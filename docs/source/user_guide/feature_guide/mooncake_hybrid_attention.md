@@ -178,16 +178,17 @@ Store capacity and transfer-bandwidth requirements. Keep `enable_kvpp` disabled.
 
 ### Decode Context Parallelism (DCP)
 
-Ordinary hybrid cache groups such as full attention, sliding-window, and
-compressed/indexer caches support standalone DCP with the same matching-topology
+Hybrid cache groups without sliding-window caches, such as full-attention and
+compressed/indexer groups, support standalone DCP with the same matching-topology
 rules as the [layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 Each DCP rank stores its own context shard, and a prefix is reusable only after
 every PP stage and DCP rank has committed it.
 
-Groups backed by recurrent/align-state state (`MambaSpec` with
-`mamba_cache_mode="align"`) do not support DCP: their state is sharded across TP
-but not across DCP, so a per-DCP-rank object would never complete. Disable DCP
-for such models. PCP and DCP cannot be enabled together.
+Sliding-window groups (including DeepSeek-V4 SWA and compressor caches) and
+recurrent/align-state groups do not support DCP: upstream vLLM rejects DCP for
+sliding-window caches, and recurrent state is sharded across TP but not across
+DCP, so a per-DCP-rank object would never complete. Disable DCP for such models.
+PCP and DCP cannot be enabled together.
 
 ## Configuration Parameters
 
