@@ -337,7 +337,15 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
 
 @pytest.mark.parametrize(
     "mode,tp_size",
-    [(VocabParallelMode.PCP_X_TP, 1), (VocabParallelMode.PCP_X_TP, 2), (VocabParallelMode.FINE_GRAINED, 1)],
+    [
+        (VocabParallelMode.PCP_X_TP, 1),
+        (VocabParallelMode.PCP_X_TP, 2),
+        (VocabParallelMode.FINE_GRAINED, 1),
+        # Fine-grained embedding TP composed with standard TP: same two-level
+        # exchange contract as PCP_X_TP (token exchange over the fine-grained
+        # group, then the TP all-reduce completing the vocabulary result).
+        (VocabParallelMode.FINE_GRAINED, 2),
+    ],
 )
 def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
     def run_batch(layer, weight, ids, span, tp_rank, rank):
@@ -440,6 +448,64 @@ def test_embedding_exchange_compilation(monkeypatch):
     assert not any(name.startswith("_embed_") for name in vars(layer))
 
 
+def _composed_lmhead(monkeypatch, lmtp_rank, lmtp_world, tp_rank, tp_world):
+    """Build an LM head under a composed finegrained x standard-TP topology."""
+    module = "vllm_ascend.ops.vocab_parallel_embedding"
+    lmtp_group = SimpleNamespace(rank_in_group=lmtp_rank, world_size=lmtp_world)
+    tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_world)
+    for name, value in (
+        ("get_tp_group", tp_group),
+        ("get_lmhead_tp_group", lmtp_group),
+        ("enable_pcp_embedding_lmhead_weight_sharding", False),
+        ("embedding_tp_enable", False),
+        ("lmhead_tp_enable", True),
+    ):
+        monkeypatch.setattr(f"{module}.{name}", lambda value=value: value)
+    return AscendParallelLMHead(
+        num_embeddings=50,
+        embedding_dim=8,
+        org_num_embeddings=40,
+        padding_size=8,
+        prefix="lm_head",
+    )
+
+
+def test_composed_lmhead_shards_tile_padded_vocabulary(monkeypatch):
+    """The composed (finegrained x TP) encoding shards the vocabulary over the
+    TP-outer / fine-grained-inner grid: every tp_rank x lmtp_rank combination
+    gets a unique shard that tiles the padded vocabulary evenly."""
+    heads = [_composed_lmhead(monkeypatch, lmtp_rank, 2, tp_rank, 2) for tp_rank in range(2) for lmtp_rank in range(2)]
+
+    # shard ranks are unique, consecutive, and drive an even vocab split.
+    assert sorted(h.tp_rank for h in heads) == list(range(4))
+    for head in heads:
+        assert head.tp_size == 4
+        assert head.num_embeddings_per_partition == head.num_embeddings_padded // 4
+        assert head.shard_indices.org_vocab_start_index == head.org_vocab_size_padded * head.tp_rank // head.tp_size
+    # Org spans, concatenated in shard order, tile [0, org_vocab_size_padded).
+    org_spans = sorted((h.shard_indices.org_vocab_start_index, h.shard_indices.org_vocab_end_index) for h in heads)
+    assert org_spans[0][0] == 0
+    assert all(org_spans[i][1] == org_spans[i + 1][0] for i in range(len(org_spans) - 1))
+    assert org_spans[-1][1] == heads[0].org_vocab_size_padded
+
+
+@pytest.mark.parametrize(
+    "lmtp_world,tp_world,expected_padding",
+    [(2, 2, 8), (4, 4, 16), (8, 3, 24)],
+)
+def test_composed_lmhead_padding_covers_shard_count(monkeypatch, lmtp_world, tp_world, expected_padding):
+    """The padding granularity grows to the lcm with the shard count so the
+    padded vocabulary always divides evenly across the composed grid."""
+    head = _composed_lmhead(monkeypatch, 0, lmtp_world, 0, tp_world)
+
+    assert head.tp_size == lmtp_world * tp_world
+    assert head.padding_size == expected_padding
+    assert head.num_embeddings_padded % head.tp_size == 0
+    # tp_world == 1 keeps the legacy padding untouched (backwards compatible).
+    pure_dp = _composed_lmhead(monkeypatch, 1, lmtp_world, 0, 1)
+    assert pure_dp.padding_size == 8
+
+
 class TestVocabParallelPlan(unittest.TestCase):
     def test_resolve_vocab_parallel_plan(self):
         """Cover layout selection, communication groups, and conflicts."""
@@ -447,36 +513,71 @@ class TestVocabParallelPlan(unittest.TestCase):
         def group(rank, world_size):
             return MagicMock(rank_in_group=rank, world_size=world_size)
 
-        tp_group = group(1, 2)
         pcp_group = group(1, 2)
         embed_group = group(2, 4)
         lmhead_group = group(3, 4)
         pcp_config = MagicMock()
         pcp_config.parallel_config.prefill_context_parallel_size = 2
-        cases: tuple[tuple[str, str, bool, bool, bool, bool, VocabParallelMode, int, int], ...] = (
-            ("replicated", "layers.0.markov_head", True, False, False, False, VocabParallelMode.REPLICATED, 0, 1),
-            ("standard", "model.norm", False, False, False, False, VocabParallelMode.STANDARD, 1, 2),
+        # tp_rank/tp_world parameterize the standard TP group per case so the
+        # composed lm-head layout (finegrained x standard TP) is covered
+        # alongside the pure-DP one.
+        cases: tuple[
+            tuple[str, str, bool, bool, bool, bool, int, int, VocabParallelMode, int, int],
+            ...,
+        ] = (
+            ("replicated", "layers.0.markov_head", True, False, False, False, 0, 1, VocabParallelMode.REPLICATED, 0, 1),
+            ("standard", "model.norm", False, False, False, False, 1, 2, VocabParallelMode.STANDARD, 1, 2),
             (
-                "fine-grained embedding",
+                "fine-grained embedding (pure dp)",
                 "model.embed_tokens",
                 False,
                 False,
                 True,
                 False,
+                0,
+                1,
                 VocabParallelMode.FINE_GRAINED,
                 2,
                 4,
             ),
             (
-                "fine-grained lm head",
+                "composed embedding (finegrained x tp)",
+                "model.embed_tokens",
+                False,
+                False,
+                True,
+                False,
+                1,
+                2,
+                VocabParallelMode.FINE_GRAINED,
+                1 * 4 + 2,
+                4 * 2,
+            ),
+            (
+                "fine-grained lm head (pure dp)",
                 "lm_head",
                 False,
                 False,
                 False,
                 True,
+                0,
+                1,
                 VocabParallelMode.FINE_GRAINED,
                 3,
                 4,
+            ),
+            (
+                "composed lm head (finegrained x tp)",
+                "lm_head",
+                False,
+                False,
+                False,
+                True,
+                1,
+                2,
+                VocabParallelMode.FINE_GRAINED,
+                1 * 4 + 3,
+                4 * 2,
             ),
             (
                 "pcp embedding",
@@ -485,6 +586,8 @@ class TestVocabParallelPlan(unittest.TestCase):
                 True,
                 False,
                 False,
+                1,
+                2,
                 VocabParallelMode.PCP_X_TP,
                 3,
                 4,
@@ -496,13 +599,16 @@ class TestVocabParallelPlan(unittest.TestCase):
                 True,
                 False,
                 False,
+                1,
+                2,
                 VocabParallelMode.PCP_X_TP,
                 3,
                 4,
             ),
         )
 
-        for name, prefix, disable_tp, pcp, embed_tp, lmhead_tp, mode, rank, world_size in cases:
+        for name, prefix, disable_tp, pcp, embed_tp, lmhead_tp, tp_rank, tp_world, mode, rank, world_size in cases:
+            tp_group = group(tp_rank, tp_world)
             with (
                 self.subTest(name=name),
                 patch(
@@ -527,9 +633,12 @@ class TestVocabParallelPlan(unittest.TestCase):
             if name == "pcp embedding":
                 self.assertIs(plan.token_exchange_group, pcp_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
-            elif name == "fine-grained embedding":
+            elif name == "fine-grained embedding (pure dp)":
                 self.assertIs(plan.token_exchange_group, embed_group)
                 self.assertIsNone(plan.output_reduce_group)
+            elif name == "composed embedding (finegrained x tp)":
+                self.assertIs(plan.token_exchange_group, embed_group)
+                self.assertIs(plan.output_reduce_group, tp_group)
             elif mode is VocabParallelMode.STANDARD:
                 self.assertIsNone(plan.token_exchange_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
@@ -539,6 +648,7 @@ class TestVocabParallelPlan(unittest.TestCase):
 
         non_pcp_config = MagicMock()
         non_pcp_config.parallel_config.prefill_context_parallel_size = 1
+        tp_group = group(1, 2)
         with (
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
@@ -601,6 +711,10 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
         self.mock_pcp_group = MagicMock(world_size=1, rank_in_group=0)
+        # Pure-DP layout by default: plan resolution and _get_logits_lmheadtp
+        # both consult the standard TP group, which must stay trivial here so
+        # the existing assertions keep their pre-composition semantics.
+        self.mock_tp_group = MagicMock(world_size=1, rank_in_group=0)
         self.mock_ascend_config = MagicMock()
 
         self.mock_quant_method = MagicMock()
@@ -610,6 +724,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.patches = [
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=self.mock_tp_group),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group",
                 return_value=self.mock_pcp_group,
@@ -691,6 +806,38 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.assertEqual(result, "lmheadtp")
         mock_lmheadtp.assert_called_once_with(hidden_states, sharded_head, None)
         mock_normal.assert_not_called()
+
+    def test_get_logits_lmheadtp_composes_tp_gather(self):
+        """With standard TP composed in, the LM-head path reconstructs the
+        fine-grained spans first (all-to-all) and only then gathers the
+        remaining vocabulary spans over the TP group, so the TP collective
+        carries the local token rows rather than the whole group's."""
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+        # Composed layout: fine-grained group of 2 x standard TP of 2. The
+        # setUp patches keep the fine-grained exchange; retarget the TP group.
+        self.mock_tp_group.configure_mock(world_size=2, rank_in_group=1)
+        events = []
+
+        def tp_all_gather(logits, *, dim):
+            events.append(("tp", dim, tuple(logits.shape)))
+            return torch.cat((logits, logits + 20), dim=dim)
+
+        self.mock_tp_group.all_gather.side_effect = tp_all_gather
+        lmhead = AscendParallelLMHead(
+            num_embeddings=self.num_embeddings, embedding_dim=self.embedding_dim, prefix="lm_head"
+        )
+        # The head itself must have resolved the composed layout.
+        self.assertEqual((lmhead.tp_rank, lmhead.tp_size), (1 * 2 + 0, 4))
+        lmhead.quant_method = self.mock_quant_method
+        lmhead.quant_method.apply = self.mock_quant_method.apply
+
+        logits = processor._get_logits(torch.randn(1, self.org_num_embeddings), lmhead, None)
+
+        # The TP gather runs after the all-to-all (its input carries the
+        # redistributed [N/P, 2*V/P] shape) and completes the full vocab.
+        self.assertEqual(events, [("tp", -1, (1, 2 * self.vocab_size))])
+        self.assertEqual(logits.shape, (1, self.vocab_size))
+        self.mock_all_to_all_single.assert_called_once()
 
     def test_get_logits_pcp_reconstructs_vocab_in_group_order(self):
         processor = AscendLogitsProcessor(vocab_size=7)
