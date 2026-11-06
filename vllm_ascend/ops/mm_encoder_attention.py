@@ -52,18 +52,21 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     def maybe_recompute_cu_seqlens(
         cls,
         attn_backend: AttentionBackendEnum,
-        cu_seqlens: np.ndarray,
+        cu_seqlens: np.ndarray | torch.Tensor | None,
         hidden_size: int,
         tp_size: int,
         device: torch.device,
         fp8_padded_hidden_size: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
+        if cu_seqlens is None:
+            return None
+
         # Ascend FIA consumes host token endpoints, not device offsets. Keep
         # CPU-generated metadata on CPU instead of uploading it here and
         # synchronously copying it back in every vision attention block.
         # Own the storage so later mutation of the NumPy input cannot change
         # metadata retained by the encoder graph manager.
-        return torch.tensor(cu_seqlens, dtype=torch.int32, device="cpu")
+        return torch.as_tensor(cu_seqlens, dtype=torch.int32, device="cpu").clone()
 
     def __init__(
         self,
