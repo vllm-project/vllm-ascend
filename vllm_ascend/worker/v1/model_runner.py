@@ -6883,8 +6883,16 @@ class NPUModelRunner(GPUModelRunner):
         ):
             for attn_backend in attn_backend_set:
                 builder_cls = attn_backend.get_builder_cls()
+                # Upstream #62964 judges draft groups against the drafter's
+                # head geometry. Keep the release lane, which has no helper,
+                # on its existing configuration.
+                support_config = (
+                    self.vllm_config
+                    if vllm_version_is("0.31.0")
+                    else self._config_for_kv_group(kv_cache_group)
+                )
                 cg_support = builder_cls.get_cudagraph_support(
-                    self.vllm_config, kv_cache_group.kv_cache_spec
+                    support_config, kv_cache_group.kv_cache_spec
                 )
                 if cg_support.value < min_cg_support.value:
                     min_cg_support = cg_support
