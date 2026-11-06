@@ -17,6 +17,7 @@ from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.hisparse import (
     gather_rows_kernel,
+    gather_valid_resident_rows_kernel,
     invalidate_kernel,
     pack_attention_rows_kernel,
     scatter_packed_kv_kernel,
@@ -434,6 +435,38 @@ class HiSparseNPUOps:
             GROUPED=grouped,
             multibuffer=False,
         )
+
+
+def gather_valid_resident_rows(source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor) -> None:
+    """Fill only Resident rows in a staging cache that already holds Host rows."""
+    _check_packed_cache(source)
+    _check_packed_cache(destination)
+    rows = destination.size(0) * destination.size(1)
+    _check_tensor(row_ids, "row_ids", source.device, (torch.int32,), shape=(rows,))
+    if (
+        source.device != destination.device
+        or source.dtype != destination.dtype
+        or source.size(2) != destination.size(2)
+        or source.untyped_storage().data_ptr() == destination.untyped_storage().data_ptr()
+    ):
+        raise ValueError("HiSparse Resident gather requires matching, separate source and staging rows")
+    row_bytes = source.size(2) * source.element_size()
+    block_rows = 8
+    gather_valid_resident_rows_kernel[(triton.cdiv(rows, block_rows),)](
+        source.view(torch.uint8),
+        destination.view(torch.uint8),
+        row_ids,
+        ROWS=rows,
+        SOURCE_ROWS=source.size(0) * source.size(1),
+        SOURCE_BLOCK=source.size(1),
+        SOURCE_STRIDE=source.stride(0) * source.element_size(),
+        DEST_BLOCK=destination.size(1),
+        DEST_STRIDE=destination.stride(0) * destination.element_size(),
+        ROW_BYTES=row_bytes,
+        BLOCK_ROWS=block_rows,
+        BLOCK_BYTES=triton.next_power_of_2(row_bytes),
+        multibuffer=False,
+    )
 
 
 def pack_attention_rows(packed_cache, physical_topk, selected_latent_out, selected_rope_out, latent_dim) -> None:
