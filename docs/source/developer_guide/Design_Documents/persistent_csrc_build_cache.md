@@ -186,8 +186,8 @@ an input not otherwise covered by the prepared-input identity.
 
 The custom-operator command sets its generated `ASCEND_CUSTOM_OPP_PATH` through
 `env`, so the existing command normalization handles its declared OPP root.
-Generated SoC configuration remains a prepared input, and operator host/tiling
-sources remain in the operator namespace. The rebuilt tiling library is not
+Operator host/tiling sources, including the definitions that generate OPP
+configuration, remain in the operator namespace. The rebuilt tiling library is not
 hashed again: its log strings can embed a different checkout path even when
 the sources are identical. With matching source and toolchain inputs, moving
 the entire `csrc/build_cache` to another checkout can restore kernel artifacts

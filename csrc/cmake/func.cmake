@@ -702,13 +702,9 @@ function(add_bin_compile_target)
             )
             set(_CACHE_COMMAND_ENV)
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
-                # The command already normalizes declared roots. Keep the OPP
-                # configuration as input, and host sources in the operator
-                # namespace; rebuilt library bytes embed checkout-specific logs.
+                # Normalize the generated OPP root with the command. Its host
+                # definitions are already covered by the operator source hash.
                 set(_CACHE_COMMAND_ENV env ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
-                list(APPEND _CACHE_PREPARED_INPUTS
-                    ${CUSTOM_DIR}/op_impl/ai_core/tbe/config/${BINARY_COMPUTE_UNIT}
-                )
             endif()
 
             set(_CACHE_EXCLUDES "*.md" "*.rst" "README" "docs" "docs/**")
