@@ -654,7 +654,10 @@ def test_shared_layer_event_preserves_final_chunk_only_state(worker, monkeypatch
     meta.add_new_push_send_req("p-request", ([1, 2], [3]), 8, 4, 4, target_params(message))
     worker.start_load_kv(meta)
     worker.save_kv_layer(attention)
-    drive(worker, lambda: state.destinations[(0, 0, 0)].sent_tokens.get(circular) == 8)
+    drive(
+        worker,
+        lambda: all(state.destinations[(0, 0, 0)].sent_tokens.get(layer) == 8 for layer in (attention, circular)),
+    )
     assert worker.engine.batch_transfer_sync_write.call_count == 3
     assert any(
         call.args[1:] == ([2096], [20640], [32]) for call in worker.engine.batch_transfer_sync_write.call_args_list

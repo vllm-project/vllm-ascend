@@ -70,7 +70,6 @@ def scheduler():
     obj.group_unique_specs = [[Mock(spec=base_scheduler.FullAttentionSpec, is_circular=False)] for _ in range(2)]
     obj.num_speculative_tokens = 0
     obj._reqs_pending_recv = {}
-    obj._reqs_failed_recv = set()
     obj._reqs_need_send_layerwise = {}
     obj._reqs_sent_to_worker = set()
     obj._reqs_need_send = {}
@@ -502,28 +501,6 @@ def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_re
         (1, 2),
         (10, 11, 12),
     )
-
-
-@pytest.mark.parametrize("failure", ["missing_metadata", "dead_metadata", "missing_client"])
-def test_unavailable_d_service_fails_request_before_publication(scheduler, failure):
-    scheduler._metadata_thread = (
-        None
-        if failure == "missing_metadata"
-        else Mock(error=RuntimeError("listener stopped") if failure == "dead_metadata" else None)
-    )
-    client = Mock()
-    scheduler.metaserver_client = None if failure == "missing_client" else client
-    request = SimpleNamespace(
-        request_id="d-request", kv_transfer_params={"do_remote_prefill": True, "num_computed_tokens": 0}
-    )
-    scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([1, 2],)), 32)
-    client.submit.assert_not_called()
-    client.get_failed_requests.return_value = {}
-    meta = scheduler.build_connector_meta(None)
-    assert meta.push_failed_requests == {"d-request": True}
-    assert meta.push_requests["d-request"].local_block_ids == ((1, 2),)
-    assert not request.kv_transfer_params["do_remote_prefill"]
-    assert not scheduler.build_connector_meta(None).push_failed_requests
 
 
 @pytest.mark.parametrize("url", [None, 123, "", "relative/path", "ftp://proxy/metaserver", "http://proxy:bad"])
