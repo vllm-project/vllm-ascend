@@ -94,7 +94,6 @@ class AscendFp8Config(Fp8Config):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         # Delayed imports: both modules reach back into the quantization package.
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
@@ -113,7 +112,7 @@ class AscendFp8Config(Fp8Config):
         if self._is_layer_skipped(prefix):
             if is_linear:
                 return AscendUnquantizedLinearMethod()
-            return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid)
+            return AscendUnquantizedFusedMoEMethod(layer.moe_config)
 
         self._verify_block_quantization()
         logger.info_once("Using the vLLM Ascend block-wise fp8 Quantization now!")
@@ -129,7 +128,6 @@ class AscendFp8Config(Fp8Config):
             return AscendFusedMoEMethod(
                 scheme_class(self.weight_block_size, layer.moe_config),
                 layer.moe_config,
-                tid2eid=tid2eid,
             )
 
         return None
@@ -145,7 +143,6 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendFusedMoEMethod,
@@ -163,6 +160,6 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
                 assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_w4a8_moe"
             else:
                 raise NotImplementedError
-            quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config, tid2eid=tid2eid)
+            quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config)
             return quant_method
         return None
