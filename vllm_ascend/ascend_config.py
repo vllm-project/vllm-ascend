@@ -61,6 +61,60 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
+def validate_draft_window_graph_config(vllm_config: Any, *, support: Any) -> None:
+    """Validate topology after the factory resolves policy and Graph support."""
+    from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
+
+    if get_current_hardware_profile().attention_backend_family is not AttentionBackendFamily.STANDARD:
+        raise NotImplementedError("Draft Window Graph requires the STANDARD hardware family")
+    parallel = vllm_config.parallel_config
+    speculative = vllm_config.speculative_config
+    if parallel.pipeline_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
+        raise RuntimeError("Draft Window Graph requires PP=PCP=1")
+    if parallel.decode_context_parallel_size != 1:
+        # Upstream gives a dense parallel drafter replicated KV even when the
+        # GLM Target shards its KV across the TP group. The loaded provider
+        # checks that actual Draft group before allocating its read bank.
+        if not (
+            speculative.method in ("dspark", "dflash")
+            and vllm_config.model_config.hf_text_config.model_type == "glm_moe_dsa"
+            and not speculative.draft_model_config.use_mla
+            and parallel.decode_context_parallel_size == parallel.tensor_parallel_size
+        ):
+            raise NotImplementedError("Draft Window Graph requires replicated Draft KV under Target DCP")
+    # The qualified consumer contract already validates its exact topology,
+    # buckets, static K and OFF/ON window. Do not parse/check it a second time.
+    if support is not None:
+        return
+    additional = vllm_config.additional_config or {}
+    if additional.get("draft_window_size") != 1024:
+        raise ValueError("Draft Window Graph requires W1024 for this consumer")
+    draft_parallel = speculative.draft_parallel_config
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    if tp not in (2, 4, 16) or draft_parallel is None or draft_parallel.tensor_parallel_size != tp:
+        raise ValueError("replicated TP Graph review requires matching actual Target/Draft TP in (2, 4, 16)")
+    if speculative.method == "eagle3" and (tp != 2 or speculative.num_speculative_tokens != 3):
+        raise ValueError("Eagle3 replicated Graph review requires static K3 and TP2 or the named dense TP4 geometry")
+    dp = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+    if dp not in (1, 2):
+        raise ValueError("replicated Graph review requires integer DP1 or the explicit DFlash TP4/DP2 route")
+    if dp == 2 and (
+        speculative.method != "dflash"
+        or tp != 4
+        # Pinned SpeculativeConfig.create_draft_parallel_config builds a
+        # TP-only model descriptor with DP1. The actual two replicas live
+        # in the parent engine/groups, retained by the runtime fingerprint.
+        # Requiring descriptor DP2 rejects the official DP2 constructor.
+        or draft_parallel.data_parallel_size != 1
+        or getattr(vllm_config.parallel_config, "enable_expert_parallel", False) is not True
+    ):
+        raise ValueError(
+            "DP2 Graph review requires actual DFlash TP4/DP2, the pinned TP-only Draft descriptor and expert parallel"
+        )
+    if getattr(vllm_config.compilation_config.cudagraph_mode, "name", None) != "FULL_DECODE_ONLY":
+        raise ValueError("replicated TP Graph review requires FULL_DECODE_ONLY")
+
+
 @config(config=ConfigDict(frozen=True))
 class KVPPConfig:
     """Configuration for KV layer parallelism on Ascend."""

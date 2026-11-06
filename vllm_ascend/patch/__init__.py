@@ -1606,6 +1606,13 @@
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
 #
+#   2. `vllm.v1.worker.gpu.spec_decode.dflash.cudagraph.build_attn_metadata`
+#    Why: the fixed capture helper has no instance-level metadata hook.
+#    How: scope the existing Common callback to the Draft read bank and restore
+#         the alias on exit; keep original dummy inputs, Full slots and context.
+#    Related PR: none; this is the default-off Draft Window Graph entry.
+#    Future Plan: replace the alias when upstream exposes an instance hook.
+#
 # ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`

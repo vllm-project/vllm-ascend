@@ -348,12 +348,19 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         block_table = common_attn_metadata.block_table_tensor
 
         # TODO: This will be moved to propose and deleted after fia ops fixed.
-        seq_lens = _select_seq_lens(
-            common_attn_metadata,
-            kv_cache_spec=self.kv_cache_spec,
-            speculative_config=self.speculative_config,
-            vllm_config=self.vllm_config,
+        device_read = getattr(common_attn_metadata, "_draft_window_device_read", None)
+        seq_lens = (
+            device_read.seq_lens
+            if device_read is not None
+            else _select_seq_lens(
+                common_attn_metadata,
+                kv_cache_spec=self.kv_cache_spec,
+                speculative_config=self.speculative_config,
+                vllm_config=self.vllm_config,
+            )
         )
+        if device_read is not None and seq_lens.numel() < num_reqs:
+            seq_lens = torch.cat((seq_lens, seq_lens.new_zeros(num_reqs - seq_lens.numel())))
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
@@ -466,6 +473,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
+        if device_read is not None:
+            # The ordinary reader owns its completed visible CPU lengths,
+            # slots and mask; the Common keeps the framework's Full operands.
+            private_metadata: Any = attn_metadata
+            private_metadata._draft_window_device_read = device_read
         return attn_metadata
 
     def _finalize_pcp_metadata(
@@ -1332,6 +1344,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         with attention_transfer_window():
             num_tokens = query.shape[0]
+
+            device_read = getattr(attn_metadata, "_draft_window_device_read", None)
+            if device_read is not None:
+                from vllm_ascend.worker.v2.spec_decode.draft_window_dense import dense_draft_attention
+
+                if _EXTRA_CTX.capturing:
+                    raise RuntimeError("Device exact Draft reads require eager execution")
+                result = dense_draft_attention(
+                    device_read,
+                    query.reshape(-1, self.num_heads, self.head_size),
+                    self.key_cache,
+                    self.value_cache,
+                    self.scale,
+                )
+                real_tokens = device_read.num_query_tokens
+                output[:real_tokens] = result.reshape(real_tokens, *output.shape[1:])
+                output[real_tokens:] = 0
+                return output
 
             if (
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly

@@ -16,6 +16,7 @@
 #
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, create_forward_context, override_forward_context
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _DRAFT_NOISE_SALT, _log1p_neg_stable, tl_rand32
@@ -125,6 +126,8 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
+    # Native SWA masking remains upstream; this route retains complete KV history.
+    _dflash2_full_kv_reference = True
 
     def _score_candidates(
         self,
@@ -146,3 +149,36 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
         # target-MoE DP synchronization or attention metadata in this local head.
         with override_forward_context(forward_context):
             return super()._score_candidates(candidate_ids, unary_logits, hidden_states)
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.enforce_eager or cudagraph_mode is CUDAGraphMode.NONE:
+            # Preserve the existing typed eager path and its independent owner.
+            super().init_cudagraph_manager(CUDAGraphMode.NONE)
+            return
+        from vllm_ascend import envs
+
+        # Window OFF bypasses the Window factory. It must retain the same
+        # explicit experimental gate before any DFlash2 Graph is captured.
+        if not envs.VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH:
+            raise ValueError("DFlash2 Graph requires the experimental Draft Graph gate, including Window OFF")
+        if cudagraph_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
+            raise NotImplementedError(
+                "DFlash2 Graph first admits FULL/FULL_DECODE_ONLY only; no implicit eager fallback"
+            )
+        if cudagraph_mode.decode_mode() is CUDAGraphMode.FULL:
+            import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream_dflash2
+
+            from vllm_ascend.worker.v2.spec_decode.draft_window_dflash2_graph import validate_dflash2_graph_source
+
+            # Do not capture the unsupported CUDA selector accidentally. The
+            # installed Ascend patch is already used by ordinary DFlash2 eager.
+            if upstream_dflash2._selector_walk_kernel is not _selector_walk_kernel_ascend:
+                raise RuntimeError("DFlash2 Graph requires the actual Ascend selector-walk kernel binding")
+            if not hasattr(self, "_draft_window_graph_binding_provider"):
+                validate_dflash2_graph_source(self)
+        super().init_cudagraph_manager(cudagraph_mode)
+        if (
+            cudagraph_mode.decode_mode() is CUDAGraphMode.FULL
+            and self.query_cudagraph_manager.cudagraph_mode.decode_mode() is not CUDAGraphMode.FULL
+        ):
+            raise NotImplementedError("DFlash2 Graph backend did not admit FULL capture; no eager fallback is selected")

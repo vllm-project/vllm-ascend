@@ -50,8 +50,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
         reasons.append("VL encoder graph")
-    if _additional(vllm_config, "draft_window_size") is not None:
-        reasons.append("draft_window_size")
 
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
@@ -78,7 +76,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     except for these models and features, which fall back to V1:
 
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
-    * draft_window_size
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding

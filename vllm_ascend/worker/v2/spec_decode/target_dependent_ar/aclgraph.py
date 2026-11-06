@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable
+from copy import copy
 from typing import Any
 
 import torch
@@ -37,7 +38,48 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.draft_window_graph import draft_window_all_continuing
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+
+def _eagle_ar_capture_config(vllm_config: VllmConfig, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+    """Keep Target SP alignment out of the admitted dense Eagle AR buckets.
+
+    Ascend filters the shared Target capture sizes to multiples of TP. K3
+    first passes use Q4, so their valid request buckets survive that filter;
+    the same sizes cannot represent Q1 AR for those requests. Only this
+    explicitly enabled TP4 Eagle Graph route gets an independent descriptor.
+    Target/first-pass configs, topology and computation remain unchanged.
+    """
+    from vllm_ascend import envs
+
+    if not envs.VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH:
+        return vllm_config
+    if (
+        decode_query_len != 1
+        or not isinstance(cudagraph_mode, CUDAGraphMode)
+        or cudagraph_mode.decode_mode() != CUDAGraphMode.FULL
+        or vllm_config.speculative_config is None
+        or vllm_config.speculative_config.method != "eagle3"
+    ):
+        return vllm_config
+    from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import resolve_draft_graph_review_limit
+
+    scope = resolve_draft_graph_review_limit(
+        vllm_config, experimental_graph_review=envs.VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH
+    )
+    if scope is None:
+        return vllm_config
+    # The qualified startup contract already checks every admitted first Q4
+    # bucket, its capacity and the independent non-SP Draft. Reuse those same
+    # request counts for Q1 AR; never renormalize them through Target SP.
+    compilation = vllm_config.compilation_config
+    requests = list(range(1, vllm_config.scheduler_config.max_num_seqs + 1))
+    draft_config = copy(vllm_config)
+    draft_config.compilation_config = copy(compilation)
+    draft_config.compilation_config.cudagraph_capture_sizes = requests
+    draft_config.compilation_config.max_cudagraph_capture_size = max(requests)
+    return draft_config
 
 
 class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
@@ -52,6 +94,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
     ):
+        vllm_config = _eagle_ar_capture_config(vllm_config, cudagraph_mode, decode_query_len)
         super().__init__(
             vllm_config,
             device,
@@ -91,6 +134,20 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     ) -> None:
         """Capture ACL graphs for autoregressive speculative decoding."""
 
+        provider = getattr(self.speculator, "_draft_window_graph_binding_provider", None)
+        if provider is not None:
+            actual_forward = forward_fn
+
+            def forward_fn(*args, **kwargs):
+                if self.is_draft_model_prefill:
+                    n, tokens = args[0], args[1]
+                else:
+                    desc = args[2]
+                    n = desc.num_reqs or min(desc.num_tokens, self.max_num_reqs)
+                    tokens = desc.num_tokens
+                with self.speculator._eagle3_capture_scope(n=n, tokens=tokens):
+                    return actual_forward(*args, **kwargs)
+
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
             if self.is_draft_model_prefill:
                 super().capture(
@@ -102,6 +159,8 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     kv_cache_config,
                     progress_bar_desc=progress_bar_desc,
                 )
+                if provider is not None:
+                    provider.validate_captured_graphs(self.graphs)
                 return
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
@@ -138,9 +197,33 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 )
 
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
+            if provider is not None:
+                provider.validate_captured_graphs(self.graphs)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""
+        provider = getattr(self.speculator, "_draft_window_graph_binding_provider", None)
+        if provider is not None and self.speculator._eagle3_window_is_active():
+            if self.is_draft_model_prefill:
+                capture = provider.capture_banks_for(num_reqs=desc.num_reqs, num_tokens=desc.num_tokens)[0]
+                self.speculator._materialize_eagle3_step(capture, 0)
+                provider.bind_current(capture.descriptor)
+                self.speculator._eagle3_window_next_step = 1
+            ret = self._updatable_graph_replay(desc, (), window_source=provider)
+            provider.finish_update()
+            return ret
+        # Without an active Window proposal the ordinary graph still needs the finite
+        # admitted consumer shape. Target input padding alone does not
+        # constrain the AR graph bucket selected by the fixed core dispatcher.
+        # Source-created dummy/profile batches retain their original behavior.
+        if getattr(getattr(self.speculator, "input_batch", None), "is_dummy", False) is not True:
+            from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import (
+                validate_eagle_single_request_graph_descriptor,
+            )
+
+            validate_eagle_single_request_graph_descriptor(
+                self.speculator, first=self.is_draft_model_prefill, n=desc.num_reqs, tokens=desc.num_tokens
+            )
         num_tokens = desc.num_tokens
         logger.info_once(
             "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
@@ -203,16 +286,48 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
+    def _updatable_graph_replay(self, desc, draft_attn_metadatas, *, window_source=None):
+        dp_dummy = getattr(self.speculator, "_eagle3_graph_dp_dummy_active", False)
+        if dp_dummy:
+            self.speculator._draft_window_graph_binding_provider.require_reusable()
+            if (
+                desc.cg_mode != CUDAGraphMode.FULL
+                or desc.num_reqs != 1
+                or desc.num_tokens != (4 if self.is_draft_model_prefill else 1)
+                or len(draft_attn_metadatas) != (1 if self.is_draft_model_prefill else 2)
+            ):
+                raise RuntimeError("Eagle DP dummy lost its real first Q4 or two AR Q1 consumer/update-stream identity")
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        fia_params = self.speculator.build_fia_params(
-            desc.num_reqs,
-            draft_attn_metadatas[0],
-            self.is_draft_model_prefill,
-        )
-        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
+        if window_source is None:
+            fia_params = self.speculator.build_fia_params(
+                desc.num_reqs,
+                draft_attn_metadatas[0],
+                self.is_draft_model_prefill,
+            )
+            window_source = SharedSource(fia_params)
+        resolved_tasks = graph.resolve_tasks(window_source)
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
-        graph.update(self.update_stream, resolved_tasks)
+        if dp_dummy:
+            # Keep the fixed Full/PAD dummy operands and original UPDATE/event
+            # order; no Window generation or business bank is staged here.
+            with set_current_vllm_config(self.vllm_config):
+                graph.update(self.update_stream, resolved_tasks)
+        else:
+            graph.update(self.update_stream, resolved_tasks)
         return ret
+
+    def dispatch(self, num_reqs, num_tokens, uniform_token_count, num_active_loras, max_query_len=None, num_ubatches=1):
+        if draft_window_all_continuing(self.speculator):
+            # This explicit phase keeps Full reads; never a missing-bucket or UPDATE fallback.
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=self._resolve_effective_loras(num_active_loras),
+                num_ubatches=num_ubatches,
+            )
+        return super().dispatch(
+            num_reqs, num_tokens, uniform_token_count, num_active_loras, max_query_len, num_ubatches
+        )

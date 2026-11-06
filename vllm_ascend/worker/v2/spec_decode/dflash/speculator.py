@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -16,8 +19,10 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
-from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.utils import get_rotation_path, vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.draft_window_eager import DraftWindowGraphInputMixin
+from vllm_ascend.worker.v2.spec_decode.draft_window_graph_runtime import install_parallel_graph
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -125,7 +130,47 @@ def prepare_dflash_inputs_factory(
     return prepare_with_block_size
 
 
-class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+def _draft_window_owner_scope(owner, input_batch, dummy_run=False, is_profile=False, *, num_speculative_tokens=None):
+    """Choose exactly one existing proposal owner at the Ascend boundary."""
+    runtime = getattr(owner, "_draft_window_runtime", None)
+    graph_runtime = getattr(owner, "_draft_window_graph_binding_provider", None)
+    limit = getattr(owner, "_draft_graph_review_limit", None)
+    context_kv_only = num_speculative_tokens == 0
+    if limit is not None:
+        from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import validate_draft_graph_review_requests
+
+        # Original request limits apply before either owner is changed.
+        # The core's zero-draft branch writes only context K/V; its Target padding
+        # is not a Draft query shape. The real request identity is still checked.
+        validate_draft_graph_review_requests(
+            owner,
+            input_batch,
+            dummy_run=dummy_run,
+            is_profile=is_profile,
+            context_kv_only=context_kv_only,
+        )
+    if runtime is not None and graph_runtime is not None:
+        raise RuntimeError("Draft Window eager and Graph owners cannot share one proposal")
+    if graph_runtime is not None:
+        if graph_runtime.proposal is not None:
+            raise RuntimeError("A Draft Window proposal scope is already active")
+        if num_speculative_tokens is not None and (
+            type(num_speculative_tokens) is not int or num_speculative_tokens not in (0, owner.num_speculative_steps)
+        ):
+            raise RuntimeError("Draft Window Graph cannot change its captured static K")
+        effective_dummy = dummy_run or getattr(input_batch, "is_dummy", False)
+        if context_kv_only and not (effective_dummy or is_profile):
+            # The fixed K0 branch writes context KV but executes no attention.
+            # Fence its first write; the empty shared scope owns exceptions.
+            graph_runtime.require_reusable()
+            return graph_runtime.proposal_scope(())
+        return owner._draft_window_proposal_scope(input_batch, dummy_run=effective_dummy, is_profile=is_profile)
+    if runtime is not None:
+        return runtime.proposal_context(input_batch, dummy_run, is_profile, context_kv_only=context_kv_only)
+    return nullcontext()
+
+
+class AscendDFlashSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
     if not vllm_version_is("0.32.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
@@ -143,6 +188,22 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # target layers, using the restored target configuration.
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
+        elif (rotation_path := get_rotation_path(self.vllm_config)) is not None and model.model.use_aux_hidden_state:
+            # The fixed generic DFlash model has no post_process hook. Keep
+            # its auxiliary projection aligned; models with a hook own this.
+            from vllm_ascend.models.qwen3_dspark import align_draft_weights
+
+            projection = getattr(model.model, "fc", None)
+            if projection is None:
+                raise ValueError("DFlash with a QuaRot target requires an auxiliary-hidden-state projection")
+            if projection.weight.ndim != 2 or projection.weight.dtype not in (
+                torch.float16,
+                torch.bfloat16,
+                torch.float32,
+            ):
+                raise ValueError("QuaRot DFlash alignment requires an unquantized floating-point fc weight")
+            align_draft_weights(model, projection, self.vllm_config)
+            logger.info("[spec_decode/quarot] Aligned MRV2 DFlash fc and owned vocab layers for %s", rotation_path)
         return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
@@ -197,6 +258,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
+        install_parallel_graph(self)
 
     def set_attn(
         self,
@@ -239,6 +301,46 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             block_tables,
         )
 
+        from vllm_ascend.worker.v2.spec_decode import initialize_draft_window_owner
+
+        initialize_draft_window_owner(self)
+
+    def _build_attn_metadata(
+        self,
+        num_reqs: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+        slot_mappings: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        runtime = getattr(self, "_draft_window_runtime", None)
+        with (
+            build_attn_metadata_factory(
+                self.input_buffers.positions,
+                batch_desc.num_tokens,
+                self.draft_is_prefilling,
+                common_metadata_callback=runtime.metadata_callback(step, num_reqs),
+            )
+            if runtime is not None
+            else nullcontext()
+        ):
+            metadata = super()._build_attn_metadata(
+                num_reqs,
+                batch_desc,
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+                dcp_local_seq_lens,
+                slot_mappings=slot_mappings,
+            )
+        if runtime is not None:
+            runtime.retain_metadata(metadata)
+        return metadata
+
     def propose(
         self,
         input_batch: InputBatch,
@@ -259,6 +361,10 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        # Check checkpoint admission/static K before replacing proposal state.
+        owner_scope = _draft_window_owner_scope(
+            self, input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens
+        )
         self.input_batch = input_batch
         sync_state = dp_sync_state
         if dummy_run and skip_attn_for_dummy_run:
@@ -268,7 +374,10 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
-        with build_attn_metadata_wrapper():
+        with (
+            owner_scope,
+            build_attn_metadata_wrapper(),
+        ):
             return super().propose(
                 input_batch,
                 attn_metadata,

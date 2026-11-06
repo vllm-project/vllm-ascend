@@ -2230,6 +2230,7 @@ def build_attn_metadata_factory(
     attn_state=None,
     parallel_config=None,
     offload_kwargs=None,
+    common_metadata_callback=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -2238,6 +2239,10 @@ def build_attn_metadata_factory(
     speculator path does not forward them. Attention state is left to the
     caller/backend instead of forcing the legacy speculative state. Must run inside
     ``build_attn_metadata_wrapper()``.
+
+    Host execution must be serialized; nested scopes restore the previous
+    builder in reverse order, including on exceptions. The read callback has
+    one owner so that a Window projection cannot be applied twice.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
 
@@ -2250,6 +2255,11 @@ def build_attn_metadata_factory(
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
         if offload_kwargs is not None:
             kwargs.update(offload_kwargs)
+        if common_metadata_callback is not None:
+            existing_callback = kwargs.get("common_metadata_callback")
+            if existing_callback is not None:
+                raise ValueError("Multiple draft common metadata callbacks cannot share a build")
+            kwargs["common_metadata_callback"] = common_metadata_callback
         return raw(*args, **kwargs)
 
     try:

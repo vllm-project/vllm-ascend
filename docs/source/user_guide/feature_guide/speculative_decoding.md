@@ -635,7 +635,7 @@ options.
   the draft attention can read. Omit the key (or remove it) to disable the
   window. Typical values are 512-4096; the window is block-aligned internally,
   so any positive value works.
-- Works on the default model runner (MRV1). Not yet supported under
+- Works on MRV1. See the MRV2 requirements below when using
   `VLLM_USE_V2_MODEL_RUNNER=1`.
 - For `mtp` the window is ignored (force-disabled): MTP reuses the target
   model's own layers, so windowing it would change the target's computation.
@@ -658,6 +658,55 @@ options.
 Check the effect with the server log: `SpecDecoding metrics: Mean acceptance
 length: ...` lines report the acceptance per interval — compare runs with the
 window off and on under your real workload before settling on a value.
+
+### Model Runner V2
+
+MRV2 supports an additional Draft read window for admitted `eagle3`, `dflash`
+(including DFlash2), and external `dspark` consumers. Full KV writes,
+absolute positions, and Target attention retain their original coordinates.
+Omitting `draft_window_size`, or setting it to `null`, disables the additional
+window and preserves the Draft's native attention.
+
+For Draft eager execution, use the example above with
+`VLLM_USE_V2_MODEL_RUNNER=1` and speculative `enforce_eager=true`. This does
+not disable Target Graph. Only resident, supported Draft KV layouts are
+admitted; transferred, offloaded, and sharded Draft KV require other readers.
+This feature does not change the official Target/Draft CP configuration.
+GLM Target DCP16 with a replicated Draft needs separate admission and metadata
+compatibility; an ordinary replicated MLA Draft under that Target also needs
+a separate topology policy and vLLM compatibility. These prerequisites are not
+part of the Window patch. A rejected combination is not qualified by disabling
+its applicable features.
+
+Draft Graph is a separate, default-off experimental entry:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH=1
+```
+
+Use speculative `enforce_eager=false` and a compatible Target Graph mode
+and capture sizes. Capture capacity must cover both Target query tokens
+and the method's Draft query geometry. Unsupported models, buckets, and
+request shapes fail explicitly; the entry does not select an eager fallback.
+Admission currently covers the GLM DSpark/DFlash parallel consumers,
+the qualified Qwen Full-attention DFlash and Eagle3 consumers at TP4 with
+DP1 local capacity 1/2 or DP2 local capacity 1, and Qwen DFlash2 at TP2 with
+static K7/Q8. These capacities describe actual requests per DP rank, not
+client concurrency. Preempted and unqualified shapes remain protected.
+
+The Draft's loaded attention determines whether it is Full, native SWA,
+mixed, or unknown. Startup reports this distinction. Full KV retention does
+not imply Full attention: DFlash2 retains its native window with Full KV
+backing. An explicit smaller window can reduce acceptance or throughput;
+prefer the native window unless workload measurements justify narrowing it.
+Unknown consumers cannot enable an additional window. DFlash2's non-causal
+window, block alignment, and query width must fit its native attention band.
+
+MRV2 forces the additional window off for MTP and built-in DeepSeek V4
+DSpark. Dynamic-K, plain Eagle, and unqualified Draft Graph combinations
+are not enabled by this feature. Compare OFF/ON with the same execution
+mode, model, load, and other features; a window does not guarantee a speedup.
 
 ## Speculating using Suffix Decoding
 

@@ -26,6 +26,8 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.worker.v2.spec_decode.dflash.capture import draft_window_dflash_capture_scope
+from vllm_ascend.worker.v2.spec_decode.draft_window_graph import draft_window_all_continuing
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -60,6 +62,28 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         if super().needs_capture():
             set_draft_graph_params(self.capture_sizes)
 
+    def dispatch(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        num_active_loras: int,
+        max_query_len: int | None = None,
+        num_ubatches: int = 1,
+    ) -> BatchExecutionDescriptor:
+        if draft_window_all_continuing(self.speculator):
+            # This explicit phase keeps Full reads; never a missing-bucket or UPDATE fallback.
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=self._resolve_effective_loras(num_active_loras),
+                num_ubatches=num_ubatches,
+            )
+        return super().dispatch(
+            num_reqs, num_tokens, uniform_token_count, num_active_loras, max_query_len, num_ubatches
+        )
+
     def capture(
         self,
         forward_fn: Callable,
@@ -80,7 +104,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         one the installed vLLM expects.
         """
         prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+        with (
+            draft_window_dflash_capture_scope(self.speculator) as context,
+            communicator_switch(),
+            model_capture_wrapper(self.speculator, False),
+        ):
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -92,23 +120,40 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 progress_bar_desc=progress_bar_desc,
                 **prepare_kwargs,
             )
+            if context is not None:
+                context.validate_captured_graphs(self.graphs)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
+        dp_dummy = getattr(self.speculator, "_draft_window_dp_dummy_active", False)
+        window_provider = None if dp_dummy else getattr(self.speculator, "_draft_window_graph_binding_provider", None)
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if window_provider is not None and not use_updatable_graph(attn_backend):
+            raise NotImplementedError("Draft Window Graph requires the admitted updatable backend binding contract")
         if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
             # Length preparation and FlashAttn tiling run inside the graph,
             # reading the draft's persistent device buffers on every replay.
             return super().run_fullgraph(desc)
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
-            desc.num_reqs,
-            self.speculator.input_batch.seq_lens_cpu_upper_bound,
-        )
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, draft_attn_metadatas)
+        if window_provider is None:
+            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+                desc.num_reqs,
+                self.speculator.input_batch.seq_lens_cpu_upper_bound,
+            )
         else:
-            # This will be removed once the refactoring is fully complete.
+            window_provider.bind_current(desc)
+            draft_attn_metadatas = None
+        if use_updatable_graph(attn_backend):
+            ret = self._updatable_graph_replay(
+                desc,
+                draft_attn_metadatas,
+                window_source=window_provider,
+            )
+            if window_provider is not None:
+                window_provider.finish_update()
+            return ret
+        else:
+            # Ordinary OFF/eager Target policy keeps the original fallback.
             return self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
 
     def _graph_replay(self, desc, attn_backend, num_tokens, draft_attn_metadatas):
@@ -142,10 +187,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
+    def _updatable_graph_replay(self, desc, draft_attn_metadatas, *, window_source=None):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        resolved_tasks = graph.resolve_tasks(ContextSource(draft_attn_metadatas[0]))
+        resolved_tasks = graph.resolve_tasks(
+            ContextSource(draft_attn_metadatas[0]) if window_source is None else window_source
+        )
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)
