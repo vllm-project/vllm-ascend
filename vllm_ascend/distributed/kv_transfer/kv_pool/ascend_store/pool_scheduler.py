@@ -437,7 +437,6 @@ class BaseKVPoolScheduler(ABC):
             # _process_preempted_cached_request.
             self._preempted_req_ids.discard(request.req_id)
         load_spec = self.load_specs.pop(request.req_id, None)
-        num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
         request_tuple = self._unfinished_requests.get(request.req_id)
         if request_tuple is None:
             raise ValueError(
@@ -447,6 +446,9 @@ class BaseKVPoolScheduler(ABC):
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
         previous_tracker = self._request_trackers.get(request.req_id)
         prefill_tokens = _new_req_prefill_tokens(request)
+        num_tokens_to_compute = min(
+            request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id], len(prefill_tokens)
+        )
         request_tracker = RequestTracker(
             req_id=request.req_id,
             token_len=num_tokens_to_compute,
@@ -487,7 +489,10 @@ class BaseKVPoolScheduler(ABC):
                 f"Request {req_id} is not in _unfinished_requests, but it is scheduled as a preempted cached request"
             )
         request_real = request_tuple[0]
-        num_tokens_to_compute = request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
+        num_tokens_to_compute = min(
+            request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id],
+            len(request_real.all_token_ids),
+        )
         previous_tracker = self._request_trackers.get(req_id)
         request_tracker = RequestTracker(
             req_id=req_id,
@@ -537,6 +542,8 @@ class BaseKVPoolScheduler(ABC):
             # The scheduler rolls this back when speculative tokens are rejected.
             num_current_tokens = request.num_computed_tokens
             target_token_len = self.get_running_target_token_len(request, num_new_tokens)
+            if not is_decoding:
+                target_token_len = min(target_token_len, len(request.all_token_ids))
             new_token_ids = request.all_token_ids[num_current_tokens:target_token_len]
             if request_tracker.token_ids is not None and new_token_ids:
                 request_tracker.token_ids.extend(new_token_ids)

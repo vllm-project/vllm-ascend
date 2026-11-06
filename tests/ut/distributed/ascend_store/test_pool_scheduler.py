@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -34,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
@@ -215,6 +218,78 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.mark.parametrize("entry", ["new", "resumed", "running"])
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("previous_outputs", [0, 4])
+def test_prefill_metadata_excludes_verifier_padding(entry, reuse, previous_outputs):
+    config = make_config(extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1 if reuse else 4})
+    config.model_config.get_num_layers.return_value = 4
+    scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+    request = Request(
+        request_id="r1",
+        prompt_token_ids=list(range(33)),
+        sampling_params=SamplingParams(max_tokens=16),
+        pooling_params=None,
+        block_hashes=[b"h0", b"h1"],
+    )
+    request.append_output_token_ids([10] * previous_outputs)
+    endpoint = len(request.all_token_ids)
+    request.num_computed_tokens = endpoint - 1
+    scheduler._unfinished_requests[request.request_id] = (request, [[1, 2, 3]])
+    output = SimpleNamespace(num_scheduled_tokens={request.request_id: 6})
+    if entry == "new":
+        data = NewRequestData.from_request(request, ([1, 2, 3],), prefill_token_ids=list(request.all_token_ids))
+        meta = scheduler._process_new_request(data, output, False)
+    elif entry == "resumed":
+        scheduler._preempted_req_ids.add(request.request_id)
+        meta = scheduler._process_preempted_cached_request(([1, 2, 3],), request.request_id, 0, None, output, False)
+    else:
+        scheduler._request_trackers[request.request_id] = RequestTracker(
+            req_id=request.request_id,
+            token_len=request.num_computed_tokens,
+            allocated_block_ids_by_group=[[1, 2, 3]],
+            num_prompt_tokens=request.num_prompt_tokens,
+            prefill_end_tokens=endpoint,
+        )
+        meta = scheduler._process_running_cached_request(
+            None,
+            request.request_id,
+            0,
+            SimpleNamespace(num_computed_tokens=[request.num_computed_tokens]),
+            output,
+            False,
+        )
+    assert meta is not None
+    assert meta.target_token_len == endpoint
+    assert meta.num_prompt_tokens == endpoint
+    assert output.num_scheduled_tokens[request.request_id] == 6
+
+
+def test_layerwise_decode_keeps_speculative_snapshot_extent():
+    config = make_config(extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1})
+    config.model_config.get_num_layers.return_value = 4
+    scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+    request = Request("r1", list(range(32)), SamplingParams(max_tokens=16), None)
+    request.num_computed_tokens = 32
+    request.append_output_token_ids([10])
+    scheduler._unfinished_requests[request.request_id] = (request, [[1, 2, 3]])
+    scheduler._request_trackers[request.request_id] = RequestTracker(
+        req_id=request.request_id,
+        token_len=32,
+        allocated_block_ids_by_group=[[1, 2, 3]],
+        num_prompt_tokens=32,
+    )
+    meta = scheduler._process_running_cached_request(
+        None,
+        request.request_id,
+        0,
+        SimpleNamespace(num_computed_tokens=[32]),
+        SimpleNamespace(num_scheduled_tokens={request.request_id: 6}),
+        False,
+    )
+    assert meta is not None and meta.target_token_len == 38
 
 
 @pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])
