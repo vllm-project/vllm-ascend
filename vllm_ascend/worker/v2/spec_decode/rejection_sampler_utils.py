@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_global_logsumexp as _compute_global_lse,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_local_logits_stats_kernel as _upstream_block_stats_kernel,
+    _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -41,128 +41,6 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
 )
 from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
-
-
-@triton.jit
-def _compute_block_stats_kernel(
-    # [num_logits, num_blocks]
-    target_local_argmax_ptr,
-    target_local_argmax_stride,
-    # [num_logits, num_blocks]
-    target_local_max_ptr,
-    target_local_max_stride,
-    # [num_logits, num_blocks]
-    target_local_sumexp_ptr,
-    target_local_sumexp_stride,
-    # [num_logits, num_blocks]
-    draft_local_max_ptr,
-    draft_local_max_stride,
-    # [num_logits, num_blocks]
-    draft_local_sumexp_ptr,
-    draft_local_sumexp_stride,
-    # [num_logits, V]
-    target_logits_ptr,
-    target_logits_stride,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits_ptr,
-    draft_logits_stride_0,
-    draft_logits_stride_1,
-    # [num_logits]
-    expanded_idx_mapping_ptr,
-    # [num_logits]
-    expanded_local_pos_ptr,
-    # [max_num_reqs]
-    temp_ptr,
-    # The vocabulary and the speculative depth are fixed for a given model and
-    # draft configuration. Declaring them constexpr lets triton-ascend resolve
-    # the launch-time tiling at compile time instead of per launch.
-    vocab_size: tl.constexpr,
-    num_speculative_steps: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    HAS_DRAFT_LOGITS: tl.constexpr,
-):
-    _upstream_block_stats_kernel(
-        target_local_argmax_ptr,
-        target_local_argmax_stride,
-        target_local_max_ptr,
-        target_local_max_stride,
-        target_local_sumexp_ptr,
-        target_local_sumexp_stride,
-        draft_local_max_ptr,
-        draft_local_max_stride,
-        draft_local_sumexp_ptr,
-        draft_local_sumexp_stride,
-        target_logits_ptr,
-        target_logits_stride,
-        draft_logits_ptr,
-        draft_logits_stride_0,
-        draft_logits_stride_1,
-        expanded_idx_mapping_ptr,
-        expanded_local_pos_ptr,
-        temp_ptr,
-        vocab_size,
-        num_speculative_steps,
-        BLOCK_SIZE=BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=HAS_DRAFT_LOGITS,
-    )
-
-
-@triton.jit
-def _compute_block_stats_kernel_row_mapping(
-    # Same as _compute_block_stats_kernel plus the optional per-row mapping
-    # slot of the sharded draft cache that newer vLLM kernel signatures
-    # require. The NPU path always passes None here (sharded draft logits
-    # are rejected before launch).
-    target_local_argmax_ptr,
-    target_local_argmax_stride,
-    target_local_max_ptr,
-    target_local_max_stride,
-    target_local_sumexp_ptr,
-    target_local_sumexp_stride,
-    draft_local_max_ptr,
-    draft_local_max_stride,
-    draft_local_sumexp_ptr,
-    draft_local_sumexp_stride,
-    target_logits_ptr,
-    target_logits_stride,
-    draft_logits_ptr,
-    draft_logits_stride_0,
-    draft_logits_stride_1,
-    draft_logits_row_mapping_ptr,
-    expanded_idx_mapping_ptr,
-    expanded_local_pos_ptr,
-    temp_ptr,
-    vocab_size: tl.constexpr,
-    num_speculative_steps: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    HAS_DRAFT_LOGITS: tl.constexpr,
-):
-    _upstream_block_stats_kernel(
-        target_local_argmax_ptr,
-        target_local_argmax_stride,
-        target_local_max_ptr,
-        target_local_max_stride,
-        target_local_sumexp_ptr,
-        target_local_sumexp_stride,
-        draft_local_max_ptr,
-        draft_local_max_stride,
-        draft_local_sumexp_ptr,
-        draft_local_sumexp_stride,
-        target_logits_ptr,
-        target_logits_stride,
-        draft_logits_ptr,
-        draft_logits_stride_0,
-        draft_logits_stride_1,
-        draft_logits_row_mapping_ptr,
-        expanded_idx_mapping_ptr,
-        expanded_local_pos_ptr,
-        temp_ptr,
-        vocab_size,
-        num_speculative_steps,
-        BLOCK_SIZE=BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=HAS_DRAFT_LOGITS,
-    )
-
 
 _ENTROPY_EPSILON = 1e-10
 
@@ -221,9 +99,7 @@ def _probabilistic_rejection_kernel(
     local_residual_mass_stride,
     # [num_logits, num_blocks], same layout as target_local_sumexp
     entropy_partials_ptr,
-    # Fixed for a given model: constexpr so the tiling is resolved at compile
-    # time rather than per launch.
-    vocab_num_blocks: tl.constexpr,
+    vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
@@ -577,8 +453,8 @@ def rejection_sample(
             expanded_idx_mapping,
             expanded_local_pos,
             temperature,
-            vocab_size=vocab_size,
-            num_speculative_steps=stats_num_logits,
+            vocab_size,
+            stats_num_logits,
             BLOCK_SIZE=VOCAB_BLOCK_SIZE,
             HAS_DRAFT_LOGITS=has_draft_logits,
             # TODO: Remove this workaround after the Triton Ascend AutoBlockify
@@ -586,9 +462,7 @@ def rejection_sample(
             has_auto_blockify_blacklist_op=True,
         )
     else:
-        # Newer vLLM kernel signatures carry an extra row-mapping slot for
-        # the sharded draft cache; the NPU path always passes None here.
-        _compute_block_stats_kernel_row_mapping[(num_logits, vocab_num_blocks)](
+        _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
             target_local_argmax,
             target_local_argmax.stride(0),
             target_local_max,
@@ -608,8 +482,8 @@ def rejection_sample(
             expanded_idx_mapping,
             expanded_local_pos,
             temperature,
-            vocab_size=vocab_size,
-            num_speculative_steps=stats_num_logits,
+            vocab_size,
+            stats_num_logits,
             BLOCK_SIZE=VOCAB_BLOCK_SIZE,
             HAS_DRAFT_LOGITS=has_draft_logits,
             # TODO: Remove this workaround after the Triton Ascend AutoBlockify
@@ -796,7 +670,7 @@ def rejection_sample(
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         entropy_partials,
-        vocab_num_blocks=vocab_num_blocks,
+        vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
