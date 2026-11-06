@@ -24,6 +24,8 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.utils import vllm_version_is
+
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
 
@@ -323,6 +325,9 @@ class AscendDeepseekV41ForCausalLM(
         return loaded_vision | {f"language_model.{name}" for name in loaded_language}
 
     def process_weights_after_loading(self) -> None:
+        # #57678 already finalizes language_model in the children-first walk.
+        if not vllm_version_is("0.33.0"):
+            return
         hook = getattr(
             self.language_model,
             "process_weights_after_loading",

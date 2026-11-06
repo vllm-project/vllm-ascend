@@ -372,30 +372,34 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn) as backend:
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
             mock_get_vllm_config.return_value = mock_vllm_config
-            mock_vllm_config.compilation_config = CompilationConfig()
+            # CUDA eligibility must not alter Ascend cache/indexer layout.
+            for shardq_eligible in (False, True):
+                mock_vllm_config.compilation_config = CompilationConfig()
 
-            attn = AscendMultiHeadLatentAttention(
-                hidden_size=self.hidden_size,
-                num_heads=self.num_heads,
-                scale=self.scale,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                mla_modules=self.mock_mla_modules,
-                cache_config=self.mock_cache_config,
-                quant_config=self.mock_quant_config,
-                prefix=self.prefix,
-            )
+                attn = AscendMultiHeadLatentAttention(
+                    hidden_size=self.hidden_size,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    qk_nope_head_dim=self.qk_nope_head_dim,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    v_head_dim=self.v_head_dim,
+                    q_lora_rank=self.q_lora_rank,
+                    kv_lora_rank=self.kv_lora_rank,
+                    mla_modules=self.mock_mla_modules,
+                    cache_config=self.mock_cache_config,
+                    quant_config=self.mock_quant_config,
+                    prefix=self.prefix,
+                    shardq_eligible=shardq_eligible,
+                )
 
-            self.assertEqual(attn.tp_size, 2)
-            self.assertIsNotNone(attn.mla_attn)
+                self.assertEqual(attn.tp_size, 2)
+                self.assertIsNotNone(attn.mla_attn)
+                self.assertNotIn("shardq_eligible", backend.call_args.kwargs)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")

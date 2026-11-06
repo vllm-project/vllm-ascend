@@ -33,6 +33,32 @@ def _can_launch_triton_batch_memcpy() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
 
 
+def postprocess_mamba_align(**kwargs) -> None:
+    """Keep V1 align semantics across the #55688 lifecycle API change."""
+    legacy = getattr(mamba_utils, "postprocess_mamba_align_gpu", None)
+    if legacy is not None:
+        # Also preserves the CPU fallback installed below for 310P.
+        legacy(**kwargs)
+    else:
+        mamba_utils.postprocess_mamba_gpu(**kwargs, run_prefix_state_migration=True)
+
+
+def stage_mamba_postprocess_inputs(ctx, scheduler_output, req_ids, num_reqs, requests, mamba_state_idx) -> None:
+    """Retain V1's state-index upload after upstream removed its argument."""
+    if not hasattr(mamba_utils, "postprocess_mamba_gpu"):
+        mamba_utils.stage_postprocess_inputs_to_gpu(ctx, scheduler_output, req_ids, num_reqs, requests, mamba_state_idx)
+        return
+    # Ascend's V1 preprocess still owns these indices. New upstream staging
+    # expects its native preprocess to have uploaded them already.
+    assert ctx.mamba_state_idx_buf is not None
+    for i, req_id in enumerate(req_ids[:num_reqs]):
+        state_idx = mamba_state_idx.get(req_id)
+        assert state_idx is not None, f"mamba_state_idx missing entry for {req_id!r}"
+        ctx.mamba_state_idx_buf.np[i] = state_idx
+    ctx.mamba_state_idx_buf.copy_to_gpu(num_reqs)
+    mamba_utils.stage_postprocess_inputs_to_gpu(ctx, scheduler_output, req_ids, num_reqs, requests)
+
+
 def _get_state_copy_funcs_for_layer(
     kv_cache_group,
     layer_name: str,

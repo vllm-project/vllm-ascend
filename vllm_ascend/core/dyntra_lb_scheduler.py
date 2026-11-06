@@ -30,7 +30,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -594,9 +593,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         break
 
             if new_blocks is None:
-                if not vllm_version_is("0.32.0") and (
-                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
-                ):
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
                     # The request was the lowest-priority running request and
                     # preempted itself. The requests after it have higher
                     # priority and may still fit; it was removed from
@@ -1062,13 +1059,15 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
+        # vLLM #64076 removed the deprecated cascade-attention contract.
+        common_prefix_kwargs: dict[str, Any] = {}
+        if "num_common_prefix_blocks" in SchedulerOutput.__dataclass_fields__:
+            num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
+            with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+                if self.running:
+                    any_request_id = self.running[0].request_id
+                    num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
+            common_prefix_kwargs["num_common_prefix_blocks"] = num_common_prefix_blocks
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
@@ -1152,7 +1151,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
+            **common_prefix_kwargs,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.

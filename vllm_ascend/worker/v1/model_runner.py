@@ -185,6 +185,10 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.ops.triton.v1.spec_decode.ngram import triton_ngram_spec_decode
+from vllm_ascend.patch.worker.patch_v1.patch_mamba_utils import (
+    postprocess_mamba_align,
+    stage_mamba_postprocess_inputs,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.utils import (
@@ -262,15 +266,6 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-
-# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.32.0 lane
-# still ships `AscendMedusaProposer`. Keep the name for the drafter type union
-# on both lanes, but on main never resolve it at runtime: the dispatch below
-# short-circuits on the version first, and the config rejects `method="medusa"`
-# before a proposer could be constructed.
-if vllm_version_is("0.32.0"):
-    from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer  # type: ignore[import-not-found]
-
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -761,7 +756,6 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDSparkProposer
             | AscendGemma4Proposer
             | AscendSuffixDecodingProposer
-            | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
             | None
         ) = None
@@ -853,7 +847,11 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+                or (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
             )
             and not self.model_config.enforce_eager
         )
@@ -1051,7 +1049,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
-            mamba_utils.postprocess_mamba_align_gpu(
+            postprocess_mamba_align(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
@@ -2082,16 +2080,6 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
-        elif vllm_version_is("0.32.0") and isinstance(self.drafter, AscendMedusaProposer):
-            draft_token_ids = self.drafter.propose(
-                # Dynamic SD: forward the scheduled K (equals the configured
-                # maximum when the feature is disabled).
-                scheduler_output.num_spec_tokens_to_schedule,
-                valid_sampled_token_ids,
-                sampling_metadata,
-                spec_decode_metadata,
-                sample_hidden_states,
-            )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
             assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
@@ -2484,7 +2472,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
+                if vllm_version_is("0.33.0") and self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
                     # Pre-compute cascade attention prefix lengths
                     cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
                         num_scheduled_tokens_np,
@@ -2564,7 +2552,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
                     if mamba_bufs.postprocess_align is not None:
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
+                        stage_mamba_postprocess_inputs(
                             mamba_bufs.postprocess_align,
                             scheduler_output,
                             self.input_batch.req_ids,
@@ -4852,7 +4840,11 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             if (
-                breakable_cudagraph.is_breakable_cudagraph_enabled()
+                (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
                 and cudagraph_mode != CUDAGraphMode.NONE
             ):
                 self.model = BreakableACLGraphWrapper(

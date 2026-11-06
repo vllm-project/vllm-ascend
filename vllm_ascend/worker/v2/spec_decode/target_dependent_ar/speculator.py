@@ -82,7 +82,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     model_state: "AscendModelState"
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -275,7 +275,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
         if self.pcp_manager is not None:
-            attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -303,10 +303,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             )
 
     @staticmethod
-    def _get_pcp_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
+    def _get_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
         """Keep eager draft MLA queries within the target's real decode rows.
 
-        FULL target graphs include query offsets for padded PCP requests. The
+        FULL target graphs include query offsets for padded requests. The
         draft prefill runs outside FULL graphs and MLA slices its query to
         num_decode_tokens, so padding requests must have zero query length.
         Copy only the changed metadata: target graph updates still need the
@@ -428,17 +428,31 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
         # vLLM #60335 added `num_speculative_steps` on main.
-        super()._generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-            num_speculative_steps,
-        )
+        if vllm_version_is("0.33.0"):
+            super()._generate_draft(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                num_speculative_steps,
+            )
+        else:
+            super()._decode(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                num_speculative_steps,
+            )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    # #60989 invokes _decode through the new shared AR loop.
+    _decode = _generate_draft
 
     def _multi_step_decode(
         self,
@@ -489,29 +503,24 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        if vllm_version_is("0.32.0"):
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-            )
-        else:
-            # vLLM main forwards `skip_sample` so the drafter KV stays in sync
-            # without sampling when num_speculative_tokens == 0.
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-                skip_sample,
-            )
+        # #63406 can introduce request-padded target graphs even without PCP.
+        # Eager/PW MLA slices queries to real decode rows; its cumulative query
+        # lengths must exclude target padding too. Keep FULL graph metadata.
+        if not vllm_version_is("0.33.0") and attn_metadata is not None and cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
+
+        # vLLM main forwards `skip_sample` so the drafter KV stays in sync
+        # without sampling when num_speculative_tokens == 0.
+        super()._prefill(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+            skip_sample,
+        )
 
     def _build_attn_metadata(
         self,

@@ -18,7 +18,9 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
     runner.max_num_reqs = requests
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp))
     runner.speculative_config = SimpleNamespace(
-        method="dspark" if replicated else "mtp", num_speculative_tokens=query - 1
+        method="dspark" if replicated else "mtp",
+        num_speculative_tokens=query - 1,
+        max_num_new_slots_for_drafting=0,
     )
     runner.speculator = None  # Non-last PP stages have no local drafter.
     return runner

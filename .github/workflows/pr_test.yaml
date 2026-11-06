@@ -501,7 +501,10 @@ jobs:
             exit 1
           fi
 
-          git rebase "$BASE_SHA"
+          # Preserve resolved merges when this exact base is already included.
+          if ! git merge-base --is-ancestor "$BASE_SHA" HEAD; then
+            git rebase "$BASE_SHA"
+          fi
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Validate test coverage config

@@ -87,7 +87,6 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1017,20 +1016,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
-        # vLLM main fuses Kimi-K3's output gate into the QKV-A projection as a
-        # trailing shard, making its per-rank layout ``[q_a | kv_a | gate]`` and
-        # dropping the standalone ``g_proj``. Release v0.32.0 keeps the separate
-        # ``g_proj`` and a two-shard projection.
-        if vllm_version_is("0.32.0"):
-            self.qkv_a_gate_fused = False
-            self.use_output_gate = self.g_proj is not None
-        else:
-            # The plain MLA projection also only has the two latent shards, so
-            # the shard count identifies the fused layout without importing the
-            # Kimi-specific linear class.
-            fused_output_sizes = getattr(self.fused_qkv_a_proj, "output_sizes", None)
-            self.qkv_a_gate_fused = fused_output_sizes is not None and len(fused_output_sizes) == 3
-            self.use_output_gate = self.g_proj is not None or self.qkv_a_gate_fused
+        # Both supported Kimi AMD implementations can append an output-gate shard.
+        # The plain MLA projection also only has the two latent shards, so
+        # the shard count identifies the fused layout without importing the
+        # Kimi-specific linear class.
+        fused_output_sizes = getattr(self.fused_qkv_a_proj, "output_sizes", None)
+        self.qkv_a_gate_fused = fused_output_sizes is not None and len(fused_output_sizes) == 3
+        self.use_output_gate = self.g_proj is not None or self.qkv_a_gate_fused
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -1312,23 +1304,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         # scenario the graph is captured once, so every later weight update
         # reload has to refresh the stored tensors in place instead of
         # rebinding the attributes to freshly allocated tensors.
-        # `replace_parameter(..., prefer_copy=True)` does exactly that on
-        # v0.32.0: it copies into the existing storage while the new value stays
-        # compatible, and rebinds only when shape/dtype/device actually
-        # changes. vLLM main (#62326) dropped `prefer_copy` and keeps the
-        # parameter object by default. This mirrors how upstream vLLM refreshes
-        # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
-        # raise on a shape mismatch.
+        # replace_parameter preserves the parameter object and compatible storage.
         w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
         w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
         if self.dcp_q_replicate_enabled:
             w_uk_t = get_dcp_group().all_gather(w_uk_t, dim=0)
-        if vllm_version_is("0.32.0"):
-            replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
-            replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
-        else:
-            replace_parameter(self, "W_UV", w_uv)
-            replace_parameter(self, "W_UK_T", w_uk_t)
+        replace_parameter(self, "W_UV", w_uv)
+        replace_parameter(self, "W_UK_T", w_uk_t)
         self.mlapo_W_UK_T = self.W_UK_T
 
         if self.enable_mlapo:
@@ -3268,53 +3250,33 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_k_pe=current_k_pe,
         )
 
-    # vLLM main fuses Kimi-K3's output gate into the trailing shard of the
-    # QKV-A projection; v0.32.0 never has that shard, so the release lane keeps
-    # the original two-way ``[q_a | kv_a]`` split.
-    if vllm_version_is("0.32.0"):
+    @property
+    def _fused_qkv_a_kv_end(self) -> int | None:
+        """End offset of the KV-A shard inside the fused QKV-A projection.
 
-        @property
-        def _fused_qkv_a_kv_end(self) -> int | None:
-            """v0.32.0 keeps the plain two-shard QKV-A projection."""
+        Kimi-K3 appends its output gate after ``[q_a | kv_a]``. ``None`` means
+        the plain two-shard layout, where the KV-A shard runs to the end.
+        """
+        if not getattr(self, "qkv_a_gate_fused", False):
             return None
+        return self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
 
-        def _split_fused_qkv_lora(self, qkv_lora: torch.Tensor):
-            """Split the plain ``[q_a | kv_a]`` QKV-A projection."""
-            q_c, kv_no_split = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            return q_c, kv_no_split, None
+    def _split_fused_qkv_lora(self, qkv_lora: torch.Tensor):
+        """Split the fused QKV-A projection into ``q_c`` and ``kv_no_split``.
 
-    else:
-
-        @property
-        def _fused_qkv_a_kv_end(self) -> int | None:
-            """End offset of the KV-A shard inside the fused QKV-A projection.
-
-            Kimi-K3 appends its output gate after ``[q_a | kv_a]``. ``None`` means
-            the plain two-shard layout, where the KV-A shard runs to the end.
-            """
-            if not getattr(self, "qkv_a_gate_fused", False):
-                return None
-            return self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
-
-        def _split_fused_qkv_lora(self, qkv_lora: torch.Tensor):
-            """Split the fused QKV-A projection into ``q_c`` and ``kv_no_split``.
-
-            Kimi-K3 appends its output gate as a trailing shard; when that layout is
-            detected the gate is peeled off first and returned so the caller can
-            apply it after attention. ``None`` is returned for the plain layout.
-            """
-            gate = None
-            kv_end = self._fused_qkv_a_kv_end
-            if kv_end is not None:
-                qkv_lora, gate = qkv_lora.split([kv_end, qkv_lora.shape[-1] - kv_end], dim=-1)
-            q_c, kv_no_split = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            return q_c, kv_no_split, gate
+        Kimi-K3 appends its output gate as a trailing shard; when that layout is
+        detected the gate is peeled off first and returned so the caller can
+        apply it after attention. ``None`` is returned for the plain layout.
+        """
+        gate = None
+        kv_end = self._fused_qkv_a_kv_end
+        if kv_end is not None:
+            qkv_lora, gate = qkv_lora.split([kv_end, qkv_lora.shape[-1] - kv_end], dim=-1)
+        q_c, kv_no_split = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            dim=-1,
+        )
+        return q_c, kv_no_split, gate
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
         # MLA Preprocess:

@@ -10,7 +10,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
-from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config, vllm_version_is
+from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -87,16 +87,17 @@ def _normalize_legacy_qwen3_dspark_config(
     hf_config: PretrainedConfig,
     transformers_mtp_overrides: dict[str, Any] | None = None,
 ) -> PretrainedConfig:
-    if not vllm_version_is("0.32.0") and transformers_mtp_overrides is not None:
+    if transformers_mtp_overrides is not None:
         # The Transformers MTP draft is built from the target config: upstream
         # applies the overrides and none of the checkpoint rewrites below apply.
         return _orig_hf_config_override(  # type: ignore[call-arg]
             hf_config, transformers_mtp_overrides
         )
+    # #63205 renames this legacy architecture before returning to our hook.
+    legacy_qwen3_dspark = hf_config.model_type == "qwen3" and "DSparkDraftModel" in (hf_config.architectures or ())
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
-    architectures = hf_config.architectures or ()
-    if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
+    if legacy_qwen3_dspark:
         dflash_config = hf_config.dflash_config
         hf_config.update(
             {

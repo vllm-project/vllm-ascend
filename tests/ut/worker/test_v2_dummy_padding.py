@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -50,12 +49,23 @@ def runner(buffers):
 def _make_graph_manager(buffers, mode, uniform, capture_size):
     manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
     manager.vllm_config = SimpleNamespace(
-        speculative_config=None, cache_config=SimpleNamespace(use_kda_recoverssm=False)
+        speculative_config=None,
+        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        uniform_decode_query_len=uniform,
     )
-    manager.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[capture_size], max_cudagraph_capture_size=64)
+    manager.compilation_config = SimpleNamespace(
+        cudagraph_capture_sizes=[capture_size],
+        max_cudagraph_capture_size=64,
+        prefill_cudagraph_capture_token_sizes=[capture_size],
+        decode_cudagraph_capture_request_sizes=[(capture_size + uniform - 1) // uniform],
+        max_decode_cudagraph_capture_tokens=None,
+    )
+    manager.decode_request_sizes = None
     manager.cudagraph_mode = mode
     manager.decode_query_len = uniform
     manager.max_num_reqs = len(buffers.seq_lens_cpu)
+    manager.decode_max_reqs = {uniform: manager.max_num_reqs}
+    manager._decode_descs = {}
     manager.varlen_decode = False
     manager.ubatch_runner = None
     manager.lora_capture_cases = [0]
@@ -140,7 +150,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
     cpu_group = object()
 
     def other_rank_votes(votes, group):
-        # v0.32.0 passes ``group=cpu_group``; main's ``cpu_all_reduce_`` does not.
+        # cpu_all_reduce_ already binds the CPU group.
         assert group is None or group is cpu_group
         # The other ranks decode real requests with the same query width.
         votes[0, 1:] = torch.tensor([2 * uniform, 3 * uniform, uniform])
@@ -171,16 +181,10 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         return None, None
 
     extra_collective_patch: AbstractContextManager[Any]
-    if vllm_version_is("0.32.0"):
-        # v0.32.0 collects through ``dist.all_reduce(votes, group=cpu_group)``.
-        dp_group = SimpleNamespace(cpu_group=cpu_group)
-        collective = Mock(side_effect=other_rank_votes)
-        extra_collective_patch = patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", collective)
-    else:
-        # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
-        collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
-        dp_group = SimpleNamespace(cpu_all_reduce_=collective)
-        extra_collective_patch = nullcontext()
+    # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
+    collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
+    dp_group = SimpleNamespace(cpu_all_reduce_=collective)
+    extra_collective_patch = nullcontext()
 
     with (
         patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),

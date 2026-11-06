@@ -30,7 +30,10 @@ from vllm_ascend.utils import vllm_version_is
 def _npu_context():
     with (
         patch.object(
-            torch, "npu", SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock()), create=True
+            torch,
+            "npu",
+            SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock(), empty_cache=MagicMock()),
+            create=True,
         ),
         patch("torch.accelerator.current_device_index", return_value=0),
     ):
@@ -43,13 +46,18 @@ def _make_engine():
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
     engine._last_hccl_update_info = {}
+    # Match the upstream constructor's disabled load-plan state.
+    engine._plan_metadata = None
+    engine._plan_manifest = None
+    engine._plan = None
     return engine
 
 
 def test_start_weight_update_initializes_layerwise_reload():
     engine = _make_engine()
 
-    with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as initialize:
+    start = "initialize_layerwise_reload" if vllm_version_is("0.33.0") else "start_reload"
+    with patch(f"vllm.model_executor.model_loader.reload.{start}") as initialize:
         engine.start_weight_update()
 
     initialize.assert_called_once_with(engine.model)
@@ -58,10 +66,14 @@ def test_start_weight_update_initializes_layerwise_reload():
 def test_finish_weight_update_finalizes_layerwise_reload():
     engine = _make_engine()
 
-    with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as finalize:
+    finish = "finalize_layerwise_reload" if vllm_version_is("0.33.0") else "finish_reload"
+    with patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize:
         engine.finish_weight_update()
 
-    finalize.assert_called_once_with(engine.model, engine.model_config)
+    args: tuple[Any, ...] = (engine.model, engine.model_config)
+    if not vllm_version_is("0.33.0"):
+        args += (engine.device,)
+    finalize.assert_called_once_with(*args)
 
 
 def test_shutdown_closes_session_once():
@@ -109,7 +121,10 @@ def test_init_info_preserves_upstream_payload_contract():
 
     assert isinstance(init_info, NCCLWeightTransferInitInfo)
     assert HCCLWeightTransferEngine.init_info_cls is HCCLWeightTransferInitInfo
-    assert worker_init_payload(init_info) == dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    expected = dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    if "use_load_plan" in NCCLWeightTransferInitInfo.__dataclass_fields__:
+        expected["use_load_plan"] = False
+    assert worker_init_payload(init_info) == expected
     restored = HCCLWeightTransferInitInfo(**worker_init_payload(init_info))
     assert restored == init_info
     assert restored.packed is None
@@ -221,7 +236,7 @@ def test_trainer_normalizes_source_for_both_modes(packed):
         patch.object(engine, "_checked_iter", return_value=iter(pairs)),
         patch(f"{namespace}.packed_broadcast_producer", side_effect=pack),
     ):
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             engine._broadcast(pairs, [])
         else:
             # Main passes the metadata slice and the broadcasting group rank.
@@ -267,7 +282,7 @@ def test_non_sender_drains_source_without_validating_placeholder_tensors():
     iter_source = MagicMock()
     iter_source.iter_full.return_value = source()
     iter_source.__iter__.return_value = source()
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         with patch.object(torch, "npu", SimpleNamespace(device=lambda _: nullcontext()), create=True):
             engine._broadcast(iter_source, [])
     else:
@@ -322,15 +337,15 @@ def test_worker_update_binds_assigned_device_for_base_sync():
 def test_send_reuses_real_upstream_round_trip(sender):
     engine = _trainer(sender)
     param = ParamMeta(name="w", dtype=torch.float32, shape=(1,))
-    if vllm_version_is("0.32.0"):
-        engine.source.metadata.return_value = []
+    if vllm_version_is("0.33.0"):
+        engine.source.metadata = []
     else:
         # vLLM main exposes WeightSource.metadata as a property and sends one
         # slice per broadcasting rank.
         engine.source.metadata = [param]
     with patch.object(engine, "_broadcast") as broadcast, patch.object(engine, "_post_send_sync") as sync:
         engine.send_weights()
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         broadcast.assert_called_once_with(engine.source, [])
     else:
         broadcast.assert_called_once_with([param], 0)
