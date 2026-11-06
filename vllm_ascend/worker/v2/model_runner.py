@@ -573,6 +573,11 @@ class NPUModelRunner(GPUModelRunner):
 
         self._fill_c8_mxfp_v_scale_caches()
 
+        # Private candidate only: bind after Core seals all cache/stream owners.
+        from vllm_ascend.hisparse.mirror_overlap import overlap_mtp_host_mirror
+
+        self.kv_connector = overlap_mtp_host_mirror(self.kv_connector, self.speculator, self.output_copy_stream)
+
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
         self._c8_mxfp_v_scale_caches = []
