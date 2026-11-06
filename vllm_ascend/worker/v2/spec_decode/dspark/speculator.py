@@ -76,6 +76,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
+        self._draft_metadata_num_reqs: int | None = None
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
         self._init_dcp()
