@@ -77,6 +77,35 @@ class AscendDeepseekV41ForCausalLM(
             return IMAGE_PLACEHOLDER
         return None
 
+    @classmethod
+    def build_lora_weights_mapper(cls) -> WeightsMapper:
+        """Map HF adapter keys onto the multimodal-wrapped module tree.
+
+        Adapters are trained against the HF text backbone, so their keys start
+        at ``model.layers.`` and use the checkpoint spelling ``.attn.``. The
+        module tree spells the same layer ``.self_attn.`` (see the rename table
+        in ``AscendDeepseekV41LLMForCausalLM.load_weights``). The substring
+        rule has to live here too: the LoRA loader resolves adapter keys before
+        it walks the model, and a key that misses its module is dropped without
+        an error because the base layer keeps answering ``weight``.
+
+        The mapper is applied to the instance rather than the class on purpose:
+        the class-level attribute is also read by ``configure_quant_config``
+        and the base weight loader, which must keep seeing raw HF names.
+        """
+        return WeightsMapper(
+            # HF text checkpoints name the block ``attn``; the model tree keeps
+            # ``self_attn``.
+            orig_to_new_substr={".attn.": ".self_attn."},
+            orig_to_new_prefix={
+                "model.layers.": "language_model.model.layers.",
+                "layers.": "language_model.model.layers.",
+                "model.hc_head": "language_model.model.hc_head",
+                "hc_head": "language_model.model.hc_head",
+                "lm_head.": "language_model.lm_head.",
+            },
+        )
+
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
         model_config = vllm_config.model_config
@@ -114,21 +143,7 @@ class AscendDeepseekV41ForCausalLM(
         self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
         self.moe_comm_methods = self.language_model.moe_comm_methods
-        # Adapters are trained against the HF text backbone, so their keys start
-        # at ``model.layers.``. After multimodal wrapping the same modules live
-        # under ``language_model.``, so the LoRA loader needs this re-rooting
-        # rule to reach them. It is set on the instance on purpose: the
-        # class-level attribute is also read by ``configure_quant_config`` and
-        # the base weight loader, which must keep seeing raw checkpoint names.
-        self.hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "model.layers.": "language_model.model.layers.",
-                "layers.": "language_model.model.layers.",
-                "model.hc_head": "language_model.model.hc_head",
-                "hc_head": "language_model.model.hc_head",
-                "lm_head.": "language_model.lm_head.",
-            },
-        )
+        self.hf_to_vllm_mapper = self.build_lora_weights_mapper()
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)
