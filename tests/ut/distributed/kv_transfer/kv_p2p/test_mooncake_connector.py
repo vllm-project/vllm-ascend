@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     ReqMeta,
     ensure_zmq_recv,
     ensure_zmq_send,
+    get_prefill_pp_indices,
     group_concurrent_contiguous,
     resolve_remote_layer_idx,
     split_if_not_byte_contiguous,
@@ -3558,6 +3559,199 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
                 self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
                 self.assertEqual(worker.handshake_port, 5000)
+
+    def test_consumer_pcp_rejected_before_backend_creation(self):
+        """PCP replicates KV only on the prefill engine; a kv_consumer with PCP must fail fast."""
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        parallel = {"prefill": {"tp_size": 2, "dp_size": 1}, "decode": {"tp_size": 2, "dp_size": 1}}
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        with (
+            patch.object(module.global_te, "get_transfer_engine") as backend,
+            patch.object(
+                module,
+                "get_pcp_group",
+                return_value=types.SimpleNamespace(rank_in_group=0, world_size=2),
+            ),
+            self.assertRaisesRegex(ValueError, "PCP only on the prefill"),
+        ):
+            MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        backend.assert_not_called()
+
+    def test_get_prefill_pp_indices_validates_partition_string(self):
+        """The D-side PP partition table must parse and match pp_size and layer count."""
+        self.assertEqual(get_prefill_pp_indices(8, 0, 2, "4,4"), (0, 4))
+        self.assertEqual(get_prefill_pp_indices(8, 1, 2, "4,4"), (4, 8))
+        for partition, pp_size, num_layers, message in (
+            ("a,b", 2, 8, "Invalid partition string"),
+            ("4,4,4", 2, 8, "does not match pp_size"),
+            ("4,8", 2, 16, "does not match num_hidden_layers"),
+        ):
+            with self.subTest(partition=partition), self.assertRaisesRegex(ValueError, message):
+                get_prefill_pp_indices(num_layers, 0, pp_size, partition)
+
+    def _make_cp_worker(self, dcp_size: int) -> MooncakeConnectorWorker:
+        """Minimal D-side worker whose CP geometry is overridden per test case."""
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_mla = True  # skip the non-MLA head-divisibility assert
+        worker.pcp_size = 1
+        worker.dcp_size = dcp_size
+        worker.tp_size = 2
+        worker.tp_rank = 0
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker._prefill_tp_size = 2
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+        worker.use_sparse = False
+        worker.block_size_scale = [[1]]
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "layer_names": ["model.layers.0.self_attn"],
+                },
+                [0],
+            )
+        }
+        return worker
+
+    @staticmethod
+    def _make_cp_meta(**overrides):
+        meta = types.SimpleNamespace()
+        meta.remote_pcp_size = 1
+        meta.remote_dcp_size = 2
+        meta.remote_ptp_size = None
+        meta.remote_port = 30000
+        meta.remote_block_ids = ([1],)
+        meta.local_block_ids = ([1],)
+        meta.num_external_tokens = 16
+        meta.num_prompt_blocks = 1
+        meta.num_computed_tokens = 0
+        meta.remote_engine_id = 0
+        meta.remote_host = "localhost"
+        meta.remote_block_size = 16
+        meta.remote_multi_nodes_meta_mapping = {}
+        for key, value in overrides.items():
+            setattr(meta, key, value)
+        return meta
+
+    def test_get_kv_split_metadata_block_size_cp_validation(self):
+        """P/D block-size and CP-size mismatches must fail fast instead of sharding incorrectly."""
+        cases = (
+            # (local block, remote block, local dcp, remote dcp, message)
+            (128, 96, 2, 2, "must be divisible by each other"),
+            (16, 32, 2, 2, "not support P node block_size"),
+            (32, 16, 2, 2, "must be an integer multiple"),
+            (16, 16, 2, 3, "divisible in either direction"),
+        )
+        for block_size, remote_block_size, dcp_size, remote_dcp_size, message in cases:
+            with self.subTest(
+                block_size=block_size, remote_block_size=remote_block_size, dcp=(dcp_size, remote_dcp_size)
+            ):
+                worker = self._make_cp_worker(dcp_size)
+                worker.block_size = block_size
+                with self.assertRaisesRegex(AssertionError, message):
+                    worker._get_kv_split_metadata(
+                        "0",
+                        cast(
+                            ReqMeta,
+                            self._make_cp_meta(remote_block_size=remote_block_size, remote_dcp_size=remote_dcp_size),
+                        ),
+                    )
+
+    def test_get_kv_split_metadata_decode_only_dcp_validation(self):
+        """Decode-only DCP (D dcp>1, P dcp==1) requires equal blocks and MLA-style specs."""
+        worker = self._make_cp_worker(dcp_size=2)
+        with (
+            self.subTest(case="unequal_block_size"),
+            self.assertRaisesRegex(AssertionError, "Decode-only DCP requires equal P/D block sizes"),
+        ):
+            worker._get_kv_split_metadata(
+                "0", cast(ReqMeta, self._make_cp_meta(remote_dcp_size=1, remote_block_size=32))
+            )
+        with (
+            self.subTest(case="unsupported_cache_spec"),
+            # FullAttentionSpec is neither MLA nor a spec decode-only DCP special-cases.
+            self.assertRaisesRegex(NotImplementedError, "Decode-only DCP does not support cache type"),
+        ):
+            worker._get_kv_split_metadata("0", cast(ReqMeta, self._make_cp_meta(remote_dcp_size=1)))
+
+    def test_selected_pcp_rank_is_deterministic(self):
+        """P and D independently derive the same PCP replica from the request ID."""
+        self.assertEqual(MooncakeConnectorWorker._get_selected_pcp_rank("req-1", 1), 0)
+        for pcp_size in (2, 4):
+            ranks = {MooncakeConnectorWorker._get_selected_pcp_rank(f"req-{i}", pcp_size) for i in range(50)}
+            self.assertTrue(all(0 <= rank < pcp_size for rank in ranks))
+            self.assertGreater(len(ranks), 1)
+        self.assertEqual(
+            MooncakeConnectorWorker._get_selected_pcp_rank("req-42", 4),
+            MooncakeConnectorWorker._get_selected_pcp_rank("req-42", 4),
+        )
+
+    def test_remote_ranks_equal_tp_passthrough(self):
+        """With P TP == D TP each decode rank pulls its own TP rank on every PP stage."""
+        worker = self._make_cp_worker(dcp_size=1)
+        worker._prefill_tp_size = 2
+        worker._decode_tp_size = 2
+        worker._prefill_pp_size = 1
+        self.assertEqual(worker._get_remote_ranks_for_req("0"), [[0], [1]])
+        worker._prefill_pp_size = 2
+        self.assertEqual(worker._get_remote_ranks_for_req("0"), [[0, 2], [1, 3]])
+
+    def test_remote_ranks_unequal_tp_stable_and_disjoint(self):
+        """With P TP > D TP and enough GQA heads, ranks split deterministically per decode rank."""
+        parallel = {
+            "prefill": {"tp_size": 4, "dp_size": 1},
+            "decode": {"tp_size": 2, "dp_size": 1},
+        }
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+        self.vllm_config.parallel_config.tensor_parallel_size = 2
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._prefill_pp_size = 1
+        # use_sparse is resolved at registration time; GQA routing keeps it off.
+        worker.use_sparse = False
+        # 8 KV heads: each decode rank pulls (8//2)//(8//4) = 2 prefill ranks.
+        self.assertEqual(worker.tp_num_need_pulls, 2)
+        result = worker._get_remote_ranks_for_req("req-a")
+        self.assertEqual(result, [[0, 1], [2, 3]])
+        # Hash-independent split keeps groups disjoint so every pulled rank serves one decode rank.
+        self.assertEqual(len({rank for group in result for rank in group}), 4)
+        self.assertEqual(result, worker._get_remote_ranks_for_req("req-a"))
+
+    def test_handshake_port_formula_across_topologies(self):
+        """handshake_port = kv_port + dp*tp*pp*pcp + (pp_rank*pcp + pcp_rank)*tp + tp_rank."""
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        parallel = {"prefill": {"tp_size": 2, "dp_size": 1}, "decode": {"tp_size": 2, "dp_size": 1}}
+        cases = (
+            # (tp_rank, pp_rank, pcp_rank, pcp_size, pp_size, dp_rank, expected_port)
+            (1, 0, 1, 2, 1, 0, 5003),
+            (1, 1, 0, 1, 2, 0, 5003),
+            (0, 0, 0, 1, 1, 1, 5002),
+        )
+        for tp_rank, pp_rank, pcp_rank, pcp_size, pp_size, dp_rank, expected_port in cases:
+            with self.subTest(tp=tp_rank, pp=(pp_rank, pp_size), pcp=(pcp_rank, pcp_size), dp=dp_rank):
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                self.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+                self.vllm_config.parallel_config.data_parallel_rank = dp_rank
+                with (
+                    patch.object(module, "get_tensor_model_parallel_rank", return_value=tp_rank),
+                    patch.object(
+                        module,
+                        "get_pp_group",
+                        return_value=types.SimpleNamespace(rank_in_group=pp_rank, world_size=pp_size),
+                    ),
+                    patch.object(
+                        module,
+                        "get_pcp_group",
+                        return_value=types.SimpleNamespace(rank_in_group=pcp_rank, world_size=pcp_size),
+                    ),
+                    patch.object(module.torch.npu, "current_device", return_value=5),
+                ):
+                    worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                self.assertEqual(worker.handshake_port, expected_port)
 
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
