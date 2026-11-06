@@ -358,7 +358,11 @@ class NPUModelRunner(GPUModelRunner):
 
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
-        output = super().sample_tokens(grammar_output)
+        try:
+            output = super().sample_tokens(grammar_output)
+        finally:
+            if (mirror := getattr(self, "_sampling_mirror", None)) is not None:
+                mirror.join_pending()
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
@@ -554,7 +558,9 @@ class NPUModelRunner(GPUModelRunner):
         # Private candidate only: bind after Core seals all cache/stream owners.
         from vllm_ascend.hisparse.mirror_overlap import overlap_mtp_host_mirror
 
-        self.kv_connector = overlap_mtp_host_mirror(self.kv_connector, self.speculator, self.output_copy_stream)
+        overlap_connector = overlap_mtp_host_mirror(self)
+        self._sampling_mirror = overlap_connector if overlap_connector is not self.kv_connector else None
+        self.kv_connector = overlap_connector
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -665,6 +671,9 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
+        mirror = getattr(self, "_sampling_mirror", None)
+        if mirror is not None:
+            mirror.begin_execution(not dummy_run and not is_profile)
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
@@ -712,6 +721,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
+                if forward_failed and mirror is not None:
+                    mirror.join_pending()
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
