@@ -219,6 +219,7 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.kv_cache_views import reshape_combined_attention_kv_cache
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.spec_decode_utils import (
@@ -6198,45 +6199,20 @@ class NPUModelRunner(GPUModelRunner):
                         raw_kv_is_combined
                         and len(kv_cache_shape) == 5
                         and kv_cache_shape[0] == 2
+                        and current_kv_cache_spec.head_size_v == current_kv_cache_spec.head_size
+                        and not enable_fa_quant(self.vllm_config)
                     ):
-                        raw_typed = raw_k_tensor.view(current_kv_cache_spec.dtype)
-                        if raw_typed.numel() == math.prod(kv_cache_shape):
-                            hidden_size = math.prod(kv_cache_shape[2:])
-                            dense_strides = [
-                                math.prod(kv_cache_shape[dim + 1 :])
-                                for dim in range(len(kv_cache_shape))
-                            ]
-                            kv_cache = torch.as_strided(
-                                raw_typed,
-                                size=kv_cache_shape,
-                                stride=(
-                                    hidden_size,
-                                    2 * hidden_size,
-                                    *dense_strides[2:],
-                                ),
-                                storage_offset=raw_typed.storage_offset(),
-                            )
-                            # Match MRV2: expose block-first K/V views while
-                            # preserving the shared allocation and strides.
-                            kv_caches[layer_name] = (kv_cache[0], kv_cache[1])
-                            # TODO: Remove this temporary observation point once
-                            # the non-contiguous KV-cache layout is mature.
-                            logger.debug(
-                                "[non-contiguous-kv-cache] attention mode=%s "
-                                "layer=%s shape=%s stride=%s "
-                                "k_contiguous=%s v_contiguous=%s",
-                                (
-                                    "hybrid"
-                                    if self.hybrid_with_attn_and_mamba
-                                    else "gqa"
-                                ),
-                                layer_name,
-                                tuple(kv_cache.shape),
-                                kv_cache.stride(),
-                                kv_cache[0].is_contiguous(),
-                                kv_cache[1].is_contiguous(),
-                            )
-                            continue
+                        # Share MRV2's physical-page view. Trimming padding
+                        # from the whole allocation loses the gaps between
+                        # manager pages and can overwrite another kernel page.
+                        kv_caches[layer_name] = reshape_combined_attention_kv_cache(
+                            raw_k_tensor,
+                            kv_cache_shape,
+                            current_kv_cache_spec.dtype,
+                            current_kv_cache_spec.page_size_bytes,
+                            block_size_chunk,
+                        )
+                        continue
                     should_trim_page_padding = (
                         self.hybrid_with_attn_and_mamba and self.use_hybrid_blocks
                     ) or (
