@@ -179,8 +179,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.requests: dict[str, ReqMeta] = {}
         self.push_requests: dict[str, PushReqMeta] = {}
         self.push_send_requests: dict[str, PushSendReqMeta] = {}
-        # P request ID -> D request ID, including aborts before first dispatch.
-        self.push_aborted_requests: dict[str, str] = {}
+        # P request ID -> D completion routing, including pre-dispatch aborts.
+        self.push_aborted_requests: dict[str, dict[str, Any]] = {}
         # D request ID -> whether the failed metaserver call never dispatched P.
         self.push_failed_requests: dict[str, bool] = {}
         self.requests_to_send: dict[str, float] = {}

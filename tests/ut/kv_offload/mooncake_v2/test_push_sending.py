@@ -357,19 +357,73 @@ def test_write_failure_notifies_d_and_keeps_p_running(worker, monkeypatch, failu
 
 
 @pytest.mark.parametrize("dispatched", [False, True])
-def test_abort_before_forward(worker, dispatched):
+def test_abort_before_forward(worker, dispatched, monkeypatch):
     if dispatched:
         worker.start_load_kv(source_meta(0, 0))
+    else:
+        discovery = Mock(side_effect=AssertionError("Abort must not query cache metadata"))
+        monkeypatch.setattr(worker, "_get_remote_metadata", discovery)
     meta = MooncakeConnectorMetadata()
-    meta.push_aborted_requests = {"p-request": "d-request"}
+    meta.push_aborted_requests = {"p-request": target_params()}
     worker.start_load_kv(meta)
     worker.wait_for_save()
     drive(worker, lambda: "d-request" not in worker._reqs_send_state)
-    if dispatched:
-        assert worker._send_done.call_args.args[1] == "P request aborted"
-    else:
-        worker._send_done.assert_not_called()
+    worker._send_done.assert_called_once()
+    params, error = worker._send_done.call_args.args
+    assert params["request_id"] == "d-request"
+    assert params["consumer_engine_id"] == "d"
+    assert params["consumer_rank"] == [0, 0, 0]
+    assert params["completion_address"] == "tcp://127.0.0.1:9001"
+    assert error == "P request aborted"
     assert not worker.engine.batch_transfer_sync_write.called
+    if not dispatched:
+        discovery.assert_not_called()
+
+
+def test_abort_before_dispatch_notifies_every_d_rank(worker):
+    params = target_params()
+    params["remote_worker_addresses"].append([0, 0, 1, "tcp://127.0.0.1:9002"])
+    meta = MooncakeConnectorMetadata()
+    meta.push_aborted_requests = {"p-request": params}
+    worker.start_load_kv(meta)
+    worker.wait_for_save()
+    assert worker._send_done.call_count == 2
+    assert {tuple(call.args[0]["consumer_rank"]) for call in worker._send_done.call_args_list} == {
+        (0, 0, 0),
+        (0, 0, 1),
+    }
+    assert all(call.args[1] == "P request aborted" for call in worker._send_done.call_args_list)
+    assert worker.get_transfer_results().finished_sending == {"p-request"}
+
+
+def test_abort_waits_for_submitted_write(worker):
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked_write(*args):
+        entered.set()
+        assert release.wait(3)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = blocked_write
+    worker.start_load_kv(source_meta(0, 4))
+    worker.save_kv_layer("model.layers.0.attn")
+    drive(worker, entered.is_set)
+    meta = MooncakeConnectorMetadata()
+    meta.push_aborted_requests = {"p-request": target_params()}
+    worker.start_load_kv(meta)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker.wait_for_save)
+        try:
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.05)
+            worker._send_done.assert_not_called()
+            assert not worker.get_transfer_results().finished_sending
+        finally:
+            release.set()
+        future.result(timeout=3)
+    worker._send_done.assert_called_once()
+    assert worker._send_done.call_args.args[1] == "P request aborted"
+    assert worker.get_transfer_results().finished_sending == {"p-request"}
 
 
 def test_done_socket_timeout_is_bounded(worker, monkeypatch):
@@ -923,7 +977,7 @@ def test_cancel_only_step_finishes_without_waiting_for_metadata(worker, monkeypa
     monkeypatch.setattr(push_worker.torch.npu, "Event", events)
     try:
         cancelled = MooncakeConnectorMetadata()
-        cancelled.push_aborted_requests = {"p-request": "d-request"}
+        cancelled.push_aborted_requests = {"p-request": target_params()}
         worker.start_load_kv(cancelled)
         assert not worker._prefilling_request_ids
         worker._send_done.assert_not_called()
