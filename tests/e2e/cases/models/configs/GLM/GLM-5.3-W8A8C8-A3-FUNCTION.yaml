@@ -1,5 +1,6 @@
 # GLM-5.3 W8A8C8 RP3 PD coverage.
 # 16 physical A3 cards (32 logical NPUs); combined RP3 feature smoke with a nonempty completion.
+# Bound prefill batches to 4096 tokens for full-weight startup and inference memory.
 test_name: GLM-5.3-W8A8C8-A3-FUNCTION
 model: Eco-Tech/GLM-5.3-w8a8c8
 num_nodes: 4
@@ -151,7 +152,7 @@ templates:
   - --max-model-len
   - '200000'
   - --max-num-batched-tokens
-  - '16384'
+  - '4096'
   - --trust-remote-code
   - --max-num-seqs
   - '64'
@@ -227,7 +228,7 @@ templates:
   - --max-model-len
   - '200000'
   - --max-num-batched-tokens
-  - '16384'
+  - '4096'
   - --trust-remote-code
   - --max-num-seqs
   - '64'
