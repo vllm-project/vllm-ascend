@@ -94,6 +94,74 @@ for staging.
 For startup scripts and a proxy example, see
 [D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe).
 
+#### DSA Host KV offload with MooncakeConnectorV2
+
+With vLLM 0.32.0, enable ModelRunner V2 with
+`VLLM_USE_V2_MODEL_RUNNER=1` and select `MooncakeConnectorV2` on both nodes:
+
+```json
+{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer"}
+```
+
+Set `kv_role` to `kv_producer` on P. On D, keep the DSA
+`dsa_sparse_attention_config` settings `mode: fused_overlap` and
+`enable_cpu_kv_store: true` in `additional_config`, together with the model's
+sparse-attention settings. This path uses the DSA swapped Host KV allocator.
+
+P's source KV and D's HBM destinations are registered with Mooncake. D's Host
+KV addresses remain in the transfer metadata but are excluded from HBM
+registration. Host-bound READs first enter a pre-registered HBM staging
+window, then land through the DSA tensor views. HBM-bound READs remain direct.
+The existing V2 layer, block, TP and PCP mapping is preserved; completion is
+reported only after all landing copies finish. Concurrent peer buckets share
+one staging lock through READ and landing.
+
+`VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW` keeps its total slot count
+(default 16), with each slot rounded to at least 2 MiB. Source page offsets
+are preserved. `VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE=1` enables the existing
+landing streams and per-slot events, and
+`VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS` sets their bank count (default 4).
+Disabling the pipeline retains the synchronous landing path. These controls
+are independent of the `MooncakeConnectorV2` and ModelRunner V2 names.
+
+#### SFA decode offload with Mooncake pull
+
+`SfaRemoteD2HConnector` also accepts `"transfer_backend": "mooncake"` in
+`kv_connector_extra_config`. Configure the same transport on P and D:
+
+```json
+{
+  "kv_connector": "SfaRemoteD2HConnector",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "transfer_backend": "mooncake",
+    "mooncake_staging_bytes": 16777216
+  }
+}
+```
+
+Set `kv_role` to `kv_producer` on P. Keep the existing SFA decode-offload
+configuration on D, including `kv_offload_decode_config.use_fused_copy_sfa`
+when using Copy-SFA. The default transport remains `memfabric`.
+
+Mooncake registers P's HBM source caches and D's HBM destinations. D reads
+host-bound main KV through a bounded HBM staging window, then copies it into
+the TP-shared host pool using the offload manager's local-copy API. Indexer KV,
+short-request dense rows, and long-request hot/tail destinations retain their
+existing device layouts and pull plans. D sends `READ_DONE` only after the
+local host copy completes, before P can reuse its source storage.
+
+`mooncake_staging_bytes` is a positive integer multiple of 2 MiB and defaults
+to 16 MiB per D worker. It limits additional staging HBM, independently of
+the host KV pool size. The MemFabric offload package remains required for
+local shared-pool allocation and copies; its cross-host transfer engine is
+not initialized when `transfer_backend` is `mooncake`.
+
+This transport path requires Ascend hardware validation, including TP-shared
+host writes, multi-chunk transfers, short/long Copy-SFA requests, and read or
+local-copy failure handling. CPU descriptor tests do not establish hardware
+or model correctness.
+
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:

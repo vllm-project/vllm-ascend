@@ -1,0 +1,10 @@
+pr: 19212
+entries:
+  - category: bugfix
+    text: Preserved late Mooncake staging registrations and CPU location hints across sleep and wake cycles, including retries after partial registration failures.
+  - category: bugfix
+    text: Kept Mooncake DSA configuration optional for direct AscendConfig construction after the upstream config migration.
+  - category: feature
+    text: Added experimental Mooncake pull support to SfaRemoteD2HConnector with bounded HBM staging into the TP-shared host KV pool; MemFabric remains the default transport.
+  - category: feature
+    text: Adapted DSA Host KV offload to MooncakeConnectorV2 with ModelRunner V2, preserving bounded staging, pipeline landing, and completion ordering.

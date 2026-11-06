@@ -57,6 +57,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -73,6 +74,8 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.kv_offload.dsa_pd_mooncake import get_dsa_pd_mooncake_offloaded_kv_tensor
+from vllm_ascend.kv_offload.dsa_pd_mooncake_staging import DSAPDMooncakeStagingMixin
 from vllm_ascend.utils import (
     enable_custom_op,
     enable_sfa_dcp_replicated_indexer,
@@ -423,7 +426,7 @@ class KVCacheSendingThread(threading.Thread):
                 )
 
 
-class KVCacheRecvingThread(threading.Thread):
+class KVCacheRecvingThread(DSAPDMooncakeStagingMixin, threading.Thread):
     def __init__(
         self,
         tp_rank: int,
@@ -463,6 +466,41 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_caches_base_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.block_len_per_addr = block_len_per_addr
+        self._dsa_pd_mooncake_staging_storage: torch.Tensor | None = None
+        self._dsa_pd_mooncake_staging_tensor: torch.Tensor | None = None
+        self._dsa_pd_mooncake_staging_bytes = 0
+        self._dsa_pd_mooncake_staging_lock = threading.Lock()
+        # Pipeline landing: staged copies are submitted to dedicated NPU
+        # stream(s) and awaited with per-slot events, so the device-wide
+        # torch.npu.synchronize() in the landing loop no longer stalls
+        # unrelated streams. The staging window is split into BANKS banks
+        # (VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS, default 4) that round-robin,
+        # each landing on its own stream, so one bank's landing can execute
+        # in parallel with the others instead of queueing behind them.
+        # _landing_stream (stream 0) stays the single stream of the
+        # non-pipeline mode. Kill switch: VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE=0
+        # restores the legacy synchronous landing path.
+        self._pipeline_banks = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS
+        self._landing_streams = [torch.npu.Stream() for _ in range(max(1, self._pipeline_banks))]
+        self._landing_stream = self._landing_streams[0]
+        self._pipeline_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE
+        # Host-only offloaded KV leaves the ADXL engine with no device
+        # region registered, so the device-side data channel is never
+        # established at startup; the first cross-process connect then
+        # fails on the NPU NIC socket (EI0020 -> 503900). Pre-registering
+        # the NPU staging window here keeps a device region registered
+        # before any transfer connects.
+        if any(
+            get_dsa_pd_mooncake_offloaded_kv_tensor(int(t.data_ptr()), int(t.numel() * t.element_size())) is not None
+            for kv_tuple in kv_caches.values()
+            for t in (kv_tuple if isinstance(kv_tuple, (list, tuple)) else [kv_tuple])
+            if isinstance(t, torch.Tensor)
+        ):
+            self._ensure_dsa_pd_mooncake_staging_tensor()
+            logger.info(
+                "Pre-registered DSA PD Mooncake NPU staging buffer at startup: bytes=%s",
+                self._dsa_pd_mooncake_staging_bytes,
+            )
         self.block_stride_per_addr = block_stride_per_addr
         if kv_group2layeridx is None:
             kv_group2layeridx = {}
@@ -1056,7 +1094,9 @@ class KVCacheRecvingThread(threading.Thread):
             dst_list,
             length_list,
         )
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        ret = self._batch_transfer_sync_read_with_optional_staging(
+            session_id, src_list, dst_list, length_list, remote_request_id
+        )
         if ret < 0:
             logger.error(
                 "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
@@ -2222,7 +2262,10 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        # The Ascend ADXL transport requires an explicit device binding even
+        # for single-PP workers; without it rtsHostRegister fails with an
+        # invalid device handle during HcclCommPrepare.
+        device_name = str(torch.npu.current_device())
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,
@@ -2706,7 +2749,18 @@ class MooncakeConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        # Offloaded (swap-backed) KV regions must stay OUT of the transfer
+        # engine: rtsHostRegister rejects swap-backed host memory during
+        # HcclCommPrepare (EL0003 invalid handle -> 503900). Those regions
+        # are served through the NPU staging window, which stays the only
+        # device region this engine registers.
+        region_ptrs, region_lengths = [], []
+        for region_ptr, region_length in zip(register_regions.ptrs, register_regions.lengths):
+            if get_dsa_pd_mooncake_offloaded_kv_tensor(int(region_ptr), int(region_length)) is not None:
+                continue
+            region_ptrs.append(region_ptr)
+            region_lengths.append(region_length)
+        global_te.register_buffer(region_ptrs, region_lengths)
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
