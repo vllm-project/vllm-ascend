@@ -67,6 +67,8 @@ def map_c8_physical_indices(indices: torch.Tensor, block: int, stride_rows: int,
     if capacity <= 0 or capacity % block or (capacity // block - 1) * stride_rows + block > _INT32_MAX:
         raise ValueError("HiSparse C8 physical row capacity is invalid")
     valid = (indices >= 0) & (indices < capacity)
+    if stride_rows == block:
+        return torch.where(valid, indices, -1)
     safe = indices.clamp_min(0).to(torch.int64)
     mapped = safe.div(block, rounding_mode="floor") * stride_rows + safe.remainder(block)
     return torch.where(valid, mapped, -1).to(torch.int32)
