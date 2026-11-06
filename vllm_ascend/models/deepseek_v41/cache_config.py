@@ -3,6 +3,7 @@
 """Framework-side V4.1 layer-outermost cache placement and allocation."""
 
 from dataclasses import replace
+from itertools import zip_longest
 
 import torch
 from vllm.config import VllmConfig
@@ -234,8 +235,10 @@ def group_cache_specs(specs):
         ]
         for layer_tuple in layer_tuples
     ]
-    for names in zip(*swa_columns):
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names}))
+    # Reduced backbones can leave fewer SWA layers in the last physical slot.
+    # Keep the tail of longer columns rather than silently dropping layers.
+    for names in zip_longest(*swa_columns):
+        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names if name is not None}))
 
     draft_names = [
         name

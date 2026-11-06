@@ -1,0 +1,7 @@
+pr: 20532
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek V4.1 cache grouping dropping trailing sliding-window
+      attention layers when a reduced backbone produces uneven physical-slot
+      columns.

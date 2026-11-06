@@ -282,6 +282,41 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
                 assert scale.shape == (blocks, storage_block_size, 1, 1)
 
 
+@pytest.mark.parametrize("num_layers", [37, 38, 39, 40])
+def test_cache_groups_preserve_uneven_swa_columns(config, runtime, num_layers):
+    config.num_hidden_layers = num_layers
+    original = collect_specs(runtime)
+    page_sizes, layer_tuples = get_layer_tuples(original)
+    slot_by_name = {name: slot for slot, names in enumerate(layer_tuples) for name in names}
+
+    uniform = group_cache_specs(original)
+    grouped_names = [name for group in uniform for name in group.kv_cache_specs]
+    assert set(grouped_names) == set(original)
+    assert len(grouped_names) == len(original)
+    assert all(spec.page_size_padded is None for spec in original.values())
+    assert group_cache_specs(dict(reversed(list(original.items())))) == uniform
+    padded = {name: spec for group in uniform for name, spec in group.kv_cache_specs.items()}
+    assert group_cache_specs(padded) == uniform
+
+    swa_groups = uniform[2:]
+    for group in swa_groups:
+        # A scheduler group must not bind two layers to the same physical slot.
+        assert len({slot_by_name[name] for name in group.kv_cache_specs}) == len(group.kv_cache_specs)
+        for name, spec in group.kv_cache_specs.items():
+            assert spec.page_size_bytes == page_sizes[slot_by_name[name]]
+    assert list(swa_groups[-1].kv_cache_specs) == [
+        f"model.layers.{layer}.self_attn.swa_cache" for layer in range(36, num_layers)
+    ]
+
+    groups = make_cache_groups(uniform)
+    pool_bytes = get_deepseek_v41_pool_bytes_per_block(groups)
+    assert pool_bytes == sum(page_sizes)
+    allocation = get_deepseek_v41_kv_cache_config(runtime, groups, 10 * pool_bytes + 1)
+    assert allocation.num_blocks == 10
+    assert sum(tensor.size for tensor in allocation.kv_cache_tensors) == 10 * pool_bytes
+    assert {name for tensor in allocation.kv_cache_tensors for name in tensor.layers} == set(original)
+
+
 def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     specs = collect_specs(runtime)
     name = "model.layers.20.self_attn.indexer.k_cache_folded"
