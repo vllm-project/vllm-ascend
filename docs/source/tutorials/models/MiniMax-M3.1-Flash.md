@@ -2813,8 +2813,8 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | AIME2026 | Ascend 950DT products | 93.33@repeat4 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
 | AIME2026 | A3 | 93.33@repeat1 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
 | AIME2026 | A2 | 93.33@repeat1 | 133000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
-| MMMU PRO | A3 | 79.6 | 133000 | 128 | 81920 | 32 | temperature=1, top_p=0.95, reasoning_effort="max" |
 | MMMU PRO | Ascend 950DT products | 80.35 | 133000 | 128 | 81920 | 32 | temperature=1, top_p=0.95, reasoning_effort="max" |
+| MMMU PRO | A3 | 79.6 | 133000 | 128 | 81920 | 32 | temperature=1, top_p=0.95, reasoning_effort="max" |
 
 ## 8 Performance Evaluation
 
