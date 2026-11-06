@@ -29,22 +29,28 @@ _sort = _resolve_triton_ascend_op("sort")
 def _exact_div_nonnegative(value, DIVISOR: tl.constexpr, SHIFT: tl.constexpr):
     WIDTH: tl.constexpr = value.dtype.primitive_bitwidth
     if DIVISOR >= 1 << (WIDTH - 1):
-        return tl.full(value.shape, 0, value.dtype)
-    if DIVISOR == 1 << SHIFT:
-        return value >> SHIFT
-    # The high word of value * ceil(2**WIDTH / d) overestimates the quotient
-    # by at most one. Split the product into half words to avoid uint64
-    # mulhi. Every intermediate fits the original unsigned width.
-    HALF: tl.constexpr = WIDTH // 2
-    MASK: tl.constexpr = (1 << HALF) - 1
-    MAGIC: tl.constexpr = ((1 << WIDTH) + DIVISOR - 1) // DIVISOR
-    low = value & MASK
-    high = value >> HALF
-    product = low * (MAGIC & MASK)
-    middle = high * (MAGIC & MASK) + (product >> HALF)
-    carry = low * (MAGIC >> HALF) + (middle & MASK)
-    quotient = high * (MAGIC >> HALF) + (middle >> HALF) + (carry >> HALF)
-    return quotient - (quotient * DIVISOR > value).to(value.dtype)
+        quotient = tl.full(value.shape, 0, value.dtype)
+    elif DIVISOR == 1 << SHIFT:
+        quotient = value >> SHIFT
+    else:
+        # The high word of value * ceil(2**WIDTH / d) overestimates the
+        # quotient by at most one. Half-word products avoid uint64 mulhi.
+        HALF: tl.constexpr = WIDTH // 2
+        MASK: tl.constexpr = (1 << HALF) - 1
+        MAGIC: tl.constexpr = ((1 << WIDTH) + DIVISOR - 1) // DIVISOR
+        low = value & MASK
+        high = value >> HALF
+        product = low * (MAGIC & MASK)
+        # Mask the extracted words: A3 may lower an unsigned shift as a
+        # signed shift when the product's most significant bit is set.
+        middle = high * (MAGIC & MASK) + ((product >> HALF) & MASK)
+        carry = low * (MAGIC >> HALF) + (middle & MASK)
+        quotient = high * (MAGIC >> HALF) + ((middle >> HALF) & MASK) + ((carry >> HALF) & MASK)
+        # -d < q*d - value < d, so the signed difference is exact. Avoid
+        # unsigned comparison, which A3 lowers through an unsupported cast.
+        difference = (quotient * DIVISOR - value).to(tl.int64 if WIDTH == 64 else tl.int32)
+        quotient -= (difference > 0).to(value.dtype)
+    return quotient
 
 
 @triton.jit
@@ -71,6 +77,47 @@ def _remap_values(
 
 
 @triton.jit
+def _remap_sorted_values(
+    idx,
+    offsets,
+    K: tl.constexpr,
+    DCP_BITS: tl.constexpr,
+    RANK: tl.constexpr,
+    INTERLEAVE_BITS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    INTERLEAVE_SIZE: tl.constexpr,
+    COUNT: tl.constexpr = False,
+):
+    local, valid = _remap_values(idx, DCP_SIZE, RANK, INTERLEAVE_SIZE, DCP_BITS, INTERLEAVE_BITS)
+    valid &= offsets < K
+    # Unique FP32 position keys preserve top-k order, including duplicate IDs.
+    # Only positions are converted numerically; integer payloads stay exact.
+    order = _sort(tl.where(valid, offsets.to(tl.float32), float("inf")), descending=False)
+    lookup = tl.minimum(order, BLOCK - 1).to(tl.int32)
+    selected = tl.gather(local, lookup, 0)
+    count = tl.sum(valid.to(tl.int32), 0) if COUNT else 0
+    return tl.where(order < float("inf"), selected, -1), count
+
+
+@triton.jit
+def _store_remap_sort(
+    result, count, output, write_pos, chunk, K: tl.constexpr, BLOCK: tl.constexpr, NUM_CHUNKS: tl.constexpr
+):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    if NUM_CHUNKS == 1:
+        tl.store(output + row * K + offsets, result, offsets < K)
+    else:
+        # Previous tiles write at most chunk * BLOCK entries. Initializing
+        # this tile cannot overwrite their already-compacted prefix.
+        input_offsets = chunk * BLOCK + offsets
+        tl.store(output + row * K + input_offsets, -1, input_offsets < K)
+        tl.store(output + row * K + write_pos + offsets, result, offsets < count)
+    return write_pos + count
+
+
+@triton.jit
 def _remap_sort(
     indices,
     output,
@@ -85,15 +132,85 @@ def _remap_sort(
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK)
     idx = tl.load(indices + row * K + offsets, offsets < K, -1)
-    local, valid = _remap_values(idx, DCP_SIZE, RANK, INTERLEAVE_SIZE, DCP_BITS, INTERLEAVE_BITS)
-    valid &= offsets < K
-    # Unique FP32 position keys preserve top-k order, including duplicate IDs.
-    # Only positions are converted numerically; integer payloads stay exact.
-    order = _sort(tl.where(valid, offsets.to(tl.float32), float("inf")), descending=False)
-    lookup = tl.minimum(order, BLOCK - 1).to(tl.int32)
-    selected = tl.gather(local, lookup, 0)
-    result = tl.where(order < float("inf"), selected, -1)
+    result, _ = _remap_sorted_values(idx, offsets, K, DCP_BITS, RANK, INTERLEAVE_BITS, BLOCK, DCP_SIZE, INTERLEAVE_SIZE)
     tl.store(output + row * K + offsets, result, offsets < K)
+
+
+@triton.jit
+def _remap_sort_tiles(
+    indices,
+    index_words,
+    output,
+    K: tl.constexpr,
+    DCP_BITS: tl.constexpr,
+    RANK: tl.constexpr,
+    INTERLEAVE_BITS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    INTERLEAVE_SIZE: tl.constexpr,
+    NUM_CHUNKS: tl.constexpr,
+    NARROW_INT64: tl.constexpr,
+):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    write_pos = 0
+    for chunk in range(NUM_CHUNKS):
+        input_offsets = chunk * BLOCK + offsets
+        if NARROW_INT64:
+            # Inspect the two INT32 words without scalarized INT64 arithmetic.
+            # Negative inputs are invalid regardless of their remaining bits.
+            words = index_words + 2 * (row * K + input_offsets)
+            low = tl.load(words, input_offsets < K, 0).to(tl.uint32)
+            high = tl.load(words + 1, input_offsets < K, -1).to(tl.uint32)
+            negative = (high >> 31) != 0
+            wide = ~negative & ((high != 0) | ((low >> 31) != 0))
+            if tl.sum(wide.to(tl.int32), 0) == 0:
+                narrow_idx = tl.where(negative, -1, low.to(tl.int32))
+                narrow_result, narrow_count = _remap_sorted_values(
+                    narrow_idx,
+                    offsets,
+                    K,
+                    DCP_BITS,
+                    RANK,
+                    INTERLEAVE_BITS,
+                    BLOCK,
+                    DCP_SIZE,
+                    INTERLEAVE_SIZE,
+                    NUM_CHUNKS > 1,
+                )
+                write_pos = _store_remap_sort(
+                    narrow_result, narrow_count, output, write_pos, chunk, K, BLOCK, NUM_CHUNKS
+                )
+            else:
+                idx = tl.load(indices + row * K + input_offsets, input_offsets < K, -1)
+                result, count = _remap_sorted_values(
+                    idx,
+                    offsets,
+                    K,
+                    DCP_BITS,
+                    RANK,
+                    INTERLEAVE_BITS,
+                    BLOCK,
+                    DCP_SIZE,
+                    INTERLEAVE_SIZE,
+                    NUM_CHUNKS > 1,
+                )
+                write_pos = _store_remap_sort(result, count, output, write_pos, chunk, K, BLOCK, NUM_CHUNKS)
+        else:
+            idx = tl.load(indices + row * K + input_offsets, input_offsets < K, -1)
+            result, count = _remap_sorted_values(
+                idx,
+                offsets,
+                K,
+                DCP_BITS,
+                RANK,
+                INTERLEAVE_BITS,
+                BLOCK,
+                DCP_SIZE,
+                INTERLEAVE_SIZE,
+                NUM_CHUNKS > 1,
+            )
+            write_pos = _store_remap_sort(result, count, output, write_pos, chunk, K, BLOCK, NUM_CHUNKS)
 
 
 @triton.jit(do_not_specialize=["topk_count", "dcp_rank"])
@@ -221,16 +338,45 @@ def remap_sparse_indices_triton(
     sort_limit = 4096 if indices.dtype == torch.int32 else 2048
     if topk_count <= sort_limit:
         out = torch.empty_like(indices)
-        _remap_sort[(rows,)](
+        power_of_two_layout = not (dcp_size & (dcp_size - 1) or interleave_size & (interleave_size - 1))
+        # A3 cannot reliably lower the INT64 width-selection loop for a
+        # single tile. Small rows use the direct row kernel for every layout.
+        if topk_count <= 1024 or ((power_of_two_layout or dcp_size == 1) and topk_count <= 2048):
+            _remap_sort[(rows,)](
+                indices,
+                out,
+                topk_count,
+                dcp_size.bit_length() - 1,
+                dcp_rank,
+                interleave_size.bit_length() - 1,
+                next_power_of_2(topk_count),
+                dcp_size,
+                interleave_size,
+            )
+            return out.view(orig_shape)
+        narrow_int64 = (
+            indices.dtype == torch.int64
+            and dcp_size < 1 << 31
+            and interleave_size < 1 << 31
+            and not power_of_two_layout
+        )
+        # A3 needs 208 KiB for INT32 K4096 and 216 KiB for the INT64 K2048
+        # width-selection branches. Bound tiles to its 192 KiB UB on all devices.
+        block = min(2048 if indices.dtype == torch.int32 else 1024, next_power_of_2(topk_count))
+        num_chunks = triton.cdiv(topk_count, block)
+        _remap_sort_tiles[(rows,)](
             indices,
+            indices.view(torch.int32) if narrow_int64 else indices,
             out,
             topk_count,
             dcp_size.bit_length() - 1,
             dcp_rank,
             interleave_size.bit_length() - 1,
-            next_power_of_2(topk_count),
+            block,
             dcp_size,
             interleave_size,
+            num_chunks,
+            narrow_int64,
         )
         out = out.view(orig_shape)
         return out
