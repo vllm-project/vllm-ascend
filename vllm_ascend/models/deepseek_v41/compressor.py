@@ -52,13 +52,13 @@ class DeepseekV41Compressor(nn.Module):
 
         self._ring_num_cores = _cube_core_num()
 
-    def pool_projected(self, kv, scores, metadata):
+    def pool_projected(self, kv, scores, metadata, *, state_cache=None):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
         pooled = compressor_from_projected(
             kv,
             scores,
-            self.state_cache.kv_cache[0].squeeze(-2),
+            self.state_cache.kv_cache[0].squeeze(-2) if state_cache is None else state_cache,
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
             max_query_len=metadata.max_query_len,
