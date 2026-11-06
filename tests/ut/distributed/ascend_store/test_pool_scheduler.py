@@ -1982,7 +1982,9 @@ def test_block_only_uses_core_hash_and_whole_page_load_range(local_start, pool_e
     else:
         scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start)
     if expected:
-        scheduler.update_state_after_alloc(request, MagicMock(), expected)
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = (list(range(1, 1 + (local_start + expected) // 640)),)
+        scheduler.update_state_after_alloc(request, blocks, expected)
         load_spec = scheduler.load_specs["tail"]
         assert load_spec.vllm_cached_tokens == local_start
         assert load_spec.kvpool_cached_tokens == local_start + expected
