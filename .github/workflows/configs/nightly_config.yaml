@@ -137,6 +137,10 @@ a3:
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 2
+      - name: DeepSeek-V4.1-Flash-W4A8-A3-PD-MRV2
+        config_file_path: DeepSeek-V4.1-Flash-W4A8-A3-PD-MRV2.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 2
       - name: DeepSeek-V4.1-Flash-w8a8-PD-MRV2
         config_file_path: DeepSeek-V4.1-Flash-w8a8-PD-MRV2.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
@@ -171,6 +175,10 @@ a3-560t:
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-800i-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: DeepSeek-V4.1-Flash-W4A8-A3-MRV2
+        os: linux-aarch64-a3-800i-16
+        config_file_path: DeepSeek-V4.1-Flash-W4A8-A3-MRV2.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
       - name: DeepSeek-V4-Flash-W8A8-A3-MRV2
         os: linux-aarch64-a3-800i-16
