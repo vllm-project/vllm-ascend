@@ -29,7 +29,7 @@ See [supported features](../../user_guide/support_matrix/supported_features.md) 
 | Weight Version | Hardware Requirements | Download Links |
 | --- | --- | --- |
 | `Qwen3.8-Flash-Next-w8a8-mtp` (quantized version) | A3 series | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | |
+| `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8) |
 | `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 950DT products | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp) |
 
 The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint.
@@ -201,7 +201,9 @@ sudo fallocate -l "${LOOP_BACKING_SIZE}" "${LOOP_BACKING_FILE}"
 sudo losetup --find --show --direct-io=on "${LOOP_BACKING_FILE}"
 ```
 
-Set `SSD_DEVICE_PATH` to the device returned by `losetup`, not the backing-file path. Skip loop-device creation when using a dedicated disk.
+Set `SSD_DEVICE_PATH` to the device returned by `losetup`, not the backing-file path. For the A3 two-device example, prepare a second device with a different backing file before continuing. Skip loop-device creation when using dedicated disks.
+
+When reusing an existing pool, keep its devices and backing files; skip new-device creation and initialization.
 
 **Prepare the personal configuration directory and device mapping:**
 
@@ -216,7 +218,7 @@ lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "${SSD_DEVICE_PATH}"
 sudo blkid "${SSD_DEVICE_PATH}"
 ```
 
-Proceed only after confirming that the selected device has no filesystem signature or mount point; `blkid` normally prints nothing and returns a nonzero status for a blank device. The commands below map one device. For multiple devices, add one `--device` mapping per device and separate the matching `ubsio.disk.path` entries with `:`.
+For a new pool, proceed only after confirming that each selected device has no filesystem signature or mount point; `blkid` normally prints nothing and returns a nonzero status for a blank device. The A2 and 950DT products commands below map one device; the A3 example maps two. Prepare all devices before creating the container, and separate their matching `ubsio.disk.path` entries with `:`.
 
 !!! warning
 
@@ -228,7 +230,7 @@ Proceed only after confirming that the selected device has no filesystem signatu
 
 In Section 5.4, set `MEMCACHE_SSD_PATHS` to the device paths mapped by `--device`.
 
-Verify that all host device and file paths exist before running Docker. The 950 DT example retains the device, driver, and communication-tool mounts from the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+Verify that all host device and file paths exist before running Docker. For 950DT products, the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) also requires `/lib/route.conf` and `/etc/hccl_rootinfo.json` in its deployment environment. The supplied Qwen startup scripts do not show how these files are provisioned, so they do not establish that the files can be omitted. Before using a new environment, confirm its communication prerequisites with the image/platform provider. If these files are required, use the platform-provided files and the guide's mounts, and verify their contents inside the container before starting services.
 
 === "A2 series"
 
@@ -269,7 +271,14 @@ Verify that all host device and file paths exist before running Docker. The 950 
 
 === "A3 series"
 
+    The A3 example in Section 5.4 uses two SSD-backed devices. Set `SSD_DEVICE_PATH` to the first device and `SSD_DEVICE_PATH_2` to the second device prepared above; check both before creating the container. The example device names are `/dev/loop0` and `/dev/loop1`, but use the actual names returned on your host.
+
     ```bash
+    export SSD_DEVICE_PATH_2="<SECOND_ACTUAL_SSD_DEVICE_PATH>"
+    test -b "${SSD_DEVICE_PATH_2}" || exit 1
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "${SSD_DEVICE_PATH_2}"
+    sudo blkid "${SSD_DEVICE_PATH_2}"
+
     # Reuse the host model cache at /root/.cache.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend-qwen38-pool
@@ -298,6 +307,7 @@ Verify that all host device and file paths exist before running Docker. The 950 
       --device /dev/davinci15 \
       --device /dev/davinci_manager \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
+      --device "${SSD_DEVICE_PATH_2}:${SSD_DEVICE_PATH_2}" \
       --device /dev/devmm_svm \
       --device /dev/hisi_hdc \
       -v /usr/local/dcmi:/usr/local/dcmi \
@@ -1210,57 +1220,60 @@ export MEMCACHE_TEMPLATE_DIR="<IMAGE_MEMCACHE_CONFIG_DIR>"
 ls "${MEMCACHE_TEMPLATE_DIR}"
 ```
 
-Use the templates shipped inside the selected image: `/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/config/` is an example, and the actual path varies with the Python version and installation location. Set `MEMCACHE_TEMPLATE_DIR` to that directory and copy its files into your personal mounted `MEMCACHE_CONFIG_DIR`. Edit only the keys listed below in those copies, preserving the other template entries; `cp -n` leaves existing personal files unchanged. In the INI examples, replace `<MEMCACHE_...>` with the actual value of the corresponding variable set above; configuration files do not expand shell variables.
+Use the templates shipped inside the selected image: `/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/config/` is an example, and the actual path varies with the Python version and installation location. Set `MEMCACHE_TEMPLATE_DIR` to that directory and copy its files into your personal mounted `MEMCACHE_CONFIG_DIR`. Edit only the keys listed below in those copies, preserving the other template entries; `cp -n` leaves existing personal files unchanged. In the INI examples, replace `<MEMCACHE_...>` with the actual value selected in the matching hardware tab; configuration files do not expand shell variables.
 
-**A2/A3 configuration preparation:**
+**Choose a new or existing pool before editing configuration:**
 
-For A2, prepare LocalService files on both hosts and MetaService only on the prefill host. For A3, prepare them in the single serving container. Both roles must use the same reachable MetaService and ConfigStore endpoints. When reusing a running pool, retain its MetaService configuration and skip its creation and startup.
-
-```bash
-cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
-export MEMCACHE_META_URL="tcp://<META_SERVICE_IP>:<META_SERVICE_PORT>"
-export MEMCACHE_CONFIG_STORE_URL="tcp://<CONFIG_STORE_IP>:<CONFIG_STORE_PORT>"
-```
-
-For a new pool, prepare MetaService:
-
-```bash
-cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
-export MEMCACHE_METRICS_URL="http://<METRICS_IP>:<METRICS_PORT>"
-export MEMCACHE_EVICT_HIGH="<HIGH_EVICTION_THRESHOLD_PERCENT>"
-export MEMCACHE_EVICT_LOW="<LOW_EVICTION_THRESHOLD_PERCENT>"
-```
-
-In the copied `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`, edit the following keys:
-
-```ini
-ock.mmc.meta_service_url = <MEMCACHE_META_URL>
-ock.mmc.meta_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
-ock.mmc.meta_service.metrics_url = <MEMCACHE_METRICS_URL>
-ock.mmc.log_level = info
-ock.mmc.evict_threshold_high = <MEMCACHE_EVICT_HIGH>
-ock.mmc.evict_threshold_low = <MEMCACHE_EVICT_LOW>
-```
-
-Set each host's storage values from its deployment configuration and memory budget. Use the device paths mapped in Section 4.3, separated by `:` for multiple devices:
-
-```bash
-export MEMCACHE_SSD_PATHS="<MAPPED_SSD_DEVICE_PATHS_SEPARATED_BY_COLONS>"
-export MEMCACHE_WORLD_SIZE="<POOL_LOCAL_SERVICE_CAPACITY>"
-export MEMCACHE_DRAM_SIZE="<DRAM_SIZE_PER_LOCAL_SERVICE_WITH_UNIT>"
-export MEMCACHE_MAX_DRAM_SIZE="<MAX_DRAM_SIZE_WITH_UNIT>"
-export MEMCACHE_UBS_IO_MEM_GB="<UBS_IO_MEMORY_GB_PER_LOCAL_SERVICE>"
-export MEMCACHE_DEVICE_COUNT="<DRAM_ENABLED_LOCAL_SERVICE_COUNT_ON_THIS_HOST>"
-export MEMCACHE_FORCE_NEW_DISK="<true_OR_false_FOR_THIS_DEPLOYMENT>"
-```
-
-The A3 and 950DT products tabs below provide filled-in values from their respective deployment configurations. For the two-host A2 deployment, set the reachable shared endpoints and each host's storage budget separately; the A3 loopback address and 16-service count do not describe that layout.
+- **New pool:** follow **Prepare a new pool** in the matching hardware tab, using only the devices mapped in Section 4.3. Choose all endpoint and resource values before editing the INI copies.
+- **Existing pool:** skip the new-pool exports, template copying, INI edits, and MetaService startup below. Use the existing pool's MetaService/ConfigStore endpoints and approved LocalService files in `MEMCACHE_CONFIG_DIR` (A2/A3: `mmc-local.conf`; 950DT products: `mmc-local-p.conf` and `mmc-local-d.conf`). Preserve its storage initialization policy; do not apply the new-pool `force_new_disk=true` example. Check the existing service's actual endpoints, then continue with the matching service environment and P/D commands.
 
 `dram.size` and `ubsio.mem.size_in_gb` apply per DRAM-enabled LocalService; budget their total alongside Engram, vLLM, and operating-system memory. `world_size` is pool capacity; `device_count` counts the host's DRAM-enabled LocalServices, not SSDs. LocalServices run inside P/D workers; the `ubsio.standalone.*` keys do not require a separate process.
 
 === "A2 series"
 
-    Keep the A2 model configuration from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode, on separate eight-device hosts. On each host, use the common MetaService and ConfigStore endpoints and pool `world_size`, but set SSD paths and memory values for that host. Edit the copied RoCE configuration:
+    Keep the A2 model configuration from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode, on separate eight-device hosts.
+
+    **Prepare a new pool:**
+
+    Prepare LocalService files on both hosts and MetaService only on the prefill host. Set the same reachable MetaService/ConfigStore endpoints and pool `world_size` on both hosts; choose storage values for each host separately.
+
+    ```bash
+    cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    export MEMCACHE_META_URL="tcp://<META_SERVICE_IP>:<META_SERVICE_PORT>"
+    export MEMCACHE_CONFIG_STORE_URL="tcp://<CONFIG_STORE_IP>:<CONFIG_STORE_PORT>"
+    ```
+
+    On the prefill host only, prepare MetaService:
+
+    ```bash
+    cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
+    export MEMCACHE_METRICS_URL="http://<METRICS_IP>:<METRICS_PORT>"
+    export MEMCACHE_EVICT_HIGH="<HIGH_EVICTION_THRESHOLD_PERCENT>"
+    export MEMCACHE_EVICT_LOW="<LOW_EVICTION_THRESHOLD_PERCENT>"
+    ```
+
+    In the copied `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`, edit the following keys:
+
+    ```ini
+    ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+    ock.mmc.meta_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
+    ock.mmc.meta_service.metrics_url = <MEMCACHE_METRICS_URL>
+    ock.mmc.log_level = info
+    ock.mmc.evict_threshold_high = <MEMCACHE_EVICT_HIGH>
+    ock.mmc.evict_threshold_low = <MEMCACHE_EVICT_LOW>
+    ```
+
+    Set each host's storage values from its deployment configuration and memory budget. Use the device paths mapped in Section 4.3, separated by `:` for multiple devices:
+
+    ```bash
+    export MEMCACHE_SSD_PATHS="<MAPPED_SSD_DEVICE_PATHS_SEPARATED_BY_COLONS>"
+    export MEMCACHE_WORLD_SIZE="<POOL_LOCAL_SERVICE_CAPACITY>"
+    export MEMCACHE_DRAM_SIZE="<DRAM_SIZE_PER_LOCAL_SERVICE_WITH_UNIT>"
+    export MEMCACHE_MAX_DRAM_SIZE="<MAX_DRAM_SIZE_WITH_UNIT>"
+    export MEMCACHE_UBS_IO_MEM_GB="<UBS_IO_MEMORY_GB_PER_LOCAL_SERVICE>"
+    export MEMCACHE_DEVICE_COUNT="<DRAM_ENABLED_LOCAL_SERVICE_COUNT_ON_THIS_HOST>"
+    export MEMCACHE_FORCE_NEW_DISK="<true_OR_false_FOR_THIS_DEPLOYMENT>"
+    ```
 
     In the copied `${MEMCACHE_CONFIG_DIR}/mmc-local.conf`, edit the following keys:
 
@@ -1415,7 +1428,11 @@ The A3 and 950DT products tabs below provide filled-in values from their respect
 
 === "A3 series"
 
-    Keep the A3 model configuration from Section 5.2. The following filled-in example comes from the single-host A3 deployment configuration, with MetaService and P/D in the same host network, 16 DRAM-enabled LocalServices, and two SSD-backed loop devices. Use these endpoint and eviction values when editing the shared `mmc-meta.conf` example above and the LocalService file below:
+    Keep the A3 model configuration from Section 5.2.
+
+    **Prepare a new pool:**
+
+    The following values come from the single-host A3 configuration: MetaService and P/D share the host network, with 16 DRAM-enabled LocalServices and two SSD-backed devices already mapped in Section 4.3. Select these values before editing either INI file below. For an existing pool, skip this preparation block as described above.
 
     ```bash
     export MEMCACHE_META_URL="tcp://127.0.0.1:15000"
@@ -1432,7 +1449,25 @@ The A3 and 950DT products tabs below provide filled-in values from their respect
     export MEMCACHE_FORCE_NEW_DISK=true
     ```
 
-    Replace `/dev/loop0:/dev/loop1` with the actual container device paths and map both devices separately in the Section 4.3 Docker command. These values apply to this A3 example; each LocalService allocates `10GB` of pool DRAM and `10` GB for UBS IO, and `force_new_disk=true` reinitializes SSD cache storage at startup.
+    Replace `/dev/loop0:/dev/loop1` with the two device paths already mapped in Section 4.3. These new-pool values allocate `10GB` of DRAM and `10` GB for UBS IO per LocalService; `force_new_disk=true` reinitializes SSD cache storage at startup.
+
+    ```bash
+    cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
+    cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    ```
+
+    In the copied `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`, edit the following keys:
+
+    ```ini
+    ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+    ock.mmc.meta_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
+    ock.mmc.meta_service.metrics_url = <MEMCACHE_METRICS_URL>
+    ock.mmc.log_level = info
+    ock.mmc.evict_threshold_high = <MEMCACHE_EVICT_HIGH>
+    ock.mmc.evict_threshold_low = <MEMCACHE_EVICT_LOW>
+    ```
+
+    Fill both INI files with the selected values; running `export` later does not update either file.
 
     In the copied `${MEMCACHE_CONFIG_DIR}/mmc-local.conf`, edit the following keys:
 
@@ -1587,9 +1622,9 @@ The A3 and 950DT products tabs below provide filled-in values from their respect
 
     This single-host example uses TP2 × DP2 per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles.
 
-    **Prepare the configuration files:**
+    **Prepare a new pool:**
 
-    In the configuration-editing terminal, use the following filled-in example from the supplied 102-server configuration. Its pool communication IP is `172.27.24.102`, and its dedicated 500 GiB SSD-backed device is `/dev/loop0`. Replace the address and device with those of the target deployment, keeping the device consistent with Section 4.3. For an existing pool, retain its MetaService configuration and endpoints and skip MetaService creation/startup.
+    For a new pool, use the following values from the supplied 102-server configuration. Its MetaService and ConfigStore use `172.27.24.102`, and its dedicated 500 GiB SSD-backed device is `/dev/loop0`. Replace the address and device for the target deployment, keeping the device consistent with Section 4.3. For an existing pool, skip this preparation block and continue at **Set the service environment** with the existing configuration files.
 
     ```bash
     local_ip="172.27.24.102"
@@ -1648,11 +1683,13 @@ The A3 and 950DT products tabs below provide filled-in values from their respect
 
     **Set the service environment:**
 
-    Open separate MetaService, P, D, and Proxy terminals in the same container. Initialize the runtime as described in Section 4.3, apply the library exports at the beginning of this section, and run the following in each terminal. Use the same communication IP as the configuration files and its matching UB interface:
+    Open separate P, D, and Proxy terminals in the same container, plus a MetaService terminal only when creating a new pool. Initialize the runtime as described in Section 4.3, apply the library exports at the beginning of this section, and run the following in each terminal.
+
+    `local_ip` is the model service IP; `nic_name` is the socket network interface that owns that IP. MetaService/ConfigStore URLs are separate TCP control endpoints and need only be reachable from all clients; loopback is suitable when all processes share the host network. `device_urma` selects the UB data path and does not make the socket interface a UB interface. The supplied example uses the same host IP for both purposes, but this is not a general requirement.
 
     ```bash
-    local_ip="<POOL_COMMUNICATION_IP>"
-    nic_name="<POOL_NETWORK_INTERFACE>"
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
     unset HCCL_INTRA_ROCE_ENABLE ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1675,14 +1712,16 @@ The A3 and 950DT products tabs below provide filled-in values from their respect
     ulimit -s 65536
     ```
 
-    **Start MetaService:**
+    **Start MetaService (new pool only):**
+
+    Skip this command when reusing a running pool.
 
     ```bash
     export MMC_META_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
 
-    Wait until the configured ports `25250`, `25251`, and `25252` are listening (`ss -lntp`), then start Prefill.
+    For a new pool, wait until the ports configured in `mmc-meta.conf` are listening (`ss -lntp`); the example uses `25250`, `25251`, and `25252`. For an existing pool, check its actual configured endpoints instead. Then start Prefill.
 
     **Prefill:**
 
@@ -1967,11 +2006,13 @@ curl "http://127.0.0.1:8088/v1/chat/completions" \
 
 ### 7.1 Using AISBench
 
-Follow [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation. The reference result below is from A3 W8A8 TP8 × DP1; evaluate the W4A8 and W4A8-MXFP configurations separately.
+Follow [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation. The results below are for reference. The A3 result is from the W8A8 TP8 × DP1 configuration; validate accuracy for the checkpoint and deployment configuration you use.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
+| A2 series | GPQA Diamond | Accuracy | 90.4 |
 | A3 series | GPQA Diamond | Accuracy | 90.91 |
+| 950DT products | GPQA Diamond | Accuracy | 91.2 |
 
 ## 8 Performance Evaluation
 
