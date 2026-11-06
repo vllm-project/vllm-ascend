@@ -20,10 +20,13 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+
+_BATCH_METADATA_ALIGNMENT_BYTES = 32
 
 
 class AscendInputBuffers(InputBuffers):
@@ -42,13 +45,37 @@ class AscendInputBuffers(InputBuffers):
         )
         del self.query_start_loc
 
-        # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
-        # See _pad_query_start_loc_for_fia.
-        self.query_start_loc: torch.Tensor = torch.zeros(
-            max_num_reqs + 2,
+        alignment_elements = _BATCH_METADATA_ALIGNMENT_BYTES // np.dtype(np.int32).itemsize
+
+        def align_up(size: int) -> int:
+            return (size + alignment_elements - 1) // alignment_elements * alignment_elements
+
+        # Keep every device view aligned, including standalone PCP H2D targets.
+        # The same slices define the host packing layout in the model runner.
+        self.query_start_loc_slice = slice(0, max_num_reqs + 2)
+        idx_offset = align_up(self.query_start_loc_slice.stop)
+        self.idx_mapping_slice = slice(idx_offset, idx_offset + max_num_reqs)
+        cu_offset = align_up(self.idx_mapping_slice.stop)
+        self.cu_num_logits_slice = slice(cu_offset, cu_offset + max_num_reqs + 1)
+        self.batch_metadata: torch.Tensor = torch.zeros(
+            align_up(self.cu_num_logits_slice.stop),
             dtype=torch.int32,
             device=device,
         )
+        self.batch_metadata_cpu = torch.zeros(
+            self.batch_metadata.numel(),
+            dtype=torch.int32,
+            device="cpu",
+            # CPU-only runners have no accelerator DMA and may not have the
+            # platform's pinned-memory hooks registered (e.g. CPU unit tests).
+            pin_memory=device.type != "cpu" and is_pin_memory_available(),
+        )
+        self.batch_metadata_cpu_np = self.batch_metadata_cpu.numpy()
+        # Created on the first upload; CPU writers must wait before reusing it.
+        self.batch_metadata_copy_done = None
+        self.idx_mapping_buffer: torch.Tensor = self.batch_metadata[self.idx_mapping_slice]
+        self.cu_num_logits_buffer: torch.Tensor = self.batch_metadata[self.cu_num_logits_slice]
+        self.query_start_loc: torch.Tensor = self.batch_metadata[self.query_start_loc_slice]
 
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.
