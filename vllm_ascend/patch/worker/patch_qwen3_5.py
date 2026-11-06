@@ -18,12 +18,15 @@
 
 
 from functools import wraps
+import os
 
 import torch
+from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -31,13 +34,88 @@ try:
 except ImportError:
     Qwen3_5MultiTokenPredictor = None
     IntermediateTensors = None
-from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+
+
+def _flashcomm_switch_enabled(vllm_config) -> bool:
+    """Whether the user explicitly turned on the FlashComm switch.
+
+    Mirrors the ``enable_flashcomm1`` read in
+    ``AscendConfig.derive_and_validate`` (additional_config first, then the
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var) so this predicate and the
+    config-time resolution can never diverge.
+    """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    switch = additional_config.get("enable_flashcomm1", False)
+    if isinstance(switch, str):
+        return switch.strip().lower() in ("1", "true")
+    if bool(switch):
+        return True
+    return os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+
+
+# Dense (non-MoE) model families that run sequence parallelism through the
+# FlashComm switch on Ascend. The Qwen3.5 dense family covers Qwen3.5-27B,
+# Qwen3.6-27B and Qwen3.8-27B dense checkpoints (model_type "qwen3_5_text").
+DENSE_SP_MODEL_TYPES = ("qwen3_5_text",)
+
+
+def enable_dense_sp(vllm_config=None) -> bool:
+    """Dense-model sequence parallelism for the Qwen3.5 dense family.
+
+    Upstream gates sequence parallelism on ``use_sequence_parallel_moe``,
+    which requires an MoE checkpoint with expert parallelism. On Ascend the
+    FlashComm switch additionally covers the dense Qwen3.5 family: hidden
+    states and the residual stay sequence-sharded across the whole decoder
+    stack, attention (full and GDN) gathers before / reduce-scatters after its
+    sequence-parallel output projection, and the dense MLP gathers around its
+    TP-sharded weights. Enabled with TP > 1, PP == 1 and
+    ``additional_config.enable_flashcomm1`` (or the
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var).
+
+    Active only where the standard worker patches load: this module installs
+    the dense-SP decoder layout and ``patch/worker/__init__.py`` imports it
+    exclusively under ``STANDARD_WORKER_PATCHES`` (310P wires its GDN stack
+    through ``patch_idex_310`` instead).
+
+    ``vllm_ascend.utils.enable_sp`` consults this predicate through a lazy
+    import; keep this module importable without a live NPU (its UTs run on
+    CPU).
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    if vllm_config is None:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    tp_size = getattr(parallel_config, "tensor_parallel_size", 0)
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 0)
+    if tp_size <= 1 or pp_size != 1:
+        return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(hf_text_config, "model_type", None) not in DENSE_SP_MODEL_TYPES:
+        return False
+
+    return _flashcomm_switch_enabled(vllm_config)
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
@@ -100,7 +178,35 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
         return out
 
 
+def _sequence_parallel_dense_mlp_forward(mlp: torch.nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Run a TP-sharded dense MLP on the sequence-parallel token shard.
+
+    ``gate_up_proj``/``down_proj`` keep their TP weight shards, so every rank
+    must see the same (padded) token rows: all-gather the shard, run the
+    column-parallel / row-parallel GEMMs (``down_proj.reduce_results=False``
+    leaves partial sums) and reduce-scatter back to the rank-local shard.
+    """
+    hidden_states = sp_all_gather(hidden_states)
+    gate_up, _ = mlp.gate_up_proj(hidden_states)
+    hidden_states = mlp.act_fn(gate_up)
+    hidden_states, _ = mlp.down_proj(hidden_states)
+    return sp_reduce_scatter(hidden_states)
+
+
 class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
+    """Sequence-parallel decoder layer for the Qwen3.5 family.
+
+    Replicates upstream ``Qwen3NextDecoderLayer.forward`` and extends it for
+    Ascend sequence parallelism: under SP the attention output projections
+    (``o_proj`` / GDN ``out_proj``) leave TP partial sums that this layer
+    completes with a reduce-scatter, and a dense ``Qwen3NextMLP`` gathers the
+    full sequence around its TP-sharded weights. MoE blocks keep the upstream
+    ``already_sequence_parallel=True`` contract. The layout is driven by
+    ``use_attn_reduce_scatter_for_moe``, which the patched ``__init__`` below
+    also raises for the dense Qwen3.5 family when the FlashComm switch
+    enables dense SP.
+    """
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -108,11 +214,20 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         positions: torch.Tensor = None,
         **kwargs: object,
     ):
+        use_sp = getattr(self, "use_attn_reduce_scatter_for_moe", False)
+        full_num_tokens = positions.shape[-1]
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if use_sp:
+            # Attention (full and GDN) needs the full token sequence; the
+            # sequence-parallel output projection above it leaves partial
+            # sums that the reduce-scatter below completes on the shard.
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
@@ -130,9 +245,21 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             else:
                 hidden_states = hidden_states * (self.attn_layer_scale.to(hidden_states.dtype) + 1)
 
+        if use_sp:
+            hidden_states = sp_reduce_scatter(hidden_states)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if use_sp:
+            if isinstance(self.mlp, Qwen3NextSparseMoeBlock):
+                hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+            else:
+                # TP-sharded dense weights must see the same token rows on
+                # every rank; restore the padded full sequence for the MLP,
+                # then reduce its TP partial output back to the local shard.
+                hidden_states = _sequence_parallel_dense_mlp_forward(self.mlp, hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -144,6 +271,33 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 hidden_states = hidden_states * (self.ffn_layer_scale.to(hidden_states.dtype) + 1)
 
         return hidden_states, residual
+
+
+_QWEN3_5_LAYER_ORIGINAL_INIT = Qwen3_5DecoderLayer.__init__
+
+
+def _qwen3_5_decoder_layer_init_with_dense_sp(
+    self,
+    vllm_config: VllmConfig,
+    layer_type: str,
+    prefix: str = "",
+) -> None:
+    _QWEN3_5_LAYER_ORIGINAL_INIT(self, vllm_config, layer_type, prefix=prefix)
+    if not enable_dense_sp(vllm_config) or self.use_attn_reduce_scatter_for_moe:
+        return
+    # Dense FlashComm SP reuses the upstream SP-MoE layer contract: the flag
+    # drives Qwen3NextModel's entry chunk / exit all-gather, the MTP head's
+    # chunk / gather, and this patch's gather / scatter decoder layout.
+    self.use_attn_reduce_scatter_for_moe = True
+    # The output projections were built with reduce_results=True (the upstream
+    # flag is False for dense checkpoints); under SP the decoder layer's
+    # reduce-scatter completes the sum instead.
+    if layer_type == "linear_attention":
+        self.linear_attn.out_proj.reduce_results = False
+    else:
+        self.self_attn.o_proj.reduce_results = False
+    if not isinstance(self.mlp, Qwen3NextSparseMoeBlock):
+        self.mlp.down_proj.reduce_results = False
 
 
 if Qwen3_5MultiTokenPredictor is not None:
@@ -199,27 +353,36 @@ if Qwen3_5MultiTokenPredictor is not None:
             hidden_states = hidden_states[: positions.shape[-1]]
         return hidden_states
 
-    Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
+
+@wraps(_GDN_ORIGINAL_INIT)
+def _gdn_init_with_packed_weight(self, *args, **kwargs):
+    _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+    initialize_packed_conv_weight(self)
 
 
-Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
-_GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
-_GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
-_GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+# Apply this module's patches only where the standard worker patches load:
+# patch/worker/__init__.py imports this module exclusively under
+# STANDARD_WORKER_PATCHES, and utils.enable_sp reaches enable_dense_sp
+# through a lazy import, so the guard keeps that import side-effect-free on
+# devices that exclude this patch (310P wires its GDN stack through
+# patch_idex_310 instead).
+if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    if Qwen3_5MultiTokenPredictor is not None:
+        Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
-if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
-    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
-
-    _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
-    _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
-else:
+    Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+    # Sequence-parallel decoder layout (upstream SP-MoE contract plus the dense
+    # Qwen3.5-family FlashComm SP extension) and the dense-SP layer wiring.
+    Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_dense_sp
+    Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
+    _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+    _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+    _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+    # STANDARD_WORKER_PATCHES hardware never carries the 310P-only
+    # GDN_COMPATIBILITY capability, so the former 310P branch of the GDN
+    # wiring was dead under this guard and is gone; 310P GDN is wired by
+    # patch_idex_310.py.
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
-
-    @wraps(_GDN_ORIGINAL_INIT)
-    def _gdn_init_with_packed_weight(self, *args, **kwargs):
-        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
-        initialize_packed_conv_weight(self)
-
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
