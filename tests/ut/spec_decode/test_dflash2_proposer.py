@@ -191,6 +191,84 @@ def test_get_spec_decode_method_dispatches_dflash2():
         d2.assert_not_called()
 
 
+@pytest.mark.parametrize("causal", [False, True])
+def test_dflash2_loader_selects_flash_attn_without_causality_override(monkeypatch, causal):
+    from vllm.v1.attention import selector as selector_module
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+
+    from vllm_ascend import platform
+    from vllm_ascend.device.hardware_profile import AttentionBackendFamily
+
+    draft_model = SimpleNamespace(
+        runner_type="draft",
+        architectures=["DFlash2DraftModel"],
+        hf_config=SimpleNamespace(num_hidden_layers=6, is_causal=causal),
+    )
+    target_model = SimpleNamespace(
+        runner_type="generate",
+        architectures=["GlmMoeDsaForCausalLM"],
+        use_mla=True,
+        hf_text_config=SimpleNamespace(model_type="glm_moe_dsa", index_topk=2048),
+    )
+    spec = SimpleNamespace(
+        method="dflash",
+        target_model_config=target_model,
+        draft_model_config=draft_model,
+        enforce_eager=True,
+        draft_sample_method="greedy",
+    )
+    target = SimpleNamespace(
+        use_v2_model_runner=False,
+        model_config=target_model,
+        attention_config=SimpleNamespace(use_non_causal=False),
+        speculative_config=spec,
+    )
+    proposer = AscendDflash2Proposer.__new__(AscendDflash2Proposer)
+    proposer.speculative_config = spec
+    proposer.draft_model_config = draft_model
+    # Upstream clones the outer and attention configs, retaining model_config.
+    parent_config = SimpleNamespace(**vars(target))
+    parent_config.attention_config = SimpleNamespace(**vars(target.attention_config))
+    monkeypatch.setattr(
+        "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+        lambda _: parent_config,
+    )
+    monkeypatch.setattr(
+        platform,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD),
+    )
+    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    draft = proposer._create_draft_vllm_config()
+    assert draft.model_config.runner_type == "draft"
+    assert not draft.attention_config.use_non_causal
+    selector = AttentionSelectorConfig(
+        head_size=128,
+        block_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        use_non_causal=draft.attention_config.use_non_causal,
+    )
+    assert target.model_config.runner_type == "generate"
+    assert not target.attention_config.use_non_causal
+    monkeypatch.setattr("vllm.platforms.current_platform", platform.NPUPlatform)
+    monkeypatch.setattr(selector_module, "resolve_obj_by_qualname", lambda path: path)
+    # Exercise the upstream selection cache with the GLM target's sparse FP8
+    # attention selected before the draft's GQA attention.
+    target_selector = selector._replace(use_mla=True, use_sparse=True, kv_cache_dtype="fp8")
+    select = selector_module._cached_get_attn_backend
+    select.cache_clear()
+    try:
+        monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: target)
+        assert select(None, target_selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+        monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: draft)
+        assert select(None, selector) == "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+        monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: target)
+        assert select(None, target_selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+    finally:
+        select.cache_clear()
+
+
 def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):
     device = torch.device("cpu")
     num_reqs, num_steps, top_k, hidden = 2, 3, 4, 8
