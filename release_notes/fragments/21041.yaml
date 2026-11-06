@@ -1,0 +1,4 @@
+pr: 21041
+entries:
+  - category: performance
+    text: Added opt-in TP query-row parallelism for the ordinary SFA prefill indexer, including PCP deployments. Enable enable_indexer_query_parallel to reduce repeated indexer selection on eligible batches.

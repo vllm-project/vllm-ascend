@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+import pytest
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -84,6 +85,17 @@ def test_config_modules_do_not_load_vllm_config():
         "assert 'vllm.config' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("value,expected", [(True, True), (False, False), ("false", False), ("1", True)])
+def test_indexer_query_parallel_uses_typed_config(value, expected):
+    with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
+        vc = VllmConfig(device_config=DeviceConfig(device="cpu"))
+        vc.additional_config = {"enable_indexer_query_parallel": value}
+        try:
+            assert init_ascend_config(vc).enable_indexer_query_parallel is expected
+        finally:
+            clear_ascend_config()
 
 
 class TestRlConfig(TestBase):
