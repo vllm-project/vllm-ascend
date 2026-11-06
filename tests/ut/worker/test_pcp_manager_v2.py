@@ -25,12 +25,10 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, ParallelConfig
 from vllm.config.utils import replace
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
@@ -39,7 +37,7 @@ from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
@@ -602,7 +600,6 @@ def test_partition_batch_keeps_piecewise_request_extent():
 @pytest.mark.parametrize("is_prefilling", [False, True])
 def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager._kernel_block_table_groups = {}
     manager.device = torch.device("cpu")
     manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
@@ -1362,48 +1359,3 @@ def test_short_prefill_leaves_empty_pcp_ranks_in_mixed_batch(num_prefill_tokens)
             expected.append((3, rank, 1))
         assert chunks == expected
     assert manager.get_num_tokens_for_dispatch(counts, prefilling) == 5
-
-
-@pytest.mark.parametrize("kernel_block_size", [128, 640])
-def test_pcp_global_table_uses_attention_group_mapping(kernel_block_size):
-    raw = torch.tensor([[7, 11, 0], [9, 0, 0]], dtype=torch.int32)
-    counts = torch.tensor([[2, 1], [1, 0]], dtype=torch.int32)
-    factor = 640 // kernel_block_size
-    spec = MLAAttentionSpec(block_size=640, num_kv_heads=1, head_size=8, dtype=torch.float16)
-    group = AttentionGroup(
-        backend=MagicMock(),
-        layer_names=["layer.0"],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-        kernel_block_size=kernel_block_size if factor > 1 else None,
-        kernel_block_table=torch.empty((1, 4, 3 * factor), dtype=torch.int32),
-        kernel_block_offsets=torch.arange(factor, dtype=torch.int32),
-    )
-    context = AscendPCPAttentionContext(
-        global_batch=SimpleNamespace(),
-        global_block_tables=(raw, raw.clone()),
-        global_slot_mappings=torch.empty(0),
-        hidden_restore_idx=torch.empty(0),
-        global_block_table_num_blocks=counts,
-    )
-
-    view = context.for_attention_group(group)
-
-    expected = (raw.unsqueeze(-1) * factor + torch.arange(factor, dtype=torch.int32)).flatten(1)
-    torch.testing.assert_close(view.global_block_tables[0], expected)
-    torch.testing.assert_close(view.global_block_table_num_blocks[0], counts[0] * factor)
-    torch.testing.assert_close(view.global_block_table_num_blocks[1], counts[1])
-    torch.testing.assert_close(context.global_block_tables[0], raw)
-    torch.testing.assert_close(context.global_block_table_num_blocks, counts)
-    if factor == 1:
-        assert view is context
-        return
-    assert view.global_block_tables[0].data_ptr() != group.kernel_block_table.data_ptr()
-    # Updating local metadata must not overwrite the global dictionary.
-    group.map_to_kernel_block_table(raw[1:])
-    torch.testing.assert_close(view.global_block_tables[0], expected)
-    # Fresh step contexts share storage and start from Manager counts again.
-    second = replace(context, global_block_tables=(raw[:1], raw[:1]), global_block_table_num_blocks=counts[:, :1])
-    refreshed = second.for_attention_group(group)
-    assert refreshed.global_block_tables[0].data_ptr() == view.global_block_tables[0].data_ptr()
-    torch.testing.assert_close(refreshed.global_block_table_num_blocks[0], counts[0, :1] * factor)

@@ -599,46 +599,64 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
 
 
-@pytest.mark.parametrize("block_size", [128, 512, 640])
-def test_dflash_input_preparation_uses_manager_block_size(monkeypatch, block_size):
+def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate(monkeypatch):
     kernel = MagicMock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
     inputs = [object() for _ in range(28)]
-    inputs[17] = block_size
+    inputs[17] = 16  # Kernel block size, distinct from physical KV blocks.
     inputs[-1] = True  # sample_from_anchor
 
-    dflash_module.prepare_dflash_inputs(*inputs)
+    dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
 
-    kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=block_size)
+    kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
 
 
 @pytest.mark.skipif(vllm_version_is("0.32.0"), reason="main-only num_reqs_override")
 def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
-    """Forward the DP-synced dummy request count without changing its size unit."""
+    """vLLM main (#58984) forwards the DP-synced request count positionally."""
     kernel = MagicMock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
     inputs = [object() for _ in range(28)]
-    inputs[17] = 640
     inputs[-1] = True  # sample_from_anchor
 
-    dflash_module.prepare_dflash_inputs(*inputs, 5)
+    dflash_module.prepare_dflash_inputs_factory(128)(*inputs, 5)
 
-    kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=640)
+    kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=128)
 
 
-def test_dflash_input_preparation_keeps_manager_table_on_main(monkeypatch):
-    """The callback no longer needs a per-table kernel-size lookup."""
+def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):
+    """vLLM main forwards the physical block size, but the Ascend block table is
+    kernel-block addressed, so the factory restores the kernel size per group."""
     kernel = MagicMock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    block_table = torch.tensor([[7, 11]], dtype=torch.int32)
+    block_table = torch.zeros(2, 4, dtype=torch.int32)
+    block_tables = SimpleNamespace(
+        kernel_block_sizes=[128],
+        input_block_tables=[block_table],
+    )
     inputs = [object() for _ in range(28)]
     inputs[16] = block_table
-    inputs[17] = 640
-    inputs[-1] = True
+    inputs[17] = 384  # Physical KV block size forwarded by the DFlash caller.
+    inputs[-1] = True  # sample_from_anchor
+    dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
 
-    dflash_module.prepare_dflash_inputs(*inputs)
+    restored = kernel.call_args.args[17]
+    assert restored == 128
+    assert kernel.call_args.kwargs["kv_cache_block_size"] == 384
 
-    assert kernel.call_args.args[16] is block_table
-    assert kernel.call_args.args[17] == 640
-    assert kernel.call_args.kwargs["kv_cache_block_size"] == 640
-    torch.testing.assert_close(block_table, torch.tensor([[7, 11]], dtype=torch.int32))
+
+def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    block_tables = SimpleNamespace(
+        kernel_block_sizes=[128],
+        input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)],
+    )
+    inputs = [object() for _ in range(28)]
+    # A block table that AscendBlockTables never handed out.
+    inputs[16] = torch.zeros(2, 4, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="unknown to AscendBlockTables"):
+        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+
+    kernel.assert_not_called()
