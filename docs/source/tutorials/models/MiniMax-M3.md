@@ -35,7 +35,7 @@ It is recommended to place the model weight in a shared cache directory.
 
 Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `DSPARK_WEIGHT_PATH` to the downloaded DSpark draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
 
-The speculative-decoding examples use the standalone `nvidia/MiniMax-M3-DSpark` checkpoint with three draft tokens (`num_speculative_tokens=3`). Set `"enforce_eager":true` in `--speculative-config` for the draft model; this does not disable graph execution for the target model. For general DSpark configuration, see [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark). The 1M-context examples in Section 5.4 continue to run without speculative decoding.
+The speculative-decoding examples use the standalone `nvidia/MiniMax-M3-DSpark` checkpoint with seven draft tokens (`num_speculative_tokens=7`). Set `"enforce_eager":true` in `--speculative-config` for the draft model; this does not disable graph execution for the target model. If omitted, the draft follows the graph mode passed by Model Runner V2: a Decode service using `FULL_DECODE_ONLY` attempts draft graph capture, while an eager Prefill service remains eager. For general DSpark configuration, see [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark). The 1M-context examples in Section 5.4 continue to run without speculative decoding.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -243,7 +243,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
       --additional-config '{
           "enable_cpu_binding": true,
           "enable_flashcomm1": true,
@@ -291,7 +291,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
       --safetensors-load-strategy prefetch > "${LOG_PATH}" 2>&1 &
     ```
 
@@ -336,7 +336,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -374,7 +374,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -414,7 +414,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -453,7 +453,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -708,7 +708,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -787,7 +787,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -972,7 +972,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --safetensors-load-strategy prefetch \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
@@ -1057,7 +1057,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config \
         '{
@@ -1239,7 +1239,7 @@ Key Parameter Descriptions:
 **Decode node-specific configurations:**
 
 - `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing.
-- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With DSpark speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
+- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With DSpark speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one target verification step (`8` tokens when `num_speculative_tokens=7`). Size graph capture for the actual requests on each DP rank: for example, 128 concurrent requests evenly distributed across `DP2` give 64 requests per rank, producing `8 × 64 = 512` tokens per step. At 129 concurrent requests, one rank can receive 65 requests, giving `8 × 65 = 520 > 512`; batches above the capture limit fall back to eager execution. Set `"max_cudagraph_capture_size":1024` in `--compilation-config` when the per-rank verification batch requires it (for example, `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). A larger capture size reserves additional NPU memory, so tune it for the workload. This limit describes the target verification graph; the draft remains eager with `"enforce_eager":true`.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `128`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
@@ -1504,7 +1504,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MultiConnector",
@@ -1610,7 +1610,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MultiConnector",
@@ -1719,7 +1719,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
       --kv-cache-dtype fp8 \
       --reasoning-parser minimax_m3 \
       --safetensors-load-strategy prefetch \
-      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
       --enforce-eager \
       --enable-chunked-prefill \
       --enable-prefix-caching \
@@ -1829,7 +1829,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":7, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
         '{
