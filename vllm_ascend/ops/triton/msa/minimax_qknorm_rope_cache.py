@@ -75,6 +75,7 @@ def _minimax_qknorm_rope_cache_kernel(
     KV_HEADS: tl.constexpr,
     IQ_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    INDEX_HEAD_DIM: tl.constexpr,
     ROTARY_DIM: tl.constexpr,
     Q_ROW: tl.constexpr,
     Q_COL: tl.constexpr,
@@ -108,8 +109,9 @@ def _minimax_qknorm_rope_cache_kernel(
     weight_dim = tl.arange(0, HEAD_DIM)
     q_scale = 1.0 + tl.load(q_weight + weight_dim).to(tl.float32)
     k_scale = 1.0 + tl.load(k_weight + weight_dim).to(tl.float32)
-    iq_scale = 1.0 + tl.load(iq_weight + weight_dim).to(tl.float32)
-    ik_scale = 1.0 + tl.load(ik_weight + weight_dim).to(tl.float32)
+    index_dim = tl.arange(0, INDEX_HEAD_DIM)
+    iq_scale = 1.0 + tl.load(iq_weight + index_dim).to(tl.float32)
+    ik_scale = 1.0 + tl.load(ik_weight + index_dim).to(tl.float32)
     half: tl.constexpr = ROTARY_DIM // 2
     rotary_offsets = tl.arange(0, half)
     for token in range(program, NUM_TOKENS, programs):
@@ -137,21 +139,23 @@ def _minimax_qknorm_rope_cache_kernel(
             tl.store(key_cache + k_offset + tl.arange(0, KV_HEADS)[:, None] * K_HEAD + dim[None, :], k)
             tl.store(value_cache + v_offset + tl.arange(0, KV_HEADS)[:, None] * V_HEAD + dim[None, :], v)
         iq = _norm_rope_with_scale(
-            iq_input + token * IQ_ROW, iq_scale, cos, sin, IQ_HEADS, IQ_COL, HEAD_DIM, ROTARY_DIM, EPS
+            iq_input + token * IQ_ROW, iq_scale, cos, sin, IQ_HEADS, IQ_COL, INDEX_HEAD_DIM, ROTARY_DIM, EPS
         )
         if INDEX_FP8:
             iq = tl.minimum(tl.maximum(iq, -FP8_E4M3_MAX), FP8_E4M3_MAX)
-        offsets = token * IQ_HEADS * HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * HEAD_DIM + dim[None, :]
+        offsets = (
+            token * IQ_HEADS * INDEX_HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * INDEX_HEAD_DIM + index_dim[None, :]
+        )
         tl.store(index_query + offsets, iq)
         slot = tl.load(index_slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
         if slot >= 0:
             ik = _norm_rope_with_scale(
-                ik_input + token * IK_ROW, ik_scale, cos, sin, 1, IK_COL, HEAD_DIM, ROTARY_DIM, EPS
+                ik_input + token * IK_ROW, ik_scale, cos, sin, 1, IK_COL, INDEX_HEAD_DIM, ROTARY_DIM, EPS
             )
             if INDEX_FP8:
                 ik = tl.minimum(tl.maximum(ik, -FP8_E4M3_MAX), FP8_E4M3_MAX)
             offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE * I_TOKEN
-            tl.store(index_cache + offset + dim, ik.reshape(HEAD_DIM))
+            tl.store(index_cache + offset + index_dim, ik.reshape(INDEX_HEAD_DIM))
 
 
 def minimax_qknorm_rope_cache(
@@ -178,27 +182,31 @@ def minimax_qknorm_rope_cache(
 
     Projections are strided [token, head * dim] views.
     Caches use [block, token, head, dim] and [block, token, dim] layouts.
-    Head dimensions must match (the MiniMax-M3 128-wide main/index heads).
+    Main and index head dimensions may differ. Both use the same RoPE table.
     The caller owns cache lifetime and orders cache readers after this call.
     """
     head_dim = q_weight.numel()
+    index_head_dim = index_q_weight.numel()
     rotary_dim = cos_sin_cache.shape[-1]
-    assert head_dim == k_weight.numel() == index_q_weight.numel() == index_k_weight.numel()
-    assert head_dim in (64, 128, 256) and 0 < rotary_dim <= head_dim and rotary_dim % 2 == 0
+    assert head_dim == k_weight.numel() and index_head_dim == index_k_weight.numel()
+    assert head_dim in (64, 128, 256) and index_head_dim in (64, 128, 256)
+    assert 0 < rotary_dim <= min(head_dim, index_head_dim) and rotary_dim % 2 == 0
     projections = (q, k, v, index_q, index_k)
     assert q.ndim == 2 and q.dtype == torch.bfloat16
     num_tokens = q.shape[0]
     assert all(
         x.ndim == 2 and x.shape[0] == num_tokens and x.dtype == q.dtype and x.device == q.device for x in projections
     )
-    assert all(x.shape[1] > 0 and x.shape[1] % head_dim == 0 for x in projections)
-    assert v.shape == k.shape and index_k.shape[1] == head_dim
+    assert all(x.shape[1] > 0 and x.shape[1] % head_dim == 0 for x in (q, k))
+    assert v.shape == k.shape
+    assert index_q.shape[1] > 0 and index_q.shape[1] % index_head_dim == 0
+    assert index_k.shape[1] == index_head_dim
     num_q_heads = q.shape[1] // head_dim
     num_kv_heads = k.shape[1] // head_dim
-    num_index_heads = index_q.shape[1] // head_dim
+    num_index_heads = index_q.shape[1] // index_head_dim
     assert key_cache.ndim == value_cache.ndim == 4 and index_cache.ndim == 3
     assert key_cache.shape == value_cache.shape and key_cache.shape[2:] == (num_kv_heads, head_dim)
-    assert index_cache.shape[-1] == head_dim
+    assert index_cache.shape[-1] == index_head_dim
     assert key_cache.stride(-1) == value_cache.stride(-1) == index_cache.stride(-1) == 1
     assert 0 <= num_actual_tokens <= num_tokens
     assert slot_mapping.numel() >= num_actual_tokens and index_slot_mapping.numel() >= num_actual_tokens
@@ -210,7 +218,7 @@ def minimax_qknorm_rope_cache(
     assert slot_mapping.ndim == index_slot_mapping.ndim == 1
     assert slot_mapping.is_contiguous() and index_slot_mapping.is_contiguous()
     query = torch.empty((num_tokens, num_q_heads * head_dim), device=q.device, dtype=q.dtype)
-    index_query = torch.empty((num_tokens, num_index_heads * head_dim), device=q.device, dtype=index_cache.dtype)
+    index_query = torch.empty((num_tokens, num_index_heads * index_head_dim), device=q.device, dtype=index_cache.dtype)
     if num_tokens == 0:
         return query, index_query
     init_device_properties_triton()
@@ -237,6 +245,7 @@ def minimax_qknorm_rope_cache(
         num_kv_heads,
         num_index_heads,
         head_dim,
+        index_head_dim,
         rotary_dim,
         *q.stride(),
         *k.stride(),

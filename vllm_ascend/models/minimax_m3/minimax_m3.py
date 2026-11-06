@@ -305,6 +305,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
+        self.index_rotary_emb = None
+        if self.idx_head_dim != self.head_dim:
+            if self.rotary_emb.rotary_dim > self.idx_head_dim:
+                raise ValueError("MiniMax-M3 RoPE dimension exceeds the index head dimension")
+            self.index_rotary_emb = get_rope(
+                self.idx_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters={**(rope_parameters or {}), "rope_dim": self.rotary_emb.rotary_dim},
+            )
 
         self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
         self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
@@ -454,15 +463,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
 
         index_q, index_k = self._index_qk_norm(index_q, index_k)
+        index_rotary_emb = self.index_rotary_emb or self.rotary_emb
         if self.indexer.index_cache.dtype == torch.float8_e4m3fn:
-            index_q, index_k = self.rotary_emb(
+            index_q, index_k = index_rotary_emb(
                 positions,
                 index_q,
                 index_k,
                 out_dtype=torch.float8_e4m3fn,
             )
         else:
-            index_q, index_k = self.rotary_emb(positions, index_q, index_k)
+            index_q, index_k = index_rotary_emb(positions, index_q, index_k)
 
         return q, k, v, index_q, index_k
 
@@ -490,9 +500,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16
             and positions.ndim == 1
-            and self.head_dim == self.idx_head_dim == 128
+            and self.head_dim in (128, 256)
+            and self.idx_head_dim == 128
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and 0 < self.rotary_emb.rotary_dim <= self.head_dim
+            and 0 < self.rotary_emb.rotary_dim <= min(self.head_dim, self.idx_head_dim)
             and self.rotary_emb.rotary_dim % 2 == 0
             and self.q_norm.variance_epsilon
             == self.k_norm.variance_epsilon

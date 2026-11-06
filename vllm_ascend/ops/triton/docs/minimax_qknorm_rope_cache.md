@@ -8,7 +8,7 @@
   1. The grid uses `min(num_tokens, vector_core_count)` programs. Each program handles tokens cyclically and uses each projection view’s token and feature strides. The four normalization weights and Gemma scales are prepared before the token loop and reused across its iterations.
   2. Cos/sin is loaded from the RoPE cache by `positions`. No external gather, slice-contiguous, or cache-scatter kernel is launched.
   3. The model calls this through the opaque op `minimax_m3_fused_sparse_forward`, then runs the indexer and sparse attention. The original cache-insertion path is not called again.
-- **Supported modes**: BF16 NPU input, main and index head dimension 128, at most 262144 tokens including graph padding. Packed `[Q | K | V | index Q | index K]` projections and separate QKV/index projections are both supported. Other shapes keep the existing prepare path.
+- **Supported modes**: BF16 NPU input, main head dimension 128 or 256, index head dimension 128, at most 262144 tokens including graph padding. Packed `[Q | K | V | index Q | index K]` projections and separate QKV/index projections are both supported. Other shapes keep the existing prepare path.
 
 ## Parameters
 
@@ -19,7 +19,7 @@
 | `positions` | Input | Token positions, rank 1 | integer |
 | `q_weight`, `k_weight`, `index_q_weight`, `index_k_weight` | Input | Gemma RMSNorm weights. All four epsilons must match | floating |
 | `key_cache`, `value_cache` | Output | Main cache `[num_blocks, block_size, heads, head_dim]` | bfloat16 or float8_e4m3fn |
-| `index_cache` | Output | Index cache `[num_blocks, block_size, head_dim]` | bfloat16 or float8_e4m3fn |
+| `index_cache` | Output | Index cache `[num_blocks, block_size, index_head_dim]` | bfloat16 or float8_e4m3fn |
 | `slot_mapping`, `index_slot_mapping` | Input | Independent main and index slots. Negative slots are not written | integer |
 | query, index query | Output | Materialized queries only | bfloat16 / index cache dtype |
 
@@ -27,6 +27,7 @@
 
 - `NUM_SLOTS` and `NUM_TOKENS` are runtime scalars with `do_not_specialize`, so varying the actual token count or loop bound does not create a specialization for each value.
 - `num_blocks` is the runtime cache capacity. It is not hardcoded and is not a kernel compile parameter. Main and index block sizes may differ.
+- The operator accepts main and index head dimensions of 64, 128, or 256 independently. The shared RoPE width must fit both.
 - Cache writes use the actual tensor strides, including block padding.
 - Slots outside `num_actual_tokens`, and negative slots, do not update a cache. The caller must keep valid slots in range and must not write the same destination twice in one call.
 - Normalization accumulates in FP32 and rounds back to BF16 before RoPE. Main K is rounded to the model dtype before the cache store. FP8 E4M3 caches are clamped to ±448 before the store.
