@@ -135,7 +135,6 @@ def _run_test(
             attention_config={"indexer_kv_dtype": "int8"},
             kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
             additional_config={
-                "enable_dsa_cp": False,
                 "enable_prefill_mc2": True,
                 # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
                 "enable_pcp_o_proj_weight_sharding": False,
