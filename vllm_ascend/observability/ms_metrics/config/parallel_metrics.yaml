@@ -5,12 +5,6 @@
 
 - symbol: vllm_ascend.models.common.ops.sequence_parallel:sp_padding_mask
   handler: vllm_ascend.observability.ms_metrics.handlers:sp_padding_handler
-  metrics:
-    - name: parallel:sp_padding_ratio
-      type: histogram
 
 - symbol: vllm_ascend.platform:NPUPlatform.set_additional_forward_context
   handler: vllm_ascend.observability.ms_metrics.handlers:moe_comm_selection_handler
-  metrics:
-    - name: parallel:moe_comm_selection_total
-      type: counter

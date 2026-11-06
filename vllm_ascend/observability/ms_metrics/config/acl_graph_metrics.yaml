@@ -4,6 +4,3 @@
 
 - symbol: vllm_ascend.worker.v2.aclgraph_utils:ModelAclGraphManager.run_fullgraph
   handler: vllm_ascend.observability.ms_metrics.handlers:graph_replay_handler
-  metrics:
-    - name: graph:replay:duration
-      type: histogram

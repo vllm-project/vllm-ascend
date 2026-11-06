@@ -3,38 +3,20 @@
 
 - symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.sample_tokens
   handler: vllm_ascend.observability.ms_metrics.handlers:sample_tokens_handler
-  metrics:
-    - name: executor:sample_tokens:duration_ms
-      type: histogram
 
 # schedule() reports preempted request ids and no reason. Capacity preemption
 # and prefix-cache reset share reason=scheduled.
 - symbol: vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler.schedule
   handler: vllm_ascend.observability.ms_metrics.handlers:schedule_preempt_handler
-  metrics:
-    - name: scheduler:preempt_total
-      type: counter
 
 - symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule
   handler: vllm_ascend.observability.ms_metrics.handlers:schedule_preempt_handler
-  metrics:
-    - name: scheduler:preempt_total
-      type: counter
 
 - symbol: vllm_ascend.patch.platform.patch_balance_schedule:BalanceScheduler.schedule
   handler: vllm_ascend.observability.ms_metrics.handlers:schedule_preempt_handler
-  metrics:
-    - name: scheduler:preempt_total
-      type: counter
 
 - symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler._finish_recomputed_request
   handler: vllm_ascend.observability.ms_metrics.handlers:recompute_preempt_handler
-  metrics:
-    - name: scheduler:preempt_total
-      type: counter
 
 - symbol: vllm_ascend.core.dyntra_lb_scheduler:DyntraLBPolicyMixin._lb_pause_request
   handler: vllm_ascend.observability.ms_metrics.handlers:lb_pause_preempt_handler
-  metrics:
-    - name: scheduler:preempt_total
-      type: counter

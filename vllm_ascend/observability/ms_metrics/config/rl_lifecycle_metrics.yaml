@@ -3,18 +3,9 @@
 
 - symbol: vllm_ascend.worker.worker:NPUWorker.sleep
   handler: vllm_ascend.observability.ms_metrics.handlers:sleep_handler
-  metrics:
-    - name: lifecycle:sleep:duration_ms
-      type: histogram
 
 - symbol: vllm_ascend.worker.worker:NPUWorker.wake_up
   handler: vllm_ascend.observability.ms_metrics.handlers:wake_handler
-  metrics:
-    - name: lifecycle:wake:duration_ms
-      type: histogram
 
 - symbol: vllm_ascend.worker.worker:NPUWorker.update_weights
   handler: vllm_ascend.observability.ms_metrics.handlers:update_weights_handler
-  metrics:
-    - name: lifecycle:update_weights:duration_ms
-      type: histogram

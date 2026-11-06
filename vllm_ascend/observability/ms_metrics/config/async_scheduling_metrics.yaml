@@ -5,6 +5,3 @@
 
 - symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner._update_seq_lens_cpu
   handler: vllm_ascend.observability.ms_metrics.handlers:seq_lens_update_handler
-  metrics:
-    - name: async_scheduling:seq_lens_update_ms
-      type: histogram
