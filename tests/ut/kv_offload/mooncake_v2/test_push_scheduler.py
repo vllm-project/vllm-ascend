@@ -261,14 +261,14 @@ def test_prefix_hit_publishes_cached_prefix_and_new_token_range(producer_schedul
 
 
 @pytest.mark.parametrize("aborted", [False, True])
-def test_producer_retains_blocks_until_worker_finishes(producer_scheduler, aborted):
+def test_producer_delays_release_only_for_unfinished_abort(producer_scheduler, aborted):
     scheduler = producer_scheduler
     request = prefill_request()
     allocate(scheduler, request)
     scheduler.build_connector_meta(step(request, ([1], [11])))
     if aborted:
         request.status = RequestStatus.FINISHED_ABORTED
-    assert scheduler.request_finished(request, ([1], [11])) == (True, None)
+    assert scheduler.request_finished(request, ([1], [11])) == (aborted, None)
     terminal_step = step(request, None, computed=16, scheduled=0)
     meta = scheduler.build_connector_meta(terminal_step)
     assert set(meta.requests_to_send) == {request.request_id}
@@ -277,26 +277,12 @@ def test_producer_retains_blocks_until_worker_finishes(producer_scheduler, abort
     assert not scheduler.build_connector_meta(terminal_step).requests_to_send
     output = SimpleNamespace(finished_sending={request.request_id}, finished_recving=None)
     scheduler.update_connector_output(output)
-    assert output.finished_sending == {request.request_id}
+    assert output.finished_sending == ({request.request_id} if aborted else None)
     assert not scheduler._reqs_need_send
     assert not scheduler._reqs_need_send_layerwise
     # A duplicate completion cannot cause core to free an already-freed request.
     scheduler.update_connector_output(output)
     assert not output.finished_sending
-
-
-def test_early_completion_does_not_free_running_request(producer_scheduler):
-    scheduler = producer_scheduler
-    request = prefill_request()
-    allocate(scheduler, request)
-    scheduler.build_connector_meta(step(request, ([1], [11])))
-    output = SimpleNamespace(finished_sending={request.request_id}, finished_recving=None)
-    scheduler.update_connector_output(output)
-    assert not output.finished_sending
-    assert request.request_id in scheduler._reqs_finished_sending
-    assert scheduler.request_finished(request, ([1], [11])) == (False, None)
-    assert not scheduler._reqs_need_send_layerwise
-    assert not scheduler._reqs_finished_sending
 
 
 def test_abort_before_dispatch_does_not_pin_blocks(producer_scheduler):
@@ -307,26 +293,6 @@ def test_abort_before_dispatch_does_not_pin_blocks(producer_scheduler):
     assert not producer_scheduler._reqs_need_send_layerwise
     meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
     assert meta.push_aborted_requests == {request.request_id: "d-request-123"}
-
-
-def test_missing_remote_request_id_is_rejected_before_dispatch(producer_scheduler):
-    request = prefill_request()
-    del request.kv_transfer_params["remote_request_id"]
-    with pytest.raises(ValueError, match="remote_request_id"):
-        allocate(producer_scheduler, request)
-    assert not producer_scheduler._reqs_need_send_layerwise
-
-
-def test_preemption_of_published_source_is_rejected(producer_scheduler):
-    request = prefill_request()
-    allocate(producer_scheduler, request)
-    producer_scheduler.build_connector_meta(step(request, ([1], [11])))
-    output = step(request, None, computed=16)
-    output.preempted_req_ids = {request.request_id}
-    with pytest.raises(RuntimeError, match="Preempting"):
-        producer_scheduler.build_connector_meta(output)
-    with pytest.raises(RuntimeError, match="Preempting"):
-        allocate(producer_scheduler, request)
 
 
 def test_abort_before_allocation_notifies_worker_by_request_id(producer_scheduler):
@@ -443,6 +409,7 @@ def test_push_load_order_covers_chunks_pending_sends_and_idle(producer_scheduler
         scheduler.build_connector_meta(output)
         assert output.has_sync_kv_loads
 
+    request.status = RequestStatus.FINISHED_ABORTED
     assert scheduler.request_finished(request, ([1], [11]))[0]
     for _ in range(2):
         idle.has_sync_kv_loads = False

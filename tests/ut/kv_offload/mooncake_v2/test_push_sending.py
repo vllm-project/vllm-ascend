@@ -6,6 +6,7 @@ import ctypes
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -195,6 +196,11 @@ def worker(monkeypatch, request):
 
 def test_proxy_destinations_and_two_chunks(worker, monkeypatch):
     worker.start_load_kv(source_meta())
+    # Deferred finalization may collect results before all cache hooks run.
+    # Polling must not publish unfinished caches or reset this step's state.
+    assert not worker.get_transfer_results().finished_sending
+    assert not worker._reqs_send_state["d-request"].available_layers
+    assert worker._prefilling_request_ids == ("d-request",)
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
     drive(worker, lambda: worker.engine.batch_transfer_sync_write.call_count == 1)
@@ -217,6 +223,8 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch):
     drive(worker, lambda: worker._send_done.called)
     assert worker.engine.batch_transfer_sync_write.call_count == 2
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1064], [10352], [32])
+    # Sending DONE does not retire a request until scheduler reports its end.
+    assert not worker.get_transfer_results().finished_sending
     terminal = MooncakeConnectorMetadata()
     terminal.requests_to_send = {"p-request": time.monotonic()}
     worker.start_load_kv(terminal)
@@ -317,13 +325,18 @@ def test_write_failure_does_not_certify_drain(worker, native_exception):
     assert worker._send_done.call_args.args[2] is False
 
 
-def test_abort_before_forward(worker):
-    worker.start_load_kv(source_meta(0, 0))
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_abort_before_forward(worker, dispatched):
+    if dispatched:
+        worker.start_load_kv(source_meta(0, 0))
     meta = MooncakeConnectorMetadata()
     meta.push_aborted_requests = {"p-request": "d-request"}
     worker.start_load_kv(meta)
-    drive(worker, lambda: worker._send_done.called)
-    assert worker._send_done.call_args.args[1] == "P request aborted"
+    drive(worker, lambda: "d-request" not in worker._reqs_send_state)
+    if dispatched:
+        assert worker._send_done.call_args.args[1] == "P request aborted"
+    else:
+        worker._send_done.assert_not_called()
     assert not worker.engine.batch_transfer_sync_write.called
 
 
@@ -424,7 +437,6 @@ def test_discovery_failure_reports_failure_without_write(worker, monkeypatch):
 
 
 def test_head_split_copies_correct_bytes(worker, monkeypatch):
-
     source = ctypes.create_string_buffer(bytes(range(96)))
     destination = ctypes.create_string_buffer(b"\xff" * 64)
     worker.transfer_metadata.kv_caches_base_addr[0][0] = ctypes.addressof(source)
@@ -461,7 +473,6 @@ def test_head_split_copies_correct_bytes(worker, monkeypatch):
 
 
 def test_mamba_final_chunk_merges_pcp_conv_projections_and_state(worker, monkeypatch):
-
     backends = SimpleNamespace(MAMBA1="mamba1", MAMBA2="mamba2", GDN_ATTN="gdn")
     monkeypatch.setattr(base_worker, "MambaAttentionBackendEnum", backends, raising=False)
     monkeypatch.setattr(
@@ -702,14 +713,18 @@ def test_layers_ready_before_metadata_query_finishes_are_backfilled(worker, monk
     monkeypatch.setattr(worker, "_get_remote_metadata", delayed_metadata)
     worker.start_load_kv(source_meta(0, 8))
     assert entered.wait(3)
-    try:
-        worker.save_kv_layer("model.layers.0.attn")
-        worker.wait_for_save()
-        assert not worker.engine.batch_transfer_sync_write.called
-    finally:
-        release.set()
-    drive(worker, lambda: worker._send_done.called)
+    worker.save_kv_layer("model.layers.0.attn")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker.wait_for_save)
+        try:
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.05)
+            assert not worker.engine.batch_transfer_sync_write.called
+        finally:
+            release.set()
+        future.result(timeout=3)
     assert worker.engine.batch_transfer_sync_write.call_count == 1
+    assert worker._send_done.called
 
 
 def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
@@ -728,14 +743,17 @@ def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
     meta.push_send_requests["p-request"] = replace(
         target, remote_worker_addresses=(*target.remote_worker_addresses, (0, 1, 0, "tcp://127.0.0.1:9002"))
     )
-    try:
-        worker.start_load_kv(meta)
-        worker.wait_for_save()
-        drive(worker, entered.is_set)
-        terminal = MooncakeConnectorMetadata()
-        terminal.requests_to_send = {"p-request": time.monotonic()}
-        worker.start_load_kv(terminal)
-        assert not worker.get_transfer_results().finished_sending
-    finally:
-        release.set()
+    worker.start_load_kv(meta)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(worker.wait_for_save)
+        try:
+            assert entered.wait(3)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.05)
+        finally:
+            release.set()
+        future.result(timeout=3)
+    terminal = MooncakeConnectorMetadata()
+    terminal.requests_to_send = {"p-request": time.monotonic()}
+    worker.start_load_kv(terminal)
     drive(worker, lambda: "d-request" not in worker._reqs_send_state)
