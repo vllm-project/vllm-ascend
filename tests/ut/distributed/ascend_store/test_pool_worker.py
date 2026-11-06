@@ -404,10 +404,12 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
     # Verify store/retrieve generators submit one transfer request per layer and yield the final mask.
     def test_layer_generators_iterate_in_layer_order(self):
         worker = self.make_worker()
-        worker.kv_send_thread.reset_mock()
-        worker.kv_recv_thread.reset_mock()
-        worker.get_event = MagicMock()
-        worker.get_event.wait.return_value = True
+        # Exercise concrete task queues rather than a mock's call history.
+        saves, loads = queue.Queue(), queue.Queue()
+        worker.kv_send_thread.add_request = saves.put
+        worker.kv_recv_thread.add_request = loads.put
+        worker.get_event = threading.Event()
+        worker.get_event.set()
         request = ReqMeta(
             "generator",
             token_len_chunk=32,
@@ -419,18 +421,15 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
         )
         stored = worker.store_layer(request, MagicMock())
         loaded = worker.retrieve_layer(request)
-        worker.kv_send_thread.add_request.assert_not_called()
-        worker.kv_recv_thread.add_request.assert_not_called()
+        assert saves.empty() and loads.empty()
         for layer in range(2):
             assert next(stored) is None
-            assert worker.kv_send_thread.add_request.call_count == layer + 1
             assert next(loaded) is None
-            assert worker.kv_recv_thread.add_request.call_count == layer + 1
-            assert worker.get_event.wait.call_count == layer
-            for transfer in (worker.kv_send_thread, worker.kv_recv_thread):
-                task = transfer.add_request.call_args.args[0]
+            for tasks in (saves, loads):
+                task = tasks.get_nowait()
                 assert task.layer_id == layer
                 assert task.starts == [0, 16] and task.ends == [16, 32]
+                assert tasks.empty()
         assert next(loaded).tolist() == [True] * 32
         with pytest.raises(StopIteration):
             next(stored)

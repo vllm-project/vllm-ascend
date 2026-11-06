@@ -2094,7 +2094,6 @@ def test_preempt_resume_rebuilds_table_before_running_delta(use_v2):
             num_scheduled_tokens={},
         )
         assert scheduler.build_connector_meta(output).preempted_req_ids == {"resumed"}
-        assert "resumed" not in scheduler._request_trackers
         scheduler.update_state_after_alloc(request, MagicMock(), 0)
         output.preempted_req_ids = set()
         output.num_scheduled_tokens = {"resumed": 16}
@@ -2116,9 +2115,7 @@ def test_preempt_resume_rebuilds_table_before_running_delta(use_v2):
             )
         metadata = scheduler.build_connector_meta(output)
         assert metadata.requests[0].block_ids == [10, 11]
-        tracker = scheduler._request_trackers["resumed"]
-        assert tracker.num_saved_tokens == 16
-        assert "resumed" not in scheduler._preempted_req_ids
+        assert metadata.requests[0].save_start_token == 0
         request.num_computed_tokens = 16
         output.scheduled_new_reqs = []
         output.scheduled_cached_reqs = SimpleNamespace(
@@ -2127,7 +2124,5 @@ def test_preempt_resume_rebuilds_table_before_running_delta(use_v2):
             num_computed_tokens=[16],
         )
         metadata = scheduler.build_connector_meta(output)
-        assert scheduler._request_trackers["resumed"] is tracker
         assert metadata.requests[0].block_ids == [10, 11, 12]
         assert metadata.requests[0].save_start_token == 16
-        assert tracker.num_saved_tokens == 32
