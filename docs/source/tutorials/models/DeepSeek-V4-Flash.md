@@ -2588,7 +2588,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The short-sequence configuration follows the A3 deployment examples in [Chapter 5](#5-online-service-deployment). The long-context configuration uses the same A3 deployment templates with the parallelism, batch settings, and context limits in the table below; it is a reference configuration, not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment.
+> **Note**: The short-sequence configuration follows the A3 deployment examples in [Chapter 5](#5-online-service-deployment). The long-context configuration uses the same A3 deployment templates with the parallelism, batch settings, and context limits in the table below; it is a reference configuration, not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment. Except for the differences listed in the table, all other settings remain identical between the short-sequence and long-context configurations.
 
 #### Table 1: Detailed Node Configuration
 
