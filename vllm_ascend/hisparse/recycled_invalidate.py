@@ -19,20 +19,14 @@ _INT32_MAX = 2**31 - 1
 _JIT_POINTER_ALIGNMENT = 16
 
 
-def _bucket_blocks(block_ids, block_size):
+def _normalize_blocks(block_ids, block_size):
     try:
         blocks = sorted({operator.index(block) for block in block_ids})
     except TypeError:
         return None
-    if (
-        not blocks
-        or len(blocks) > _BLOCK_BUCKET
-        or blocks[0] < 0
-        or blocks[-1] * block_size + block_size - 1 > _INT32_MAX
-    ):
+    if not blocks or blocks[0] < 0 or blocks[-1] * block_size + block_size - 1 > _INT32_MAX:
         return None
-    # Padding with the last valid ID preserves membership at the int32 limit.
-    return blocks + [blocks[-1]] * (_BLOCK_BUCKET - len(blocks))
+    return blocks
 
 
 @triton.jit
@@ -165,10 +159,14 @@ class RecycledGroupInvalidator:
                 or not current.is_contiguous()
             ):
                 return False
-        blocks = _bucket_blocks(block_ids, self._block_size)
+        blocks = _normalize_blocks(block_ids, self._block_size)
         if blocks is None:
             return False
-        self._launch(blocks, indices)
+        for start in range(0, len(blocks), _BLOCK_BUCKET):
+            chunk = blocks[start : start + _BLOCK_BUCKET]
+            # Repeating the last ID preserves membership without a sentinel.
+            chunk.extend([chunk[-1]] * (_BLOCK_BUCKET - len(chunk)))
+            self._launch(chunk, indices)
         rows = indices.numel()
         if rows not in self._logged_rows:
             logger.info(
