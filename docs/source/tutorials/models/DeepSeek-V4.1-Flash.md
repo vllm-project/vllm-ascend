@@ -15,6 +15,12 @@ parameters and a context length of up to one million tokens. It uses a
 layers and 20 decoder layers, activating 8B parameters per token during
 Prefill and 16B during Decode.
 
+For 950DT products (A5), this guide covers single-node deployment, ordinary
+1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
+Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
+For 950DT, use the image built from `main` in the
+[950DT installation tab](#41-docker-image-installation).
+
 The model introduces Compressed Sparse Attention 2 (CSA2), FP4 main KV cache,
 SWA Bounded Replay, Single-Pass mHC, Engram conditional memory, and DSpark
 speculative decoding. These designs reduce the global KV cache footprint to
@@ -35,6 +41,10 @@ For source builds, use the upstream vLLM tag recorded in
 `.github/vllm-release-tag.commit` at the vLLM Ascend **v0.30.0rc2** tag.
 
 ## 2 Supported Features
+
+For 950DT products, the examples use model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`)
+and the original MXFP checkpoint. Single-node deployment and both roles in
+ordinary 1P1D use DP8/TP1/EP8.
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
 for the complete support matrix and the
@@ -68,12 +78,22 @@ prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
 Use one of the following hardware configurations:
 
+- **A5 single-node colocated** uses one server with eight Ascend950DT NPUs
+  and 96 GiB of HBM per NPU (DP8/TP1/EP8).
+- **A5 1P1D** uses two such servers, one per role. Memcache pooling also
+  needs host DRAM alongside Engram offload. The optional EP16 Decode example
+  uses a second Decode server.
 - **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
   memory per NPU. The server exposes 16 logical devices to the container.
 - **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
 - **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
   memory per NPU and exposes 8 devices to the container.
 - **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
+
+For 950DT products, use the original DeepSeek-V4.1-Flash MXFP checkpoint
+with `--quantization deepseek_v4_fp8`, including its DSpark parameters and
+Engram tables. Use its actual local directory as `<YOUR_MODEL_PATH>`; the
+ModelSlim checkpoints are for the A2/A3 examples.
 
 Store the checkpoint in a shared directory or copy it to the same absolute
 path on every server.
@@ -175,10 +195,77 @@ images.
       "$IMAGE" bash
     ```
 
+=== "950DT products"
+
+    From the root of your vLLM Ascend checkout, build the A5 image with the
+    upstream vLLM revision selected by this branch:
+
+    ```bash
+    export IMAGE="vllm-ascend-a5:$(git rev-parse --short HEAD)"
+    docker build -f Dockerfile.a5 \
+      --build-arg VLLM_COMMIT="$(cat .github/vllm-main-verified.commit)" \
+      -t "$IMAGE" .
+    ```
+
+    On each participating server, set `IMAGE` to the tag of the image you
+    built or the reference or digest of a matching prebuilt image. Set
+    `MODEL_ROOT` to the parent directory of the checkpoint on each host.
+    Prepare the host driver for the selected image and verify it with
+    `npu-smi info`; see the [installation guide](../../getting_started/installation.md).
+    The complete driver mount includes the A5 topology files. The PD scripts
+    use `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` for automatic UB resource
+    generation; see the [PD communication guide](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration).
+
+    ```bash
+    export MODEL_ROOT="/data/weights"
+    export NPU_SMI="$(command -v npu-smi)"
+
+    docker run --rm -it \
+      --name deepseek-v41-950dt \
+      --net=host \
+      --ulimit nofile=65536:524288 \
+      --shm-size=512g \
+      --privileged=true \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v "$NPU_SMI:/usr/local/bin/npu-smi:ro" \
+      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+      -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
+      -v "$MODEL_ROOT:$MODEL_ROOT" \
+      "$IMAGE" bash
+    ```
+
+    Inside the container, run `npu-smi info` and confirm that all eight NPUs
+    are visible. Run `vllm --version` to check the installed vLLM version.
+
+    Reserve enough host memory and shared memory for Engram CPU offload and
+    local DP sharing. Use the same image and absolute checkpoint path on
+    every participating node. For [Memcache pooling](#535-950dt-products-with-memcache-kv-cache-pool),
+    prepare the host files described in the [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    Add both options before `"$IMAGE"` in the `docker run` command on each node:
+
+    - `-v /lib/route.conf:/lib/route.conf:ro`
+    - `-v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro`
+
 Change `MODEL_ROOT` if the checkpoint is stored elsewhere. Keep the same
 absolute path inside and outside every container.
 
 ### 4.2 Source Code Installation
+
+For 950DT products, use the Dockerfile and vLLM revision from the
+[950DT installation tab](#41-docker-image-installation).
 
 To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
@@ -188,6 +275,57 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Colocated Deployment
+
+=== "950DT products"
+
+    This example uses DP8/TP1/EP8 on one eight-NPU server. Set `MODEL_PATH`
+    to the local checkpoint path.
+
+    ```bash
+    #!/usr/bin/env bash
+
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export HCCL_BUFFSIZE=1600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --served-model-name dsv41 \
+        --data-parallel-size 8 \
+        --tensor-parallel-size 1 \
+        --enable-expert-parallel \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 4096 \
+        --max-num-seqs 64 \
+        --gpu-memory-utilization 0.90 \
+        --block-size 128 \
+        --quantization deepseek_v4_fp8 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --tokenizer-mode deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --trust-remote-code \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "multistream_engram_overlap": true,
+            "multistream_overlap_shared_expert": true,
+            "multistream_dsv4_dsa_overlap": true,
+            "combine_quant_mode": 4
+        }'
+    ```
 
 === "A3 series"
 
@@ -273,6 +411,479 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
 
 ### 5.2 1P1D PD Disaggregated Deployment
+
+=== "950DT products"
+
+    #### A5 DP8 Prefill and DP8 Decode
+
+    Use two eight-NPU servers for 1P1D. Both roles use DP8/TP1/EP8, with
+    one API endpoint per DP rank.
+
+    | Role | DP / TP / EP | API ports | DP RPC port | KV handshake ports |
+    | ---- | ------------ | --------- | ----------- | ------------------ |
+    | Prefill | 8 / 1 / 8 | 7100–7107 | 12321 | 26010–26017 |
+    | Decode | 8 / 1 / 8 | 7100–7107 | 12321 | 27010–27017 |
+
+    Use the 950DT runtime from [Section 4.1](#41-docker-image-installation)
+    on both nodes. Prefill requires native SWA bounded replay with the PD connector.
+
+    Prefill and Decode form separate DP groups on different servers, so both
+    can use RPC port `12321`. Within each group, all ranks must use the same
+    coordinator IP and RPC port.
+
+    ##### Prepare the A5 DP Launcher
+
+    On both nodes, create a working directory inside the container:
+
+    ```bash
+    mkdir -p ~/dsv41-pd
+    cd ~/dsv41-pd
+    ```
+
+    Save the following script as `launch_online_dp.py` in this directory.
+    Keep the node's `run_dp_template.sh` in the same directory and run the
+    launcher from there. Each node needs its own role-specific template.
+
+    The launcher divides the local NPUs among DP ranks and starts one vLLM
+    process per rank. If a rank fails, the launcher reports its global rank and
+    exit status, stops the other local engines, and exits with an error.
+
+    ```python
+    import argparse
+    import asyncio
+
+
+    def parse_args():
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--dp-size", type=int, required=True)
+        parser.add_argument("--tp-size", type=int, default=1)
+        parser.add_argument("--dp-size-local", type=int, default=-1)
+        parser.add_argument("--dp-rank-start", type=int, default=0)
+        parser.add_argument("--dp-address", type=str, required=True)
+        parser.add_argument("--dp-rpc-port", type=str, default="12345")
+        parser.add_argument("--vllm-start-port", type=int, default=9000)
+        return parser.parse_args()
+
+
+    async def run_rank(args, local_rank):
+        dp_rank = args.dp_rank_start + local_rank
+        first_device = local_rank * args.tp_size
+        devices = ",".join(str(i) for i in range(first_device, first_device + args.tp_size))
+        process = await asyncio.create_subprocess_exec(
+            "bash", "./run_dp_template.sh", devices,
+            str(args.vllm_start_port + local_rank), str(args.dp_size), str(dp_rank),
+            args.dp_address, args.dp_rpc_port, str(args.tp_size),
+        )
+        try:
+            status = await process.wait()
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                await process.wait()
+        if status:
+            raise RuntimeError(f"DP rank {dp_rank} exited with status {status}")
+
+
+    async def main():
+        args = parse_args()
+        local_size = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
+        last_rank = args.dp_rank_start + local_size - 1
+        if min(local_size, args.tp_size) < 1 or not 0 <= args.dp_rank_start <= last_rank < args.dp_size:
+            raise ValueError("Check the DP size, local size, starting rank, and TP size.")
+        async with asyncio.TaskGroup() as ranks:
+            for local_rank in range(local_size):
+                ranks.create_task(run_rank(args, local_rank))
+
+
+    if __name__ == "__main__":
+        asyncio.run(main())
+    ```
+
+    The launcher arguments are:
+
+    | Parameter | Description | Value in this 1P1D example |
+    | --------- | ----------- | -------------------------- |
+    | `--dp-size` | Total DP ranks in one role's group, across all its nodes. Prefill and Decode form separate groups. | `8` on both roles. |
+    | `--tp-size` | Number of NPUs assigned to each DP rank. | `1`. |
+    | `--dp-size-local` | Number of DP ranks started on the current node. | `8`. |
+    | `--dp-rank-start` | Global rank of the first DP engine on this node. | `0`; local engines receive ranks `0` through `7`. |
+    | `--dp-address` | DP master IP for this role's group; use the same address on every node in the group. | Prefill node IP for the Prefill group; Decode node IP for the Decode group. |
+    | `--dp-rpc-port` | Coordination port shared by all ranks in this role's DP group. | `12321`; the two groups can use the same port on different servers. |
+    | `--vllm-start-port` | API port of the first local engine, incremented by one for each subsequent engine. | `7100`, giving ports `7100` through `7107`. |
+
+    For multi-node DP or wide EP, set `--dp-address` to the corresponding
+    group's DP master IP on every node, including worker nodes.
+
+    The launcher calls `run_dp_template.sh` with seven positional arguments:
+    visible devices, API port, global DP size, global DP rank, coordinator IP,
+    coordinator RPC port, and TP size. Each template below documents this order.
+
+    Prefill and Decode can start concurrently in separate terminals. Each
+    launcher runs in the foreground; keep its terminal open.
+
+    ##### Start the A5 Decode Node
+
+    On Decode, save the following as `~/dsv41-pd/run_dp_template.sh`, beside
+    `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH` for the
+    Decode server.
+
+    ```bash
+    #!/usr/bin/env bash
+
+    # Arguments passed by launch_online_dp.py, in order:
+    # $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
+    # $2: API port for this rank (7100-7107).
+    # $3: Global DP size of this role's group (8 for DP8).
+    # $4: Global DP rank in this role's group (0-7 for DP8).
+    # $5: IP address of this role's DP coordinator.
+    # $6: DP coordinator RPC port (12321).
+    # $7: Number of NPUs per DP rank, or TP size (1).
+
+    nic_name="<NETWORK_INTERFACE>"
+    local_ip="<LOCAL_IP>"
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_HOST_IP="$local_ip"
+    export HCCL_IF_IP="$local_ip"
+    export GLOO_SOCKET_IFNAME="$nic_name"
+    export TP_SOCKET_IFNAME="$nic_name"
+    export HCCL_SOCKET_IFNAME="$nic_name"
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export HCCL_BUFFSIZE=1600
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+    exec vllm serve "$MODEL_PATH" \
+        --host "$local_ip" \
+        --port "$2" \
+        --served-model-name dsv41 \
+        --data-parallel-size "$3" \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --enable-expert-parallel \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 1024 \
+        --max-num-seqs 64 \
+        --gpu-memory-utilization 0.92 \
+        --block-size 128 \
+        --quantization deepseek_v4_fp8 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --tokenizer-mode deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --trust-remote-code \
+        --enable-prefix-caching \
+        --no-swa-bounded-replay \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "multistream_engram_overlap": true,
+            "multistream_overlap_shared_expert": true,
+            "multistream_dsv4_dsa_overlap": true,
+            "combine_quant_mode": 4,
+            "scheduler_config": {
+                "recompute_scheduler_enable": true
+            }
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeHybridConnector",
+            "kv_role": "kv_consumer",
+            "kv_port": 27010,
+            "kv_connector_extra_config": {
+                "prefill": {
+                    "dp_size": 8,
+                    "tp_size": 1
+                },
+                "decode": {
+                    "dp_size": 8,
+                    "tp_size": 1
+                }
+            }
+        }'
+    ```
+
+    In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
+    `$2` is its API port (`7100` through `7107`), `$3` is the global DP size
+    (`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Decode
+    group's coordinator IP, `$6` is its DP RPC port (`12321`), and `$7` is
+    the TP size (`1`).
+
+    Start the eight Decode engines from their working directory:
+
+    ```bash
+    cd ~/dsv41-pd
+    dp_master_ip="<DECODE_DP_MASTER_IP>"
+
+    python3 launch_online_dp.py \
+        --dp-size 8 \
+        --tp-size 1 \
+        --dp-size-local 8 \
+        --dp-rank-start 0 \
+        --dp-address "$dp_master_ip" \
+        --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    ##### Start the A5 Prefill Node
+
+    On Prefill, save the following as `~/dsv41-pd/run_dp_template.sh`, beside
+    its own `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH`
+    for the Prefill server.
+
+    ```bash
+    #!/usr/bin/env bash
+
+    # Arguments passed by launch_online_dp.py, in order:
+    # $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
+    # $2: API port for this rank (7100-7107).
+    # $3: Global DP size of this role's group (8 for DP8).
+    # $4: Global DP rank in this role's group (0-7 for DP8).
+    # $5: IP address of this role's DP coordinator.
+    # $6: DP coordinator RPC port (12321).
+    # $7: Number of NPUs per DP rank, or TP size (1).
+
+    nic_name="<NETWORK_INTERFACE>"
+    local_ip="<LOCAL_IP>"
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_HOST_IP="$local_ip"
+    export HCCL_IF_IP="$local_ip"
+    export GLOO_SOCKET_IFNAME="$nic_name"
+    export TP_SOCKET_IFNAME="$nic_name"
+    export HCCL_SOCKET_IFNAME="$nic_name"
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export HCCL_BUFFSIZE=1024
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+    exec vllm serve "$MODEL_PATH" \
+        --host "$local_ip" \
+        --port "$2" \
+        --served-model-name dsv41 \
+        --data-parallel-size "$3" \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --enable-expert-parallel \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 5120 \
+        --max-num-seqs 16 \
+        --gpu-memory-utilization 0.90 \
+        --block-size 128 \
+        --quantization deepseek_v4_fp8 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --tokenizer-mode deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --trust-remote-code \
+        --enable-prefix-caching \
+        --swa-bounded-replay \
+        --enforce-eager \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "multistream_engram_overlap": false,
+            "multistream_overlap_shared_expert": true,
+            "multistream_dsv4_dsa_overlap": true
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeHybridConnector",
+            "kv_role": "kv_producer",
+            "kv_port": 26010,
+            "kv_connector_extra_config": {
+                "prefill": {
+                    "dp_size": 8,
+                    "tp_size": 1
+                },
+                "decode": {
+                    "dp_size": 8,
+                    "tp_size": 1
+                }
+            }
+        }'
+    ```
+
+    In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
+    `$2` is its API port (`7100` through `7107`), `$3` is the global DP size
+    (`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Prefill
+    group's coordinator IP, `$6` is its DP RPC port (`12321`), and `$7` is
+    the TP size (`1`).
+
+    `kv_port` is a base port; the connector adds the DP/TP/PCP rank offsets.
+    Keep the same base port on every rank of the same role. The `prefill`
+    and `decode` topology values must match on both nodes.
+
+    Start the eight Prefill engines from their working directory:
+
+    ```bash
+    cd ~/dsv41-pd
+    dp_master_ip="<PREFILL_DP_MASTER_IP>"
+
+    python3 launch_online_dp.py \
+        --dp-size 8 \
+        --tp-size 1 \
+        --dp-size-local 8 \
+        --dp-rank-start 0 \
+        --dp-address "$dp_master_ip" \
+        --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    ##### Deploy the A5 PD Proxy
+
+    Each Prefill and Decode engine reports `Application startup complete.` in
+    its terminal when startup is complete. Once all engines are ready, start
+    the proxy inside the A5 container in a separate terminal on a node that
+    can reach both servers. The image contains the non-layerwise proxy used
+    by the Hybrid Connector. Register all eight endpoints from each role:
+
+    ```bash
+    P_IP="<PREFILL_IP>"
+    D_IP="<DECODE_IP>"
+
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 \
+        --port 1999 \
+        --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
+        --prefiller-ports 7100 7101 7102 7103 7104 7105 7106 7107 \
+        --decoder-hosts "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" "$D_IP" \
+        --decoder-ports 7100 7101 7102 7103 7104 7105 7106 7107
+    ```
+
+    Check `GET /health` on every backend API endpoint (`7100-7107` on each
+    node) before sending requests through the proxy. The proxy's
+    `/healthcheck` reports configured instance counts, not backend readiness.
+    Verify the proxy and model entry with:
+
+    ```bash
+    export SERVICE_URL="http://<PROXY_IP>:1999"
+
+    curl -sS -o /dev/null -w 'HTTP %{http_code}\n' "$SERVICE_URL/healthcheck"
+    curl -sS "$SERVICE_URL/v1/models"
+    ```
+
+    The health request should return `HTTP 200`, and the model list should
+    contain `dsv41`. Reuse `SERVICE_URL` for the text request in
+    [Section 6.1](#61-text-request). Check the P/D logs for successful KV transfer.
+
+    ##### A5 Replay Configuration Notes
+
+    - On Prefill, enable local prefix caching and `--swa-bounded-replay`.
+      After a prefix hit, the engine reuses cached non-SWA blocks and
+      recomputes the trailing SWA window.
+    - On Decode, enable local prefix caching and set
+      `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
+      scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
+    - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
+      See [950DT recommended configurations](#950dt-recommended-configurations) for the sequence limits,
+      memory utilization, and execution mode for each role.
+    - Each launcher child starts one local DP engine. The templates therefore
+      pass `--data-parallel-size-local 1`, while the launcher starts eight
+      children with `--dp-size-local 8`.
+
+    Verify generation and an actual Prefill prefix-cache hit on the selected
+    build. See the [Public FAQs](../../faqs.md) for startup and environment
+    troubleshooting.
+
+    ##### A5 Deployment Extensions
+
+    ###### A5 PCP Prefill (Experimental)
+
+    For long prompts, PCP can distribute one Prefill request across all eight
+    NPUs. Starting from the DP8 Prefill template above, make these changes:
+
+    | Setting | DP8 Prefill | PCP8 Prefill |
+    | ------- | ----------- | ------------ |
+    | DP / TP / PCP / EP | 8 / 1 / 1 / 8 | 1 / 1 / 8 / 8 |
+    | `--prefill-context-parallel-size` | 1 (default) | 8 |
+    | `--max-num-batched-tokens` | 5120 | 16384 |
+    | Visible devices per process | One NPU | All eight NPUs |
+    | Prefill API endpoints | 7100–7107 | 7100 |
+    | Connector `prefill.dp_size` on both roles | 8 | 1 |
+
+    Replace Prefill's `--additional-config` with the following configuration.
+    Keep eager execution and `--max-num-seqs 16` unchanged.
+
+    ```json
+    {
+        "enable_pcp_o_proj_weight_sharding": true
+    }
+    ```
+
+    Run the modified template once with all eight visible devices:
+
+    ```bash
+    P_IP="<PREFILL_IP>"
+    bash run_dp_template.sh "0,1,2,3,4,5,6,7" 7100 1 0 "$P_IP" 12321 1
+    ```
+
+    Register only Prefill port `7100` in the proxy. Decode keeps DP8 and its
+    existing startup command. Update its connector's `prefill.dp_size` to `1`.
+    For Memcache pooling, start from the pooled Prefill template in
+    [Section 5.3.5](#535-950dt-products-with-memcache-kv-cache-pool), increase its
+    batch limit from `4096` to `16384`, and set `prefill.dp_size` to `1` in
+    the nested `MooncakeHybridConnector` on both roles. Keep `use_layerwise=false`. See the [Context Parallel guide](../../user_guide/feature_guide/context_parallel.md)
+    for PCP details.
+
+    ###### A5 Decode with Wide Expert Parallelism
+
+    For higher Decode performance, evaluate a wider EP group across multiple
+    Decode servers. Two eight-NPU Decode servers can form DP16/TP1/EP16 while
+    Prefill remains DP8/TP1/EP8. Keep `--enable-expert-parallel` and TP1 in
+    the Decode template. Increasing global DP to 16 gives EP16. Retain its
+    batch limits, graph mode, DSpark, and other model settings as a starting point.
+
+    Verify [cross-node communication](../../getting_started/installation.md#installation-multi-node-interconnect)
+    first. Set the Decode template's local IP and network interface separately
+    on each Decode server. Both servers use the first Decode server's IP as
+    the DP master:
+
+    ```bash
+    D_DP_MASTER_IP="<FIRST_DECODE_IP>"
+    DP_RANK_START=0  # Set to 8 on the second Decode server.
+
+    python3 launch_online_dp.py \
+        --dp-size 16 \
+        --tp-size 1 \
+        --dp-size-local 8 \
+        --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$D_DP_MASTER_IP" \
+        --dp-rpc-port 12321 \
+        --vllm-start-port 7100
+    ```
+
+    Set `decode.dp_size` to `16` in the connector configuration on both
+    Prefill and Decode. Keep `prefill.dp_size=8` and `tp_size=1`. For Memcache,
+    change the same values in the nested `MooncakeHybridConnector`. Keep the
+    Decode KV base port at `27010`. Global DP ranks use `27010–27025`.
+    Register ports `7100–7107` from each Decode server in the proxy, for 16
+    Decode endpoints in total. Start both servers before waiting for readiness.
+    Recheck Decode latency and throughput for the target workload before
+    changing the batch limits.
 
 === "A3 series"
 
@@ -1018,6 +1629,9 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 ### 5.3 1P1D Deployment with Memcache KV Cache Pool
 
+For the 950DT deployment with embedded LocalServices, see
+[Section 5.3.5](#535-950dt-products-with-memcache-kv-cache-pool).
+
 This configuration extends the A3 1P1D deployment in [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a
 Memcache KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
 cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
@@ -1362,6 +1976,390 @@ Key pooling parameters:
 
 For Memcache configuration, capacity tuning, and troubleshooting, refer to the
 [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
+#### 5.3.5 950DT Products with Memcache KV Cache Pool
+
+This example adds a DRAM KV Cache Pool to the two-server DP8 Prefill / DP8
+Decode deployment in [A5 DP8 Prefill and DP8 Decode](#a5-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
+the same as ordinary PD deployment.
+
+`MultiConnector` combines `MooncakeHybridConnector` for P-to-D transfer with
+`AscendStoreConnector` for Memcache access. Prefill looks up, loads, and
+stores reusable prefixes; Decode receives KV from Prefill. DeepSeek-V4.1-Flash
+uses bulk pool access: set `use_layerwise` to `false` on both roles.
+
+Set `--max-num-batched-tokens` to `4096` on Prefill and disable local prefix
+caching so that repeated-prefix requests exercise the external pool. On
+Decode, use `1024` batch tokens and enable local prefix caching.
+
+##### 5.3.5.1 Prepare Memcache
+
+On both nodes, create a separate working directory for the pooled deployment:
+
+```bash
+mkdir -p ~/dsv41-memcache
+cd ~/dsv41-memcache
+```
+
+Save `launch_online_dp.py` from
+[Prepare the A5 DP Launcher](#prepare-the-a5-dp-launcher) in this directory on each
+node. It uses the same arguments described there. Save the corresponding
+pooled `run_dp_template.sh` below beside it and run all launcher commands
+from this directory, because the launcher opens `./run_dp_template.sh`.
+
+Install `memfabric-hybrid` and `memcache-hybrid` on both nodes using the
+[Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+Use `device_urma` for Device UB, or `device_uboe` for UBOE.
+
+Create `meta.conf` on the MetaService node:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+ock.mmc.meta_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+ock.mmc.meta_service.metrics_url = http://<META_SERVICE_IP>:18000
+ock.mmc.log_level = error
+```
+
+Create `mmc-local.conf` on both Prefill and Decode nodes, using the same
+MetaService IP:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_urma
+ock.mmc.local_service.dram.size = 25GB
+ock.mmc.local_service.max.dram.size = 25GB
+ock.mmc.local_service.hbm.size = 0GB
+ock.mmc.local_service.max.hbm.size = 0GB
+ock.mmc.local_service.storage.enabled = false
+ock.mmc.log_level = error
+```
+
+Each vLLM worker starts an embedded LocalService. `dram.size` is the DRAM
+contributed by each LocalService. With eight workers per node, `25GB`
+reserves about 200 GiB per node, or 400 GiB across the two servers.
+`max.dram.size` must be at least the largest `dram.size` contributed by any
+LocalService; it does not limit the total pool capacity. Adjust both values
+to the host memory available after Engram offloading and model loading.
+`world_size` is the maximum number of LocalServices in the pool, not the DP
+size. No standalone LocalService is needed for this configuration.
+
+Start one MetaService before starting vLLM:
+
+```bash
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export MMC_META_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/meta.conf"
+python3 -c 'from memcache_hybrid import MetaService; MetaService.main()'
+```
+
+Keep MetaService running in its terminal. After MetaService is ready,
+Prefill and Decode can start concurrently in separate terminals.
+
+##### 5.3.5.2 Start the Decode Node with Pooling
+
+On Decode, save the following as `~/dsv41-memcache/run_dp_template.sh`,
+beside `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH`
+for this node. Set `MEMCACHE_INSTALL_PATH` to the `Location` reported by
+`pip show memcache_hybrid`, and `MEMCACHE_CONFIG_DIR` to the directory
+containing this node's `mmc-local.conf`.
+
+```bash
+#!/usr/bin/env bash
+
+# Arguments passed by launch_online_dp.py, in order:
+# $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
+# $2: API port for this rank (7100-7107).
+# $3: Global DP size of this role's group (8 for DP8).
+# $4: Global DP rank in this role's group (0-7 for DP8).
+# $5: IP address of this role's DP coordinator.
+# $6: DP coordinator RPC port (12321).
+# $7: Number of NPUs per DP rank, or TP size (1).
+
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<LOCAL_IP>"
+# Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+MODEL_PATH="<YOUR_MODEL_PATH>"
+
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_HOST_IP="$local_ip"
+export HCCL_IF_IP="$local_ip"
+export GLOO_SOCKET_IFNAME="$nic_name"
+export TP_SOCKET_IFNAME="$nic_name"
+export HCCL_SOCKET_IFNAME="$nic_name"
+export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+export HCCL_BUFFSIZE=1600
+export HCCL_CONNECT_TIMEOUT=1200
+export HCCL_EXEC_TIMEOUT=2040
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ASCEND_RT_VISIBLE_DEVICES="$1"
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+exec vllm serve "$MODEL_PATH" \
+    --host "$local_ip" \
+    --port "$2" \
+    --served-model-name dsv41 \
+    --data-parallel-size "$3" \
+    --data-parallel-size-local 1 \
+    --data-parallel-rank "$4" \
+    --data-parallel-address "$5" \
+    --data-parallel-rpc-port "$6" \
+    --tensor-parallel-size "$7" \
+    --enable-expert-parallel \
+    --max-model-len 1048576 \
+    --max-num-batched-tokens 1024 \
+    --max-num-seqs 64 \
+    --gpu-memory-utilization 0.92 \
+    --block-size 128 \
+    --quantization deepseek_v4_fp8 \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+    --tokenizer-mode deepseek_v41 \
+    --tool-call-parser deepseek_v41 \
+    --reasoning-parser deepseek_v41 \
+    --enable-auto-tool-choice \
+    --trust-remote-code \
+    --enable-prefix-caching \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "multistream_engram_overlap": true,
+        "multistream_overlap_shared_expert": true,
+        "multistream_dsv4_dsa_overlap": true,
+        "combine_quant_mode": 4,
+        "scheduler_config": {
+            "recompute_scheduler_enable": true
+        }
+    }' \
+    --kv-transfer-config '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_consumer",
+        "kv_load_failure_policy": "fail",
+        "kv_connector_extra_config": {
+            "connectors": [
+                {
+                    "kv_connector": "MooncakeHybridConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_port": 27010,
+                    "kv_connector_extra_config": {
+                        "prefill": {
+                            "dp_size": 8,
+                            "tp_size": 1
+                        },
+                        "decode": {
+                            "dp_size": 8,
+                            "tp_size": 1
+                        }
+                    }
+                },
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": {
+                        "backend": "memcache",
+                        "lookup_rpc_port": "0",
+                        "use_layerwise": false
+                    }
+                }
+            ]
+        }
+    }'
+```
+
+In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
+`$2` is its API port (`7100` through `7107`), `$3` is the global DP size
+(`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Decode
+group's coordinator IP, `$6` is its DP RPC port (`12321`), and `$7` is
+the TP size (`1`).
+
+After MetaService is ready, start the eight Decode engines:
+
+```bash
+cd ~/dsv41-memcache
+dp_master_ip="<DECODE_DP_MASTER_IP>"
+
+python3 launch_online_dp.py \
+    --dp-size 8 \
+    --tp-size 1 \
+    --dp-size-local 8 \
+    --dp-rank-start 0 \
+    --dp-address "$dp_master_ip" \
+    --dp-rpc-port 12321 \
+    --vllm-start-port 7100
+```
+
+##### 5.3.5.3 Start the Prefill Node with Pooling
+
+On Prefill, save the following as `~/dsv41-memcache/run_dp_template.sh`,
+beside its own `launch_online_dp.py`. Set this node's network, model, and
+Memcache paths as described for Decode above. Both nodes must use the same
+MetaService endpoint in `mmc-local.conf`.
+
+```bash
+#!/usr/bin/env bash
+
+# Arguments passed by launch_online_dp.py, in order:
+# $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
+# $2: API port for this rank (7100-7107).
+# $3: Global DP size of this role's group (8 for DP8).
+# $4: Global DP rank in this role's group (0-7 for DP8).
+# $5: IP address of this role's DP coordinator.
+# $6: DP coordinator RPC port (12321).
+# $7: Number of NPUs per DP rank, or TP size (1).
+
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<LOCAL_IP>"
+# Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+MODEL_PATH="<YOUR_MODEL_PATH>"
+
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_HOST_IP="$local_ip"
+export HCCL_IF_IP="$local_ip"
+export GLOO_SOCKET_IFNAME="$nic_name"
+export TP_SOCKET_IFNAME="$nic_name"
+export HCCL_SOCKET_IFNAME="$nic_name"
+export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+export HCCL_BUFFSIZE=1024
+export HCCL_CONNECT_TIMEOUT=1200
+export HCCL_EXEC_TIMEOUT=2040
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ASCEND_RT_VISIBLE_DEVICES="$1"
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+exec vllm serve "$MODEL_PATH" \
+    --host "$local_ip" \
+    --port "$2" \
+    --served-model-name dsv41 \
+    --data-parallel-size "$3" \
+    --data-parallel-size-local 1 \
+    --data-parallel-rank "$4" \
+    --data-parallel-address "$5" \
+    --data-parallel-rpc-port "$6" \
+    --tensor-parallel-size "$7" \
+    --enable-expert-parallel \
+    --max-model-len 1048576 \
+    --max-num-batched-tokens 4096 \
+    --max-num-seqs 16 \
+    --gpu-memory-utilization 0.90 \
+    --block-size 128 \
+    --quantization deepseek_v4_fp8 \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+    --tokenizer-mode deepseek_v41 \
+    --tool-call-parser deepseek_v41 \
+    --reasoning-parser deepseek_v41 \
+    --enable-auto-tool-choice \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --enforce-eager \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "multistream_engram_overlap": false,
+        "multistream_overlap_shared_expert": true,
+        "multistream_dsv4_dsa_overlap": true
+    }' \
+    --kv-transfer-config '{
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_producer",
+        "kv_load_failure_policy": "fail",
+        "kv_connector_extra_config": {
+            "connectors": [
+                {
+                    "kv_connector": "MooncakeHybridConnector",
+                    "kv_role": "kv_producer",
+                    "kv_port": 26010,
+                    "kv_connector_extra_config": {
+                        "prefill": {
+                            "dp_size": 8,
+                            "tp_size": 1
+                        },
+                        "decode": {
+                            "dp_size": 8,
+                            "tp_size": 1
+                        }
+                    }
+                },
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_role": "kv_producer",
+                    "kv_connector_extra_config": {
+                        "backend": "memcache",
+                        "lookup_rpc_port": "0",
+                        "use_layerwise": false
+                    }
+                }
+            ]
+        }
+    }'
+```
+
+In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
+`$2` is its API port (`7100` through `7107`), `$3` is the global DP size
+(`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Prefill
+group's coordinator IP, `$6` is its DP RPC port (`12321`), and `$7` is
+the TP size (`1`).
+
+After MetaService is ready, start the eight Prefill engines:
+
+```bash
+cd ~/dsv41-memcache
+dp_master_ip="<PREFILL_DP_MASTER_IP>"
+
+python3 launch_online_dp.py \
+    --dp-size 8 \
+    --tp-size 1 \
+    --dp-size-local 8 \
+    --dp-rank-start 0 \
+    --dp-address "$dp_master_ip" \
+    --dp-rpc-port 12321 \
+    --vllm-start-port 7100
+```
+
+##### 5.3.5.4 Start the Proxy and Verify Pooling
+
+Each Prefill and Decode engine reports `Application startup complete.` in
+its terminal when startup is complete. Once all engines are ready, start
+the proxy from [Deploy the A5 PD Proxy](#deploy-the-a5-pd-proxy) with the same
+endpoints. Verify the service using [Section 5.6](#56-service-verification).
+Send a long prompt to populate the pool, then reuse its prefix with a
+different suffix.
+
+Check Prefill external prefix-cache hits and MetaService DRAM get hits:
+
+```bash
+P_IP="<PREFILL_IP>"
+META_IP="<META_SERVICE_IP>"
+
+for port in {7100..7107}; do
+    curl --noproxy '*' -fsS "http://$P_IP:$port/metrics" | \
+        grep -E 'external_prefix_cache_(hits|queries)_total'
+done
+curl --noproxy '*' -fsS "http://$META_IP:18000/metrics" | \
+    grep -E 'memcache_get_hits_dram_total'
+```
+
+Check all Prefill ranks because the proxy may
+route requests to different ranks. Confirm that external hit tokens and
+Memcache DRAM get hits increase, and that Prefill logs show a successful
+external load. Decode external hits also include P-to-D transfer, so they
+do not identify a DRAM pool hit by themselves.
 
 ### 5.4 1P1D Deployment with Mooncake KV Cache Pool
 
@@ -1710,16 +2708,36 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
 
 ### 5.6 Service Verification
 
-Set the endpoint for the selected deployment, then verify the health endpoint.
-Use `<A3_IP>` with port `8900` for A3 single-node colocated deployment,
-`<PROXY_IP>` with `<PROXY_PORT>` for A3 PD deployment, or `<A2_NODE0_IP>` with
-port `8000` for the retained A2 deployment.
+Use the host and port for your deployment to set `SERVICE_URL` in the HTTP example below.
+
+| Deployment | Host and port | `HEALTH_PATH` |
+| ---------- | ------------- | ------------- |
+| 950DT products single-node colocated | `<SERVICE_IP>:8000` | `health` |
+| A3 single-node colocated | `<A3_IP>:8900` | `health` |
+| 950DT products PD proxy | `<PROXY_IP>:1999` | `healthcheck` |
+| A3 PD proxy | `<PROXY_IP>:<PROXY_PORT>` | `healthcheck` |
+| A2 PD proxy | `<PROXY_IP>:2999` | `healthcheck` |
+| A2 multi-node colocated | `<A2_NODE0_IP>:8000` | `health` |
+
+The 950DT products proxy example uses port `1999`, and the A2 proxy example
+uses `2999`. For A3, set `PROXY_PORT` to the port chosen when starting its
+proxy. Use the configured proxy port in `SERVICE_URL`.
+
+The proxy's `/healthcheck` reports the configured Prefill and Decode instance
+counts. To check whether a backend is ready, send `GET /health` to its host
+and API port, for example `<PREFILL_NODE_IP>:7100` or `<DECODE_NODE_IP>:7100`.
+The backend API ports start at `7100` on A2, A3, and 950DT products.
+
+The following example checks a colocated service. For PD, use the proxy host and port
+with `healthcheck` from the table. Reuse `SERVICE_URL` for the requests
+in [Section 6](#6-functional-verification).
 
 ```shell
-export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
+export SERVICE_URL="http://<SERVICE_IP>:8000"
+export HEALTH_PATH=health
 
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
-  "$SERVICE_URL/health"
+  "$SERVICE_URL/$HEALTH_PATH"
 ```
 
 Expected output:
@@ -1731,36 +2749,35 @@ HTTP 200
 Then verify that the configured model is available:
 
 ```shell
-curl -sS "$SERVICE_URL/v1/models" | \
-  jq '{object, models: [.data[] | {id, object}]}'
+curl -sS "$SERVICE_URL/v1/models"
 ```
 
-The response must contain a model entry whose `id` matches the configured
-`--served-model-name`: `dsv41` for the A3 examples and `deepseek-v41` for the
-retained A2 example.
+The response must contain a model entry whose `id` is `dsv41`, matching
+`--served-model-name dsv41` in the serving examples.
 
 ## 6 Functional Verification
 
 ### 6.1 Text Request
 
-```shell
-export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
+Use `SERVICE_URL` from [Section 5.6](#56-service-verification). To set
+reasoning effort to an integer from 1 to 100, pass it through
+`chat_template_kwargs.reasoning_effort`. The following example uses `50`.
 
-curl -sS "$SERVICE_URL/v1/chat/completions" \
+```shell
+curl -sS -w '\nHTTP %{http_code}\n' "$SERVICE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "dsv41",
-    "messages": [{"role": "user", "content": "Who are you?"}],
+    "messages": [{"role": "user", "content": "What is 1 + 1? Answer briefly."}],
+    "chat_template_kwargs": {"reasoning_effort": 50},
     "temperature": 0,
-    "max_completion_tokens": 256
-  }' | jq -e '.choices[0].message.content | length > 0'
+    "max_completion_tokens": 1024
+  }'
 ```
 
-Expected output:
-
-```output
-true
-```
+Expected result: the service returns `HTTP 200` and a JSON response with
+the answer `2` in `choices[0].message.content`. With the reasoning parser
+enabled, `choices[0].message.reasoning` contains the reasoning text.
 
 ### 6.2 Image Request
 
@@ -1769,9 +2786,8 @@ Prefill, and send a multimodal request:
 
 ```shell
 export IMAGE_URL="<YOUR_IMAGE_URL>"
-export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
 
-curl -sS "$SERVICE_URL/v1/chat/completions" \
+curl -sS -w '\nHTTP %{http_code}\n' "$SERVICE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d "{
     \"model\": \"dsv41\",
@@ -1783,15 +2799,13 @@ curl -sS "$SERVICE_URL/v1/chat/completions" \
       ]
     }],
     \"temperature\": 0,
-    \"max_completion_tokens\": 256
-  }" | jq -e '.choices[0].message.content | length > 0'
+    \"max_completion_tokens\": 1024
+  }"
 ```
 
-Expected output:
-
-```output
-true
-```
+Expected result: the service returns `HTTP 200` and describes the supplied
+image in `choices[0].message.content`. Check that the description matches
+the image, including its main objects or scene.
 
 ## 7 Accuracy Evaluation
 
@@ -1809,6 +2823,49 @@ or the [vLLM benchmark guide](https://github.com/vllm-project/vllm/blob/84030bbe
 No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
+
+### 950DT Recommended Configurations
+
+Use the 950DT configurations below as starting points. Compare latency and
+throughput on your own workload before changing the limits. `max-num-seqs` and
+`max-num-batched-tokens` apply per DP engine. The recommended 1P1D layout
+uses eight DP ranks on each node; PCP and wider Decode EP groups are optional
+extensions in [A5 Deployment Extensions](#a5-deployment-extensions).
+
+| Deployment / role | NPUs | DP / TP / PCP | Max sequences | Batch tokens | Memory utilization | Execution |
+| ----------------- | ---- | ------------- | ------------- | ------------ | ------------------ | --------- |
+| Single-node colocated | 8 | 8 / 1 / 1 | 64 | 4096 | 0.90 | FULL_DECODE_ONLY |
+| 1P1D Prefill | 8 | 8 / 1 / 1 | 16 | 5120 | 0.90 | Eager |
+| 1P1D Decode | 8 | 8 / 1 / 1 | 64 | 1024 | 0.92 | FULL_DECODE_ONLY |
+
+These configurations use DSpark with five speculative tokens and Engram
+host offloading. Ordinary 1P1D enables local prefix caching on both roles
+and SWA bounded replay on Prefill. The [Memcache example](#535-950dt-products-with-memcache-kv-cache-pool)
+uses `4096` batch tokens on Prefill with local prefix caching disabled to
+measure external hits. Decode uses `1024` in both examples.
+
+#### Workload-Specific Tuning
+
+When the workload changes, evaluate configurations with the tools in
+[Section 8](#8-performance-evaluation). Keep input and output lengths,
+image sizes, prefix cache hit rate, reasoning effort, and request
+concurrency the same when comparing results. Measure time to first token,
+time per output token, throughput, and NPU memory usage against the
+service's latency and capacity requirements.
+
+For 950DT products, [A5 Deployment Extensions](#a5-deployment-extensions) describes
+wider Decode EP groups for workloads that require higher Decode performance
+and experimental PCP Prefill for long prompts. For workloads with repeated
+prefixes, keep Prefill local prefix caching enabled and verify its actual hit
+rate. To reuse prefixes across ranks or servers, evaluate the
+[950DT Memcache KV Cache Pool](#535-950dt-products-with-memcache-kv-cache-pool).
+The pooling verification example disables local caching to expose external
+pool hits; this is separate from the ordinary PD performance configuration.
+
+For general tuning methods, refer to the
+[Performance Tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+
+### A3 Deployment Configurations
 
 The values in [Section 5.1](#51-single-node-colocated-deployment) and [Section 5.2](#52-1p1d-pd-disaggregated-deployment) are starting points rather than globally
 optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
