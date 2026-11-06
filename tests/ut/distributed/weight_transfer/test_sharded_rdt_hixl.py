@@ -4,15 +4,51 @@ import ast
 import importlib.util
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
 MODULE_DIR = ROOT / "vllm_ascend/distributed/weight_transfer"
 ALIGNMENT = 2 << 20
+
+
+def test_shared_wrapper_maps_upstream_event_and_stream_factories():
+    path = ROOT / "vllm_ascend/worker/v2/utils.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    wrapper = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "torch_cuda_wrapper"
+    )
+    # Execute the real wrapper in isolation from graph/compiler imports.
+    torch = MagicMock()
+    namespace: dict[str, Any] = {
+        "contextmanager": contextmanager,
+        "torch": torch,
+        **{
+            name: MagicMock()
+            for name in (
+                "UpdatableGraph",
+                "torch_npu_graph_wrapper",
+                "breakable_cudagraph",
+                "weak_ref_tensor",
+                "weak_ref_tensors",
+                "logger",
+            )
+        },
+    }
+    exec(compile(ast.Module(body=[wrapper], type_ignores=[]), str(path), "exec"), namespace)
+    with namespace["torch_cuda_wrapper"]():
+        assert torch.Event is torch.npu.Event
+        assert torch.cuda.Event is torch.npu.Event
+        assert torch.cuda.Stream is torch.npu.Stream
+        assert torch.cuda.stream is torch.npu.stream
+        assert torch.cuda.current_stream is torch.npu.current_stream
+    # Existing wrapper semantics are process-wide, including after exit.
+    assert torch.Event is torch.npu.Event
 
 
 def load_file(name, path):
