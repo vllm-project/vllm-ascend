@@ -349,6 +349,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
                     HardwareCapability.GDN_COMPATIBILITY,
                     HardwareCapability.IRQ_CPU_RESERVATION,
+                    HardwareCapability.NPU_TOP_K_TOP_P,
                     HardwareCapability.RC_DEVICE_DISCOVERY,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
                 }
