@@ -1,0 +1,4 @@
+pr: 21191
+entries:
+  - category: performance
+    text: Removed an unused query-boundary host-to-device copy from the default FIA attention metadata path, including merged MTP draft decode graph capture.
