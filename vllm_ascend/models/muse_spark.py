@@ -7,8 +7,11 @@ vLLM owns the Muse Spark configuration, weight mapping and decoder structure
 the smaller of the two vendor stacks, and replaces each piece that only runs
 on CUDA or ROCm with its PyTorch reference:
 
-* RMSNorm: the upstream module calls a CUDA-tuned Triton kernel for every
-  contiguous input, so every Muse Spark norm is switched to ``forward_native``.
+* RMSNorm: upstream's fused Triton kernel is kept, because its one
+  CUDA-specific line is behind a ``tl.constexpr`` that is False off CUDA.
+  ``VLLM_ASCEND_MUSE_SPARK_FUSED_NORM=0`` falls back to ``forward_native``.
+  The two kernels that fold the residual as well stay off: upstream gates
+  those on ``Tensor.is_cuda``.
 * QK-norm and RoPE: upstream rotates through ``RotaryEmbedding.forward_cuda``
   and can insert K/V from a ROCm kernel. Here QK-norm and RoPE run in fp32
   through ``forward_native`` and round once, as the upstream kernel does, and
@@ -77,6 +80,7 @@ from vllm.models.muse_spark.common.omni import (
     register_omni_processor,
 )
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -90,27 +94,47 @@ ROUTER_SCORE_DIVISION_EPS = 1e-15
 ATTENTION_OUTPUT_GATE_ACTIVATION = "sigmoid"
 
 
-class _NativeRMSNormMixin:
-    """Always take the PyTorch reference path of a Muse Spark RMSNorm."""
+class _AscendRMSNormMixin:
+    """Let a Muse Spark RMSNorm take the fused kernel, or the reference on demand.
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        out_dtype: torch.dtype | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(x, residual, out_dtype)  # type: ignore[attr-defined]
+    Upstream's ``forward`` reaches for ``fused_rmsnorm_fwd``, and that kernel
+    already carries the whole contract: fp32 accumulation, ``gain_center`` for
+    the zero-centered gammas, ``input_scale`` for the weight-first variant, and
+    one rounding to ``out_dtype``. Its only CUDA-specific line,
+    ``tl.extra.cuda.gdc_wait()``, sits behind a ``USE_PDL`` ``tl.constexpr``
+    that its launcher sets from ``current_platform.is_cuda()``, so on Ascend
+    the branch never reaches codegen and the rest is plain Triton.
+
+    Nothing else about it is CUDA-only, so the gate is only which one is
+    faster, and that is measured per hardware rather than asserted here:
+    ``VLLM_ASCEND_MUSE_SPARK_FUSED_NORM=0`` restores the reference path without
+    a rebuild. The reference costs roughly nine elementwise kernels per norm,
+    and this model runs six or seven norms in each of 62 layers; a batch-1
+    decode step reads 4.3GiB a card, which the HBM serves in single-digit
+    milliseconds, so at low concurrency the launches are the step, not the
+    bytes.
+
+    Only the single-norm kernel is in reach either way. The two kernels that
+    also fold the residual, ``fused_norm_residual_norm_fwd`` and the
+    ``residual_stream`` form of ``fused_rmsnorm_fwd``, are gated upstream on
+    ``Tensor.is_cuda``, which is False for an NPU tensor whatever this returns.
+    Those two fall back to a sequence that ends in this norm, so the kernel
+    here still serves them; lifting the gate itself is an upstream change.
+    """
 
     def supports_fused_kernel(self, x: torch.Tensor) -> bool:
-        # Also read by the fused residual boundaries, which then fall back too.
-        return False
+        if not envs_ascend.VLLM_ASCEND_MUSE_SPARK_FUSED_NORM:
+            # Upstream's forward then takes forward_native, as do the fused
+            # residual boundaries that ask this before reaching for a kernel.
+            return False
+        return super().supports_fused_kernel(x)  # type: ignore[misc]
 
 
-class AscendMuseSpark1xRMSNorm(_NativeRMSNormMixin, MuseSpark1xRMSNorm):
+class AscendMuseSpark1xRMSNorm(_AscendRMSNormMixin, MuseSpark1xRMSNorm):
     pass
 
 
-class AscendMuseSpark1xRMSNormWithInputScale(_NativeRMSNormMixin, MuseSpark1xRMSNormWithInputScale):
+class AscendMuseSpark1xRMSNormWithInputScale(_AscendRMSNormMixin, MuseSpark1xRMSNormWithInputScale):
     pass
 
 

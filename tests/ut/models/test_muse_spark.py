@@ -7,6 +7,7 @@ on NPU lives in ``tests/e2e/pull_request/one_card/test_muse_spark.py``.
 """
 
 import abc
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -361,7 +362,16 @@ class _Container(nn.Module):
         self.scaled_norm = MuseSpark1xRMSNormWithInputScale(HEAD_DIM, eps=EPS, has_weight=True)
 
 
-def test_adopt_ascend_modules_moves_norms_to_the_torch_reference():
+def _adopted_container() -> _Container:
+    container = _Container()
+    with torch.no_grad():
+        container.norm.weight.normal_()
+        container.scaled_norm.weight.normal_()
+    muse_spark.adopt_ascend_modules(container)
+    return container
+
+
+def test_adopt_ascend_modules_moves_norms_onto_the_ascend_classes():
     container = _Container()
     with torch.no_grad():
         container.norm.weight.normal_()
@@ -372,12 +382,51 @@ def test_adopt_ascend_modules_moves_norms_to_the_torch_reference():
 
     assert type(container.norm) is muse_spark.AscendMuseSpark1xRMSNorm
     assert type(container.scaled_norm) is muse_spark.AscendMuseSpark1xRMSNormWithInputScale
+    # The subclasses add no state, so the switch keeps the loaded parameters.
     assert (container.norm.weight, container.scaled_norm.weight) == weights
+
+
+def test_the_norms_take_the_fused_kernel_by_default():
+    container = _adopted_container()
     x = torch.randn(NUM_TOKENS, HEAD_DIM)
-    with patch.object(upstream_layers, "fused_rmsnorm_fwd", side_effect=AssertionError("fused kernel called")):
+    sentinel = torch.zeros(NUM_TOKENS, HEAD_DIM)
+
+    with patch.object(upstream_layers, "fused_rmsnorm_fwd", return_value=sentinel) as fused:
+        for norm in (container.norm, container.scaled_norm):
+            assert norm.supports_fused_kernel(x)
+            assert norm(x) is sentinel
+    assert fused.call_count == 2
+
+
+def test_the_env_var_restores_the_reference_path():
+    container = _adopted_container()
+    x = torch.randn(NUM_TOKENS, HEAD_DIM)
+
+    # The env module re-reads os.environ on every attribute access, so this is
+    # patched rather than the module attribute: patching the attribute would
+    # leave a real one behind that shadows the lazy lookup for later tests.
+    with (
+        patch.dict(os.environ, {"VLLM_ASCEND_MUSE_SPARK_FUSED_NORM": "0"}),
+        patch.object(upstream_layers, "fused_rmsnorm_fwd", side_effect=AssertionError("fused kernel called")),
+    ):
         for norm in (container.norm, container.scaled_norm):
             assert not norm.supports_fused_kernel(x)
             torch.testing.assert_close(norm(x), norm.forward_native(x))
+
+
+def test_a_residual_takes_the_reference_path_whatever_the_flag():
+    # Upstream's forward only reaches for a kernel when residual is None, and
+    # the two kernels that fold the residual are gated on Tensor.is_cuda.
+    container = _adopted_container()
+    x = torch.randn(NUM_TOKENS, HEAD_DIM)
+    residual = torch.randn(NUM_TOKENS, HEAD_DIM)
+
+    with patch.object(upstream_layers, "fused_rmsnorm_fwd", side_effect=AssertionError("fused kernel called")):
+        for norm in (container.norm, container.scaled_norm):
+            out, carried = norm(x, residual)
+            expected_out, expected_carried = norm.forward_native(x, residual)
+            torch.testing.assert_close(out, expected_out)
+            torch.testing.assert_close(carried, expected_carried)
 
 
 def _attention(rotary_emb=None) -> muse_spark.AscendMuseSpark1xAttention:
