@@ -136,10 +136,12 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
             index_k_source_prefix=None,
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
+        self.role = self.v41_impl.role
         context = kwargs["vllm_config"].compilation_config.static_forward_context
         context[self.v41_layer_name] = self
 
     forward = DeepseekV41Attention.forward
+    forward_sp = DeepseekV41Attention.forward_sp
 
 
 class DeepseekV41DSparkDecoderLayer(DeepseekV41DecoderLayer):

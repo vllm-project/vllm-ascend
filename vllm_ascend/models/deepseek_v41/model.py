@@ -97,6 +97,7 @@ from .engram.embedding import (
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
+from .projected_sp import projected_sp_supported
 
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
@@ -768,6 +769,11 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         output = torch.empty(0, dtype=hidden_states.dtype, device=hidden_states.device)
         torch.ops.vllm.dsa_v41_write_kv(hidden_states, output, self.v41_layer_name)
 
+    def forward_sp(self, positions, hidden_states):
+        output = hidden_states.new_empty((positions.shape[0], self.dim))
+        torch.ops.vllm.dsa_v41_forward_sp(hidden_states, output, self.v41_layer_name)
+        return output
+
 
 class DeepseekV41DecoderLayer(nn.Module):
     """V4.1 block with the checkpoint's delayed mHC coefficient handoff."""
@@ -799,6 +805,14 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
+        ascend_config = get_ascend_config()
+        self.projected_sp_min_tokens = ascend_config.dsv41_projected_sp_min_tokens
+        self.projected_sp_enabled = projected_sp_supported(
+            vllm_config,
+            ascend_config,
+            is_draft_layer=is_draft_layer,
+            batch_invariant=envs.VLLM_BATCH_INVARIANT,
+        )
 
         attn_cls = self.attention_cls
 
@@ -913,9 +927,16 @@ class DeepseekV41DecoderLayer(nn.Module):
             pre_mix,
         )
         x = self.input_layernorm(x)
-        if use_sequence_parallel:
-            x = sp_all_gather(x)[: positions.shape[0]]
-        x = self.self_attn(positions, x, llama_4_scaling)
+        if (
+            use_sequence_parallel
+            and getattr(self, "projected_sp_enabled", False)
+            and positions.shape[0] >= self.projected_sp_min_tokens
+        ):
+            x = self.self_attn.forward_sp(positions, x)
+        else:
+            if use_sequence_parallel:
+                x = sp_all_gather(x)[: positions.shape[0]]
+            x = self.self_attn(positions, x, llama_4_scaling)
         if use_sequence_parallel:
             x = sp_reduce_scatter(x)
         hidden_states = self.hc_post(x, residual, attn_post, attn_comb)

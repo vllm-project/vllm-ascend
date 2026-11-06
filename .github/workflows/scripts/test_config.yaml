@@ -47,6 +47,7 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
+    - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -79,6 +80,7 @@ skip_tests:
 # 560T labels (``linux-aarch64-a3-800i-N``); the files themselves stay in
 # their normal directory-based partitions.
 accuracy_tests:
+  - tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py
@@ -109,6 +111,9 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
+  tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
+    default: a3-2
   # Run the TP=1 KV pool test on the smallest available A3 runner.
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2

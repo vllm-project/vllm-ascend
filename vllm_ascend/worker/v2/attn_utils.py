@@ -574,6 +574,7 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        v41_prefill_override = "is_prefilling" in common_attn_metadata_extra_kwargs
         common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
             "is_prefilling",
             is_prefilling,
@@ -657,11 +658,19 @@ def build_attn_metadata(
                 if formatted_slot_mappings is not None:
                     attn_metadata_extra_kwargs["formatted_slot_mapping"] = formatted_slot_mappings[i]
             elif is_v41_builder:
+                # Only query overrides affect SMLA; unrelated model-specific
+                # fields must not disable sharing of batch coordinates or RoPE.
+                smla_override = bool(
+                    {"replay_start", "replay_max_seq_len", "replay_seq_lens", "ori_sparse_indices", "num_query_heads"}
+                    & attn_metadata_extra_kwargs.keys()
+                )
                 attn_metadata_extra_kwargs.update(
                     num_actual_reqs=num_actual_reqs,
                     skip_ring_state_update=skip_ring_state_update,
                     common_v41_metadata=common_v41_metadata,
                     common_v41_batch_metadata=common_v41_batch_metadata,
+                    v41_prefill_override=v41_prefill_override,
+                    v41_smla_override=smla_override,
                     # Upstream capture prepares metadata with runtime mode
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
                     # branches in the graph even for a short dummy sequence.
@@ -1022,7 +1031,7 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
-    if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+    if not supports_component_major_mla_pd(vllm_config):
         return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
@@ -1042,6 +1051,8 @@ def _uses_single_raw_mla_cache(
         # The external reader retains its fused-cache contract, including
         # DCP. Native FIA continues to follow the dependency's exclusions.
         return True
+    if enable_sfa(vllm_config):
+        return False
     return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 

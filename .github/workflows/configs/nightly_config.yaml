@@ -119,7 +119,6 @@ a3:
         config_file_path: MiniMax-M3-w8a8-PP-prefix-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/MiniMax
         size: 3
-
   double_node:
     test_config:
       - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function
@@ -129,10 +128,6 @@ a3:
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/Kimi
-        size: 2
-      - name: GLM-5.3-Flash-W8A8-130k-PD
-        config_file_path: GLM-5.3-Flash-W8A8-130k-PD.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
         size: 2
       - name: multi-node-GLM-5.2-w8a8-A3
         config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
@@ -229,14 +224,6 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8C8-SFA-DCP.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
-      - name: glm-5.2-w4a8-dspark
-        os: linux-aarch64-a3-800i-16
-        config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
-      - name: glm-5.2-w4a8-mtp
-        os: linux-aarch64-a3-800i-16
-        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
       - name: glm-5.2-w4a8-dspark-v2
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml
@@ -317,29 +304,41 @@ a3-560t:
         config_base_path: tests/e2e/cases/models/configs/Qwen
 
 a5:
-#   multi_node:
-#     test_config:
-#       - name: Qwen3-235B-W8A8-EPLB
-#         size: 2
-#         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-#   single_node:
-#     test_config:
-#       - name: Qwen3.5-397B-A17B-w4a8-mtp
-#         os: linux-aarch64-a5-8
-#         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
+  multi_node:
+    test_config:
+      - name: DeepSeek-V4.1-Flash-A5-PD
+        config_file_path: DeepSeek-V4.1-Flash-A5-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 2
+      - name: GLM-5.3-Flash-W8A8-MXFP8-A5-PD
+        config_file_path: GLM-5.3-Flash-W8A8-MXFP8-A5-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
+      - name: Qwen3.5-397B-A17B-FA-W8A8C8-A5-PD
+        config_file_path: Qwen3.5-397B-A17B-FA-W8A8C8-A5-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/Qwen
+        size: 2
+      - name: glm-5.2-w8a8c8-mtp-a5
+        size: 2
+        config_file_path: GLM-5.2-W8A8C8-MTP-A5-dual-nodes.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
   single_node:
     test_config:
+      - name: DeepSeek-V4-Flash-0731-A5-PD
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek-V4-Flash-0731-A5-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: qwen3.6-27B-w8a8c8-A5
+        os: linux-aarch64-a5-8
+        config_file_path: qwen3.6-27B-w8a8c8-A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Qwen
+      - name: qwen3.6-35B-W4A8-A5
+        os: linux-aarch64-a5-8
+        config_file_path: qwen3.6-35B-W4A8-A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Qwen
       - name: singlecard-ops-a5
         os: linux-aarch64-a5-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
-      - name: Qwen3_235b_w8a8_A5
-        os: linux-aarch64-a5-8
-        config_file_path: Qwen3_235b_w8a8_A5.yaml
-        config_base_path: tests/e2e/cases/models/configs/Qwen
-      - name: DeepSeek_V31_W4A4C8_A5
-        os: linux-aarch64-a5-8
-        config_file_path: DeepSeek_V31_W4A4C8_A5.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
       - name: Qwen3_32b_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_32b_w8a8_A5.yaml
@@ -347,6 +346,10 @@ a5:
       - name: GLM5_1_W4A4_A5
         os: linux-aarch64-a5-8
         config_file_path: GLM5_1_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+      - name: glm-5.2-w4a4c8-dspark-gqa-a5-v2
+        os: linux-aarch64-a5-8
+        config_file_path: GLM-5.2-W4A4C8-DSpark-GQA-A5-V2.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
       - name: Qwen3_6_27b_A5
         os: linux-aarch64-a5-8
@@ -364,10 +367,6 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V4_Flash_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
-      - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
-        os: linux-aarch64-a5-8
-        config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
       - name: Gemma4_26B_A4B_W4A4_A5
         os: linux-aarch64-a5-8
         config_file_path: Gemma4_26B_A4B_W4A4_A5.yaml
@@ -380,3 +379,7 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V4_Flash_K15_dspark_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: Step3_7_Flash_W8A8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Step3_7_Flash_W8A8_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Step

@@ -6,12 +6,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.compilation import backends
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     MLACommonMetadataBuilder,
+    plan_mla_context_chunks,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader, get_offloader
@@ -702,6 +704,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         *,
         chunk_plan_lens_cpu: torch.Tensor | None = None,
         chunk_workspace_size: int | None = None,
+        chunk_request_indices: list[int] | None = None,
+        chunk_alignment: int | None = None,
     ):
         if not self.chunked_prefill_enabled:
             return None
@@ -711,32 +715,38 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         reqs_start = self.num_decodes  # prefill_start
 
         self.context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
-        # PCP-local fragments already carry their own computed lengths. A shared
-        # plan changes only the workspace budget and the number of iterations.
+        # PCP plans use global requests; map them back to local attention rows.
         chunk_plan_lens = self.context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
-        max_context_len_cpu = chunk_plan_lens.max().item()
-        if not max_context_len_cpu > 0:
+        if not torch.any(chunk_plan_lens > 0):
             return None
-        num_prefills_with_context_cpu = (chunk_plan_lens > 0).sum().item()
         workspace_size = self.chunked_prefill_workspace_size if chunk_workspace_size is None else chunk_workspace_size
-        self.max_context_chunk = workspace_size // num_prefills_with_context_cpu
-        self.max_context_chunk = round_down(self.max_context_chunk, self.block_size)
-
+        alignment = self.block_size if chunk_alignment is None else chunk_alignment
+        self.max_context_chunk = round_down(workspace_size, alignment)
         if self.max_context_chunk <= 0:
             raise ValueError(
-                "MLA chunked prefill workspace is too small for one aligned chunk per request: "
-                f"workspace_size={workspace_size}, "
-                f"num_prefills_with_context={num_prefills_with_context_cpu}, "
-                f"block_size={self.block_size}, "
-                f"minimum_workspace_size={num_prefills_with_context_cpu * self.block_size}."
+                f"MLA chunked prefill workspace ({workspace_size}) must fit one aligned chunk ({alignment})."
             )
-        self.num_chunks = cdiv(max_context_len_cpu, self.max_context_chunk)
-        chunk_starts = (
-            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, self.num_prefills)
-            * self.max_context_chunk
+        # Charge each request's padded tail to the budget, including DCP padding.
+        plans = plan_mla_context_chunks(
+            chunk_plan_lens.tolist(),
+            workspace_size,
+            self.max_context_chunk,
+            alignment,
+            lambda rows: rows if chunk_alignment is None else cdiv(rows, alignment) * alignment,
         )
-        chunk_ends = torch.min(self.context_lens_cpu.unsqueeze(0), chunk_starts + self.max_context_chunk)
-        self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+        self.num_chunks = len(plans)
+        self.context_plan_starts = torch.zeros((self.num_chunks, len(chunk_plan_lens)), dtype=torch.int32)
+        self.context_plan_lens = torch.zeros_like(self.context_plan_starts)
+        for index, plan in enumerate(plans):
+            rows = slice(plan.request_start, plan.request_end)
+            self.context_plan_starts[index, rows] = torch.tensor(plan.starts, dtype=torch.int32)
+            self.context_plan_lens[index, rows] = torch.tensor(plan.seq_lens, dtype=torch.int32)
+        indices = slice(None) if chunk_request_indices is None else chunk_request_indices
+        chunk_starts = self.context_plan_starts[:, indices]
+        chunk_lens = self.context_plan_lens[:, indices]
+        self.chunk_seq_lens = torch.minimum(
+            (self.context_lens_cpu.unsqueeze(0) - chunk_starts).clamp(min=0), chunk_lens
+        )
         self.cu_seq_lens_cpu = torch.zeros(self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True)
         torch.cumsum(self.chunk_seq_lens, dim=1, out=self.cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
         chunk_actual_seq_lengths_kv_list = [
@@ -1037,7 +1047,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
+        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
@@ -1084,7 +1094,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # History sees all Q heads in the DCP group; current uses local heads.
         if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
-        if not supports_component_major_mla_pd(config) or enable_sfa(config):
+        if not supports_component_major_mla_pd(config):
             return False
         return get_flashmla_ops() is not None
 
@@ -1398,7 +1408,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not isinstance(get_offloader(), NoopOffloader) or not self.supports_prolog_v3_writer():
             return
         config = self.vllm_config
-        if enable_sfa(config):
+        # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
+        if enable_sfa(config) and not self.use_flashmla:
             return
         if not config.use_v2_model_runner and (
             hasattr(config.model_config.hf_config, "compress_ratios")
@@ -2088,10 +2099,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.qk_head_dim,
                 )
                 weight_uq_qr = F.pad(weight_uq_qr, (0, 0, 0, self.head_padding))
+                # NZ conversion needs a materialized 2-D matrix rather than
+                # a view retaining the padded 3-D base storage layout.
                 weight_uq_qr = weight_uq_qr.view(
                     self.q_lora_rank,
                     self.num_heads_padded * self.qk_head_dim,
-                )
+                ).clone()
                 if weight_uk.shape[0] == self.num_heads:
                     weight_uk = F.pad(weight_uk, (0, 0, 0, 0, 0, self.head_padding))
                 prolog_num_heads = self.num_heads_padded

@@ -20,6 +20,9 @@ import importlib.util
 import json
 import math
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -568,6 +571,10 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
+    # Experimental replicated-input projection before SP all-gather, including
+    # DSpark and multistream DSA. Disabled pending distributed NPU validation.
+    dsv41_projected_sp: bool = False
+    dsv41_projected_sp_min_tokens: int = 256
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
@@ -661,6 +668,8 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.dsv41_projected_sp_min_tokens < 1:
+            raise ValueError("dsv41_projected_sp_min_tokens must be positive")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
@@ -1749,6 +1758,23 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
+# Only marks synchronous draft construction/loading for platform validation.
+# Nested scopes restore their caller's marker, including on failure.
+_DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
+
+
+def is_draft_config_context() -> bool:
+    return _DRAFT_CONFIG_CONTEXT.get()
+
+
+@contextmanager
+def draft_config_context() -> Iterator[None]:
+    """Identify draft reconstruction without changing configuration values."""
+    token = _DRAFT_CONFIG_CONTEXT.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT_CONFIG_CONTEXT.reset(token)
 
 
 def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
