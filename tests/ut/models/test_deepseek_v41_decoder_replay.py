@@ -44,6 +44,24 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     assert model.decoder_replay_start == 1
 
 
+def test_decoder_replay_disabled_without_kv_source():
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[]),
+        end_layer=3,
+        decoder_replay_start=3,
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(),
+        speculative_config=None,
+    )
+
+    replay = replay_mod.make_decoder_replay(model, config)
+
+    assert replay is None
+    assert model.decoder_replay_start == model.end_layer
+
+
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
     model = SimpleNamespace(
@@ -105,13 +123,18 @@ def test_cut_layer_trim_writes_full_batch_before_replay():
     assert events == [("write_kv", [0, 1, 2, 3]), "replay_context", ("replay", [2, 3])]
 
 
-def test_factory_trims_cut_source_outputs_that_replay_regenerates():
+@pytest.mark.parametrize(
+    ("compress_ratio", "expected_replay_start", "trim_cut_layer"),
+    [(1, 1, True), (2, 2, False)],
+)
+def test_factory_only_trims_uncompressed_cut_source(compress_ratio, expected_replay_start, trim_cut_layer):
     cut_writer = lambda *states: None
     first_swa_prefix = "model.layers.1.self_attn.swa_cache"
     buffers = [torch.empty(8, 2) for _ in range(4)]
     model = SimpleNamespace(
         config=SimpleNamespace(
             kv_source_layer_ids=[1],
+            compress_ratios=[0, compress_ratio, 0, 0],
             index_source_layer_ids=[1],
             candidate_source_layer_id=1,
             engram_layer_ids=[],
@@ -151,10 +174,16 @@ def test_factory_trims_cut_source_outputs_that_replay_regenerates():
     replay = replay_mod.make_decoder_replay(model, config)
 
     assert replay is not None
-    assert model.decoder_replay_start == 1
-    assert replay.write_batch_kv is cut_writer
-    assert replay.first_swa_prefix == first_swa_prefix
-    assert replay.row_buffers == []
+    assert model.decoder_replay_start == expected_replay_start
+    if trim_cut_layer:
+        assert replay.write_batch_kv is cut_writer
+        assert replay.first_swa_prefix == first_swa_prefix
+        assert replay.row_buffers == []
+    else:
+        assert replay.write_batch_kv is None
+        assert replay.first_swa_prefix is None
+        assert len(replay.row_buffers) == len(buffers)
+        assert all(actual is expected for actual, expected in zip(replay.row_buffers, buffers))
 
 
 def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
