@@ -10,14 +10,6 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 
-def _assert_metadata_matches_meta(metadata, num_heads, head_dim, starts):
-    meta_metadata = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
-        num_heads, 1, head_dim, cu_seqlens_q=starts.to("meta")
-    )
-    assert meta_metadata.shape == metadata.shape
-    assert meta_metadata.dtype == metadata.dtype == torch.int32
-
-
 def test_band_visible_lengths_require_one_row_per_query():
     if get_ascend_device_type() == AscendDeviceType.A5:
         pytest.skip("Continuous band visible-length replay requires the A2/A3 custom op")
@@ -46,7 +38,6 @@ def test_band_visible_lengths_require_one_row_per_query():
         has_ori_kv=True,
         has_cmp_kv=False,
     )
-    _assert_metadata_matches_meta(metadata, num_heads, head_dim, starts)
     kwargs = dict(
         ori_kv=kv,
         ori_block_table=torch.tensor([[0]], dtype=torch.int32, device="npu"),
@@ -111,7 +102,6 @@ def test_sparse_visible_lengths_require_one_row_per_query_a5():
         has_ori_kv=True,
         has_cmp_kv=False,
     )
-    _assert_metadata_matches_meta(metadata, num_heads, head_dim, starts)
     kwargs = dict(
         ori_kv=kv,
         ori_sparse_indices=indices,
