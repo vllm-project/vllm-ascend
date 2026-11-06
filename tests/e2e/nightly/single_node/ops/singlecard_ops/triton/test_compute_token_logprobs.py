@@ -52,6 +52,28 @@ def test_prompt_scoring_token_id_row_stride(layout):
     torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-5)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("vocab_size", [15359, 15360, 15361, 151936])
+def test_logprobs_masked_tiles(vocab_size, dtype):
+    """Online normalization must recover after a fully masked vocabulary tile."""
+    torch.manual_seed(14156)
+    logits = torch.randn((5, vocab_size + 7), dtype=dtype, device="npu")[:, :vocab_size]
+    logits[0, :15360] = -float("inf")
+    logits[0, -1] = 1.0
+    logits[1].fill_(-float("inf"))
+    logits[2, 0] = float("inf")
+    logits[3, 0] = float("nan")
+    # Broadcast IDs and padded logits also exercise both row strides.
+    token_ids = torch.tensor([[0, vocab_size - 1]], device="npu").expand(5, -1)
+    expected = torch_compute_token_logprobs(logits.cpu(), token_ids.cpu())
+    actual = compute_token_logprobs(logits, token_ids).cpu()
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=0, equal_nan=True)
+
+
 # Common vocab sizes from mainstream models
 VOCAB_SIZES = [
     32000,  # LLaMA / LLaMA2 / Mistral
