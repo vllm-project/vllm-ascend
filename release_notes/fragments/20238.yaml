@@ -1,0 +1,4 @@
+pr: 20238
+entries:
+  - category: bugfix
+    text: Fixed ordinary MLA draft-prefill graph capture registering its FIA workspace in the draft-decode registry instead of the draft-prefill registry.
