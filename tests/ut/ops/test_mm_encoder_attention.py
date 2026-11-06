@@ -143,6 +143,15 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         layer.forward_oot(query, query, query, cu_seqlens=cu_seqlens)
         self.assertEqual(self.captured["actual_seq_lengths"], [3, 10, 12])
 
+    def test_cpu_metadata_accepts_none_and_copies_tensor(self):
+        backend = AttentionBackendEnum.TORCH_SDPA
+        device = torch.device("meta")
+        self.assertIsNone(AscendMMEncoderAttention.maybe_recompute_cu_seqlens(backend, None, 1152, 4, device))
+        boundaries = torch.tensor([0, 4, 8], dtype=torch.int32)
+        result = AscendMMEncoderAttention.maybe_recompute_cu_seqlens(backend, boundaries, 1152, 4, device)
+        boundaries[1] = 7
+        torch.testing.assert_close(result, torch.tensor([0, 4, 8], dtype=torch.int32))
+
     def test_cpu_metadata_preserves_empty_and_padded_boundaries(self):
         for endpoints in ([], [0], [0, 4, 8, 8]):
             with self.subTest(endpoints=endpoints):
