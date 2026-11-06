@@ -40,7 +40,6 @@ def _check_device_once() -> None:
     global _device_gate_checked
     if _device_gate_checked:
         return
-    _device_gate_checked = True
     from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type
 
     try:
@@ -48,12 +47,17 @@ def _check_device_once() -> None:
     except Exception:
         # No resolvable Ascend device (e.g. CPU-only CI running unit tests);
         # a real serve always resolves, so only fire the gate when it does.
+        # The flag stays unset so a worker whose runtime comes up late
+        # retries at the next flush instead of running ungated forever.
         return
     if device_type != AscendDeviceType.A3:
+        # Keep the flag unset: if a caller catches this error, the next
+        # flush raises again rather than silently skipping the gate.
         raise RuntimeError(
             "leapquant_config is validated on Atlas A3 only in this milestone; "
             "please disable leapquant_config on this device."
         )
+    _device_gate_checked = True
 
 
 def leapquant_config_or_none() -> LeapQuantConfig | None:
@@ -88,6 +92,16 @@ def leapquant_flush_state_rows(
     rows.  The flush runs once per step, only on due rows, and leaves the
     pool layout intact (fp32 in, fp32 out — the storage-side checkpoint lands
     with the fused-kernel milestone).
+
+    Prefill caveat: a chunked-prefill chunk that *crosses* a window boundary
+    without ending on it is not flushed at that interior boundary — the
+    chunked delta-rule kernel only materializes the end-of-chunk state.  In
+    that window the state accumulates one (or a few) extra tokens before the
+    next boundary-aligned flush, which can only *reduce* the injected
+    quantization error per boundary; the exact per-boundary cadence is
+    restored from the first decode boundary on.  Exact interior-boundary
+    flushes are deferred to the fused-kernel milestone, whose chunk loop can
+    emit per-window states.
 
     Args:
         state: state pool ``[slots, H, V, K]`` (may have a padded batch stride).
