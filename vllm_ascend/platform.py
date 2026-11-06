@@ -1314,7 +1314,8 @@ def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
     # not passed down, so inspect children as well (mirrors
     # AscendKVPPConfig.validate).
     if kv_transfer_config.kv_connector == "MultiConnector":
-        connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        extra_config = kv_transfer_config.kv_connector_extra_config or {}
+        connectors = extra_config.get("connectors", [])
     else:
         connectors = [{"kv_connector": kv_transfer_config.kv_connector,
                        "kv_role": kv_transfer_config.kv_role}]
