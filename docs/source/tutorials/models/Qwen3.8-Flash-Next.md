@@ -376,7 +376,7 @@ An import check does not validate version compatibility; complete the MemCache d
 
 !!! note "950 DT pooling runtime"
 
-    The supplied 950 DT configuration used a prepared r67 image with changes from PRs #20699, #20642, #20499, and #20991. Use a runtime containing those model and connector changes. Initialize CANN/ATB as described in Section 4.1. If the image does not initialize its repository, custom operators, and model libraries automatically, apply the following in each service shell; use actual container paths, with library directories separated by `:`.
+    Use a runtime that supports Qwen3.8-Flash-Next and MemCache three-tier pooling. Initialize CANN/ATB as described in Section 4.1. If the image does not initialize its repository, custom operators, and model libraries automatically, apply the following in each service shell; use actual container paths, with library directories separated by `:`.
 
     ```bash
     export ASCEND_REPO="<VLLM_ASCEND_REPOSITORY_IN_CONTAINER>"
