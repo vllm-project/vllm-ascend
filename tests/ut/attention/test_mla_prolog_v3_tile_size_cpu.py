@@ -49,6 +49,7 @@ def test_prolog_tile_size_is_independent_of_cache_pages(page_size, quant_mode):
         quant_kscale=MagicMock(),
         _prepare_prolog_v3_token=MagicMock(return_value=(hidden_states, {}, weights)),
         _flatten_prolog_rope_table=lambda table, _: table,
+        _prolog_v3_writer_workspace=lambda *_: (cache, slots, False),
     )
 
     assert run(impl, hidden_states, object(), object(), cache, slots, quantize_query=True) is outputs

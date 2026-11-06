@@ -70,7 +70,7 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
             torch.testing.assert_close(v, qkv[2].transpose(1, 2))
             return output, state.transpose(-1, -2).contiguous()
 
-        with patch("vllm_ascend.device.device_op.l2norm_fwd", side_effect=norm):
+        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm):
             actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 

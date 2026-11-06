@@ -1,206 +1,204 @@
 # Mooncake Layerwise Hybrid Attention
 
-This extension adds multi-KV-group support to the Mooncake layerwise range/session
-implementation introduced in [PR #16004](https://github.com/vllm-project/vllm-ascend/pull/16004).
-The implementation was based on upstream main at
-`be427041bf63a620e4a637b60f2656e87dcdf8f6`.
+## Feature Introduction
 
-It targets attention layouts such as DeepSeek-V4, where sliding-window KV,
-compressed KV, indexer caches, and compressor state can belong to different KV
-groups. It reuses the shared reachability coordinator also used by Memcache;
-see the design discussion in [issue #12234](https://github.com/vllm-project/vllm-ascend/issues/12234).
-It does not translate Mooncake operations into Memcache GVA operations.
+Mooncake layerwise hybrid attention extends KV cache pooling to models with
+multiple cache groups. It saves and restores each group's cache layer by layer,
+so that a request can reuse a prefix together with the window, compressed cache,
+or recurrent state needed to continue computation.
 
-## Scope and prerequisites
+This feature uses `AscendStoreConnector` with `backend="mooncake"` and
+`use_layerwise=true`. Cache groups are detected from the model's runtime cache
+configuration; no separate hybrid-pooling switch is required.
 
-- Use `AscendStoreConnector` with `backend="mooncake"` and `use_layerwise=true`.
-- Install a Mooncake client with the range/session interfaces listed in the
-  [single-group guide](mooncake_layerwise_adaptation_and_optimization.md#51-mooncake-version).
-- The model must provide valid `KVCacheConfig.kv_cache_groups` and group block
-  tables. Runtime group block sizes already describe raw-token coverage; do not
-  multiply them by the compression ratio again.
-- This patch wires compute windows into the Ascend DSA, FA, and SFA attention
-  paths. Start validation in eager mode. Graph-mode execution and additional
-  attention backends require separate integration validation.
-- Topology-matched PP supports uneven partitions and stage-local hybrid groups.
-  DCP, PCP and prefill/decode TP mismatch remain unsupported.
-- Recurrent/linear-attention groups using `MambaSpec` require
-  `mamba_cache_mode="align"`. Their state is saved after the attention kernels
-  update it; they do not submit PUTs at attention entry.
-- Only complete, coordinator-aligned block snapshots are published. Partial
-  block offloading and cross-layer cache-buffer reuse are not part of this
-  hybrid implementation.
+For the basic transfer mechanism, Mooncake preparation, and common parameters,
+see [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md).
 
-## Group-aware objects and range offsets
+### Usage Scenarios
 
-The single-group wire format is unchanged. Hybrid layouts use a separate
-namespace:
+- Models combining full attention and sliding-window attention.
+- Models with compressed KV, indexer caches, and compressor state, such as DeepSeek-V4.
+- Models combining attention with linear or recurrent layers that use aligned state checkpoints.
 
-```text
-model@mooncake_hybrid_v1:<layout-digest>@group:<id>@block:<size>@<hash>@<head>
-```
+### Constraints and Limitations
 
-The digest includes TP size, ordered group membership, and each group's page-size
-signature. Together with the group ID, it identifies the cache group without
-duplicating the scheduler's cache-family classification in the object key. It
-prevents incompatible group layouts from reading the same objects. It is not a
-model-weight checksum or a tenant isolation mechanism: use isolated deployments
-for different weights with identical model names and cache specifications.
+The common Mooncake dependency and deployment requirements are listed in the
+[layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#constraints-and-limitations).
 
-Each key stores one block for one group and storing head/rank. Its bytes contain
-only that group's registered cache entries, ordered by physical layer and cache
-name. Object size is the sum of their actual per-block byte lengths. A transfer
-uses the group-local layer index to calculate remote offsets, while the physical
-layer index selects the compute event and completion signal.
+| Category | Constraint |
+| --- | --- |
+| Attention backend | Compute/transfer overlap is integrated with Ascend FA, SFA, and DSA paths. Other attention backends need their own integration. |
+| Execution mode | Eager and graph-mode compatibility follows the selected model and attention backend. |
+| Recurrent state | Recurrent and linear-attention groups, including GDN and KDA state, require `mamba_cache_mode="align"`. |
+| Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
+| PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
+| PCP | Each PCP rank stores its own snapshot. Account for these copies in Store capacity and bandwidth. |
+| KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
+| Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
+| Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
 
-For example:
+Model-specific quantization, graph mode, and speculative-decoding support should
+be checked in the corresponding model deployment guide.
 
-| Group | Raw tokens/block | Physical layers | Commit boundary |
+## How It Works
+
+### Independent Cache Groups
+
+A hybrid model can use different block sizes and cache entries in different
+groups. Mooncake stores one object per group, logical block, and storing
+rank within each pipeline stage. Each object contains that group's layer data;
+range transfers read or write only the entries needed by the current layer.
+
+For example, a model may have the following layout:
+
+| Cache group | Tokens per block | Layers with cache entries | Object committed after |
 | --- | --- | --- | --- |
 | Full attention | 16 | 0, 2 | Layer 2 |
 | Compressed KV | 32 | 1, 2, 3 | Layer 3 |
 | Window/state | 16 | 0, 3 | Layer 3 |
 
-Several groups can transfer at one physical layer. A group is committed after
-its own last layer, not necessarily the model's last layer. Multiple cache
-entries at the same physical layer remain separate byte ranges.
+The sizes and layer numbers above are illustrative. Groups can have different
+commit boundaries, and one physical layer can transfer entries from several
+groups. Object identity includes the group and a cache-layout fingerprint to
+separate incompatible group layouts. Different model weights still require
+separate pool namespaces even when model names and cache layouts match.
 
-## Reachability and session lifetime
+### Consistent Prefix Recovery
 
-The scheduler queries `batch_is_readable` for the keys selected by the coordinator's
-per-group lookup masks. A block is usable only if all required stage and storing-head keys
-are committed and readable. The coordinator then determines a common reachable token boundary across
-groups. A full-attention hit alone is insufficient when the corresponding
-window or compressor state is missing.
+Reusing a hybrid prefix requires more than finding full-attention KV. The
+request must also recover the window or state checkpoint needed to continue at
+the same token boundary.
 
-The worker uses the same coordinator for store and load masks. It does not
-interpret a sparse state cache as a contiguous prefix. A mask-generation failure
-is not silently converted into a request to copy every state block.
+The cache coordinator selects the blocks required by each group and finds a
+common reusable token boundary. A hit is reported only when all required
+objects are committed and readable across the participating ranks and stages.
+Missing window or recurrent state can therefore shorten the reusable prefix
+even when full-attention KV is available.
 
-The worker creates separate request views for each group. Session ownership is
-indexed by `(request_id, group_id, logical_block_index)`, so block zero in one
-group cannot replace block zero in another. Across chunked-prefill steps, committed
-keys can be restored using the current local block IDs even without a new
-scheduler load specification. Each group retains independent active-transfer
-state and resets it at its last group layer.
+Only complete snapshots aligned to this common boundary are published. Sparse
+state checkpoints are restored according to their group-specific masks rather
+than treated as a contiguous sequence of KV blocks. Later chunked-prefill steps
+can restore committed data using their current local block allocations.
 
-A failed range put revokes the affected keys; successful keys in other groups
-can still commit. A preparation exception revokes the objects opened earlier in
-that preparation. A failed get stops the forward path before incomplete hybrid
-KV/state is used. Get sessions are released after in-flight reads finish.
+### Transfer and Cache Updates
 
-## Transfer timing: configurable asynchronous pipeline
+Future-layer loads can overlap the current attention computation. Device events
+ensure that transfers access cache data after the relevant updates and that
+attention waits for its required loads.
 
-The heavy payload operations use a per-layer attention compute window:
+Full and sliding-window attention can submit saves once their cache updates are
+ready at attention entry. Recurrent layers update their state during computation,
+so their saves start after those updates finish. Each group commits independently
+after its last participating layer. Failed writes do not publish incomplete
+objects, and failed reads stop computation before incomplete hybrid state is used.
 
-```text
-previous collectives / cache updates
-              |
-       cache-ready NPU event
-              |
-     +--------+---------------------+
-     |                              |
- current attention kernel     put current-layer ranges
-                              get future-layer ranges
-     |                              |
-     +------- policy checkpoint ----+
-                         |
-         output projection / MoE communication
-              || bounded transfers
+## Usage
+
+### Configure Prefill and Decode Nodes
+
+Prepare the Mooncake Store and client as described in the
+[layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#prepare-mooncake),
+then follow the **PD Disaggregation Scenario** in the
+[Mooncake deployment guide](kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
+Use these Store connector configurations for hybrid models.
+
+**Prefill (P) node:**
+
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
+    }
+}
 ```
 
-At attention entry, an NPU event protects cache writes and preceding work on the
-compute stream. Prefetched gets wait for that event. For full/SWA attention, the
-worker records the save event and submits current-layer puts at the same boundary. The host then launches
-the attention kernel and applies the configured queue policy before returning
-to the following output projection or MoE communication.
+**Decode (D) node:**
 
-Physical layers containing `MambaSpec` (including GDN and Kimi KDA) update
-conv/recurrent state inside attention. They record the save event and submit PUTs
-from the existing post-compute save hook instead. That hook also applies send
-backpressure to attention paths without a compute-window context manager.
-Step completion waits for all queued PUTs, including when the final layer has
-no ranges to save.
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
+    }
+}
+```
 
-By default, future-layer gets remain queued and up to eight send tasks may stay
-unfinished. This removes whole-queue drains from each layer's critical path,
-but it also means transfer can overlap subsequent output-projection or MoE
-communication. This is an internal scheduling policy rather than a public
-runtime setting. Error and teardown paths still drain both queues completely.
+Hybrid models require `fail`; `recompute` is not supported. When using
+`MultiConnector`, set this policy on the top-level `kv-transfer-config` and
+update its `AscendStoreConnector` entry with the role and extra configuration
+shown above. Decode pool access is disabled by default; enable
+`consumer_is_to_load` explicitly if Decode needs to load from the pool. See
+[Configure Prefill and Decode Nodes](mooncake_layerwise_adaptation_and_optimization.md#configure-prefill-and-decode-nodes)
+for role behavior and IPC identifier requirements.
 
-In DSA this boundary is after the compressor/indexer/cache updates and before
-the sparse-attention operator. In SFA it surrounds the sparse-attention operator;
-in FA it surrounds the paged/FIA attention path. It does not surround the whole
-transformer layer.
+Choose model, parallelism, token-budget, and execution-mode options according
+to the model deployment guide. For recurrent or linear-attention state,
+set `--mamba-cache-mode align` unless the model configuration already selects it.
+Use the same model weights and cache configuration on all sharing instances.
 
-Consequences:
+Inference requests use the normal OpenAI-compatible API. To exercise remote
+reuse, send a long shared prefix to two instances connected to the same pool,
+as described in [Use Cached Prefixes](mooncake_layerwise_adaptation_and_optimization.md#use-cached-prefixes).
+Reuse advances only to a boundary where all required cache groups are available.
 
-- Under the default policy, a transfer tail can compete with subsequent HCCL or
-  expert-parallel communication. Device traces should be used to validate this
-  fixed policy on the target deployment.
-- An initial, unprefetched demand load has no preceding attention window. It
-  waits for earlier compute-stream work, then completes before attention starts.
-- Session allocation, existence queries, and other metadata RPCs are not payload
-  DMA and can occur outside the window.
-- This is a local queue policy, not a cluster-wide bandwidth scheduler.
-  Unrelated workers and independent communication streams are not globally
-  serialized. Validate multistream and multi-rank behavior using device traces.
-- No latency or throughput improvement is claimed without hardware measurements.
-  Short attention kernels can expose a substantial transfer tail.
+### Prefill Context Parallelism (PCP)
 
-## Configuration
+To use PCP, add these options to the model's launch command:
 
 ```bash
-export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
-vllm serve /path/to/hybrid-model \
-  --tensor-parallel-size 8 \
-  --enforce-eager \
-  --enable-prefix-caching \
-  --enable-chunked-prefill \
-  --max-num-batched-tokens 4096 \
-  --kv-transfer-config '{
-    "kv_connector": "AscendStoreConnector",
-    "kv_role": "kv_both",
-    "kv_connector_extra_config": {
-      "backend": "mooncake",
-      "use_layerwise": true,
-      "layerwise_prefetch_layers": 2,
-      "layerwise_max_transfer_blocks": 64,
-      "layerwise_max_transfer_bytes": 16777216
-    }
-  }'
+--prefill-context-parallel-size 4 \
+--decode-context-parallel-size 1
 ```
 
-Choose TP size, chunk size, quantization, and model arguments for the actual
-hardware/model. Begin with two future-layer prefetch windows. This example is
-not a verified DeepSeek-V4 deployment recipe or a memory-capacity guarantee.
+Use the same TP, PP, and PCP topology on every instance sharing these objects.
+Select Model Runner V2 for the DeepSeek-V4-Flash PCP path:
 
-## Validation
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
 
-CPU/mock unit tests cover group-aware byte round trips, different block sizes,
-unequal cache-entry counts, sparse masks, independent commit boundaries, group
-session ownership, continuation with remapped local blocks, negative transfer
-results, allocation rollback, device-event gating, and fatal-thread propagation.
-They do not execute attention kernels or a real Mooncake service.
+Each PCP worker owns separate Store objects and transfer sessions. Prefix lookup
+requires committed objects from every required PCP rank, PP stage, and storing
+TP rank or head. Objects from different PCP sizes are isolated, and PCP does
+not change the logical token coverage of a group block.
 
-Real NPU and distributed Mooncake validation is still required and is not
-automated by this change. Use the project-approved deployment and benchmark
-workflow for the target model and hardware. Compare layerwise and non-layerwise
-Mooncake with otherwise identical settings and isolated test pools, and run
-performance measurements without profiling or range-debug logging enabled.
+PCP keeps a separate cache copy per PCP rank, so increasing PCP can increase
+Store capacity and transfer-bandwidth requirements. Keep `enable_kvpp` disabled.
 
-Before claiming hardware support or a performance improvement, verify:
+## Configuration Parameters
 
-1. Cold/warm token equality, positive remote hits, and multiple chunk boundaries
-   on the real hybrid model.
-2. Every group, including sparse state and indexer groups, has valid load ranges.
-   Check Mooncake range-debug logs alongside the device trace.
-3. Put/get payload ranges begin after cache-ready events and complete before
-   subsequent HCCL on the tested device; inspect all relevant streams and ranks.
-4. TTFT, throughput, exposed transfer tails, and HCCL duration against the
-   non-layerwise baseline under the same model, TP, prompt, and pool conditions.
-5. Additional concurrent-request, preemption, model-specific state, and service
-   failure tests. The smoke script alone does not establish production readiness.
+Hybrid pooling uses the same connector parameters as
+[layerwise pooling](mooncake_layerwise_adaptation_and_optimization.md#configuration-parameters).
+Cache-group membership, block sizes, and transfer offsets are derived from the
+model's cache configuration.
 
-Real NPU/Mooncake validation is pending; the implementation environment only
-supports CPU/mock checks.
+| Parameter | Requirement |
+| --- | --- |
+| `kv_connector_extra_config.backend` | Set to `"mooncake"`. |
+| `kv_connector_extra_config.use_layerwise` | Set to `true`. |
+| `kv_connector_extra_config.layerwise_prefetch_layers` | Positive integer, default `2`; controls future-layer load distance. |
+| `mamba_cache_mode` | Use `"align"` for models with recurrent-state groups. |
+| `decode_context_parallel_size` | Keep at `1`. |
+| `prefill_context_parallel_size` | Default `1`; sharing instances must use the same value. |
+
+## Tuning Suggestions
+
+- Start with a prefetch distance of `2` and adjust it to the model's attention
+  time and transfer bandwidth. A larger distance can hide loads but can also
+  increase contention with HCCL or expert-parallel communication.
+- Size the Store for all cache groups and PCP copies, including indexer and
+  recurrent state. Full-attention KV size alone is insufficient for capacity planning.
+- Use representative prompt lengths and shared prefixes when measuring reuse.
+  Different group block sizes and checkpoint boundaries determine how much of
+  a prefix can be restored.

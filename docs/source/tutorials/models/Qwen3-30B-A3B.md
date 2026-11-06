@@ -181,19 +181,19 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
 1. Clone and install vLLM:
 
-   ```bash
-   git clone https://github.com/vllm-project/vllm.git
-   cd vllm
-   pip install -e .
-   ```
+    ```bash
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    pip install -e .
+    ```
 
 2. Clone and install the vLLM-Ascend repository:
 
-   ```bash
-   git clone https://github.com/vllm-project/vllm-ascend.git
-   cd vllm-ascend
-   pip install -e .
-   ```
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    pip install -e .
+    ```
 
 !!! note
 
@@ -264,7 +264,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --port 8000 \
         --tensor-parallel-size 2 \
         --max-num-seqs 32 \
-        --served_model_name qwen3 \
+        --served-model-name qwen3 \
         --dtype float16 \
         --quantization ascend \
         --max-model-len 16384 \

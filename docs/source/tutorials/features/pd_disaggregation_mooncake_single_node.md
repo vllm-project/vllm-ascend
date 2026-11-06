@@ -165,9 +165,6 @@ We can run the following scripts to launch a server on the prefiller/decoder NPU
     export HCCL_IF_IP=192.0.0.1  # node ip
     export GLOO_SOCKET_IFNAME="eth0"  # network card name
     export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
 
     vllm serve /model/Qwen2.5-VL-7B-Instruct  \
       --host 0.0.0.0 \
@@ -204,9 +201,6 @@ We can run the following scripts to launch a server on the prefiller/decoder NPU
     export HCCL_IF_IP=192.0.0.1  # node ip
     export GLOO_SOCKET_IFNAME="eth0"  # network card name
     export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
 
     vllm serve /model/Qwen2.5-VL-7B-Instruct  \
       --host 0.0.0.0 \

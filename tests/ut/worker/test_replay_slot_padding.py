@@ -40,7 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     register_ascend_kv_cache_specs,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 # The prefix-replay geometry upstream's own test uses: a 100-token prompt with a
 # 96-token hit and a 32-token window recomputes [64, 96).
@@ -226,7 +226,7 @@ def test_pad_pass_forwards_its_own_arrays():
 
 
 def test_host_function_returns_before_launching_when_nothing_replays():
-    from vllm_ascend.ops.triton.compute_slot_mapping import pad_replayed_slot_mapping
+    from vllm_ascend.ops.triton.v1.compute_slot_mapping import pad_replayed_slot_mapping
 
     empty = torch.tensor([], dtype=torch.int32)
     # No cacheable group, and no request: both have to be non-launches rather

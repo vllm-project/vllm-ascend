@@ -403,7 +403,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
     chunk_kda_fwd = MagicMock(return_value=(output, final_state, *([None] * 10)))
 
     with (
-        patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.ops.kda.chunk_kda_fwd", new=chunk_kda_fwd),
     ):
         actual = attention._run_prefill(

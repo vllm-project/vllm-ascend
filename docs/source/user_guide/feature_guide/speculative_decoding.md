@@ -6,7 +6,7 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 
 vLLM Ascend implements speculative decoding through a **proposer-verifier** architecture:
 
-1. **Proposer** (`vllm_ascend/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
+1. **Proposer** (`vllm_ascend/worker/v1/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
 2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify).
 
 The following speculative decoding methods are supported:
@@ -363,19 +363,22 @@ A few important things to consider when using DFlash2 draft models:
     VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
       --tensor-parallel-size 2 \
       --max-model-len 2048 \
+      --max-num-seqs 1 \
       --no-enable-prefix-caching \
-      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8, "enforce_eager": true}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[9]}' \
+      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 requires an eager draft**: DFlash2 on model runner V2
-   does not yet support graph mode for the draft. Set `"enforce_eager": true`
-   in `speculative_config`; the target model keeps its own graph mode (e.g.
-   `FULL_DECODE_ONLY`).
+2. **Model runner V2 draft graphs**: DFlash2 supports full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
+   `enforce_eager` is unset or false.
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size
    1 with `num_speculative_tokens = 8`.
+   For `num_speculative_tokens` of 4, 5, or 6, use multiples of 5, 6, or 7,
+   respectively. Choose a draft length supported by the checkpoint.
 
 4. **The draft must use the target's unquantized LM head**: the candidate
    top-k is taken over the full-vocabulary logits, so a reduced draft
@@ -384,9 +387,113 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+## Speculating using LiLiCorr
+
+LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
+lattice before target-model verification. It requires a dedicated
+`LiLiCorrDraftModel` checkpoint trained for the target model; a regular DFlash
+or DFlash2 checkpoint cannot be substituted. The configured
+`num_speculative_tokens` should equal the checkpoint's trained block size minus
+one (the example below assumes a block size of eight). Shorter lengths down to
+one token are supported, but may reduce acceptance; measure them with your
+checkpoint and workload. Longer lengths are unsupported.
+
+LiLiCorr currently uses Model Runner V2 and eager draft execution on Ascend.
+Set `VLLM_USE_V2_MODEL_RUNNER=1` and set the nested speculative
+`enforce_eager` option to `true`. The target model retains its independently
+configured execution mode.
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --no-enable-prefix-caching \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true}'
+```
+
+Both the plain and convolutional LiLiCorr checkpoint variants are supported.
+The real-weight CI test pairs `Qwen/Qwen3.8-27B` with the ModelScope draft
+`niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0`, using TP=2 and seven
+speculative tokens. Both models are listed in the A2/A3 download catalog.
+After the CI model-download job has populated the cache, run:
+
+```shell
+VLLM_USE_MODELSCOPE=True VLLM_USE_V2_MODEL_RUNNER=1 pytest -v \
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py
+```
+
+The test compares greedy output token IDs with target-only decoding for both
+draft sampling modes, exercises nonzero-temperature probabilistic drafting,
+and checks draft/acceptance metric consistency. Acceptance length is recorded
+for calibration; no unmeasured throughput or acceptance-rate threshold is set.
+
+Standard tensor parallelism is supported. Fine-grained embedding/LM head TP
+and PCP vocabulary weight sharding are currently unsupported; the candidate
+path requires the standard TP vocabulary layout.
+Use the checkpoint's own `dflash_config` values for candidate top-k and
+convolution geometry; these values are part of the trained model and should
+not be tuned at serving time.
+
+Both `draft_sample_method: "greedy"` and `"probabilistic"` use the correlator's
+conditional scores. Probabilistic drafting supplies the realized proposal
+distribution to the rejection sampler and uses a separate random stream from
+target sampling. Compare acceptance length and throughput for both modes with
+your workload. Quantized draft projections require a quantization format
+supported by Ascend; NVIDIA ModelOpt NVFP4 exports are not portable merely
+because the upstream LiLiCorr loader accepts them.
+
+For a latency comparison on NPU, use real checkpoint weights and run the same
+batch and sequence lengths without speculative decoding, with greedy drafts,
+and with probabilistic drafts. For example:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm bench latency --model <target-model> \
+  --batch-size 8 --input-len 1024 --output-len 128 \
+  --num-iters-warmup 5 --num-iters 30 --output-json lilicorr-latency.json \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true,"draft_sample_method":"probabilistic"}'
+```
+
+Repeat at the production batch sizes and context lengths, keeping TP size,
+target execution mode, and prefix caching settings fixed. Measure acceptance
+length and serving throughput alongside latency; synthetic prompts alone do
+not establish the production speedup.
+
 ## Speculating using DSpark
 
 The following code configures vLLM Ascend to use speculative decoding where proposals are generated by a DSpark semi-autoregressive block drafter with a sequential Markov logit-bias head.
+
+On 950DT Products with Model Runner V2, GLM (`GlmMoeDsaForCausalLM`) targets paired with
+`Qwen3DSparkModel` GQA drafts can use the device-length CANN FlashAttn backend.
+This requires FP16/BF16 queries and unquantized draft KV cache. When all draft
+layers use FlashAttn, the runner can skip the speculative CPU length
+synchronization; PP, PCP, DCP, KV transfer, sparse KV offload, and adaptive
+verification retain their existing synchronization path.
+
+For GQA draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
+kernel, keeps the original attention scale, and trims the output back to 192.
+Model weights and logical head sizes are unchanged. These draft KV cache pages
+use one third more storage than unpadded 192-wide pages, and padding adds work;
+this backend does not guarantee higher speculative acceptance rates.
+
+GLM also supports DSpark with MLA drafts (`Glm5DSparkForCausalLM`), which can
+use the device-length FlashMLA backend on the same hardware and runner.
+This requires FP16/BF16 queries and unquantized KV cache with matching dtype.
+When the draft selects FlashMLA, the runner can skip speculative CPU length
+synchronization under the same conditions as the GQA path; FIA fallback retains
+exact CPU length synchronization.
+
+FlashMLA currently requires local Q heads and `local Q heads * DCP size` in
+`{8, 12, 64, 96}`, with latent/RoPE dimensions of 512/64. The 64-head GLM draft
+therefore uses FIA at TP2/TP4. KV NZ and PCP are unsupported. When the target
+KV cache is FP8, set `"kv_cache_dtype": "bfloat16"` in `--speculative-config`
+for a BF16 draft.
+
+!!! warning
+
+    DSpark adaptive verification with a confidence head is supported only with Model Runner V2.
+    When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
+    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, LM head TP, or LoRA.
+    Commercial use is restricted.
 
 - Offline inference
 
@@ -448,6 +555,7 @@ Enable it in `speculative_config`:
 
 ```shell
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{
     "method": "dspark",
     "model": "deepseek-ai/dspark_qwen3_8b_block7",
@@ -457,6 +565,63 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
 ```
 
 Adaptive verification takes effect only with model runner V2.
+
+#### Hybrid Gated DeltaNet targets
+
+The Model Runner V2 GDN path supports variable verification lengths, including
+steps that admit no draft tokens. Zero-draft decode requests retain the previous
+step's accepted-token offset so convolution and recurrent attention resume from
+the correct state. ACL Graph capture uses the same speculative path for one-token
+rows, and padding requests have zero-length GDN queries.
+
+Adaptive GDN verification directly reuses vLLM's Triton recurrent implementation
+with a two-dimensional state table. Its row stride is independent of the current
+query length, so a one-token query can restore the state from an earlier step
+that accepted multiple tokens. The fixed-length path keeps the native recurrent
+operator. This adaptive path requires triton-ascend and is not supported by the
+310P recurrent backend.
+
+Ascend declares the device/host query-length mismatch capability and the bounded
+variable-length decode graph capability in its own backend and metadata builder.
+It does not depend on inheriting those declarations from upstream GDN classes.
+The variable-length graph bound is `1 + num_speculative_tokens` with adaptive
+verification enabled; the 310P backend explicitly rejects this capability.
+
+Use a matching vLLM revision with the strided recurrent API and adaptive-verification
+initialization hooks and the convolution kernel interface used by the paired
+vLLM checkout, together with a DSpark checkpoint
+trained for the target model. For Qwen hybrid targets, including
+Qwen3.8-27B, set `num_speculative_tokens` to the draft checkpoint's supported
+length and enable `enable_adaptive_verification` as above. Keep full decode graphs
+enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
+to use vLLM's model-state implementation and the compacted device query boundaries.
+
+Ascend reuses vLLM's confidence estimates, cost profiling, budget allocator, and
+rejection sampler. Newer vLLM Triton budget allocators are used directly; the
+Ascend `index_fill_` workaround applies only to the older torch allocator.
+No change to sampling probabilities or model weights is required.
+
+Validate each target/draft pair on the intended NPU and CANN version. Compare
+plain decoding, fixed-length DSpark, and adaptive DSpark with the same precision,
+TP size, concurrency, prompt/output lengths, and cache settings, after warmup.
+Check output quality and actual admitted draft counts as well as throughput.
+Adaptive GDN uses strided Triton convolution and recurrent updates with device
+query boundaries. This supports FULL-graph padding and a previously accepted
+block followed by a shorter verification query without copying the state cache.
+On A2, fixed verification queries of at least nine tokens also use the strided
+recurrent update as a workaround for native NaNs observed with BF16 and eight
+draft tokens. This threshold records the observed failing configuration, not a
+general hardware limit. A3 and A5 retain their native fixed-verification path;
+adaptive verification uses the strided path independently of this workaround.
+The fixed-path workaround can be removed after the replacement native operator
+stack passes the recurrent numerical and state-update regression tests on A2.
+
+The FIA path copies admitted query boundaries back to the host for partial draft
+budgets. Full and zero budgets already have exact host boundaries and skip that
+synchronization; include the remaining synchronization cost in profiling.
+The upstream recurrent kernel may also have different performance from the native
+operator on each NPU generation; measure the complete target step, rather than
+inferring a speedup from the reduced verification token count alone.
 
 > **Performance note (Ascend):** The benefits of adaptive verification depend on
 > the workload.
@@ -472,6 +637,15 @@ Adaptive verification takes effect only with model runner V2.
 >
 > - **In high-throughput scenarios**, performance gains from adaptive verification may sometimes fall short of expectations.
 >   In such cases, start by investigating the cause at the actual serving concurrency.
+
+For DSpark on Ascend, DEBUG logs report scheduled and admitted draft counts,
+confidence estimates, and the profiled verification costs. The Ascend runtime
+configuration can reset worker logging to INFO; set
+`runtime_config.ascend_log.modules.vllm.logger` to `DEBUG` in
+`--additional-config` for a diagnostic run. Remove that override for performance
+measurements. If the confidence head produces non-finite estimates, they are
+treated as 1 for budget selection; compare adaptive outputs with fixed and
+non-speculative outputs on NPU before relying on performance results.
 
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
@@ -875,12 +1049,6 @@ Block verification supports both greedy and probabilistic draft sampling. Target
 
 ## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
-Block Verify and Entropy Verify currently support Model Runner V1 only. Set `VLLM_USE_V2_MODEL_RUNNER=0` before starting the server or offline inference process, then configure these features through `additional_config.rejection_sampler_config` as shown below. Model Runner V2 is enabled by default; its block verification is configured through `speculative_config.rejection_sample_method`, as described in [Block Verification in Model Runner V2](#block-verification-in-model-runner-v2).
-
-```shell
-export VLLM_USE_V2_MODEL_RUNNER=0
-```
-
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 
 !!! warning
@@ -889,9 +1057,13 @@ vLLM Ascend provides two optional optimizations for the rejection sampler in spe
 
 ### Block Verify
 
+Block Verify requires Model Runner V1 (`VLLM_USE_V2_MODEL_RUNNER=0`). For Model Runner V2, see [Block Verification in Model Runner V2](#block-verification-in-model-runner-v2).
+
 Block Verify evaluates all draft tokens as a block using cumulative probability products, rather than checking each token independently. This can improve the acceptance rate and reduce the overhead of rejection sampling, especially when `num_speculative_tokens >= 3`.
 
 ### Entropy Verify
+
+Entropy Verify supports both Model Runner V1 and V2. Model Runner V2 is enabled by default. Enable Entropy Verify with `additional_config.rejection_sampler_config.enable_entropy_verify=true`.
 
 Entropy Verify adjusts the acceptance threshold based on the entropy of the target distribution:
 
@@ -903,7 +1075,11 @@ This entropy-aware threshold is controlled by two parameters:
 - **`posterior_threshold`** (default: `0.95`, range: `(0, 1]`): The upper bound of the modified threshold. Even when entropy is very low, the effective threshold will not exceed this value.
 - **`posterior_alpha`** (default: `0.4`, range: `>= 0`): Controls how strongly entropy influences the threshold. A higher alpha makes the threshold more sensitive to entropy changes, resulting in a higher acceptance rate for speculative tokens but also greater precision loss. You need to tune this value based on your specific model and dataset. When alpha is `0`, entropy has no effect and the threshold equals `posterior_threshold`.
 
+In Model Runner V2, entropy is computed from the target logits after sampling parameters (such as temperature, top-k/top-p and penalties) are applied, for both raw and processed logprobs modes. Each draft position uses its own threshold `min(exp(-entropy * posterior_alpha), posterior_threshold)`. Greedy requests retain their existing behavior, and synthetic rejection sampling uses its configured acceptance rates. Use Entropy Verify with `rejection_sample_method="standard"`; upstream `"block"` verification and Entropy Verify are mutually exclusive.
+
 ### Usage
+
+For Model Runner V1:
 
 - Online inference
 
@@ -930,7 +1106,82 @@ This entropy-aware threshold is controlled by two parameters:
     )
     ```
 
-Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+On Model Runner V1, both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+
+For Entropy Verify on Model Runner V2, keep your proposer configuration and add:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "rejection_sample_method": "standard"}' \
+    --additional-config '{"rejection_sampler_config": {"enable_entropy_verify": true, "posterior_threshold": 0.95, "posterior_alpha": 0.4}}'
+```
+
+Use a model with MTP support for this example, or retain your existing supported proposer settings. To disable Entropy Verify, set `enable_entropy_verify` to `false` (the default).
+
+## Experimental GLM KDA RecoverSSM
+
+GLM-5.3-Flash supports experimental KDA RecoverSSM on A3 and A5 with
+Model Runner V2. It reconstructs the accepted recurrent state after speculative
+decoding instead of keeping a recurrent checkpoint for every draft token.
+The default remains the native AscendC KDA path.
+
+Enable this path with upstream vLLM's `--use-replayssm` option, which defaults
+to disabled. See the [vLLM serving CLI reference](https://docs.vllm.ai/en/latest/cli/serve/)
+and [CacheConfig API reference](https://docs.vllm.ai/en/latest/api/vllm/config/cache/)
+for the upstream option. Upstream describes Mamba2 ReplaySSM under this flag;
+the GLM KDA behavior and requirements in this section are provided by the
+Ascend integration.
+
+Add the following options to your GLM serving command. Keep the parallelism,
+quantization, KV-cache dtype, and memory settings appropriate for your model
+and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "deepseek_mtp", "num_speculative_tokens": 5}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
+RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
+Prefill producers with TP=1 using the Mooncake connectors below;
+PCP Decode consumers and colocated PCP execution are not supported.
+Stochastic rounding must be disabled.
+
+For prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` with matching model weights, speculative window,
+cache dtypes, convolution layout and RecoverSSM settings on both sides.
+PCP producers may use a different KDA head-shard count from Decode consumers:
+Mooncake gathers the producer head shards into each receiving consumer's state.
+Use SD convolution state layout `[state_len, conv_dim]` on both roles when
+their KDA head-shard counts differ.
+
+For example, an eight-device Prefill role and an eight-device Decode role can
+use the following layout with `--use-replayssm` and MTP5 on both sides:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 1 | 1 |
+| Prefill context parallel size | 8 | 1 |
+| Data parallel size | 1 | 8 |
+| Expert parallelism | Enabled (EP8) | Enabled (EP8) |
+| KV role | `kv_producer` | `kv_consumer` |
+| Target and draft execution | Eager | `FULL_DECODE_ONLY` |
+
+In this example, set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
+DP rank receives all eight KDA head shards for its assigned requests; DP ranks
+do not divide one request's recurrent state. Keep the same prefix-caching
+configuration on both roles.
+
+PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
+an eager dispatch boundary, allowing the surrounding model to be compiled.
+Validate the selected P graph configuration separately for your deployment.
+
+!!! warning
+
+    This feature is experimental. Floating-point differences can change generated
+    tokens; evaluate model accuracy and performance for your workload before use.
+
+Removing `--use-replayssm` selects the native KDA path.
 
 ## Synthetic Rejection Sampling
 
@@ -986,7 +1237,7 @@ vllm serve path/to/target/model \
 
 Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode per model-runner path:
 
-- **MRV1** (`vllm_ascend/sample/rejection_sampler.py` + `vllm_ascend/ops/triton/reject_sample.py`): the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`.
+- **MRV1** (`vllm_ascend/sample/rejection_sampler.py` + `vllm_ascend/ops/triton/v1/reject_sample.py`): the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`.
 - **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
 The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.

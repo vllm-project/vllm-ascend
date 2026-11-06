@@ -46,7 +46,16 @@ from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.32.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.32.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
+else:
+    from transformers import DeepseekV4Config
 
 IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
@@ -354,13 +363,29 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         patch_size = hf_config.vision_patch_size
         downsample_ratio = hf_config.vision_downsample_ratio
-        # A square maximizes the ViT patch count (area) within the token
-        # budget; solve the budget-derived size directly to keep the dummy
-        # image small.
+        max_wh_ratio = hf_config.vision_max_wh_ratio
+        # Every aligner row costs an extra IMAGE_NEW_LINE token, so height is
+        # more expensive than width and a square is *not* optimal: search the
+        # LLM grids that fit the budget for the one with the most ViT patches
+        # (ties broken by the longer sentinel block).
         budget = hf_config.vision_max_n_token - (COMPRESS_PAD_TO - 1)
-        side = budget * patch_size * downsample_ratio
-        _, _, best_h, best_w, _ = solve_resize_ratio(side, side, patch_size, downsample_ratio, budget)
-        return ImageSize(width=best_w, height=best_h)
+        step = patch_size * downsample_ratio
+        best_grid = (1, 1)
+        best_key = (0, 0)
+        for n_llm_h in range(1, budget):
+            if grid_tokens(n_llm_h * step, step, patch_size, downsample_ratio)[2] > budget:
+                break
+            for n_llm_w in range(1, budget):
+                if max_wh_ratio is not None and n_llm_w > n_llm_h * max_wh_ratio:
+                    break
+                num_tokens = grid_tokens(n_llm_h * step, n_llm_w * step, patch_size, downsample_ratio)[2]
+                if num_tokens > budget:
+                    break
+                key = (n_llm_h * n_llm_w, num_tokens)
+                if key > best_key:
+                    best_key, best_grid = key, (n_llm_h, n_llm_w)
+        n_llm_h, n_llm_w = best_grid
+        return ImageSize(width=n_llm_w * step, height=n_llm_h * step)
 
 
 class DeepseekV4VLDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekV4VLProcessingInfo]):

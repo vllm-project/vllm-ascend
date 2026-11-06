@@ -31,6 +31,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
+from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
@@ -48,8 +49,9 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
+from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -88,12 +90,21 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
         .to(device=packed_param.device, dtype=packed_param.dtype)
         .contiguous()
     )
-    replace_parameter(
-        conv1d,
-        _PACKED_CONV_WEIGHT_NAME,
-        packed_weight,
-        prefer_copy=True,
-    )
+    # vLLM main (#62326) keeps the parameter object by default and drops
+    # `prefer_copy`; v0.32.0 still requires `prefer_copy=True`.
+    if vllm_version_is("0.32.0"):
+        replace_parameter(
+            conv1d,
+            _PACKED_CONV_WEIGHT_NAME,
+            packed_weight,
+            prefer_copy=True,
+        )
+    else:
+        replace_parameter(
+            conv1d,
+            _PACKED_CONV_WEIGHT_NAME,
+            packed_weight,
+        )
 
 
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
@@ -142,6 +153,46 @@ def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor
     if cache_indices.dim() == 2:
         return cache_indices[:, 0].contiguous()
     raise ValueError(f"GDN causal cache_indices must be 1D or 2D, got shape={tuple(cache_indices.shape)}")
+
+
+def _flatten_recurrent_state_indices(
+    state_indices: torch.Tensor,
+    total_tokens: int,
+    query_start_loc: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reduce state indices to exactly one entry per recurrent token.
+
+    ``torch_npu.npu_recurrent_gated_delta_rule`` requires
+    ``len(ssm_state_indices) == T`` where T is the number of q/k/v rows.
+    Block-table-derived index tensors carry one entry per request row, which
+    also covers FIA/graph padding rows and requests scheduled with zero
+    tokens, while speculative rows carry one entry per draft slot, including
+    slots left unused when a sequence capped at max_model_len carries fewer
+    than ``num_spec + 1`` query tokens. 1D indices follow the live-rows-first
+    convention; 2D indices keep the first ``query_len`` slots of each row.
+    """
+    if state_indices.ndim == 1:
+        # Plain slice: zero device work. The block-table column view is
+        # strided and the kernel accepted strided input here before the fix,
+        # so forcing contiguity would add a per-layer copy on the hot path.
+        return state_indices[:total_tokens]
+    num_seqs, num_slots = state_indices.shape
+    if total_tokens == num_seqs * num_slots:
+        return state_indices.reshape(-1).contiguous()
+    if query_start_loc is None:
+        raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
+    # Variable-length speculative sequences: map each token to its
+    # (sequence, slot) pair on device. The output length is host-known
+    # (total_tokens), so this path stays sync-free, unlike masked_select or
+    # a CPU compaction whose output shape depends on device data.
+    qsl = query_start_loc[: num_seqs + 1]
+    lens = (qsl[1:] - qsl[:-1]).clamp_(min=0, max=num_slots)
+    bounds = lens.cumsum(0)
+    starts = bounds - lens
+    token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
+    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
+    slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
+    return state_indices[seq_ids, slot_ids].contiguous()
 
 
 def _split_head_first_conv_output(
@@ -474,7 +525,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
-            output_spec = causal_conv1d_update(
+            conv_update = (
+                causal_conv1d_update_varlen
+                if attn_metadata.spec_decode_metadata.use_upstream_conv
+                else causal_conv1d_update
+            )
+            output_spec = conv_update(
                 mixed_qkv_spec,
                 self_kv_cache[0],
                 conv_weights_T,
@@ -662,21 +718,43 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
-                ssm_state,
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+            if attn_metadata.spec_decode_metadata.use_upstream_recurrent:
+                # The native packed-index API bounds accepted_prev by the
+                # current query length. Reuse vLLM's strided state-table API
+                # for adaptive graphs, whose next query may be only one token.
+                core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=spec_causal_conv1d_meta.query_start_loc,
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                )
+            else:
+                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+                core_attn_out_spec = recurrent_gated_delta_rule(
+                    query_spec.squeeze(0),
+                    key_spec.squeeze(0),
+                    value_spec.squeeze(0),
+                    ssm_state,
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=_flatten_recurrent_state_indices(
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
@@ -703,7 +781,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
                 scale=key_decode.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_decodes],
+                ssm_state_indices=_flatten_recurrent_state_indices(
+                    non_spec_state_indices_tensor,
+                    num_decode_tokens,
+                ),
             ).unsqueeze(0)
         else:
             core_attn_out_decode = None
@@ -797,24 +878,38 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     last_recurrent_state,
                 )
             else:
-                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, prefill_has_initial_state)
+                # Under the hybrid KV-cache manager the state cache is a view
+                # over padded physical pages, so ``ssm_state[indices]`` would
+                # first copy the entire cache on NPU. Gather only the selected
+                # rows there; a packed contiguous cache keeps the plain index.
+                padded_state = ssm_state.stride(0) != ssm_state[0].numel()
+                if padded_state:
+                    initial_state = gather_ssm_states(
+                        ssm_state,
+                        prefill_state_indices,
+                        prefill_has_initial_state,
+                    )
+                else:
+                    initial_state = ssm_state[prefill_state_indices]
+                    clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
-                    initial_state=initial_state,
+                    initial_state=initial_state.transpose(-1, -2).contiguous(),
                     output_final_state=True,
                     cu_seqlens=prefill_query_start_loc,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-                ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
+                final_state = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                if padded_state:
+                    scatter_ssm_states_(ssm_state, prefill_state_indices, final_state)
+                else:
+                    ssm_state[prefill_state_indices] = final_state
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
@@ -833,7 +928,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
                 scale=key_non_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor,
+                ssm_state_indices=_flatten_recurrent_state_indices(
+                    non_spec_state_indices_tensor,
+                    num_decode_tokens,
+                ),
             ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
