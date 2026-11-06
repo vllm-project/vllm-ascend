@@ -579,6 +579,40 @@ class TestPCPMetadata:
                 group["swa"]._build_pcp_rope_views(batch.local, global_cache=True)
                 torch.testing.assert_close(swa.cos[LAYER], local_rope)
 
+    def test_rope_reused_across_builders_and_refreshed_each_batch(self, builders, monkeypatch):
+        first = builders()["swa"]
+        second = builders()["swa"]
+        gather = Mock(wraps=torch.gather)
+        monkeypatch.setattr(torch, "gather", gather)
+        positions = torch.tensor([3, 7])
+        common = SimpleNamespace(num_input_tokens=2, positions=positions)
+        addresses = []
+        for step in range(2):
+            shared = {}
+            before = gather.call_count
+            global_views = first._build_pcp_rope_views(common, global_cache=True, batch_shared=shared)
+            reused = second._build_pcp_rope_views(common, global_cache=True, batch_shared=shared)
+            local_views = first._build_pcp_rope_views(common, global_cache=False, batch_shared=shared)
+            assert gather.call_count - before == 4
+            for i in range(2):
+                assert reused[i][LAYER].data_ptr() == global_views[i][LAYER].data_ptr()
+                assert local_views[i][LAYER].data_ptr() != global_views[i][LAYER].data_ptr()
+                expected = positions.float() * (1 if i == 0 else -1)
+                torch.testing.assert_close(global_views[i][LAYER][:, 0, 0, 0], expected)
+            addresses.append(global_views[0][LAYER].data_ptr())
+            positions.add_(1)
+        assert addresses[0] == addresses[1]
+
+        # A different table must not reuse results even for identical positions.
+        shared = {}
+        first._build_pcp_rope_views(common, global_cache=True, batch_shared=shared)
+        original = second._pcp_rope_buffers[LAYER]
+        second._pcp_rope_buffers[LAYER] = (original[0] + 100, original[1] - 100, *original[2:])
+        before = gather.call_count
+        distinct = second._build_pcp_rope_views(common, global_cache=True, batch_shared=shared)
+        assert gather.call_count - before == 2
+        torch.testing.assert_close(distinct[0][LAYER][:, 0, 0, 0], positions.float() + 100)
+
     @pytest.mark.parametrize("asynchronous", [False, True])
     @pytest.mark.parametrize("stage", list(dsa_v41.DeviceMetadataStage))
     def test_metadata_tasks_cover_both_owners_and_are_drained_once(self, builders, asynchronous, stage):

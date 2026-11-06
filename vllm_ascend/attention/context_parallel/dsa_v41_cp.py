@@ -187,24 +187,34 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                 by_table[key] = buffers
             self._pcp_rope_buffers[layer_name] = buffers
 
-    def _build_pcp_rope_views(self, common: AscendCommonAttentionMetadata, *, global_cache: bool):
+    def _build_pcp_rope_views(
+        self,
+        common: AscendCommonAttentionMetadata,
+        *,
+        global_cache: bool,
+        batch_shared: dict[str, Any] | None = None,
+    ):
         if self._cache_kind != "swa":
             return None
         assert self._pcp_rope_buffers, "Prepare V4.1 PCP RoPE before building attention metadata"
         num_tokens = common.num_input_tokens
-        positions = common.positions[:num_tokens].long()
+        positions = common.positions[:num_tokens]
         cos_views, sin_views = {}, {}
-        gathered: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        # The runner resets this dictionary each step and traverses builders in
+        # capture order. Reuse the first builder's persistent output buffers,
+        # while keeping global KV and local Q addresses independent.
+        shared = {} if batch_shared is None else batch_shared
+        gathered = shared.setdefault("pcp_global_rope" if global_cache else "pcp_local_rope", {})
         for layer_name, buffers in self._pcp_rope_buffers.items():
             full_cos, full_sin = buffers[:2]
-            key = (full_cos.data_ptr(), full_sin.data_ptr())
+            key = (full_cos.data_ptr(), full_sin.data_ptr(), positions.data_ptr(), positions.stride(), num_tokens)
             views = gathered.get(key)
             if views is None:
                 offset = 4 if global_cache else 2
                 cos, sin = buffers[offset : offset + 2]
                 cos, sin = cos[:num_tokens], sin[:num_tokens]
                 if num_tokens:
-                    indices = positions.reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_cos.shape[-1])
+                    indices = positions.long().reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_cos.shape[-1])
                     torch.gather(full_cos, 0, indices, out=cos)
                     torch.gather(full_sin, 0, indices, out=sin)
                 views = (cos, sin)
@@ -296,7 +306,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         if needs_global_metadata:
             global_kwargs = dict(kwargs)
             global_kwargs["num_actual_reqs"] = pcp_context.global_batch.num_reqs
-            global_rope = self._build_pcp_rope_views(global_common, global_cache=True)
+            global_rope = self._build_pcp_rope_views(
+                global_common, global_cache=True, batch_shared=kwargs.get("common_v41_batch_metadata")
+            )
             if global_rope is not None:
                 global_kwargs["rope_views"] = global_rope
             global_metadata = self._build_global_metadata(common_prefix_len, global_common, fast_build, global_kwargs)
@@ -313,7 +325,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                 shared = kwargs.get(name)
                 if shared is not None:
                     local_kwargs[name] = shared.setdefault("pcp_local", {})
-            local_rope = self._build_pcp_rope_views(local_common, global_cache=False)
+            local_rope = self._build_pcp_rope_views(
+                local_common, global_cache=False, batch_shared=kwargs.get("common_v41_batch_metadata")
+            )
             if local_rope is not None:
                 local_kwargs["rope_views"] = local_rope
             local_metadata = super().build(common_prefix_len, local_common, fast_build, **local_kwargs)
