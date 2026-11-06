@@ -1947,9 +1947,8 @@ class TestAscendMLAImpl(TestBase):
         """Kimi-K3 fuses its gate as a third QKV-A shard; MLAPO cannot carry it."""
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
-        # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.33.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.33.0")
+        # Both supported Kimi AMD implementations use the three-shard layout.
+        gate_fused = True
 
         impl = self._rebuild_impl()
 
@@ -3690,10 +3689,6 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
     torch.testing.assert_close(kv_no_split, qkv_lora[:, 4:])
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.33.0"),
-    reason="gate-fused QKV-A layout is vLLM main only",
-)
 def test_split_fused_qkv_lora_peels_kimi_output_gate():
     """A gate-fused layout returns the trailing shard separately from q/kv."""
     qkv_lora = torch.arange(15, dtype=torch.float32).reshape(1, 15)
