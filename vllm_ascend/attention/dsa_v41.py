@@ -1228,7 +1228,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             req.slot_mapping = prepared_slots
             req.flat_slot_mapping = prepared_flat_slots
             if native_metadata_in_graph:
-                req.slot_metadata_group_id = id(self.common_v41_metadata[f"prepare:{slot_key}"])
+                # Shared native FULL-graph slots must have a PREPARE producer
+                # registered by the builder that first created the slot mapping.
+                producer_buffer = self.common_v41_metadata.get(f"prepare:{slot_key}")
+                if producer_buffer is None:
+                    raise RuntimeError(f"Native FULL-graph slot mapping {slot_key!r} has no PREPARE producer")
+                req.slot_metadata_group_id = id(producer_buffer)
 
     def _prepare_cache_lengths(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         compressed = req.cache_kind in {"long_kv", "index_k"}

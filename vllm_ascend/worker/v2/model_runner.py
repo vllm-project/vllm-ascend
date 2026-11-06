@@ -476,6 +476,7 @@ class NPUModelRunner(GPUModelRunner):
             not packed
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and self.parallel_config.prefill_context_parallel_size == 1
+            and self.parallel_config.decode_context_parallel_size == 1
         )
         self.model_state.device_metadata = (
             TargetDeviceMetadata(full_graph_only=capture_native_metadata)
