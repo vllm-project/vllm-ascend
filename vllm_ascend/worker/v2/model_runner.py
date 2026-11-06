@@ -95,6 +95,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
+from vllm_ascend.expert_offload.utils import initialize_expert_offload
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -148,10 +150,14 @@ class NPUModelRunner(GPUModelRunner):
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
     max_num_reqs: int
+    expert_offload_manager: ExpertOffloadManager | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        offload_config = getattr(self.ascend_config, "expert_offload_config", None)
+        if offload_config is not None and offload_config.enabled:
+            self.expert_offload_manager = ExpertOffloadManager()
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
@@ -294,6 +300,11 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        offload = self.expert_offload_manager
+        if offload is not None and load_dummy_weights:
+            raise ValueError(
+                "expert offload requires checkpoint shard tracking; dummy checkpoint loading is unsupported"
+            )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
@@ -311,6 +322,9 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        if offload is not None:
+            initialize_expert_offload(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -532,6 +546,10 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        if self.expert_offload_manager is not None:
+            self.expert_offload_manager.unsubscribe_graph_streams()
+            self.expert_offload_manager = None
+
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -634,6 +652,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        offload_manager = self.expert_offload_manager
+        if offload_manager is not None:
+            # Dummy runs have no batch state and keep the full-pool default.
+            # Real batch metadata below selects prefill or decode.
+            offload_manager.has_prefill = True
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -762,6 +785,8 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if self.expert_offload_manager is not None and batch_state is not None:
+            self.expert_offload_manager.has_prefill = batch_state.has_prefill
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
