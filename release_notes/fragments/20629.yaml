@@ -1,0 +1,5 @@
+pr: 20629
+entries:
+  - category: feature
+    text: Added A5 chunk32 GDN prefill with prebuilt host metadata shared across layers, requiring a compatible FLA NPU backend.
+    hardware: [A5]

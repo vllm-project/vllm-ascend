@@ -43,6 +43,7 @@ from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
+_GDN_CHUNK32_SIZE = 32
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
 _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
 _GDN_CUMSUM_WORKING_SET = 2**18
@@ -139,6 +140,8 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    # A5 chunk32 uses the compacted kernel sequence IDs; shared across layers.
+    chunk_indices_chunk32_host: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -325,6 +328,16 @@ def _build_non_spec_chunked_prefill_metadata(
     else:
         cu_seqlens_kern = tuple(cu_seqlens_kern)
 
+    # Use the same index builder as chunk64, with the compacted sequence IDs
+    # passed to the A5 kernel. Every GDN layer reuses this metadata instance.
+    chunk_cu_seqlens_cpu = cu_seqlens_cpu if cu_seqlens_kern is None else cu_seqlens_cpu.new_tensor(cu_seqlens_kern)
+    if chunk_cu_seqlens_cpu.numel() > 1:
+        chunk_indices_chunk32 = prepare_chunk_indices(chunk_cu_seqlens_cpu, _GDN_CHUNK32_SIZE)
+        chunk_indices_chunk32_host = tuple(chunk_indices_chunk32.to(torch.int64).reshape(-1).tolist())
+    else:
+        # With no nonempty sequences, prepare_chunk_indices would call torch.cat([]).
+        chunk_indices_chunk32_host = ()
+
     if build_device_metadata:
         device_chunk_metadata = {
             "chunk_indices_chunk64": chunk_indices_chunk64.to(device=device, non_blocking=True),
@@ -347,6 +360,7 @@ def _build_non_spec_chunked_prefill_metadata(
     return GDNChunkedPrefillMetadata(
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
+        chunk_indices_chunk32_host=chunk_indices_chunk32_host,
         **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
