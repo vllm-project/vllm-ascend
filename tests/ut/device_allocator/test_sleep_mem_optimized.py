@@ -16,12 +16,16 @@
 #
 
 from contextlib import nullcontext
+from ctypes import c_void_p
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from vllm_ascend.device_allocator.hccl_suspend import comm_to_int
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
+    AclGraphSleepPolicy,
     AclGraphSleepWakeupManager,
+    HcclSleepPolicy,
     HcclSleepWakeupManager,
     SleepWakeupManager,
 )
@@ -378,3 +382,168 @@ def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
 
     manager.wakeup(tags=["kv_cache"])
     manager.hccl.release_lifecycle_anchor.assert_called_once_with()
+
+
+def test_wakeup_defers_acl_and_anchor_when_hccl_resume_is_incomplete():
+    model_runner = MagicMock(use_aclgraph=True)
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    manager.hccl.wakeup = MagicMock(return_value=False)
+    manager.acl_graph.wakeup = MagicMock()
+    manager.hccl.release_lifecycle_anchor = MagicMock()
+
+    manager.wakeup()
+
+    manager.acl_graph.wakeup.assert_not_called()
+    manager.hccl.release_lifecycle_anchor.assert_not_called()
+
+
+def test_acl_graph_inplace_skips_recapture_on_main_path():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+    manager.acl_policy = AclGraphSleepPolicy.INPLACE
+    wrapper = MagicMock()
+    wrapper.concrete_aclgraph_entries = {"keep": object()}
+    with patch(
+        "vllm_ascend.device_allocator.sleep_mem_optimized.acl_graph._acl_graph_wrappers",
+        [wrapper],
+    ):
+        manager.sleep()
+        manager.wakeup(tags=None)
+    model_runner.capture_model.assert_not_called()
+
+
+def test_hccl_lightweight_suspend_path_on_main():
+    worker = MagicMock()
+    worker._pp_send_work = []
+    manager = HcclSleepWakeupManager(MagicMock(), worker)
+    manager.hccl_policy = HcclSleepPolicy.LIGHTWEIGHT
+    manager.allow_fallback = False
+    with (
+        patch.object(manager, "_has_multi_rank_group", return_value=False),
+        patch.object(manager, "_suspend_all_comms", return_value=1),
+        patch.object(manager, "_resume_all_comms", return_value=1),
+        patch.object(manager, "refresh_moe_hccl_groups"),
+        patch.object(manager, "refresh_moe_hccl_runtime_state"),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
+        patch("torch.distributed.is_available", return_value=True),
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.npu.synchronize"),
+    ):
+        manager.sleep()
+        manager.wakeup()
+
+
+def test_acl_graph_inplace_fallback_when_entries_missing():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+    manager.acl_policy = AclGraphSleepPolicy.INPLACE
+    manager.allow_fallback = True
+    manager._used_inplace = True
+    wrapper = MagicMock()
+    wrapper.concrete_aclgraph_entries = {}
+    with (
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.acl_graph._acl_graph_wrappers", [wrapper]),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
+    ):
+        manager.wakeup(tags=None)
+    model_runner.capture_model.assert_called_once_with()
+
+
+def test_comm_to_int_accepts_ctypes_and_nested_wrapper_handles():
+    assert comm_to_int(c_void_p(17)) == 17
+    assert comm_to_int(SimpleNamespace(value=c_void_p(23))) == 23
+    assert comm_to_int(SimpleNamespace(handle=SimpleNamespace(ptr=29))) == 29
+    assert comm_to_int(object()) == 0
+
+
+def test_hccl_suspend_barriers_all_groups_before_first_suspend():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    group_a = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
+    group_b = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
+    calls: list[str] = []
+
+    def _record(label: str) -> None:
+        calls.append(label)
+
+    def _suspend(comm: object) -> bool:
+        calls.append(f"suspend-{comm}")
+        return True
+
+    with (
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group_a, group_b]),
+        patch.object(manager, "_global_barrier", side_effect=lambda: _record("global")),
+        patch.object(manager, "_safe_barrier", side_effect=lambda _: _record("barrier")),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.hccl_suspend_available", return_value=True),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.get_backend_hccl_comm",
+            side_effect=[11, 22],
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_hccl_comm",
+            side_effect=_suspend,
+        ),
+    ):
+        assert manager._suspend_all_comms() == 2
+
+    assert calls == ["global", "barrier", "barrier", "suspend-11", "suspend-22"]
+
+
+def test_hccl_resume_does_not_resume_unknown_current_handle_or_barrier():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    group = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
+    manager._suspended_comms = [11]
+    with (
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.resume_all_registered_pgs", return_value=0),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.get_backend_hccl_comm",
+            return_value=22,
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_process_group_hccl",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_hccl_comm",
+            return_value=False,
+        ) as mock_resume,
+        patch.object(manager, "_safe_barrier") as mock_barrier,
+        patch.object(manager, "_global_barrier") as mock_global_barrier,
+    ):
+        assert manager._resume_all_comms() == -1
+
+    mock_resume.assert_called_once_with(11)
+    mock_barrier.assert_not_called()
+    mock_global_barrier.assert_not_called()
+    assert manager._suspended_comms == [11]
+
+
+def test_hccl_resume_keeps_group_handle_pending_when_current_handle_changes():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    group = SimpleNamespace(device_group=SimpleNamespace(size=lambda: 2))
+    manager._suspended_comms = [11]
+    manager._suspended_group_handles = {id(group.device_group): 11}
+    with (
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.resume_all_registered_pgs", return_value=0),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.get_backend_hccl_comm",
+            return_value=22,
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_process_group_hccl",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_hccl_comm",
+            return_value=True,
+        ) as mock_resume,
+        patch.object(manager, "_safe_barrier") as mock_barrier,
+        patch.object(manager, "_global_barrier") as mock_global_barrier,
+    ):
+        assert manager._resume_all_comms() == -1
+
+    mock_resume.assert_not_called()
+    mock_barrier.assert_not_called()
+    mock_global_barrier.assert_not_called()
+    assert manager._suspended_comms == [11]
