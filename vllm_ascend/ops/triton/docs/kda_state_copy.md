@@ -15,8 +15,10 @@ Flow: worker binds cache -> choose fused / masked byte-copy fallback
 failure aborts startup.
 
 Both V1 and V2 runners register state-copy keys after cache binding inside their
-registry window. The worker runs unified `kernel_warmup` before model dummy runs
-and ACL graph capture. Unsupported contiguous and
+registry window. The worker runs model dummy runs, then unified `kernel_warmup`,
+then ACL graph capture. Dummy runs can compile state-copy keys on first use;
+the subsequent warmup reuses cached launchers and compiles remaining keys.
+Unsupported contiguous and
 strided caches both use the PR's byte-pointer copy algorithm with a startup-precompiled
 batch-memcpy launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
 Invalid inner layouts remain rejected by the strided fallback, as in the PR.

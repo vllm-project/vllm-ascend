@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -18,7 +18,7 @@ from tests.ut.base import TestBase
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("use_v2", [False, True])
-def test_triton_warmup_precedes_model_runs(enforce_eager, use_v2):
+def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
     from vllm_ascend.worker.worker import NPUWorker
 
     events: list[tuple[str] | tuple[str, int]] = []
@@ -49,16 +49,28 @@ def test_triton_warmup_precedes_model_runs(enforce_eager, use_v2):
     ):
         profile.return_value.supports.return_value = False
         NPUWorker.compile_or_warm_up_model(worker)
-    expected = [("kernels",), ("dummy", 4), ("dummy", 2)]
+    expected = [("dummy", 4), ("dummy", 2), ("kernels",)]
     if not enforce_eager:
         expected.append(("capture",))
     assert events == expected
 
 
-def test_triton_warmup_failure_prevents_model_runs():
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_triton_warmup_failure_prevents_capture(use_v2):
     from vllm_ascend.worker.worker import NPUWorker
 
-    worker = SimpleNamespace(model_runner=MagicMock())
+    worker = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                compile_sizes=[2, 4],
+                cudagraph_mode=CUDAGraphMode.NONE,
+                get_compile_ranges=lambda: [],
+            ),
+        ),
+        model_config=SimpleNamespace(enforce_eager=False),
+        model_runner=MagicMock(),
+    )
     with (
         patch(
             "vllm_ascend.model_executor.warmup.kernel_warmup.kernel_warmup",
@@ -67,7 +79,7 @@ def test_triton_warmup_failure_prevents_model_runs():
         pytest.raises(RuntimeError, match="KDA compilation failed"),
     ):
         NPUWorker.compile_or_warm_up_model(worker)
-    worker.model_runner._dummy_run.assert_not_called()
+    assert worker.model_runner._dummy_run.call_args_list == [call(4), call(2)]
     worker.model_runner.capture_model.assert_not_called()
 
 
