@@ -543,40 +543,6 @@ for a BF16 draft.
       --speculative-config '{"method": "dspark", "model": "deepseek-ai/dspark_qwen3_8b_block7", "num_speculative_tokens": 7, "enforce_eager": true}'
     ```
 
-### Kimi K3.1 hybrid SFA/KDA targets with an MLA drafter
-
-With Model Runner V2, Kimi K3.1 DSpark MLA draft layers share logical block
-IDs with the target's full-history SFA MLA/indexer group. Each draft layer
-has its own backing allocation, dtype, page geometry, and attention metadata.
-The target's paired SFA pages and KDA page overlays retain their existing
-geometry. Sharing ownership removes the extra full-history block sequence
-previously allocated to the draft model.
-
-This layout requires uncompressed full-history caches with the same logical
-block size and block-table coverage, including DCP sharding. Draft pages are
-still included in the cache memory budget, so enabling DSpark can reduce the
-number of available cache blocks.
-
-Set the draft KV dtype explicitly when the target uses packed FP8 SFA KV:
-
-```shell
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/kimi-target \
-  --tensor-parallel-size 8 \
-  --kv-cache-dtype fp8 \
-  --attention_config.indexer_kv_dtype fp8 \
-  --speculative-config '{
-    "method": "dspark",
-    "model": "/path/to/kimi-mla-draft",
-    "num_speculative_tokens": 3,
-    "draft_tensor_parallel_size": 8,
-    "kv_cache_dtype": "bfloat16"
-  }'
-```
-
-The draft dtype is independent of the target's `--kv-cache-dtype`.
-`"auto"` also selects BF16 when the model dtype is BF16. For PD deployment,
-use the same draft dtype on both Prefill and Decode.
-
 ### Adaptive verification
 
 Adaptive verification lets DSpark choose how many draft tokens to verify for

@@ -1,7 +1,0 @@
-pr: 20878
-entries:
-  - category: bugfix
-    text: >-
-      Fixed Kimi K3.1 DSA weight loading with newer vLLM versions by loading
-      standalone output-gate weights and quantization parameters through
-      their own parameter loaders instead of the fused Q/KV/G mapping.

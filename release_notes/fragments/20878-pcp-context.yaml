@@ -1,7 +1,0 @@
-pr: 20878
-entries:
-  - category: bugfix
-    text: >-
-      Fixed Kimi KDA PCP request failures with current vLLM metadata transport
-      by reading the PCP context forwarded through common attention metadata,
-      while preserving compatibility with explicit-context callers.
