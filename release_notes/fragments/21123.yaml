@@ -2,6 +2,7 @@ pr: 21123
 entries:
   - category: bugfix
     text: >-
-      Adjusted MRV2 PCP startup profiling for MTP/Eagle and target-only
-      configurations to use a local prefill token budget while retaining
-      speculative request capacity and the configured global token limit.
+      Separated MRV2 PCP startup memory profiling into target and draft
+      stages. Target and MTP/Eagle prefill use local token extents, while
+      DFlash/DSpark retain global context preprocessing and full draft
+      request capacity without changing the configured global token limit.
