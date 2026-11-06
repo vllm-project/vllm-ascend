@@ -263,6 +263,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         kv_transfer_config=None,
         weight_transfer_config=None,
         model_config=SimpleNamespace(
+            dtype=hidden_states.dtype,
             hf_config=SimpleNamespace(model_type="kimi_k31"),
             hf_text_config=SimpleNamespace(mla_use_nope=True),
         ),

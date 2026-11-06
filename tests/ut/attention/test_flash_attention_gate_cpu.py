@@ -16,8 +16,8 @@ class Kernel:
     def __init__(self):
         self.calls = []
 
-    def __getitem__(self, grid):
-        return lambda *args, **kwargs: self.calls.append((grid, args, kwargs))
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
 
 
 def load_gate():
@@ -26,7 +26,8 @@ def load_gate():
     tree.body = [
         node
         for node in tree.body
-        if isinstance(node, ast.Assign) or getattr(node, "name", "") == "flash_attention_gate"
+        if (isinstance(node, ast.Assign) and not isinstance(node.value, ast.Call))
+        or getattr(node, "name", "") in ("flash_attention_gate", "_flash_attention_gate_block_size")
     ]
     kernel = Kernel()
     scope = dict(
@@ -34,7 +35,7 @@ def load_gate():
         triton=SimpleNamespace(cdiv=lambda x, y: (x + y - 1) // y),
         init_device_properties_triton=lambda: None,
         get_vectorcore_num=lambda: 64,
-        _flash_attention_gate_kernel=kernel,
+        _FLASH_ATTENTION_GATE_KERNEL=kernel,
     )
     exec(compile(tree, str(path), "exec"), scope)
     return scope["flash_attention_gate"], kernel
@@ -46,13 +47,13 @@ def test_launch_preserves_storage_and_row_strides(tokens, hidden):
     a = torch.empty(tokens, hidden + 16, dtype=torch.bfloat16)[:, :hidden]
     g = torch.empty(tokens, hidden + 8, dtype=torch.bfloat16)[:, :hidden]
     assert gate_op(a, g) is a
-    grid, args, kwargs = kernel.calls[0]
-    assert args[0] is a and args[1] is g
-    assert args[2] == tokens * hidden
-    assert kwargs["PROJECTED_STRIDE"] == hidden + 16
-    assert kwargs["GATE_STRIDE"] == hidden + 8
+    kwargs = kernel.calls[0]
+    assert kwargs["projected"] is a and kwargs["gate"] is g
+    assert kwargs["numel"] == tokens * hidden
+    assert kwargs["projected"].stride(0) == hidden + 16
+    assert kwargs["gate"].stride(0) == hidden + 8
     assert kwargs["HIDDEN"] == hidden
-    assert 0 < grid[0] <= 64
+    assert 0 < kwargs["grid"][0] <= 64
 
 
 @pytest.mark.parametrize("shape", [(0, 1536), (8, 0)])

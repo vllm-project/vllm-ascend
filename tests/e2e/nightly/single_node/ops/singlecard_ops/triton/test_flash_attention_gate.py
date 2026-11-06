@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
-from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate
+from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 
 
 @pytest.mark.parametrize(
@@ -85,3 +88,45 @@ def test_all_bf16_gate_patterns_preserve_intermediate_rounding():
 def test_empty(shape):
     a = torch.empty(shape, device="npu", dtype=torch.bfloat16)
     assert flash_attention_gate(a, a) is a
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("gate_prefix", [0, 576, 1])
+@torch.inference_mode()
+def test_registry_warmup_prevents_runtime_compilation(dtype, gate_prefix, monkeypatch):
+    """All tile thresholds and fused views must hit precompiled variants.
+
+    Run with a fresh TRITON_CACHE_DIR to exercise cold compile-only startup.
+    No operator is executed before compiler entry points are forbidden.
+    """
+    hidden = 1536
+    registry = JitWarmupRegistry(None)
+    with registry.activate():
+        register_flash_attention_gate_warmup(dtype, hidden, gate_prefix)
+    registry.warmup()
+
+    def forbid_compile(*args, **kwargs):
+        raise AssertionError("Output gate compiled after registry warmup")
+
+    for name in ("triton", "triton.compiler", "triton.compiler.compiler", "triton.runtime.jit"):
+        module = importlib.import_module(name)
+        if callable(getattr(module, "compile", None)):
+            monkeypatch.setattr(module, "compile", forbid_compile)
+    for tokens in (1, 5, 6, 42, 43, 682, 683, 1024):
+        a = torch.randn(tokens, hidden, device="npu", dtype=dtype)
+        g_base = torch.randn(tokens, hidden + gate_prefix, device="npu", dtype=dtype)
+        g = g_base[:, gate_prefix:]
+        gate_before = g_base.clone()
+        expected = a * torch.sigmoid(g)
+        assert flash_attention_gate(a, g) is a
+        tolerance = {"atol": 0, "rtol": 0} if dtype == torch.bfloat16 else {}
+        torch.testing.assert_close(a, expected, **tolerance)
+        torch.testing.assert_close(g_base, gate_before, atol=0, rtol=0)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        flash_attention_gate(a, g)
+    a.normal_()
+    g.normal_()
+    expected = a * torch.sigmoid(g)
+    graph.replay()
+    torch.testing.assert_close(a, expected, **tolerance)
