@@ -662,11 +662,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.set_update_stream(update_stream)
         self.update_stream = update_stream
 
-    def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
+    def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata, num_input_tokens=None):
         if use_updatable_graph(att_backend):
             update_params = []
+            from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+            use_mla_dcp = self.dcp_size > 1 and issubclass(att_backend, AscendMLABackend)
+            if use_mla_dcp and num_input_tokens is None:
+                raise ValueError("MLA DCP draft graph updates require the padded input token count")
             for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
                 for layer_name, metadata in per_step_metadata.items():
+                    if use_mla_dcp:
+                        from vllm_ascend.attention.context_parallel.mla_cp import build_mla_dcp_fia_params
+
+                        update_params.extend(
+                            build_mla_dcp_fia_params(layer_name, metadata, num_input_tokens, is_draft_model=True)
+                        )
+                        continue
                     if self.dcp_size > 1:
                         # Import lazily: attention backends also import spec-decode utilities.
                         from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
@@ -968,6 +980,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._maybe_update_metadata(
                 self.draft_attn_groups[0].backend,
                 multi_steps_attn_metadata,
+                num_tokens,
             )
 
         with set_ascend_forward_context(
@@ -1352,6 +1365,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._maybe_update_metadata(
                 self.draft_attn_groups[0].backend,
                 multi_steps_attn_metadata,
+                num_input_tokens,
             )
 
         active_device_metadata_executor = (

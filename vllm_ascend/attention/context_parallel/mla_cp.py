@@ -43,11 +43,10 @@ class MLADCPParamProvider:
     metadata_layer_name: str
     attention_kind: CPKVScope
     num_tokens: int
-    draft_step: int | None = None
 
     @property
-    def layer_name(self) -> tuple[str, CPKVScope, int | None]:
-        return self.metadata_layer_name, self.attention_kind, self.draft_step
+    def layer_name(self) -> tuple[str, CPKVScope]:
+        return self.metadata_layer_name, self.attention_kind
 
     def resolve(self, attn_metadata) -> dict[str, object]:
         decode = attn_metadata[self.metadata_layer_name].decode
@@ -70,21 +69,29 @@ class MLADCPParamProvider:
         return {"actual_seq_qlen": query_lens, "actual_seq_kvlen": kv_lens, "block_table": block_table}
 
 
-def build_mla_dcp_fia_params(layer_name, metadata, num_tokens, draft_step=None):
-    """Build SharedSource entries for each MLA DCP attention scope."""
-    decode = getattr(metadata, "decode", None)
-    if decode is None or getattr(metadata, "external_flashmla", None) is not None:
+def build_mla_dcp_fia_params(
+    layer_name: str,
+    metadata,
+    num_tokens: int,
+    *,
+    is_draft_model: bool = False,
+    is_draft_model_prefill: bool = False,
+    use_spec_decode: bool = False,
+) -> list[dict[str, object]]:
+    """Publish parameters for the captured split or ordinary MLA task."""
+    if metadata.decode is None or metadata.external_flashmla is not None:
         return []
-    kinds = []
-    if decode.cp_seq_len is not None:
-        kinds.append(CPKVScope.FULL)
-    if decode.actual_seq_lengths_q is not None:
-        kinds.append(CPKVScope.CURRENT)
-        if decode.cp_history_seq_len is not None:
-            kinds.append(CPKVScope.HISTORY)
+
+    use_split = use_history_current_split_decode(
+        metadata,
+        is_draft_model=is_draft_model,
+        is_draft_model_prefill=is_draft_model_prefill,
+        use_spec_decode=use_spec_decode,
+    )
+    kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if use_split else (CPKVScope.FULL,)
     params = []
     for kind in kinds:
-        provider = MLADCPParamProvider(layer_name, kind, num_tokens, draft_step)
+        provider = MLADCPParamProvider(layer_name, kind, num_tokens)
         params.append({"layer_name": provider.layer_name, **provider.resolve({layer_name: metadata})})
     return params
 
@@ -596,9 +603,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             )
 
         assert self.layer_name is not None
-        draft_step = getattr(get_forward_context(), "mla_dcp_draft_step", None) if _EXTRA_CTX.is_draft_model else None
         workspace = get_capture_resource(
-            (MLADCPParamProvider, self.layer_name, draft_step, attention_kind, q_nope.shape, k_nope.shape),
+            (MLADCPParamProvider, self.layer_name, attention_kind, q_nope.shape, k_nope.shape),
             lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 q_nope, k_nope, k_nope, **common_kwargs
             ),
@@ -615,7 +621,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 "workspace": workspace,
                 "out": [attn_output, softmax_lse],
             },
-            MLADCPParamProvider(self.layer_name, attention_kind, num_tokens, draft_step),
+            MLADCPParamProvider(self.layer_name, attention_kind, num_tokens),
         )
         return attn_output, softmax_lse
 
@@ -852,12 +858,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
         if _EXTRA_CTX.capturing:
             assert self.layer_name is not None
-            draft_step = (
-                getattr(get_forward_context(), "mla_dcp_draft_step", None) if _EXTRA_CTX.is_draft_model else None
-            )
             workspace = get_capture_resource(
                 (
-                    MLADCPParamProvider, self.layer_name, draft_step, CPKVScope.FULL,
+                    MLADCPParamProvider, self.layer_name, CPKVScope.FULL,
                     input_layout, q_nope.shape, k_nope.shape,
                 ),
                 lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
@@ -885,7 +888,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     "workspace": workspace,
                     "out": [attn_output, softmax_lse],
                 },
-                MLADCPParamProvider(self.layer_name, CPKVScope.FULL, num_tokens, draft_step),
+                MLADCPParamProvider(self.layer_name, CPKVScope.FULL, num_tokens),
             )
         else:
             attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score_v2(
