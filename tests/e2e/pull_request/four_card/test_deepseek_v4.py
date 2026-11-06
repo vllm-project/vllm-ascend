@@ -29,6 +29,10 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+# A3: without fabric mem every cross-rank put fails (halDeviceDisableP2P
+# drvRetCode=17 -> aclrtIpcMemImportByKey 107000) and R2 sees 0 hits.
+# setdefault keeps it overridable on other platforms.
+os.environ.setdefault("ASCEND_ENABLE_USE_FABRIC_MEM", "1")
 
 # 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
 # prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.

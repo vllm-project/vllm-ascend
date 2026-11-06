@@ -19,10 +19,10 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
 
-# 首次 pilot 后在引擎日志里 grep `kv lcm block sizes`，把这里改成实际值。
-# 16,384 是 DSV4 的实测值；Qwen3.8-27B 预期同量级，但必须确认。
-POOL_LCM_BLOCK_SIZE = 16384
-POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+# 实测 A3：`kv cache group sizes [896, 896, 896, 896]` / `kv lcm block sizes 896`。
+# 16,388 = 18 x 896 + 260 -> 命中 16,128 tokens。
+POOL_LCM_BLOCK_SIZE = 896
+POOL_PROMPT_TOKENS = 16388
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 MAX_MODEL_LEN = POOL_MAX_MODEL_LEN

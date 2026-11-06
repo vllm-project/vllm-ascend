@@ -77,9 +77,10 @@ class PoolSnapshot:
 def snapshot_metrics(source: Any) -> PoolSnapshot:
     """Read current pool counters from a runner or model exposing ``get_metrics()``.
 
-    ``VllmRunner.get_metrics()`` returns the raw ``PromMetric`` list while
-    ``DPVllmRunner.get_metrics()`` returns ``name -> value`` summed over DP
-    ranks, so both shapes are accepted here.
+    ``VllmRunner.get_metrics()`` and ``DPVllmRunner.get_metrics()`` both
+    return ``name -> value`` (DP counters summed over ranks); a raw
+    ``PromMetric`` list is still accepted for callers that pass engine metrics
+    directly.
 
     ``LLM.get_metrics()`` requires ``disable_log_stats=False``; otherwise it
     raises ``AssertionError: Stat logging disabled``.
@@ -218,9 +219,16 @@ def assert_output_identical(cold_tokens: Sequence[int], hit_tokens: Sequence[int
     Greedy decoding over a fixed token-id prompt is deterministic, so any
     divergence means corrupted KV data rather than sampling noise.
     """
-    assert list(cold_tokens) == list(hit_tokens), (
+    cold, hit = list(cold_tokens), list(hit_tokens)
+    if cold == hit:
+        return
+    diff_positions = [index for index, (a, b) in enumerate(zip(cold, hit)) if a != b]
+    raise AssertionError(
         f"[{tag}] H3 failed: silent data corruption, pool-hit tokens differ from the cold start\n"
-        f"  cold={list(cold_tokens)}\n  hit ={list(hit_tokens)}"
+        f"  len cold={len(cold)} hit={len(hit)} "
+        f"num_diff={len(diff_positions) + abs(len(cold) - len(hit))} "
+        f"first_diff_positions={diff_positions[:3]}\n"
+        f"  cold_tail={cold[-8:]}\n  hit_tail ={hit[-8:]}"
     )
 
 
@@ -364,9 +372,12 @@ def run_pool_hit_sequence(
         "expected_hits": float(expected_total),
         "load_keys": snap4.load_keys,
     }
+    if lcm_block_size:
+        detail = f"hit_tokens R2={ratio_r2:.0f} R3={ratio_r3:.0f}"
+    else:
+        detail = f"delta_ratio R2={ratio_r2:.4f} R3={ratio_r3:.4f}"
     print(
-        f"[kv_pool] {tag} delta ratios R2={ratio_r2:.4f} R3={ratio_r3:.4f} "
-        f"expected_hits={expected_total} load_keys_total={snap4.load_keys:.0f}",
+        f"[kv_pool] {tag} {detail} expected_hits={expected_total} load_keys_total={snap4.load_keys:.0f}",
         flush=True,
     )
     return summary
