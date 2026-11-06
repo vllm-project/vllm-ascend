@@ -1526,7 +1526,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 }'
 ```
 
-`lookup_rpc_port` is the RPC port used between the pooling scheduler process and the worker process. Each instance must use a unique port value.
+`lookup_rpc_port` identifies the local IPC endpoint used between the pooling scheduler process and the worker process. DP replicas within one vLLM service use separate IPC endpoints automatically. Independently launched services sharing the same RPC base directory must use different `lookup_rpc_port` values.
 
 **Note:** The Yuanrong backend normalizes KV keys before calling Datasystem. Supported ASCII keys up to 1024 bytes are preserved. Longer keys or keys containing unsupported characters are rewritten to a maximum of 1024 characters with a hash suffix, so do not rely on the raw key string when debugging backend storage. No extra buffer pre-registration step is required.
 
@@ -1558,7 +1558,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kv_load_failure_policy` | str | fail | No | recompute / fail | Behavior when KV loading fails: `recompute` rolls back and recomputes (does not yet support hybrid attention models like DeepSeekV4, Qwen 3.5), `fail` terminates the request. When using MultiConnector, configure on the top-level `kv-transfer-config`. |
-| `lookup_rpc_port` | str | No default | Yes | Unique port number (e.g., "0", "1") | RPC port between pooling scheduler and worker processes. Each instance must use a unique port. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
+| `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
@@ -1567,6 +1567,8 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_size` | int | 1 | Required when PP + `consumer_is_to_put` | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
+
+**NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 

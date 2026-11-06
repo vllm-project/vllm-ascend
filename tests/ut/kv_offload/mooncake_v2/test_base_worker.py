@@ -411,6 +411,7 @@ def make_worker_config(
             data_parallel_rank_local=local_dp_rank,
             data_parallel_size_local=3,
             data_parallel_rank=2,
+            data_parallel_index=2,
         ),
     )
 
@@ -447,6 +448,20 @@ def patch_worker_runtime(
         )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=7))
     return global_te, tp_group
+
+
+@pytest.mark.parametrize("independent_dp", [True, False], ids=["dense", "moe"])
+def test_dp_workers_publish_distinct_handshake_ports(monkeypatch, independent_dp):
+    patch_worker_runtime(monkeypatch)
+    ports = []
+    for dp_index in range(2):
+        config = make_worker_config(local_dp_rank=dp_index)
+        config.parallel_config.data_parallel_rank = 0 if independent_dp else dp_index
+        config.parallel_config.data_parallel_index = dp_index
+        config.parallel_config.data_parallel_size_local = 1 if independent_dp else 2
+        worker = MooncakeBaseConnectorWorker(config, f"engine-{dp_index}", SimpleNamespace(num_blocks=1))
+        ports.append(worker.handshake_port)
+    assert len(set(ports)) == 2
 
 
 def test_base_worker_initializes_parallel_ranks_and_handshake_port(

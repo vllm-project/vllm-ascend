@@ -43,6 +43,7 @@ def make_scheduler_config(
             decode_context_parallel_size=2,
             data_parallel_size=3,
             data_parallel_rank=1,
+            data_parallel_index=1,
         ),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=None)),
     )
@@ -85,6 +86,28 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     assert scheduler.group_unique_specs == [[group.kv_cache_spec]]
     assert scheduler.need_truncate is False
     init_ascend_config.assert_called_once_with(config)
+
+
+@pytest.mark.parametrize("independent_dp", [True, False], ids=["dense", "moe"])
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_dp_schedulers_use_distinct_control_ports(monkeypatch, independent_dp, tp_size):
+    """Independent dense engines retain their replica index after DP rank resets."""
+    monkeypatch.setattr(base_scheduler, "init_ascend_config", MagicMock())
+    monkeypatch.setattr(base_scheduler, "get_ascend_config", MagicMock())
+    monkeypatch.setattr(base_scheduler, "get_ip", lambda: "127.0.0.1")
+    schedulers = []
+    for dp_index in range(2):
+        config = make_scheduler_config(is_consumer=False, is_producer=True)
+        config.parallel_config.tensor_parallel_size = tp_size
+        config.parallel_config.pipeline_parallel_size = 1
+        config.parallel_config.data_parallel_size = 1 if independent_dp else 2
+        config.parallel_config.data_parallel_rank = 0 if independent_dp else dp_index
+        config.parallel_config.data_parallel_index = dp_index
+        schedulers.append(
+            MooncakeBaseConnectorScheduler(config, f"engine-{dp_index}", SimpleNamespace(kv_cache_groups=[]))
+        )
+
+    assert schedulers[0].side_channel_port != schedulers[1].side_channel_port
 
 
 @pytest.mark.parametrize(("is_consumer", "is_producer"), [(False, False), (True, True)])
