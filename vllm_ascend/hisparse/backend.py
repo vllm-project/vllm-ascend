@@ -49,7 +49,7 @@ def capture_aware_stream(stream: torch.Stream) -> torch.Stream:
 
 
 class AscendHiSparseBackend(HiSparseBackend):
-    # Inherit Core's private Host-pool policy; NPU event IPC is not implemented.
+    # Keep private pools until NPU IPC events interoperate with Core's generic streams.
     stats_dtype = torch.int64
 
     def check_available(self) -> None:
