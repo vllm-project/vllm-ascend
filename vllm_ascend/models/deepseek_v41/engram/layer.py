@@ -37,8 +37,9 @@ class AscendEngram(nn.Module):
         rows: torch.Tensor,
         token_mask: torch.Tensor,
         rotation: torch.Tensor | None,
+        projected_kv: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        kv = self.wkv(rows)
+        kv = self.wkv(rows) if projected_kv is None else projected_kv
         if (
             rotation is None
             and hidden_states.device.type == "npu"
@@ -55,3 +56,7 @@ class AscendEngram(nn.Module):
             token_mask,
             self.eps,
         )
+
+    def project(self, rows: torch.Tensor) -> torch.Tensor:
+        """Project lookup rows before the model reaches this Engram layer."""
+        return self.wkv(rows)
