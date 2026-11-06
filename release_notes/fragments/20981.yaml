@@ -1,0 +1,6 @@
+pr: 20981
+entries:
+  - category: bugfix
+    text: >-
+      Fixed an IndexError when the Ascend forward-context hook receives empty attention
+      metadata without an explicit token count.
