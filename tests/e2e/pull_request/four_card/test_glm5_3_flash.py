@@ -111,6 +111,18 @@ class FlashWorker:
 
     model_runner: Any  # Supplied by the worker extension host at runtime.
 
+    def check_adaptive_verification(self, enabled):
+        assert (self.model_runner.adaptive_verification is not None) == enabled
+        if enabled:
+            assert self.model_runner.speculator.acceptance_estimator is not None
+            layers = [
+                module
+                for module in self.model_runner.model.modules()
+                if type(module).__name__ == "Glm5NextLinearAttention"
+            ]
+            assert layers and all(layer.use_adaptive_verification for layer in layers)
+        return True
+
     def check_flash_paths(self):
         modules = list(self.model_runner.model.modules())
         names = [type(module).__name__ for module in modules]
@@ -124,10 +136,16 @@ class FlashWorker:
         return True
 
 
-@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
+@pytest.mark.parametrize(
+    "enforce_eager,adaptive",
+    [(True, False), (False, False), (False, True)],
+    ids=["eager", "graph", "adaptive_graph"],
+)
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
 @pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
-def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching):
+def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, adaptive, use_replayssm, prefix_caching):
+    if adaptive and use_replayssm:
+        pytest.skip("GLM MTP adaptive verification does not support RecoverSSM")
     for name, value in {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -169,6 +187,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             "method": "deepseek_mtp",
             "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
             "enforce_eager": enforce_eager,
+            "enable_adaptive_verification": adaptive,
         },
         use_replayssm=use_replayssm,
         additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0},
@@ -180,6 +199,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
         }
     with VllmRunner(str(model), **settings) as runner:
         assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
+        assert runner.model.collective_rpc("check_adaptive_verification", args=(adaptive,)) == [True] * TP_SIZE
         params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKENS, ignore_eos=True, detokenize=False)
         # A second mixed batch reuses slots after the first request finishes.
         # 127/128/129 and 511/512/513 straddle input/chunk boundaries.

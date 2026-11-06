@@ -30,10 +30,12 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.models.glm5next.adaptive import glm_mtp_adaptive_query_len, validate_glm_mtp_adaptive
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.utils import vllm_version_is
 
@@ -262,6 +264,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         # KDA projections remain BF16 because fp8 checkpoints omit their scales.
+        validate_glm_mtp_adaptive(vllm_config)
+        self.use_adaptive_verification = glm_mtp_adaptive_query_len(vllm_config) is not None
         self.use_recoverssm = use_glm_recoverssm(vllm_config)
         saved_quant_config = vllm_config.quant_config
         try:
@@ -545,6 +549,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
+        adaptive = getattr(self, "use_adaptive_verification", False)
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache
@@ -626,6 +631,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 run_mode=1,
                 num_accepted_tokens=conv_meta.num_accepted_tokens,
                 output_buffer=conv_meta.output_buffer,
+                max_query_len=self.num_spec + 1 if adaptive else None,
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -702,8 +708,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.dt_bias,
                     lower_bound,
                     num_accepted_tokens,
+                    use_triton=adaptive,
                 )
-            if spec_token_indx is None:
+            if adaptive and (non_spec_token_indx is None or non_spec_token_indx.numel() == 0):
+                # Device boundaries may end before the physical graph buffer.
+                # Never scatter uninitialized recurrent padding into the output.
+                write_recurrent_output(spec_output, core_attn_out, spec_query_start_loc)
+            elif spec_token_indx is None:
                 core_attn_out[:, : spec_output.shape[1]].copy_(spec_output)
             else:
                 core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])

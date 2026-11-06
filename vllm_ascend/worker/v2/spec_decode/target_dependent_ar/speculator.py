@@ -274,6 +274,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
+        if getattr(self, "enable_adaptive_verification", False) and not is_profile:
+            # Target compaction changes its token budget; the autoregressive
+            # drafter must negotiate its own batch descriptor across DP ranks.
+            sync_state = None
         if self.pcp_manager is not None:
             attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.

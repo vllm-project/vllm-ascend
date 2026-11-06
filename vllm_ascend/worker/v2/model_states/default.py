@@ -511,6 +511,13 @@ class AscendModelState(DefaultModelState):
                 )
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        if for_capture:
+            # Varlen graph dummies can have one row per request while replay
+            # verifies K+1 rows. Preserve the descriptor's bound for KPool
+            # state-table and rollback-window allocation (vLLM #60229).
+            capture_query_len = getattr(input_batch, "max_query_len", None)
+            if capture_query_len is not None:
+                max_query_len = min(capture_query_len, num_input_tokens)
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
