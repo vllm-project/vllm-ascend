@@ -115,6 +115,7 @@ from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
+    initialize_kernel_block_table_buffers,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -496,6 +497,13 @@ class NPUModelRunner(GPUModelRunner):
             )
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            # Target PCP metadata can contain two chunks per request; both
+            # target and draft FIA metadata may append one padding request.
+            max_metadata_reqs = self.max_num_reqs * (2 if self.pcp_manager is not None else 1) + 1
+            metadata_groups = [*self.attn_groups, *getattr(self.speculator, "attn_groups", [])]
+            initialize_kernel_block_table_buffers(
+                (group for groups in metadata_groups for group in groups), max_metadata_reqs
+            )
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups

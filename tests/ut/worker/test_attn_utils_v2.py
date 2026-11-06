@@ -73,6 +73,16 @@ class SparseAttentionBackend(AscendAttentionBackend):
         return True
 
 
+def _metadata_test_group(layer_names, builder):
+    return AttentionGroup(
+        backend=AscendAttentionBackend,
+        layer_names=layer_names,
+        kv_cache_spec=cast(Any, object()),
+        kv_cache_group_id=0,
+        metadata_builders=[builder],
+    )
+
+
 def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
     return KVCacheTensor(
@@ -249,6 +259,8 @@ def test_main_allocator_attention_layout(
 
 
 def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffer(monkeypatch):
+    # This placement test uses miniature pages rather than a real kernel size.
+    monkeypatch.setattr(SparseAttentionBackend, "get_supported_kernel_block_sizes", staticmethod(lambda spec=None: [2]))
     name = "model.layers.0.self_attn.attn"
     spec = AscendMLAAttentionSpec(
         block_size=2,
@@ -359,7 +371,13 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
     )
-    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendAttentionBackend, layer_names=[name])
+    group = SimpleNamespace(
+        kernel_block_size=None,
+        kv_cache_group_id=0,
+        kv_cache_spec=spec,
+        backend=AscendAttentionBackend,
+        layer_names=[name],
+    )
     vllm_config = SimpleNamespace(
         kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
@@ -1623,10 +1641,7 @@ def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_
             return self.build(0, common_attn_metadata, **kwargs)
 
     builder = RecordingSFABuilder()
-    group = SimpleNamespace(
-        layer_names=["target.layer", "draft.layer"],
-        get_metadata_builder=lambda _: builder,
-    )
+    group = _metadata_test_group(["target.layer", "draft.layer"], builder)
     metadata = attn_utils.build_attn_metadata(
         attn_groups=[[group]],
         num_reqs=1,
@@ -2175,7 +2190,7 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
 def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, full_graph):
     monkeypatch.setattr(attn_utils, "AscendDSAV41MetadataBuilder", _CaptureStateBuilder)
     builder = _CaptureStateBuilder()
-    group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
+    group = _metadata_test_group(["layer.0"], builder)
     attn_utils.build_attn_metadata(
         attn_groups=[[group]],
         num_reqs=1,
@@ -2224,15 +2239,12 @@ def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
 def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_capture):
     builder = _CaptureStateBuilder() if for_cudagraph_capture else _PrefillStateBuilder()
-    attn_group = SimpleNamespace(
-        layer_names=["layer.0"],
-        get_metadata_builder=lambda _: builder,
-    )
+    attn_group = _metadata_test_group(["layer.0"], builder)
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
     )
     is_prefilling = torch.tensor([True])
-    pcp_context = object()
+    pcp_context = SimpleNamespace(for_attention_group=lambda _: pcp_context)
 
     metadata = attn_utils.build_attn_metadata(
         attn_groups=[[attn_group]],
@@ -2270,6 +2282,8 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     from vllm_ascend.worker import kvpp_cache
 
     config, specs, layers = make_attention_cache_case(packed)
+    # The KVPP fixture uses two-token pages to check byte placement only.
+    monkeypatch.setattr(attn_utils, "select_common_block_size", lambda size, backends, specs: size)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
     monkeypatch.setattr(kv_cache_placement, "get_layers_from_vllm_config", lambda *_args: layers)
@@ -2435,12 +2449,15 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
     caches = attn_utils._reshape_kv_cache_v2(
         attn_groups=[
             SimpleNamespace(
+                kernel_block_size=None,
                 kv_cache_group_id=0,
                 kv_cache_spec=spec,
                 layer_names=[layer_name, "alias"],
                 backend=backend,
             ),
-            SimpleNamespace(kv_cache_group_id=9, kv_cache_spec=spec, layer_names=[], backend=backend),
+            SimpleNamespace(
+                kernel_block_size=None, kv_cache_group_id=9, kv_cache_spec=spec, layer_names=[], backend=backend
+            ),
         ],
         kv_cache_raw_tensors=raw,
         cache_dtype="auto",
@@ -2506,6 +2523,7 @@ def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
     caches = attn_utils._reshape_kv_cache_v2(
         attn_groups=[
             SimpleNamespace(
+                kernel_block_size=None,
                 kv_cache_group_id=0,
                 kv_cache_spec=spec,
                 layer_names=[layer_name],
@@ -2634,7 +2652,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
 
     builder = _PrefillStateBuilder()
     attn_utils.build_attn_metadata(
-        attn_groups=[[SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)]],
+        attn_groups=[[_metadata_test_group(["layer.0"], builder)]],
         num_reqs=1,
         num_tokens=2,
         query_start_loc_gpu=torch.tensor([0, 2], dtype=torch.int32),
@@ -3126,3 +3144,41 @@ def test_combined_mla_cache_nonzero_offset_preserves_guards_and_slot_padding(dty
     assert k_cache.storage_offset() * k_cache.element_size() == raw_offset_bytes
     assert v_cache.storage_offset() * v_cache.element_size() == raw_offset_bytes + k_block_bytes
     assert k_cache.untyped_storage().data_ptr() == v_cache.untyped_storage().data_ptr() == backing.data_ptr()
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+@pytest.mark.parametrize("num_builders", [1, 2])
+def test_kernel_block_table_covers_local_and_padding_rows(pcp_size, num_builders):
+    max_num_seqs = 2
+    factor = 5
+    spec = MLAAttentionSpec(block_size=640, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    groups = [
+        AttentionGroup(
+            backend=AscendMLABackend,
+            layer_names=[name],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+            kernel_block_size=128,
+            kernel_block_table=torch.zeros((num_builders, max_num_seqs, 2 * factor), dtype=torch.int32),
+            kernel_block_offsets=torch.arange(factor, dtype=torch.int32),
+        )
+        for name in ("target.layer", "draft.layer")
+    ]
+    # Leave an unsplit Group alone: it needs no private mapping table.
+    unsplit = AttentionGroup(AscendMLABackend, ["unsplit.layer"], spec, 0)
+    capacity = max_num_seqs * (2 if pcp_size > 1 else 1) + 1
+    attn_utils.initialize_kernel_block_table_buffers([*groups, unsplit], capacity)
+    assert unsplit.kernel_block_table is None
+    pointers = [group.kernel_block_table.data_ptr() for group in groups]
+    for rows in [max_num_seqs, capacity, 1, capacity]:
+        for index, group in enumerate(groups):
+            table = torch.arange(rows * 2, dtype=torch.int32).view(rows, 2) + index * 7
+            expected = (table.unsqueeze(-1) * factor + torch.arange(factor, dtype=torch.int32)).flatten(1)
+            for ubatch_idx in range(num_builders):
+                mapped = group.map_to_kernel_block_table(table, ubatch_idx)
+                torch.testing.assert_close(mapped, expected)
+                assert mapped.shape[0] == rows
+            assert group.kernel_block_table.data_ptr() == pointers[index]
+    # Repeating initialization at the same capacity must retain graph addresses.
+    attn_utils.initialize_kernel_block_table_buffers(groups, capacity)
+    assert [group.kernel_block_table.data_ptr() for group in groups] == pointers

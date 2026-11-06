@@ -436,6 +436,22 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
+def initialize_kernel_block_table_buffers(attn_groups: Iterable[AttentionGroup], max_num_reqs: int) -> None:
+    """Reserve Ascend request rows before warmup or graph capture.
+
+    Upstream sizes Group mappings for scheduler requests. PCP can expose two
+    local rows per request, and FIA can append a padding request. Reallocate
+    once during initialization so mapping never resizes graph-owned storage.
+    """
+    for group in attn_groups:
+        table = group.kernel_block_table
+        if table is None or table.shape[1] >= max_num_reqs:
+            continue
+        expanded = table.new_zeros((table.shape[0], max_num_reqs, table.shape[2]))
+        expanded[:, : table.shape[1]].copy_(table)
+        group.kernel_block_table = expanded
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],

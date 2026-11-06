@@ -600,6 +600,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
 @pytest.mark.parametrize("is_prefilling", [False, True])
 def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._kernel_block_table_groups = {}
     manager.device = torch.device("cpu")
     manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
