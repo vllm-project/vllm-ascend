@@ -148,6 +148,7 @@ class NPUModelRunner(GPUModelRunner):
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
     max_num_reqs: int
+    max_num_tokens: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
