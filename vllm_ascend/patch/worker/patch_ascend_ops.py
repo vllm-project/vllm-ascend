@@ -16,16 +16,15 @@
 #
 """Ascend operator rebinds that do not involve Triton.
 
-These swap upstream CUDA kernels for AscendC operators or torch
-implementations: the AscendC ``causal_conv1d`` entry points, ``torch_npu``
+These swap upstream CUDA kernels for Ascend-compatible operators or torch
+implementations: the generic ``causal_conv1d`` wrappers, ``torch_npu``
 RMSNorm for the fused Q/K RMSNorm, and the mHC pre/post torch fallbacks. They
 used to live in ``patch_triton.py`` and were split out because nothing here is
 Triton.
 
-Import order matters: the ``_cc1d.causal_conv1d_update`` wrapper installed here
-is deliberately overwritten by the NPU Triton kernel in ``patch_triton.py``, so
-this module must be imported *before* ``patch_triton`` (see
-``vllm_ascend/patch/worker/__init__.py``).
+This module owns the generic ``_cc1d.causal_conv1d_update`` binding.
+Model-specific paths such as GLM5Next import their fla_npu AscendC convolution
+entry points directly and do not rely on this binding.
 """
 
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
@@ -54,9 +53,9 @@ def _npu_causal_conv1d_update(*args, **kwargs):
 
 
 # npu_kda_causal_conv1d_bind: CUDA causal_conv1d kernels use tl.extra.cuda.gdc_wait
-# which Ascend Triton does not provide. Swap the NPU update kernel and a PyTorch
-# prefill fn. Models that live in vllm-ascend import the Ascend entry points
-# directly and do not rely on this rebind.
+# which Ascend Triton does not provide. Bind the generic torch implementations.
+# Models such as GLM5Next import their AscendC entry points directly and do not
+# rely on this rebind.
 _CC1D_FN_DROP = (
     "null_block_id",
     "block_idx_first_scheduled_token",
