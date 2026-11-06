@@ -6,7 +6,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.triton_utils import triton
 
-from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
+from vllm_ascend.ops.triton.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
 
 
 @pytest.mark.parametrize("vocab_size", [1, 31, 32, 33, 1023, 8191, 8192, 8193, 151936, 248320, 256001])

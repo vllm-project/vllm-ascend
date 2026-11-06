@@ -12,7 +12,7 @@ import torch
 import torch_npu
 from vllm.triton_utils import triton
 
-from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
+from vllm_ascend.ops.triton.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
 
 
 def main():
