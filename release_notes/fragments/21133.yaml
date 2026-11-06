@@ -1,0 +1,6 @@
+pr: 21133
+entries:
+  - category: bugfix
+    text: MiniMax-M3 BF16 GBSA on A5 now uses mixed-precision softmax to support CANN operators that reject precision 0. A3 retains FP32 softmax, and FP8 KV selection is unchanged.
+    model: minimax-m3
+    hardware: [A5]
