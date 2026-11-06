@@ -550,8 +550,8 @@ def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
     assert request_ids == {(0, 0): {"request"}}
 
 
-def test_multi_head_fa_uses_tp_transfer_with_global_dcp() -> None:
-    spec = make_full_spec(num_kv_heads=4)
+def test_unsharded_fa_uses_tp_transfer_with_global_dcp() -> None:
+    spec = replace(make_full_spec(num_kv_heads=4), dcp_sharded=False)
     thread = make_thread(
         tp_size=2,
         tp_rank=1,
@@ -561,6 +561,7 @@ def test_multi_head_fa_uses_tp_transfer_with_global_dcp() -> None:
         block_shapes=[[(2, 16, 4)]],
     )
     remote = make_pp_metadata(
+        dcp_sharded=[False],
         block_shapes=[[(2, 16, 4)]],
         tp_base_addrs={0: [[5000]], 1: [[6000]]},
     )
@@ -1873,7 +1874,7 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
         dcp_size=4,
         block_shapes=[[(1, 16, 4)]],
     )
-    swa_remote = make_pp_metadata(block_shapes=[[(1, 16, 4)]])
+    swa_remote = make_pp_metadata(dcp_sharded=[False], block_shapes=[[(1, 16, 4)]])
     assert swa_thread._get_layer_remote_tp_rank_groups(
         0, 0, make_sliding_spec(), swa_remote, remote_pcp_size=1, remote_tp_size=4, remote_dcp_size=4
     ) == [[2]]

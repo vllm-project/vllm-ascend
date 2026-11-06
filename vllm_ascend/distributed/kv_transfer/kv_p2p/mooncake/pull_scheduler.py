@@ -227,6 +227,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                     for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
                         layer_signature = (
                             worker_metadata.group_indices[local_layer_index],
+                            worker_metadata.dcp_sharded[local_layer_index],
                             worker_metadata.layer_block_sizes[local_layer_index],
                             worker_metadata.block_strides[local_layer_index],
                             worker_metadata.block_lens[local_layer_index],
@@ -237,6 +238,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                         if previous_signature is not None and previous_signature != layer_signature:
                             layer_field_names = (
                                 "group_indices",
+                                "dcp_sharded",
                                 "layer_block_sizes",
                                 "block_strides",
                                 "block_lens",
@@ -260,6 +262,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             layer_names = sorted(layer_source_by_name)
             layer_block_sizes: list[int] = []
             group_indices: list[int] = []
+            dcp_sharded: list[bool] = []
             block_strides: list[list[int]] = []
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
@@ -268,6 +271,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
                 group_indices.append(worker_metadata.group_indices[local_layer_index])
+                dcp_sharded.append(worker_metadata.dcp_sharded[local_layer_index])
                 block_strides.append(worker_metadata.block_strides[local_layer_index])
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
@@ -302,6 +306,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 layer_names=layer_names,
                 layer_block_sizes=layer_block_sizes,
                 group_indices=group_indices,
+                dcp_sharded=dcp_sharded,
                 block_strides=block_strides,
                 block_lens=block_lens,
                 block_shapes=block_shapes,
