@@ -83,7 +83,9 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
     monkeypatch.setattr(attn_utils, "is_deepseek_v41_cache", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: cache_kind == "sfa_c8")
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
-    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_config", lambda _: {} if reuse_enabled else None)
+    monkeypatch.setattr(
+        attn_utils, "get_layerwise_reuse_config", lambda _, *, vllm_config: {} if reuse_enabled else None
+    )
     layer = SimpleNamespace(get_attn_backend=lambda: SimpleNamespace(is_sparse=lambda: False))
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: dict.fromkeys(names, layer))
     allocations = []

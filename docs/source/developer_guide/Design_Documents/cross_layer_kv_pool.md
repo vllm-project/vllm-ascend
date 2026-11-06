@@ -1,8 +1,32 @@
-# CED source-sharing KV pool transfers
+# Cross-layer shared KV pool transfers
 
-CED overlaps pooled KV transfers with model execution while retaining the
-existing bulk keys and object layout. The public opt-in is
-`kv_connector_extra_config.CED_layerwise`; it is disabled by default.
+`cross_layer_kv` overlaps pooled KV transfers with model execution for models
+whose consumer layers share KV sources. It retains the existing group keys
+and object layout while transferring dependency slices before their consumers.
+The only public opt-in is `kv_connector_extra_config.use_layerwise`.
+
+## One switch, two layerwise strategies
+
+| Configuration and topology | Scheduler | Worker strategy |
+| --- | --- | --- |
+| `use_layerwise=false` | `KVPoolScheduler` | Existing bulk transfers |
+| `use_layerwise=true`, independent layer KV, such as DS4 | `LayerwiseKVPoolScheduler` | Existing physical-layer transfers |
+| `use_layerwise=true`, shared KV sources, such as DS4.1 | `LayerwiseKVPoolScheduler` | `CrossLayerKVPoolWorker` |
+
+The scheduler and connector use the same topology resolver. The cross-layer
+strategy uses group-object hit queries and synchronous request admission;
+ordinary layerwise retains its backend-bound key protocol and behavior.
+Sharing an object does not require copying it as one operation: the worker
+builds dependency units from the registered producer/consumer layout.
+
+Cross-layer saves retain in-flight state blocks until all workers report
+completion, and reset refuses to discard outstanding save work. Physical-layer
+offload snapshots and buffer reuse are disabled for this strategy, including
+allocator, memory-budget, V1/V2 state-copy and KVPP hook selection. These checks
+receive model context explicitly; the user's config is not rewritten.
+Both layerwise strategies normalize `load_async` to false. The cross-layer
+pipeline overlaps within a scheduled forward and never reports early receive
+completion to the scheduler.
 
 ## Model topology and SWA retention
 
@@ -13,9 +37,9 @@ nested text configs use the same resolver. For example, a compatible 16-layer
 model with sources `[1, 5, 9]` gets three source units and a cut at layer 9.
 Registered bulk descriptors determine each unit's actual byte range.
 
-Compatible model implementations expose `supports_ced_transfer_hooks=true`
+Compatible model implementations expose `supports_cross_layer_kv_transfer_hooks=true`
 on every backbone attention layer registered in `static_forward_context`.
-This means both ordinary forward and cache-only writes enforce the CED load
+This means both ordinary forward and cache-only writes enforce the dependency
 gate before accessing caches. Models that reuse the existing attention class
 inherit the capability. A new attention implementation must implement that
 hook contract; a similar config alone cannot make asynchronous loads safe.
@@ -135,14 +159,19 @@ reschedule a partially executed hybrid request. Distributed failure handling
 and worker restart behavior need hardware validation before production use.
 
 The initial runtime gate supports eager Memcache transfers with full blocks.
-PP, PCP, DCP, KVPP, SP, microbatching, speculation/MTP, graph modes, async
-scheduler loads, partial objects, and unknown layouts retain bulk behavior.
+PP, PCP, DCP, KVPP, SP, microbatching, speculation/MTP, graph modes, partial
+objects, and unknown layouts retain group-object bulk behavior within the
+cross-layer strategy. Use `--enforce-eager` to enable its initial pipeline;
+ordinary layerwise keeps the existing graph-mode negotiation.
 KV-event publication also keeps saves on the bulk path.
 
 ## Verification
 
 CPU regression tests cover:
 
+- Shared/independent topology routing under the same switch, synchronous
+  admission, group lookup, source-block retention, and hook dispatch.
+- Physical-layer buffer reuse remains enabled only for the original strategy.
 - Real registered K/scale descriptor boundaries and the 369,280-byte payload
   of the BF16/INT8 example, independently of its 540,928-byte physical capacity.
 - New-save/new-load round trips and existing bulk descriptor equivalence.

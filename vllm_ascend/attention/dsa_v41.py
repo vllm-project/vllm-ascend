@@ -42,7 +42,9 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import dispatch_ced_hook
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv_hooks import (
+    dispatch_cross_layer_kv_hook,
+)
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -71,15 +73,15 @@ def dsa_v41_forward(
     """Execute V4.1 attention behind an explicit graph side-effect boundary."""
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
-    _maybe_wait_ced_layer_load(attn)
+    _maybe_wait_cross_layer_kv_layer_load(attn)
     attn.v41_impl.forward(attn, None, hidden_states, output)
-    _maybe_trigger_ced_save(attn)
+    _maybe_trigger_cross_layer_kv_save(attn)
 
 
-def _maybe_wait_ced_layer_load(attn: Any) -> None:
-    """Gate a V4.1 consumer layer on its CED pipelined load unit.
+def _maybe_wait_cross_layer_kv_layer_load(attn: Any) -> None:
+    """Gate a V4.1 consumer layer on its CrossLayerKV pipelined load unit.
 
-    No-op for every connector without the CED load pipeline; when active it
+    No-op for every connector without the CrossLayerKV load pipeline; when active it
     blocks until the unit backing this layer's cache members has landed.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
@@ -91,15 +93,15 @@ def _maybe_wait_ced_layer_load(attn: Any) -> None:
     if layer_idx is None:
         return
     connector = get_kv_transfer_group()
-    dispatch_ced_hook(connector, "wait_for_ced_layer_load", layer_idx)
+    dispatch_cross_layer_kv_hook(connector, "wait_for_cross_layer_kv_load", layer_idx)
 
 
-def _maybe_trigger_ced_save(attn: Any) -> None:
+def _maybe_trigger_cross_layer_kv_save(attn: Any) -> None:
     """Notify the KV pool connector that a V4.1 layer's caches are final.
 
-    The AscendStore CED path uses this as the per-slice save trigger; every
+    The AscendStore CrossLayerKV path uses this as the per-slice save trigger; every
     other connector ignores it, and the pool-side dispatch is a no-op unless
-    CED_layerwise is enabled.
+    CROSS_LAYER_KV_layerwise is enabled.
     """
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -110,7 +112,7 @@ def _maybe_trigger_ced_save(attn: Any) -> None:
     if layer_idx is None:
         return
     connector = get_kv_transfer_group()
-    dispatch_ced_hook(connector, "save_kv_group", layer_idx)
+    dispatch_cross_layer_kv_hook(connector, "save_kv_group", layer_idx)
 
 
 def dsa_v41_forward_fake(
@@ -140,7 +142,7 @@ def dsa_v41_write_kv(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
-    _maybe_wait_ced_layer_load(attn)
+    _maybe_wait_cross_layer_kv_layer_load(attn)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
     # Replay can write this source again. Its save uses the step-end event,

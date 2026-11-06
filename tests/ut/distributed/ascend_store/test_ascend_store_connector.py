@@ -34,39 +34,44 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import As
 
 
 class TestKVPoolWorkerConstruction(unittest.TestCase):
-    def test_ced_plan_is_bound_before_start_load_kv(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import CEDSaveWorker
+    def test_cross_layer_kv_plan_is_bound_before_start_load_kv(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import (
+            CrossLayerKVPoolWorker,
+        )
 
         connector = object.__new__(AscendStoreConnector)
-        connector.ced_layerwise = True
+        connector.use_cross_layer_kv = True
         connector.use_layerwise = False
-        connector.connector_worker = MagicMock(spec=CEDSaveWorker)
+        connector.connector_worker = MagicMock(spec=CrossLayerKVPoolWorker)
         metadata = AscendConnectorMetadata(set())
         connector.bind_connector_metadata(metadata)
-        connector.connector_worker.prepare_ced_step.assert_called_once_with(metadata)
+        connector.connector_worker.prepare_cross_layer_kv_step.assert_called_once_with(metadata)
         connector.connector_worker.start_load_kv.assert_not_called()
 
     def test_factory_passes_only_current_constructor_arguments(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
 
         config, cache = MagicMock(), MagicMock()
+        config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
         for layerwise, name in ((False, "KVPoolWorker"), (True, "LayerwiseKVPoolWorker")):
             with self.subTest(layerwise=layerwise), patch.object(connector, name, autospec=True) as worker:
                 self.assertIs(connector.create_kv_pool_worker(config, layerwise, cache), worker.return_value)
                 worker.assert_called_once_with(config, layerwise, cache)
 
-    def test_factory_selects_ced_worker_and_keeps_default_compatible(self):
+    def test_factory_selects_shared_worker_with_existing_switch(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
 
         config, cache = MagicMock(), MagicMock()
-        with patch.object(connector, "CEDSaveWorker", autospec=True) as worker:
-            self.assertIs(
-                connector.create_kv_pool_worker(config, False, cache, ced_layerwise=True), worker.return_value
-            )
-            worker.assert_called_once_with(config, False, cache)
+        config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9])
+        with patch.object(connector, "CrossLayerKVPoolWorker", autospec=True) as worker:
+            self.assertIs(connector.create_kv_pool_worker(config, True, cache), worker.return_value)
+            worker.assert_called_once_with(config, True, cache)
         with patch.object(connector, "KVPoolWorker", autospec=True) as worker:
             self.assertIs(connector.create_kv_pool_worker(config, False, cache), worker.return_value)
             worker.assert_called_once_with(config, False, cache)
+        with patch.object(connector, "LayerwiseKVPoolScheduler", autospec=True) as scheduler:
+            self.assertIs(connector.create_kv_pool_scheduler(config, True, cache), scheduler.return_value)
+            scheduler.assert_called_once_with(config, True, cache)
 
     def test_layerwise_constructor_matches_base_signature(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
@@ -125,6 +130,7 @@ class TestLookupKeyServer(unittest.TestCase):
         self, mock_context_cls, mock_make_socket, mock_poller_cls, mock_thread_cls
     ):
         config = MagicMock()
+        config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
         config.parallel_config.data_parallel_rank = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
@@ -170,6 +176,7 @@ class TestLookupKeyServer(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_close_stops_and_joins_thread(self, mock_context_cls, mock_make_socket, mock_thread_cls):
         config = MagicMock()
+        config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
         config.parallel_config.data_parallel_rank = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
         mock_make_socket.return_value = MagicMock()
@@ -239,6 +246,7 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     def _make_vllm_config(self, kv_role="kv_producer", extra_config=None):
         config = MagicMock()
+        config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector = "AscendStoreConnector"
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
@@ -651,6 +659,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
         ):
             config = MagicMock()
+            config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
             config.kv_transfer_config.kv_role = "kv_producer"
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
@@ -701,6 +710,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             ) as finish_copy,
         ):
             config = MagicMock()
+            config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
             config.kv_transfer_config.kv_role = "kv_consumer"
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
@@ -732,6 +742,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             patch.object(self.connector_mod, "LookupKeyServer"),
         ):
             config = MagicMock()
+            config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
             config.kv_transfer_config.kv_role = "kv_consumer"
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
@@ -811,6 +822,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             patch.object(self.connector_mod, "LookupKeyServer"),
         ):
             config = MagicMock()
+            config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
             config.kv_transfer_config.kv_role = "kv_consumer"
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
@@ -836,6 +848,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             patch.object(self.connector_mod, "LookupKeyServer"),
         ):
             config = MagicMock()
+            config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=40)
             config.kv_transfer_config.kv_role = "kv_consumer"
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"
             config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": False}

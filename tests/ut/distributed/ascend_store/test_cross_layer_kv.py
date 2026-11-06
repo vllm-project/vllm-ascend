@@ -23,22 +23,24 @@ from unittest.mock import MagicMock, patch
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import (
-    dispatch_ced_hook,
-    supports_ced_layer_hooks,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv_hooks import (
+    dispatch_cross_layer_kv_hook,
+    supports_cross_layer_kv_hooks,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import (
-    CED_LAYERWISE_CONFIG_KEY,
-    CEDLoadTask,
-    CEDLoadUnit,
-    CEDSaveChunks,
-    CEDSaveWorker,
-    CEDSessionSendThread,
-    CEDPipelinedRecvingThread,
-    build_ced_trigger_map,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import (
+    CrossLayerKVLoadTask,
+    CrossLayerKVLoadUnit,
+    CrossLayerKVSaveChunks,
+    CrossLayerKVPoolWorker,
+    CrossLayerKVSendingThread,
+    CrossLayerKVRecvingThread,
+    build_cross_layer_kv_trigger_map,
     chunk_member_transfer,
-    is_ced_model,
-    resolve_ced_layerwise,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
+    KVPoolTransferMode,
+    kv_source_layer_ids,
+    resolve_kv_pool_transfer_mode,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -52,18 +54,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 V41_SOURCES = (2, 8, 14, 20)
 
 
-class TestCEDHookDispatch(unittest.TestCase):
+class TestCrossLayerKVHookDispatch(unittest.TestCase):
     def test_nested_multi_connector_reaches_all_children(self):
         wait = MagicMock()
         other_wait = MagicMock()
         connector = SimpleNamespace(
             sub_connectors=[
                 SimpleNamespace(),
-                SimpleNamespace(sub_connectors=[SimpleNamespace(wait_for_ced_layer_load=wait)]),
-                SimpleNamespace(wait_for_ced_layer_load=other_wait),
+                SimpleNamespace(sub_connectors=[SimpleNamespace(wait_for_cross_layer_kv_load=wait)]),
+                SimpleNamespace(wait_for_cross_layer_kv_load=other_wait),
             ]
         )
-        dispatch_ced_hook(connector, "wait_for_ced_layer_load", 8)
+        dispatch_cross_layer_kv_hook(connector, "wait_for_cross_layer_kv_load", 8)
         wait.assert_called_once_with(8)
         other_wait.assert_called_once_with(8)
 
@@ -71,7 +73,7 @@ class TestCEDHookDispatch(unittest.TestCase):
         save = MagicMock()
         child_save = MagicMock()
         connector = SimpleNamespace(save_kv_group=save, sub_connectors=[SimpleNamespace(save_kv_group=child_save)])
-        dispatch_ced_hook(connector, "save_kv_group", 14)
+        dispatch_cross_layer_kv_hook(connector, "save_kv_group", 14)
         save.assert_called_once_with(14)
         child_save.assert_not_called()
 
@@ -114,89 +116,93 @@ def _v41_layout(
     return groups
 
 
-class TestResolveCEDLayerwise(unittest.TestCase):
-    def test_disabled_by_default(self):
-        self.assertFalse(resolve_ced_layerwise(_vllm_config({})))
-        self.assertFalse(resolve_ced_layerwise(_vllm_config({CED_LAYERWISE_CONFIG_KEY: False})))
+class TestResolveKVPoolTransferMode(unittest.TestCase):
+    def test_disabled_by_default_even_for_shared_models(self):
+        self.assertIs(resolve_kv_pool_transfer_mode(_vllm_config({})), KVPoolTransferMode.BULK)
+        self.assertIs(resolve_kv_pool_transfer_mode(_vllm_config({"use_layerwise": False})), KVPoolTransferMode.BULK)
 
-    def test_enabled_on_v41(self):
-        config = _vllm_config({CED_LAYERWISE_CONFIG_KEY: True})
-        self.assertTrue(resolve_ced_layerwise(config))
-
-    def test_rejects_use_layerwise_combination(self):
-        config = _vllm_config({CED_LAYERWISE_CONFIG_KEY: True, "use_layerwise": True})
-        with self.assertRaises(ValueError):
-            resolve_ced_layerwise(config)
-
-    def test_ignored_without_source_parameters(self):
+    def test_ds4_compression_keeps_physical_layerwise(self):
         config = _vllm_config(
-            {CED_LAYERWISE_CONFIG_KEY: True},
-            architectures=("Qwen3ForCausalLM",),
-            text_config=SimpleNamespace(num_hidden_layers=40),
+            {"use_layerwise": True},
+            architectures=("DeepseekV4ForCausalLM",),
+            text_config=SimpleNamespace(num_hidden_layers=40, compress_ratios=[0, 4, 128] * 14),
         )
-        self.assertFalse(resolve_ced_layerwise(config))
+        self.assertIs(resolve_kv_pool_transfer_mode(config), KVPoolTransferMode.PHYSICAL_LAYER)
 
-    def test_is_ced_model_uses_parameters_instead_of_architecture(self):
-        self.assertTrue(is_ced_model(_vllm_config({}, architectures=("DeepseekV41ForCausalLM",))))
-        self.assertTrue(is_ced_model(_vllm_config({}, architectures=("DeepseekV41ForConditionalGeneration",))))
-        future = _vllm_config(
-            {CED_LAYERWISE_CONFIG_KEY: True},
-            architectures=("FutureSharedKVForCausalLM",),
-            text_config=SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9]),
+    def test_shared_topology_uses_existing_switch_regardless_of_architecture(self):
+        for architecture in (
+            "DeepseekV41ForCausalLM",
+            "DeepseekV41ForConditionalGeneration",
+            "FutureSharedKVForCausalLM",
+        ):
+            config = _vllm_config(
+                {"use_layerwise": True},
+                architectures=(architecture,),
+                text_config=SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9]),
+            )
+            self.assertIs(resolve_kv_pool_transfer_mode(config), KVPoolTransferMode.CROSS_LAYER_KV)
+
+    def test_all_layers_own_kv_keeps_physical_layerwise(self):
+        config = _vllm_config(
+            {"use_layerwise": True}, text_config={"num_hidden_layers": 4, "kv_source_layer_ids": [0, 1, 2, 3]}
         )
-        self.assertTrue(resolve_ced_layerwise(future))
-        # A familiar model name alone does not establish a valid topology.
-        self.assertFalse(is_ced_model(_vllm_config({}, text_config=SimpleNamespace(num_hidden_layers=40))))
+        self.assertIs(resolve_kv_pool_transfer_mode(config), KVPoolTransferMode.PHYSICAL_LAYER)
 
-    def test_nested_raw_text_config(self):
+    def test_nested_raw_text_config_and_explicit_text_config_priority(self):
         config = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_config={"text_config": {"num_hidden_layers": 16, "kv_source_layer_ids": [1, 9]}}
             )
         )
-        self.assertTrue(is_ced_model(config))
+        self.assertIs(resolve_kv_pool_transfer_mode(config, True), KVPoolTransferMode.CROSS_LAYER_KV)
         config.model_config.hf_text_config = {"num_hidden_layers": 16, "kv_source_layer_ids": []}
-        self.assertFalse(is_ced_model(config))
+        self.assertIs(resolve_kv_pool_transfer_mode(config, True), KVPoolTransferMode.PHYSICAL_LAYER)
 
-    def test_invalid_sources_are_not_enabled(self):
-        for sources in ([], [1, 1], [5, 1], [-1, 5], [1, 16], [True, 5], ["1", 5], "1,5"):
+    def test_invalid_source_declarations_do_not_silently_enter_old_path(self):
+        for sources in ([1, 1], [5, 1], [-1, 5], [1, 16], [True, 5], ["1", 5], "1,5"):
             with self.subTest(sources=sources):
-                config = _vllm_config({}, text_config={"num_hidden_layers": 16, "kv_source_layer_ids": sources})
-                self.assertFalse(is_ced_model(config))
+                text = {"num_hidden_layers": 16, "kv_source_layer_ids": sources}
+                self.assertFalse(kv_source_layer_ids(text))
+                with self.assertRaisesRegex(ValueError, "topology"):
+                    resolve_kv_pool_transfer_mode(_vllm_config({"use_layerwise": True}, text_config=text))
+                self.assertIs(
+                    resolve_kv_pool_transfer_mode(_vllm_config({}, text_config=text)), KVPoolTransferMode.BULK
+                )
 
     def test_every_backbone_consumer_requires_hooks(self):
         context = {
-            str(layer): SimpleNamespace(layer_idx=layer, supports_ced_transfer_hooks=True) for layer in range(16)
+            str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_kv_transfer_hooks=True)
+            for layer in range(16)
         }
-        self.assertTrue(supports_ced_layer_hooks(context, 16))
-        context["8"].supports_ced_transfer_hooks = False
-        self.assertFalse(supports_ced_layer_hooks(context, 16))
-        context["8"].supports_ced_transfer_hooks = True
+        self.assertTrue(supports_cross_layer_kv_hooks(context, 16))
+        context["8"].supports_cross_layer_kv_transfer_hooks = False
+        self.assertFalse(supports_cross_layer_kv_hooks(context, 16))
+        context["8"].supports_cross_layer_kv_transfer_hooks = True
         del context["9"]
-        self.assertFalse(supports_ced_layer_hooks(context, 16))
+        self.assertFalse(supports_cross_layer_kv_hooks(context, 16))
 
     def test_changed_source_count_and_positions_derive_matching_units(self):
         sources = (1, 5, 9)
         groups = _v41_layout(num_layers=16, sources=sources)
         offsets = {0: [0, 2, 4, 6], **{group: [0, 1, 2, 3, 4] for group in range(2, 6)}}
-        plan = build_ced_trigger_map(groups, sources, offsets)
+        plan = build_cross_layer_kv_trigger_map(groups, sources, offsets)
         self.assertEqual([part.trigger_layer for part in plan.slices_by_group[0]], list(sources))
         self.assertEqual(plan.publish_layers[0], 9)
         worker = _plan_worker(_mla_database(), plan)
         worker.kv_cache_config.kv_cache_groups[0].layer_names = groups[0]
-        self.assertEqual([unit.gate_layer for unit in worker._build_ced_load_units({0})], list(sources))
+        self.assertEqual([unit.gate_layer for unit in worker._build_cross_layer_kv_load_units({0})], list(sources))
         worker.hf_config = SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=list(sources))
-        worker._ced_save_capable = worker._ced_step_active = True
-        worker.on_ced_save_trigger(9)
+        worker._cross_layer_kv_save_capable = worker._cross_layer_kv_step_active = True
+        worker.on_cross_layer_kv_save_trigger(9)
         worker.kv_send_thread.enqueue_slice_tasks.assert_not_called()
-        worker.on_ced_save_trigger(5)
+        worker.on_cross_layer_kv_save_trigger(5)
         self.assertEqual(worker.kv_send_thread.enqueue_slice_tasks.call_args.args[0], 5)
 
 
-class TestBuildCEDTriggerMap(unittest.TestCase):
+class TestBuildCrossLayerKVTriggerMap(unittest.TestCase):
     def test_bounded_off_full_layout(self):
         groups = _v41_layout()
-        trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
+        trigger_map = build_cross_layer_kv_trigger_map(groups, V41_SOURCES)
 
         mla_slices = trigger_map.slices_by_group[0]
         self.assertEqual(
@@ -222,13 +228,13 @@ class TestBuildCEDTriggerMap(unittest.TestCase):
 
     def test_bounded_on_only_mla_group_pooled(self):
         groups = {0: _v41_layout()[0]}
-        trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
+        trigger_map = build_cross_layer_kv_trigger_map(groups, V41_SOURCES)
         self.assertEqual(set(trigger_map.slices_by_group), {0})
         self.assertEqual(trigger_map.trigger_layers(), (2, 8, 14, 20))
 
     def test_folded_indexer_stays_inside_slot_slice(self):
         groups = _v41_layout(with_folded=True)
-        trigger_map = build_ced_trigger_map({0: groups[0]}, V41_SOURCES)
+        trigger_map = build_cross_layer_kv_trigger_map({0: groups[0]}, V41_SOURCES)
         self.assertEqual(
             [(s.member_start, s.member_end, s.trigger_layer) for s in trigger_map.slices_by_group[0]],
             [(0, 3, 2), (3, 6, 8), (6, 9, 14), (9, 12, 20)],
@@ -236,16 +242,16 @@ class TestBuildCEDTriggerMap(unittest.TestCase):
 
     def test_draft_group_keeps_bulk_save(self):
         groups = _v41_layout(with_draft=True)
-        trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
+        trigger_map = build_cross_layer_kv_trigger_map(groups, V41_SOURCES)
         self.assertNotIn(12, trigger_map.slices_by_group)
         self.assertEqual(len(trigger_map.slices_by_group), 11)
 
-    def test_non_ced_layout_yields_empty_map(self):
+    def test_non_cross_layer_kv_layout_yields_empty_map(self):
         groups = {
             0: [f"model.layers.{i}.self_attn.kv_cache" for i in range(8)],
             1: [f"model.layers.{i}.self_attn.kv_cache" for i in range(8, 16)],
         }
-        trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
+        trigger_map = build_cross_layer_kv_trigger_map(groups, V41_SOURCES)
         self.assertEqual(trigger_map.slices_by_group, {})
         self.assertEqual(trigger_map.slices_by_trigger, {})
         self.assertEqual(trigger_map.publish_layers, {})
@@ -253,7 +259,7 @@ class TestBuildCEDTriggerMap(unittest.TestCase):
     def test_partial_source_coverage_reports_missing_slots(self):
         groups = {0: _v41_layout()[0][:4]}
         with self.assertLogs(level="WARNING") as captured:
-            trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
+            trigger_map = build_cross_layer_kv_trigger_map(groups, V41_SOURCES)
         self.assertNotIn(0, trigger_map.slices_by_group)
         self.assertIn("configured KV sources", "; ".join(captured.output))
 
@@ -274,7 +280,7 @@ _MLA_MEMBER_BASES = (0x100, 0x200, 0x300, 0x400)
 _MLA_MEMBER_SIZES = (8, 4, 8, 4)
 
 
-class FakeCEDStore:
+class FakeCrossLayerKVStore:
     """Session-capable store recording GVA traffic into simulated memory."""
 
     supports_exclusive_allocation = True
@@ -382,10 +388,10 @@ class TestChunkMemberTransfer(unittest.TestCase):
         self.assertEqual([row[1] for row in slice_rows], [0, 3, 4, 7])
 
 
-class TestCEDSessionFlow(unittest.TestCase):
+class TestCrossLayerKVSessionFlow(unittest.TestCase):
     def _fixture(self, published=None):
         database = _mla_database()
-        trigger_map = build_ced_trigger_map(
+        trigger_map = build_cross_layer_kv_trigger_map(
             {
                 0: [
                     "model.layers.2.self_attn.long_kv_cache",
@@ -401,9 +407,9 @@ class TestCEDSessionFlow(unittest.TestCase):
             addr = base + 7 * 24
             for i in range(_MLA_MEMBER_SIZES[member]):
                 device[addr + i] = (0x11 * (member + 1) + i) & 0xFF
-        store = FakeCEDStore(device)
+        store = FakeCrossLayerKVStore(device)
         store.published.update(published or {})
-        thread = CEDSessionSendThread(store, database, [16], tp_rank=0, trigger_map=trigger_map)
+        thread = CrossLayerKVSendingThread(store, database, [16], tp_rank=0, trigger_map=trigger_map)
         return thread, store
 
     def _device_bytes(self, device):
@@ -416,13 +422,13 @@ class TestCEDSessionFlow(unittest.TestCase):
     def test_session_publishes_byte_identical_object(self):
         thread, store = self._fixture()
         req_meta = ReqMeta("r1", block_ids=[7])
-        chunks = CEDSaveChunks(starts=[0], ends=[16], keys=["k0"], block_ids=[7])
-        session = thread.open_ced_session(req_meta, 0, chunks, object_size=24)
-        thread._handle_ced_open(session)
+        chunks = CrossLayerKVSaveChunks(starts=[0], ends=[16], keys=["k0"], block_ids=[7])
+        session = thread.open_cross_layer_kv_session(req_meta, 0, chunks, object_size=24)
+        thread._handle_cross_layer_kv_open(session)
         self.assertEqual(session.live_keys, ["k0"])
-        thread._handle_ced_slice(session, 0, MagicMock())
+        thread._handle_cross_layer_kv_slice(session, 0, MagicMock())
         self.assertNotIn("k0", store.published)
-        thread._handle_ced_slice(session, 1, MagicMock())
+        thread._handle_cross_layer_kv_slice(session, 1, MagicMock())
         self.assertEqual(store.published["k0"], self._device_bytes(store.device))
         self.assertIn("r1", thread.finished_requests)
         self.assertIsNone(thread.get_stored_request_count("r1"))
@@ -430,11 +436,11 @@ class TestCEDSessionFlow(unittest.TestCase):
     def test_prefiltered_keys_skip_session(self):
         thread, store = self._fixture(published={"k0": b"existing"})
         req_meta = ReqMeta("r1", block_ids=[7])
-        chunks = CEDSaveChunks(starts=[0], ends=[16], keys=["k0"], block_ids=[7])
-        session = thread.open_ced_session(req_meta, 0, chunks, object_size=24)
-        thread._handle_ced_open(session)
+        chunks = CrossLayerKVSaveChunks(starts=[0], ends=[16], keys=["k0"], block_ids=[7])
+        session = thread.open_cross_layer_kv_session(req_meta, 0, chunks, object_size=24)
+        thread._handle_cross_layer_kv_open(session)
         self.assertEqual(session.live_keys, [])
-        thread._handle_ced_slice(session, 0, MagicMock())
+        thread._handle_cross_layer_kv_slice(session, 0, MagicMock())
         self.assertEqual(store.published["k0"], b"existing")
         self.assertEqual(store.finish_calls, [])
 
@@ -442,9 +448,9 @@ class TestCEDSessionFlow(unittest.TestCase):
         thread, store = self._fixture()
         store.fail_copy = True
         req_meta = ReqMeta("r1", block_ids=[7])
-        chunks = CEDSaveChunks(starts=[0], ends=[16], keys=["k0"], block_ids=[7])
-        session = thread.open_ced_session(req_meta, 0, chunks, object_size=24)
-        thread._handle_ced_open(session)
+        chunks = CrossLayerKVSaveChunks(starts=[0], ends=[16], keys=["k0"], block_ids=[7])
+        session = thread.open_cross_layer_kv_session(req_meta, 0, chunks, object_size=24)
+        thread._handle_cross_layer_kv_open(session)
         thread._handle_request(_slice_task(session, 0))
         self.assertTrue(session.failed)
         self.assertNotIn("k0", store.published)
@@ -462,20 +468,20 @@ class TestCEDSessionFlow(unittest.TestCase):
             kv_cache_group_ids=[0],
         )
         self.assertTrue(thread._handle_stored_request(request))
-        with thread._ced_lock:
-            thread._ced_claimed_requests.add("r1")
+        with thread._cross_layer_kv_lock:
+            thread._cross_layer_kv_claimed_requests.add("r1")
         self.assertFalse(thread._handle_stored_request(request))
 
 
 def _slice_task(session, slice_index):
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import (
-        CEDSessionSliceTask,
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import (
+        CrossLayerKVSessionSliceTask,
     )
 
-    return CEDSessionSliceTask(session, slice_index, MagicMock())
+    return CrossLayerKVSessionSliceTask(session, slice_index, MagicMock())
 
 
-class TestCEDPipelinedLoad(unittest.TestCase):
+class TestCrossLayerKVPipelinedLoad(unittest.TestCase):
     def _derived_key(self, database, block_hashes=("h0",)):
         for _start, _end, key, _bh, _block_id in database.process_token_key_strings_with_block_ids(
             16,
@@ -494,7 +500,7 @@ class TestCEDPipelinedLoad(unittest.TestCase):
         database = _mla_database()
         database.load_mask = lambda block_hashes, token_len: None
         database.mask_allows_chunk = lambda masks, group_id, start: True
-        trigger_map = build_ced_trigger_map(
+        trigger_map = build_cross_layer_kv_trigger_map(
             {
                 0: [
                     "model.layers.2.self_attn.long_kv_cache",
@@ -510,14 +516,14 @@ class TestCEDPipelinedLoad(unittest.TestCase):
             addr = base + 7 * 24
             for i in range(_MLA_MEMBER_SIZES[member]):
                 device[addr + i] = (0x11 * (member + 1) + i) & 0xFF
-        store = FakeCEDStore(device)
-        send_thread = CEDSessionSendThread(store, database, [16], tp_rank=0, trigger_map=trigger_map)
+        store = FakeCrossLayerKVStore(device)
+        send_thread = CrossLayerKVSendingThread(store, database, [16], tp_rank=0, trigger_map=trigger_map)
         req_meta = ReqMeta("r1", block_ids=[7])
-        chunks = CEDSaveChunks(starts=[0], ends=[16], keys=[self._derived_key(database)], block_ids=[7])
-        session = send_thread.open_ced_session(req_meta, 0, chunks, object_size=24)
-        send_thread._handle_ced_open(session)
-        send_thread._handle_ced_slice(session, 0, MagicMock())
-        send_thread._handle_ced_slice(session, 1, MagicMock())
+        chunks = CrossLayerKVSaveChunks(starts=[0], ends=[16], keys=[self._derived_key(database)], block_ids=[7])
+        session = send_thread.open_cross_layer_kv_session(req_meta, 0, chunks, object_size=24)
+        send_thread._handle_cross_layer_kv_open(session)
+        send_thread._handle_cross_layer_kv_slice(session, 0, MagicMock())
+        send_thread._handle_cross_layer_kv_slice(session, 1, MagicMock())
         return database, trigger_map, store
 
     def test_load_roundtrip_restores_device_bytes_and_sets_gates(self):
@@ -525,7 +531,7 @@ class TestCEDPipelinedLoad(unittest.TestCase):
         expected = next(iter(store.published.values()))
         device_target = bytearray(0x10000)
         store.device = device_target
-        recv_thread = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        recv_thread = CrossLayerKVRecvingThread(store, database, [16], tp_rank=0)
         load_spec = SimpleNamespace(vllm_cached_tokens=0)
         req_meta = ReqMeta(
             "r1",
@@ -536,11 +542,11 @@ class TestCEDPipelinedLoad(unittest.TestCase):
             kv_cache_group_ids=[0],
         )
         units = [
-            CEDLoadUnit(0, 0, 2, 2),
-            CEDLoadUnit(0, 2, 4, 8),
+            CrossLayerKVLoadUnit(0, 0, 2, 2),
+            CrossLayerKVLoadUnit(0, 2, 4, 8),
         ]
         gate_events = {2: threading.Event(), 8: threading.Event()}
-        task = CEDLoadTask(
+        task = CrossLayerKVLoadTask(
             req_meta=req_meta,
             token_len=16,
             units=units,
@@ -562,7 +568,7 @@ class TestCEDPipelinedLoad(unittest.TestCase):
         store.alloc_base.clear()
         device_target = bytearray(0x10000)
         store.device = device_target
-        recv_thread = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        recv_thread = CrossLayerKVRecvingThread(store, database, [16], tp_rank=0)
         load_spec = SimpleNamespace(vllm_cached_tokens=0)
         req_meta = ReqMeta(
             "r1",
@@ -572,10 +578,10 @@ class TestCEDPipelinedLoad(unittest.TestCase):
             load_spec=load_spec,
             kv_cache_group_ids=[0],
         )
-        task = CEDLoadTask(
+        task = CrossLayerKVLoadTask(
             req_meta=req_meta,
             token_len=16,
-            units=[CEDLoadUnit(0, 0, 2, 2)],
+            units=[CrossLayerKVLoadUnit(0, 0, 2, 2)],
             gate_events={2: threading.Event()},
             remaining_by_gate={2: 1},
         )
@@ -587,10 +593,10 @@ class TestCEDPipelinedLoad(unittest.TestCase):
 
 
 def _plan_worker(database, trigger_map, *, store=None):
-    worker = object.__new__(CEDSaveWorker)
+    worker = object.__new__(CrossLayerKVPoolWorker)
     worker.token_database = database
-    worker.ced_trigger_map = trigger_map
-    worker.ced_trigger_layers = trigger_map.trigger_layers()
+    worker.cross_layer_kv_trigger_map = trigger_map
+    worker.cross_layer_kv_trigger_layers = trigger_map.trigger_layers()
     worker.cacheable_group_ids = [0]
     worker.group_uses_align_state = [False]
     worker.group_layer_cache_entry_offsets = {0: [0, 2, 4]}
@@ -607,24 +613,24 @@ def _plan_worker(database, trigger_map, *, store=None):
             )
         ]
     )
-    worker._ced_load_tasks = []
-    worker._ced_load_gates = {}
-    worker._ced_fired_triggers = set()
-    worker._ced_fallback_groups = {}
-    worker._ced_save_capable = False
-    worker._ced_load_capable = True
-    worker._ced_step_active = False
-    worker._ced_load_started = False
+    worker._cross_layer_kv_load_tasks = []
+    worker._cross_layer_kv_load_gates = {}
+    worker._cross_layer_kv_fired_triggers = set()
+    worker._cross_layer_kv_fallback_groups = {}
+    worker._cross_layer_kv_save_capable = False
+    worker._cross_layer_kv_load_capable = True
+    worker._cross_layer_kv_step_active = False
+    worker._cross_layer_kv_load_started = False
     worker.can_put = True
     worker.m_store = store
-    worker.kv_send_thread = MagicMock(spec=CEDSessionSendThread)
-    worker.kv_recv_thread = MagicMock(spec=CEDPipelinedRecvingThread)
+    worker.kv_send_thread = MagicMock(spec=CrossLayerKVSendingThread)
+    worker.kv_recv_thread = MagicMock(spec=CrossLayerKVRecvingThread)
     worker.hf_config = SimpleNamespace(num_hidden_layers=12, kv_source_layer_ids=[2, 8])
     worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
     return worker
 
 
-class TestCEDRegisteredLayout(unittest.TestCase):
+class TestCrossLayerKVRegisteredLayout(unittest.TestCase):
     def test_real_registration_includes_index_scale_and_uses_effective_bytes(self):
         worker = object.__new__(KVPoolWorker)
         worker.num_blocks = 2
@@ -682,7 +688,7 @@ class TestCEDRegisteredLayout(unittest.TestCase):
             group_layer_cache_entry_offsets=worker.group_layer_cache_entry_offsets,
             group_cache_entry_segments=worker.group_cache_entry_segments,
         )
-        plan = build_ced_trigger_map({0: names}, V41_SOURCES, worker.group_layer_cache_entry_offsets)
+        plan = build_cross_layer_kv_trigger_map({0: names}, V41_SOURCES, worker.group_layer_cache_entry_offsets)
         self.assertEqual(
             [(p.member_start, p.member_end) for p in plan.slices_by_group[0]], [(0, 3), (3, 6), (6, 9), (9, 12)]
         )
@@ -699,27 +705,27 @@ class TestCEDRegisteredLayout(unittest.TestCase):
 
     def test_unknown_member_rejects_the_whole_group(self):
         names = _v41_layout()[0] + ["model.layers.2.self_attn.unknown_cache"]
-        self.assertNotIn(0, build_ced_trigger_map({0: names}, V41_SOURCES).slices_by_group)
+        self.assertNotIn(0, build_cross_layer_kv_trigger_map({0: names}, V41_SOURCES).slices_by_group)
 
     def test_bounded_off_load_has_44_units(self):
         groups = _v41_layout()
         groups.pop(1)
         offsets = {group: list(range(len(names) + 1)) if group else [0, 3, 6, 9, 12] for group, names in groups.items()}
-        plan = build_ced_trigger_map(groups, V41_SOURCES, offsets)
+        plan = build_cross_layer_kv_trigger_map(groups, V41_SOURCES, offsets)
         worker = _plan_worker(_mla_database(), plan)
         worker.group_layer_cache_entry_offsets = offsets
         worker.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[SimpleNamespace(layer_names=groups.get(i, [])) for i in range(12)]
         )
         worker.cacheable_group_ids = list(groups)
-        units = worker._build_ced_load_units(set(groups))
+        units = worker._build_cross_layer_kv_load_units(set(groups))
         self.assertEqual(len(units), 44)
         self.assertEqual([u.gate_layer for u in units], sorted(u.gate_layer for u in units))
 
 
-class TestCEDSafePublication(unittest.TestCase):
-    _fixture = TestCEDSessionFlow._fixture
-    _device_bytes = TestCEDSessionFlow._device_bytes
+class TestCrossLayerKVSafePublication(unittest.TestCase):
+    _fixture = TestCrossLayerKVSessionFlow._fixture
+    _device_bytes = TestCrossLayerKVSessionFlow._device_bytes
 
     def test_uncertain_commit_never_sends_compensating_write_fail(self):
         sender, store = self._fixture()
@@ -731,11 +737,11 @@ class TestCEDSafePublication(unittest.TestCase):
 
         store.batch_write_finish = lose_reply
         request = ReqMeta("r", block_ids=[7])
-        session = sender.open_ced_session(request, 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
-        sender._handle_ced_open(session)
-        sender._handle_ced_slice(session, 0, MagicMock())
+        session = sender.open_cross_layer_kv_session(request, 0, CrossLayerKVSaveChunks([0], [16], ["k"], [7]), 24)
+        sender._handle_cross_layer_kv_open(session)
+        sender._handle_cross_layer_kv_slice(session, 0, MagicMock())
         with self.assertRaises(TimeoutError):
-            sender._handle_ced_slice(session, 1, MagicMock())
+            sender._handle_cross_layer_kv_slice(session, 1, MagicMock())
         sender._fail_session(session)
         sender._fail_session(session)
         self.assertTrue(session.commit_started)
@@ -746,26 +752,26 @@ class TestCEDSafePublication(unittest.TestCase):
     def test_shared_allocation_contract_is_rejected_before_allocating(self):
         sender, store = self._fixture()
         store.supports_exclusive_allocation = False
-        session = sender.open_ced_session(ReqMeta("r"), 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
+        session = sender.open_cross_layer_kv_session(ReqMeta("r"), 0, CrossLayerKVSaveChunks([0], [16], ["k"], [7]), 24)
         with self.assertRaisesRegex(RuntimeError, "exclusive"):
-            sender._handle_ced_open(session)
+            sender._handle_cross_layer_kv_open(session)
         self.assertFalse(store.alloc_base)
 
     def test_duplicate_completed_slice_does_not_publish_or_retire_twice(self):
         sender, store = self._fixture()
-        session = sender.open_ced_session(ReqMeta("r"), 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
-        sender._handle_ced_open(session)
-        sender._handle_ced_slice(session, 0, MagicMock())
-        sender._handle_ced_slice(session, 1, MagicMock())
-        sender._handle_ced_slice(session, 1, MagicMock())
+        session = sender.open_cross_layer_kv_session(ReqMeta("r"), 0, CrossLayerKVSaveChunks([0], [16], ["k"], [7]), 24)
+        sender._handle_cross_layer_kv_open(session)
+        sender._handle_cross_layer_kv_slice(session, 0, MagicMock())
+        sender._handle_cross_layer_kv_slice(session, 1, MagicMock())
+        sender._handle_cross_layer_kv_slice(session, 1, MagicMock())
         self.assertEqual(store.finish_calls, [(["k"], [0])])
-        self.assertEqual(sender._ced_claim_counts, {})
+        self.assertEqual(sender._cross_layer_kv_claim_counts, {})
 
     def test_step_end_seal_covers_missing_and_cut_hooks(self):
         sender, store = self._fixture()
-        sender.open_ced_session(ReqMeta("r"), 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
+        sender.open_cross_layer_kv_session(ReqMeta("r"), 0, CrossLayerKVSaveChunks([0], [16], ["k"], [7]), 24)
         event = MagicMock()
-        sender.seal_ced_step(event)
+        sender.seal_cross_layer_kv_step(event)
         fence = sender.add_save_batch([])
         while not sender.request_queue.empty():
             sender._handle_request(sender.request_queue.get_nowait())
@@ -775,7 +781,7 @@ class TestCEDSafePublication(unittest.TestCase):
 
     def test_bulk_fallback_keeps_all_unclaimed_groups(self):
         sender, _store = self._fixture()
-        worker = _plan_worker(sender.token_database, sender.ced_trigger_map)
+        worker = _plan_worker(sender.token_database, sender.cross_layer_kv_trigger_map)
         request = ReqMeta("r", block_ids=[7], can_save=True, kv_cache_group_ids=[0, 2])
         worker.wait_for_save(SimpleNamespace(requests=[request]))
         requests = worker.kv_send_thread.add_save_batch.call_args.args[0]
@@ -784,20 +790,20 @@ class TestCEDSafePublication(unittest.TestCase):
 
     def test_bounded_replay_cut_is_deferred_until_step_end(self):
         sender, _store = self._fixture()
-        worker = _plan_worker(sender.token_database, sender.ced_trigger_map)
-        worker._ced_save_capable = True
-        worker._ced_step_active = True
-        worker.on_ced_save_trigger(8)
+        worker = _plan_worker(sender.token_database, sender.cross_layer_kv_trigger_map)
+        worker._cross_layer_kv_save_capable = True
+        worker._cross_layer_kv_step_active = True
+        worker.on_cross_layer_kv_save_trigger(8)
         worker.kv_send_thread.enqueue_slice_tasks.assert_not_called()
-        worker.on_ced_save_trigger(2)
+        worker.on_cross_layer_kv_save_trigger(2)
         worker.kv_send_thread.enqueue_slice_tasks.assert_called_once()
-        worker.on_ced_save_trigger(2)
+        worker.on_cross_layer_kv_save_trigger(2)
         self.assertEqual(worker.kv_send_thread.enqueue_slice_tasks.call_count, 1)
 
 
-class TestCEDLoadLifecycle(unittest.TestCase):
-    _derived_key = TestCEDPipelinedLoad._derived_key
-    _publish_reference_object = TestCEDPipelinedLoad._publish_reference_object
+class TestCrossLayerKVLoadLifecycle(unittest.TestCase):
+    _derived_key = TestCrossLayerKVPipelinedLoad._derived_key
+    _publish_reference_object = TestCrossLayerKVPipelinedLoad._publish_reference_object
 
     def test_lease_then_refresh_and_release_once_after_all_units(self):
         database, _plan, store = self._publish_reference_object()
@@ -822,15 +828,15 @@ class TestCEDLoadLifecycle(unittest.TestCase):
         store.batch_add_lease = add_lease
         store.batch_remove_lease = MagicMock(return_value=0)
         request = ReqMeta("r", block_ids=[7], block_hashes=["h0"], load_spec=SimpleNamespace(vllm_cached_tokens=0))
-        task = CEDLoadTask(
+        task = CrossLayerKVLoadTask(
             request,
             16,
-            [CEDLoadUnit(0, 0, 2, 2), CEDLoadUnit(0, 2, 4, 8)],
+            [CrossLayerKVLoadUnit(0, 0, 2, 2), CrossLayerKVLoadUnit(0, 2, 4, 8)],
             {2: threading.Event(), 8: threading.Event()},
             {2: 1, 8: 1},
         )
         store.device = bytearray(0x10000)
-        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        receiver = CrossLayerKVRecvingThread(store, database, [16], tp_rank=0)
         receiver.request_queue.put(task)
         receiver._handle_request(task)
         self.assertIsNone(task.error)
@@ -855,7 +861,7 @@ class TestCEDLoadLifecycle(unittest.TestCase):
             )
             for req_id in ("r1", "r2")
         ]
-        handled = worker._prepare_ced_loads(SimpleNamespace(requests=requests))
+        handled = worker._prepare_cross_layer_kv_loads(SimpleNamespace(requests=requests))
         self.assertEqual(handled, {"r1", "r2"})
         submitted = [call.args[0] for call in worker.kv_recv_thread.add_request.call_args_list]
         self.assertEqual(
@@ -869,8 +875,8 @@ class TestCEDLoadLifecycle(unittest.TestCase):
     def test_empty_units_settle_gates_without_waiting_forever(self):
         database, _plan, store = self._publish_reference_object()
         request = ReqMeta("r", block_ids=[7], block_hashes=["h0"], load_spec=SimpleNamespace(vllm_cached_tokens=16))
-        task = CEDLoadTask(request, 16, [CEDLoadUnit(0, 0, 2, 2)], {2: threading.Event()}, {2: 1})
-        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        task = CrossLayerKVLoadTask(request, 16, [CrossLayerKVLoadUnit(0, 0, 2, 2)], {2: threading.Event()}, {2: 1})
+        receiver = CrossLayerKVRecvingThread(store, database, [16], tp_rank=0)
         receiver.request_queue.put(task)
         receiver._handle_request(task)
         self.assertTrue(task.done.is_set())
@@ -880,25 +886,25 @@ class TestCEDLoadLifecycle(unittest.TestCase):
     def test_task_error_survives_consumed_failed_request_notifications(self):
         database, plan, _store = self._publish_reference_object()
         worker = _plan_worker(database, plan)
-        task = CEDLoadTask(ReqMeta("r"), 16, [], {2: threading.Event()})
+        task = CrossLayerKVLoadTask(ReqMeta("r"), 16, [], {2: threading.Event()})
         task.error = RuntimeError("late unit failure")
         task.gate_events[2].set()
         task.done.set()
-        worker._ced_load_tasks = [task]
+        worker._cross_layer_kv_load_tasks = [task]
         worker.kv_recv_thread.failed_requests = set()
         with self.assertRaisesRegex(RuntimeError, "cannot be reused"):
-            worker.wait_for_ced_layer_load(2)
+            worker.wait_for_cross_layer_kv_load(2)
 
     def test_next_step_cannot_clear_failed_inflight_state(self):
         database, plan, _store = self._publish_reference_object()
         worker = _plan_worker(database, plan)
-        task = CEDLoadTask(ReqMeta("r"), 16, [])
+        task = CrossLayerKVLoadTask(ReqMeta("r"), 16, [])
         task.done.set()
         task.error = RuntimeError("cannot resume")
-        worker._ced_load_tasks = [task]
+        worker._cross_layer_kv_load_tasks = [task]
         with self.assertRaisesRegex(RuntimeError, "cannot be reused"):
-            worker.prepare_ced_step(SimpleNamespace(requests=[]))
-        self.assertEqual(worker._ced_load_tasks, [task])
+            worker.prepare_cross_layer_kv_step(SimpleNamespace(requests=[]))
+        self.assertEqual(worker._cross_layer_kv_load_tasks, [task])
 
     def test_partial_lease_failure_releases_successful_leases(self):
         database, _plan, store = self._publish_reference_object()
@@ -906,8 +912,8 @@ class TestCEDLoadLifecycle(unittest.TestCase):
         store.batch_add_lease = MagicMock(return_value=[0, -1])
         store.batch_remove_lease = MagicMock(return_value=0)
         request = ReqMeta("r", block_ids=[7], block_hashes=["h0"], load_spec=SimpleNamespace(vllm_cached_tokens=0))
-        task = CEDLoadTask(request, 16, [CEDLoadUnit(0, 0, 2, 2)], {2: threading.Event()}, {2: 1})
-        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        task = CrossLayerKVLoadTask(request, 16, [CrossLayerKVLoadUnit(0, 0, 2, 2)], {2: threading.Event()}, {2: 1})
+        receiver = CrossLayerKVRecvingThread(store, database, [16], tp_rank=0)
         receiver.request_queue.put(task)
         receiver._handle_request(task)
         self.assertIsNotNone(task.error)
@@ -929,7 +935,7 @@ class TestCEDLoadLifecycle(unittest.TestCase):
             return original_copy(gvas, addrs, sizes, direction)
 
         store.batch_copy = copy_with_late_second_source
-        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        receiver = CrossLayerKVRecvingThread(store, database, [16], tp_rank=0)
         worker = _plan_worker(database, plan, store=store)
         worker.kv_recv_thread = receiver
         request = ReqMeta(
@@ -942,14 +948,14 @@ class TestCEDLoadLifecycle(unittest.TestCase):
         receiver.start()
         self.assertTrue(receiver.ready_event.wait(timeout=2))
         try:
-            worker._prepare_ced_loads(SimpleNamespace(requests=[request]))
-            worker.wait_for_ced_layer_load(2)
+            worker._prepare_cross_layer_kv_loads(SimpleNamespace(requests=[request]))
+            worker.wait_for_cross_layer_kv_load(2)
             self.assertTrue(later_started.wait(timeout=2))
-            self.assertFalse(worker._ced_load_tasks[0].done.is_set())
+            self.assertFalse(worker._cross_layer_kv_load_tasks[0].done.is_set())
             release_later.set()
-            worker.wait_for_ced_layer_load(8)
-            worker.finish_ced_loads()
-            self.assertTrue(worker._ced_load_tasks[0].done.is_set())
+            worker.wait_for_cross_layer_kv_load(8)
+            worker.finish_cross_layer_kv_loads()
+            self.assertTrue(worker._cross_layer_kv_load_tasks[0].done.is_set())
             self.assertFalse(receiver.finished_requests)
         finally:
             release_later.set()
@@ -958,17 +964,17 @@ class TestCEDLoadLifecycle(unittest.TestCase):
         self.assertFalse(receiver.is_alive())
 
 
-class TestCEDWorkerCapabilities(unittest.TestCase):
+class TestCrossLayerKVWorkerCapabilities(unittest.TestCase):
     def test_memcache_shared_alloc_keeps_bulk_save_and_enables_load(self):
         database = _mla_database()
-        store = FakeCEDStore(bytearray(0x10000))
+        store = FakeCrossLayerKVStore(bytearray(0x10000))
         store.supports_exclusive_allocation = False
         names = _v41_layout(sources=(2, 8), num_layers=8)[0]
         config = SimpleNamespace(
             compilation_config=SimpleNamespace(
                 cudagraph_mode=SimpleNamespace(name="NONE"),
                 static_forward_context={
-                    str(layer): SimpleNamespace(layer_idx=layer, supports_ced_transfer_hooks=True)
+                    str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_kv_transfer_hooks=True)
                     for layer in range(12)
                 },
             ),
@@ -979,10 +985,11 @@ class TestCEDWorkerCapabilities(unittest.TestCase):
 
         def initialize(worker, *_args):
             worker.vllm_config = config
-            worker._extra_config = {"backend": "memcache"}
+            worker._extra_config = {"backend": "memcache", "use_layerwise": True, "load_async": True}
             worker.pp_size = worker.pcp_size = worker.dcp_size = worker.tp_size = 1
             worker.tp_rank = 0
             worker.use_kvpp = worker.load_async = worker.enable_kv_events = False
+            worker.load_async = True
             worker.can_put = True
             worker._transfer_threads_started = False
             worker.token_database = database
@@ -998,17 +1005,19 @@ class TestCEDWorkerCapabilities(unittest.TestCase):
         def receiver_factory(*args, **kwargs):
             return SimpleNamespace(start=args[6].set)
 
-        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save"
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv"
         with (
             patch.object(KVPoolWorker, "__init__", autospec=True, side_effect=initialize),
             patch.object(KVPoolWorker, "_start_kv_transfer_threads", autospec=True) as start_bulk,
-            patch(module + ".CEDPipelinedRecvingThread", side_effect=receiver_factory),
+            patch(module + ".CrossLayerKVRecvingThread", side_effect=receiver_factory),
         ):
-            worker = CEDSaveWorker(config, False)
+            worker = CrossLayerKVPoolWorker(config, True)
             worker._start_kv_transfer_threads()
-        self.assertTrue(worker._ced_runtime_supported)
-        self.assertTrue(worker._ced_load_capable)
-        self.assertFalse(worker._ced_save_capable)
+        self.assertTrue(worker._cross_layer_kv_runtime_supported)
+        self.assertTrue(worker._cross_layer_kv_load_capable)
+        self.assertFalse(worker._cross_layer_kv_save_capable)
+        self.assertFalse(worker.load_async)
+        self.assertTrue(worker._extra_config["load_async"])
         start_bulk.assert_called_once_with(worker)
         self.assertFalse(store.alloc_base)
 
@@ -1016,12 +1025,12 @@ class TestCEDWorkerCapabilities(unittest.TestCase):
         with (
             patch.object(KVPoolWorker, "__init__", autospec=True, side_effect=initialize),
             patch.object(KVPoolWorker, "_start_kv_transfer_threads", autospec=True) as start_bulk,
-            patch(module + ".CEDPipelinedRecvingThread") as create_receiver,
+            patch(module + ".CrossLayerKVRecvingThread") as create_receiver,
         ):
-            worker = CEDSaveWorker(config, False)
+            worker = CrossLayerKVPoolWorker(config, True)
             worker._start_kv_transfer_threads()
-        self.assertFalse(worker._ced_load_capable)
-        self.assertFalse(worker._ced_save_capable)
+        self.assertFalse(worker._cross_layer_kv_load_capable)
+        self.assertFalse(worker._cross_layer_kv_save_capable)
         start_bulk.assert_called_once_with(worker)
         create_receiver.assert_not_called()
 

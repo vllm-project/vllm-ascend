@@ -153,7 +153,7 @@ def test_memory_budget_sources_preserve_physical_capacity(
     monkeypatch.setattr(worker_module.envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
     monkeypatch.setattr(worker_module.torch.npu, "memory_stats", lambda _: {"allocated_bytes.all.peak": 1})
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
-    monkeypatch.setattr(worker_module, "get_layerwise_reuse_config", lambda _: None)
+    monkeypatch.setattr(worker_module, "get_layerwise_reuse_config", lambda _, *, vllm_config: None)
 
     result = worker.determine_available_memory()
 

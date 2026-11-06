@@ -679,8 +679,8 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
     """V4.1 source-shared attention with explicit cache ownership."""
 
     swa_cache_cls = AscendDeepseekV41SWACache
-    # Both forward and cache-only writes enforce CED consumer gates.
-    supports_ced_transfer_hooks = True
+    # Both forward and cache-only writes enforce CrossLayerKV consumer gates.
+    supports_cross_layer_kv_transfer_hooks = True
 
     def __init__(
         self,

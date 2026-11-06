@@ -141,6 +141,14 @@ if _MOCK_VLLM_DEPS:
     _lookup_protocol.RESP_ERR = b"\x00"
     sys.modules["vllm.v1.worker"].mamba_utils.MambaCopyBuffers = type("MambaCopyBuffers", (), {})
 
+    @dataclass
+    class _FakeKVConnectorOutput:
+        finished_sending: set[str] | None = None
+        finished_recving: set[str] | None = None
+        kv_connector_worker_meta: Any = None
+
+    sys.modules["vllm.v1.outputs"].KVConnectorOutput = _FakeKVConnectorOutput
+
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
     sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]

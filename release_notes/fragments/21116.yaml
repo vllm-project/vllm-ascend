@@ -2,12 +2,12 @@ pr: 21116
 entries:
   - category: feature
     text: >-
-      Added experimental CED_layerwise dependency-unit prefetch for DeepSeek-V4.1
-      KV pool loads. Memcache 1.3 retains atomic bulk saves because incremental
-      saves require exclusive allocation.
+      The existing use_layerwise option now automatically selects experimental
+      cross-layer KV prefetch for compatible shared-source models such as
+      DeepSeek-V4.1, while DS4 retains the physical-layer path.
     model: deepseek-v4.1
-  - category: config
+  - category: other
     text: >-
-      CED_layerwise derives source layers from model parameters and validates
-      registered consumer hooks, allowing compatible source-sharing models to
-      reuse the path without a model-name allowlist or fixed layer numbers.
+      Memcache 1.3 retains atomic bulk saves because incremental saves require
+      exclusive allocation. Source layers derive from model parameters, and
+      registered consumer hooks are validated before enabling pipelined loads.

@@ -949,20 +949,24 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
-    **Experimental DeepSeek-V4.1 prefetch:** set `CED_layerwise=true`,
-    `use_layerwise=false`, and `load_async=false` in `kv_connector_extra_config`.
-    With the Memcache backend, eager execution, and complete cache blocks,
-    loads are submitted before forward and copied in first-consumer order.
-    Each source layer waits only for its required KV source slot. With
-    bounded replay disabled, each SWA layer also waits for its window data.
-    Pool keys and bulk object layouts remain compatible with existing saves.
+    **Automatic layerwise strategy selection:** `use_layerwise=true` keeps
+    the existing physical-layer path for models such as DeepSeek-V4 and
+    selects `cross_layer_kv` for models with shared KV sources, such as
+    DeepSeek-V4.1. Both use `LayerwiseKVPoolScheduler`; no additional public
+    switch is required. `use_layerwise=false` retains ordinary bulk transfers.
 
-    KV source layers are derived from the text-model parameters
-    `kv_source_layer_ids` and `num_hidden_layers`, without fixed source layer
-    numbers or a model-name allowlist. Compatible models that reuse the CED
-    attention hooks and cache layout can use the same path. A model without
-    a registered CED consumer hook on every backbone layer retains bulk
-    transfers.
+    The cross-layer strategy derives source positions/count and the replay
+    cut from `kv_source_layer_ids` and `num_hidden_layers`. It validates the
+    registered cache layout and consumer hooks, without fixed layer numbers
+    or a model-name allowlist. Model implementations that reuse the same
+    cache and hook contract adapt to topology changes automatically.
+
+    With Memcache, full cache blocks, and `--enforce-eager`, dependency loads
+    are submitted before forward and copied in first-consumer order. Each
+    layer waits only for the data it needs. The scheduler and worker use
+    synchronous admission (`load_async` is internally set to false), while
+    later copies overlap earlier computation. Physical-layer buffer reuse,
+    offload snapshots, and KVPP layer hooks are not enabled for shared sources.
 
     With `swa_bounded_replay=true`, target SWA is reconstructed by replay and
     is excluded from pool storage. Otherwise SWA saves follow the existing
@@ -972,20 +976,17 @@ Expected output: MetaService starts successfully with no errors.
 
     Memcache release/1.3 returns shared GVAs for duplicate allocations, so
     **saves remain on the existing atomic bulk path**. Incremental session
-    saves require a backend that explicitly guarantees exclusive allocation;
-    `CED_layerwise` does not override that requirement. On such a backend,
-    early source slices overlap later computation and the complete object
-    is published only after every slice succeeds. The bounded-replay cut
-    source uses the final step event to avoid racing replay writes.
+    saves require a backend that guarantees exclusive allocation. On such a
+    backend, producer slices can overlap later computation, and publication
+    waits for all slices. The replay cut uses the final step write event.
 
-    PP, PCP, DCP, KVPP, sequence parallelism, microbatching, speculative
-    decoding/MTP, graph execution, async scheduler loads, and partial-object
-    transfers currently retain bulk behavior. A pipelined-load failure after
-    computation begins fails the step; automatic rollback/retry is not
-    supported. Hardware correctness and performance validation are required
-    before enabling this experimental mode in production. Leaving
-    `CED_layerwise` unset preserves existing behavior. See the
-    [CED design and SDK contract](../../developer_guide/Design_Documents/ced_layerwise_kv_pool.md).
+    Unsupported backends, PP/PCP/DCP/KVPP, sequence parallelism, microbatching,
+    speculative decoding/MTP, graph execution, partial objects, or missing
+    consumer hooks retain group-object bulk transfers within this strategy.
+    A load failure after computation begins fails the step; automatic state
+    rollback/retry is not supported. NPU correctness and performance evidence
+    are required before production use. See the
+    [cross-layer KV design and SDK contract](../../developer_guide/Design_Documents/cross_layer_kv_pool.md).
 
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 

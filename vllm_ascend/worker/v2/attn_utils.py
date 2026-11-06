@@ -1314,7 +1314,7 @@ def _allocate_kv_cache(
             )
             hybrid_backing = _align_memory(hybrid_backing, alignment)[:tensor_size]
 
-    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
+    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config) is not None
     layerwise_aliases: dict[str, str] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
