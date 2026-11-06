@@ -315,13 +315,6 @@ a3:
 a3-560t:
   single_node:
     test_config:
-<<<<<<< HEAD
-=======
-      - name: Qwen3.5-122B-A10B-W8A8-A3
-        os: linux-aarch64-a3-800i-16
-        config_file_path: Qwen3.5-122B-A10B-W8A8-A3_weekly.yaml
-        config_base_path: tests/e2e/cases/models/configs/Qwen
->>>>>>> 552d31a (update)
       - name: structured_output_qwen3
         os: linux-aarch64-a3-800i-2
         tests: tests/e2e/cases/features/structured_output
