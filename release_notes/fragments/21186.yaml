@@ -1,0 +1,5 @@
+pr: 21186
+entries:
+  - category: bugfix
+    text: Fixed SparseFlashMLA metadata allocation on A5 with ops-transformer 9.3.0 and kept Meta output shapes consistent, while preserving the older metadata layout for legacy packages and A2/A3.
+    hardware: [A5]
