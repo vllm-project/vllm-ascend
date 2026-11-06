@@ -120,12 +120,13 @@ def patch_tensor_parallel_group(tp_group):
     draft model can run with a TP degree that differs from the target model.
     """
     old_tp_group = _ps.get_tp_group()
+    old_tp_state_patched = getattr(_ps, "_TP_STATE_PATCHED", False)
     _ps._TP_STATE_PATCHED = True
     _ps._TP = tp_group
     try:
         yield
     finally:
-        _ps._TP_STATE_PATCHED = False
+        _ps._TP_STATE_PATCHED = old_tp_state_patched
         _ps._TP = old_tp_group
 
 
