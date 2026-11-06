@@ -34,12 +34,12 @@ def _apply_grammar_bitmask_kernel_impl(
     bitmask_stride,
     vocab_size,
     total_tasks,
-    NUM_PROGRAMS: tl.constexpr,
     NUM_VOCAB_BLOCKS: tl.constexpr,
     MASK_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    NUM_PROGRAMS = tl.num_programs(0)
 
     tasks_per_program = total_tasks // NUM_PROGRAMS
     remainder = total_tasks % NUM_PROGRAMS
@@ -74,11 +74,12 @@ def _apply_grammar_bitmask_kernel_impl(
         blocked = blocked.reshape(BLOCK_SIZE)
 
         block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
-        )
+        ptrs = logits_ptr + logits_idx * logits_stride + block_offset
+        valid = position_is_active & (block_offset < vocab_size)
+        values = tl.load(ptrs, mask=valid, other=0)
+        negative_inf = tl.full((BLOCK_SIZE,), -float("inf"), values.dtype)
+        # Keep the per-token predicate out of Ascend's discrete masked-store lowering.
+        tl.store(ptrs, tl.where(blocked, negative_inf, values), mask=valid)
 
 
 class _ApplyGrammarBitmaskKernelLauncher:
@@ -102,6 +103,8 @@ class _ApplyGrammarBitmaskKernelLauncher:
             MASK_STRIDE,
             BLOCK_SIZE,
         ):
+            if total_tasks == 0:
+                return None
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
             # a significant performance improvement on A2/A3. It can be enabled
             # again on A5.
@@ -114,7 +117,6 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 bitmask_stride,
                 vocab_size,
                 total_tasks,
-                NUM_PROGRAMS=num_programs,
                 NUM_VOCAB_BLOCKS=num_vocab_blocks,
                 MASK_STRIDE=MASK_STRIDE,
                 BLOCK_SIZE=BLOCK_SIZE,
