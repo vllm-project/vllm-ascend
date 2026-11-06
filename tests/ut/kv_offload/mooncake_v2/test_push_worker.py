@@ -3,7 +3,6 @@
 """D completion integration with real sockets; NPU registration is mocked."""
 
 import time
-from dataclasses import replace
 from types import SimpleNamespace
 
 import msgspec
@@ -137,14 +136,6 @@ def test_missing_completion_cannot_release_blocks(worker, monkeypatch):
     with pytest.raises(RuntimeError, match="Push control failed"):
         worker.get_transfer_results()
     assert "d-request" in worker._reqs_recv_state
-
-
-def test_conflicting_allocation_is_rejected(worker):
-    meta = metadata()
-    worker.start_load_kv(meta)
-    meta.push_requests["d-request"] = replace(meta.push_requests["d-request"], local_block_ids=((3,),))
-    with pytest.raises(ValueError, match="Conflicting"):
-        worker.start_load_kv(meta)
 
 
 def test_done_ack_send_error_reports_request_failure(worker):

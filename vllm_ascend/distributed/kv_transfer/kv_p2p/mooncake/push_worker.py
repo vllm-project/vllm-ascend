@@ -219,8 +219,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._zmq_context: zmq.Context | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
-        if self._recving_thread is not None or self._sender_executor is not None:
-            raise RuntimeError("Replacing active Push KV storage is not supported")
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
             if self.ascend_config.kvpp_config.size > 1:
@@ -260,8 +258,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             while self._pending_sends:
                 self._process_sending_requests(wait=True)
             for local_request_id, request in metadata.push_send_requests.items():
-                if request.request_id in self._finished_requests:
-                    raise ValueError("Reused retired Push request ID")
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo())
                 state.local_request_id = local_request_id
                 state.metadata = request
@@ -286,22 +282,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._process_sending_requests()
 
         else:
-            if self._recving_thread is None:
-                raise RuntimeError("Register D KV caches before receiving transfers")
             for request_id, request in metadata.push_requests.items():
-                if request.request_id in self._finished_requests:
-                    if self._finished_requests[request.request_id] != (request_id, request):
-                        raise ValueError("Reused retired Push request ID")
+                if request.request_id in self._finished_requests or request.request_id in self._reqs_recv_state:
                     continue
-                existing = self._reqs_recv_state.get(request.request_id)
-                if existing is not None:
-                    if (existing.request_id, existing.metadata) != (request_id, request):
-                        raise ValueError("Conflicting metadata for an active transfer")
-                    continue
-                if not request.request_id or request.num_computed_tokens < 0 or request.num_external_tokens <= 0:
-                    raise ValueError("Invalid Push request identity or token range")
-                if any(block < 0 or block >= self.num_blocks for group in request.local_block_ids for block in group):
-                    raise ValueError("Invalid D destination block ID")
                 self._reqs_recv_state[request.request_id] = _ReceiveState(request_id, request, time.monotonic())
                 for completion in self._pending_completions.pop(request.request_id, {}).values():
                     self._result_queue.put(("done", request.request_id, completion))
