@@ -145,7 +145,7 @@ def _rdt_engine_with_fake_server(source, *, is_sender, client, server, monkeypat
 
     # reduce_tensor needs NPU; the fake server never rebuilds, so stub it.
     monkeypatch.setattr(mod, "_reduce_npu_tensor", lambda t: (None, ("fake",)))
-    monkeypatch.setattr(torch.Tensor, "npu", lambda self: self)
+    monkeypatch.setattr(torch.Tensor, "npu", lambda self: self, raising=False)
     monkeypatch.setattr(torch.npu, "current_stream", lambda *a: SimpleNamespace(synchronize=lambda: None))
 
     init_info = ShardedRDTTrainerInitInfo(num_consumers=1, rank=0 if is_sender else 1)

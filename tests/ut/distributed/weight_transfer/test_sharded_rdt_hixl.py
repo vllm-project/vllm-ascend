@@ -363,3 +363,55 @@ def test_public_backend_name_dispatches_both_factories(session, monkeypatch, pla
     assert list(trainer._registry) == ["sharded_rdt"]
     assert worker._registry["sharded_rdt"]() is (new_worker if platform == "npu" else original_worker)
     assert trainer._registry["sharded_rdt"]() is (new_trainer if platform == "npu" else original_trainer)
+
+
+@pytest.mark.parametrize("supports_nixl,retry_fails", [(True, False), (False, False), (False, True)])
+def test_cpu_trainer_import_scopes_ray_transport_patch(monkeypatch, supports_nixl, retry_fails):
+    helper = load_file("hixl_cpu_import_test", Path(__file__).with_name("conftest.py"))
+    calls = []
+    imports = []
+
+    def method(*args, **kwargs):
+        if kwargs.get("tensor_transport") == "nixl" and not supports_nixl:
+            raise ValueError("Invalid tensor transport NIXL, must be one of ['OBJECT_STORE']")
+        calls.append(kwargs)
+        return lambda function: function
+
+    fake_ray = SimpleNamespace(method=method)
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    original_import = helper.importlib.import_module
+
+    def import_module(name, *args, **kwargs):
+        if name != "vllm.distributed.weight_transfer.sharded_rdt_trainer":
+            return original_import(name, *args, **kwargs)
+        imports.append(name)
+        fake_ray.method(tensor_transport="nixl", num_returns=1)(lambda: None)
+        fake_ray.method(tensor_transport="gloo", num_returns=2)(lambda: None)
+        if retry_fails:
+            raise RuntimeError("unrelated import failure")
+        return ModuleType(name)
+
+    monkeypatch.setattr(helper.importlib, "import_module", import_module)
+    if retry_fails:
+        with pytest.raises(RuntimeError, match="unrelated import failure"):
+            helper._import_trainer_without_nixl_transport()
+    else:
+        helper._import_trainer_without_nixl_transport()
+    assert fake_ray.method is method
+    assert len(imports) == (1 if supports_nixl else 2)
+    assert calls == [
+        {"tensor_transport": "nixl", "num_returns": 1} if supports_nixl else {"num_returns": 1},
+        {"tensor_transport": "gloo", "num_returns": 2},
+    ]
+
+
+def test_cpu_trainer_import_does_not_hide_other_value_errors(monkeypatch):
+    helper = load_file("hixl_cpu_import_error_test", Path(__file__).with_name("conftest.py"))
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace())
+
+    def import_module(*args, **kwargs):
+        raise ValueError("invalid ownership metadata")
+
+    monkeypatch.setattr(helper.importlib, "import_module", import_module)
+    with pytest.raises(ValueError, match="invalid ownership metadata"):
+        helper._import_trainer_without_nixl_transport()

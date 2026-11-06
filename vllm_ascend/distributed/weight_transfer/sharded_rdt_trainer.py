@@ -11,7 +11,6 @@ import contextlib
 import threading
 import time
 import uuid
-from dataclasses import asdict
 
 import ray
 import torch
@@ -19,19 +18,9 @@ from torch.multiprocessing.reductions import (
     StorageWeakRef,
 )
 from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
-from typing_extensions import Self
-from vllm.distributed.weight_transfer.base import (
-    VLLMWeightSyncClient,
-    WeightSource,
-    layerwise_groups,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_common import (
-    ALLOWED_OPS,
-)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     _EXPORT_RING_MAX_BYTES,
     DEFAULT_STALL_TIMEOUT_S,
-    ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
     _RDTProducerServer,
     _SharedPack,
@@ -267,54 +256,12 @@ class _HixlProducerServer(_RDTProducerServer):
         return self._hixl.endpoint, blob.data_ptr(), blob.numel()
 
     def _pack_shared(self, gen: _SharedPack, specs: list) -> torch.Tensor:
-        """Replay the op chains into this generation's slot and publish the blob
-        to the sharers waiting on it.
-
-        Runs on exactly one call per generation and OUTSIDE ``_cache_cond``: the
-        pack is NPU work and must not block publishes, frees or other groups.
-        """
-        sliced: list = []  # (byte_off, tensor)
-        pack_cur = 0
-        for name, chain in specs:
-            t = self._cache[name]
-            for op, args, kw in chain:
-                if op not in ALLOWED_OPS:
-                    raise ValueError(f"{name!r}: disallowed op {op!r}")
-                t = getattr(t, op)(*args, **dict(kw))
-            off = (pack_cur + 15) & ~15
-            pack_cur = off + t.numel() * t.element_size()
-            sliced.append((off, t))
-
-        buffer = self._serve_slot(gen.group, gen.slot, pack_cur)
-
-        # The destination views are a pure function of the packed
-        # layout, which is byte-identical every sync, so build them once per
-        # (sharing group, ring slot, layout) and reuse — rebuilding per call cost
-        # 5.2ms of a 7.5ms 384-spec 235B group.
-        #
-        # The key is the LAYOUT, not the spec names: a name can appear in two
-        # requests with different op chains (one name's copies can split across
-        # owner-class chunks), and serving the second through the first's views
-        # would write the wrong bytes with nothing downstream to catch it.
-        dst_key = (
-            gen.group,
-            gen.slot,
-            tuple((off, t.dtype, t.shape) for off, t in sliced),
-        )
-        cached = self._pack_dsts.get(dst_key)
-        if cached is None or cached[0] != buffer.data_ptr():
-            dsts = []
-            for off, t in sliced:
-                nb = t.numel() * t.element_size()
-                dsts.append(buffer[off : off + nb].view(t.dtype).reshape(t.shape))
-            self._pack_dsts[dst_key] = (buffer.data_ptr(), dsts)
-        else:
-            dsts = cached[1]
+        # Upstream publishes a pack as soon as copies are enqueued. Pack into a
+        # private generation so other consumers cannot read it until NPU work
+        # completes, while reusing upstream's op validation and layout cache.
         torch.npu.set_device(self._serve_device)
-        torch._foreach_copy_(dsts, [t for _off, t in sliced])
+        blob = super()._pack_shared(_SharedPack(group=gen.group, slot=gen.slot), specs)
         torch.npu.current_stream(self._serve_device).synchronize()
-
-        blob = buffer[:pack_cur]
         with self._cache_cond:
             gen.blob = blob
             gen.done = True
@@ -404,66 +351,9 @@ class ShardedRDTHixlTrainerWeightTransferEngine(ShardedRDTTrainerWeightTransferE
         return {sid: reduce_args}, views, refs
 
     def _publish_async(self, group_idx: int, entries):
-        """Fire publish_group WITHOUT waiting on the RPC (the gather loop
-        overlaps the publish's server-side rebuild with the next group's
-        gather) and return a handle that ``_await_publish`` resolves. Ray actor
-        handle in production; a plain (non-Ray) fake server runs inline."""
+        # The sidecar opens NPU IPC storage on a different stream/process.
         torch.npu.current_stream().synchronize()
-        method = self._server.publish_group
-        remote = getattr(method, "remote", None)
-        if remote is not None:
-            return remote(group_idx, entries)
-        return method(group_idx, entries)
-
-    @classmethod
-    def trainer_init(
-        cls,
-        init_info: ShardedRDTTrainerInitInfo,
-        *,
-        client: VLLMWeightSyncClient,
-        source: WeightSource | None = None,
-    ) -> Self:
-        if source is None:
-            raise ValueError("Sharded RDT trainer weight transfer requires a WeightSource.")
-        if not source.implements_iter_full():
-            raise TypeError(
-                f"Sharded RDT serves full tensors, but {type(source).__name__} does not implement iter_full()."
-            )
-        engine = cls(
-            client=client,
-            source=source,
-            is_sender=init_info.is_sender,
-            init_info=init_info,
-        )
-
-        engine._meta = list(source.metadata)
-        names = [m.name for m in engine._meta]
-        engine._groups = layerwise_groups(names)
-        flat = [n for g in engine._groups for n in g]
-        if flat != names:
-            raise ValueError(
-                "Sharded RDT requires a WeightSource whose metadata order is "
-                "group-contiguous. Reorder the source so all names sharing a "
-                "layer index are adjacent."
-            )
-
-        world, rank = engine._world_and_rank()
-        engine._resolve_ownership(world, rank)
-        engine._spawn_server(sorted(engine._owned_names))
-
-        # Every rank's server must exist before the sender's init RPC (the worker
-        # init calls reserve_serve_buffer back on ALL producer servers). The
-        # all-gather of server names doubles as that barrier.
-        server_names = engine._all_gather_server_names(world, rank)
-        # Retained so a RESTARTED consumer can be re-initialized without another
-        # all-gather (see get_worker_init_payload). The uuid actor names stay valid
-        # for the run, because producers never restart.
-        engine._server_names = server_names
-
-        if engine.is_sender:
-            worker_init = engine._build_worker_init_info(server_names)
-            engine.client.init_weight_transfer_engine(asdict(worker_init))
-        return engine
+        return super()._publish_async(group_idx, entries)
 
     def _spawn_server(self, served_names: list[str]) -> None:
         import os
