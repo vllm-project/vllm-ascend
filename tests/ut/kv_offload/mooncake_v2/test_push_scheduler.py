@@ -11,8 +11,9 @@ from unittest.mock import Mock
 import httpx
 import msgspec
 import pytest
-import zmq
 from vllm.v1.request import RequestStatus
+from zmq.constants import SocketOption, SocketType
+from zmq.sugar.context import Context
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler, utils
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import GET_META_MSG
@@ -92,10 +93,10 @@ def metaserver(monkeypatch):
 
 
 def query(thread, message):
-    with zmq.Context.instance().socket(zmq.REQ) as sock:
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, 2000)
-        sock.setsockopt(zmq.SNDTIMEO, 2000)
+    with Context.instance().socket(SocketType.REQ) as sock:
+        sock.setsockopt(SocketOption.LINGER, 0)
+        sock.setsockopt(SocketOption.RCVTIMEO, 2000)
+        sock.setsockopt(SocketOption.SNDTIMEO, 2000)
         sock.connect(thread.address)
         sock.send(msgspec.msgpack.encode(message))
         return sock.recv()
@@ -142,9 +143,9 @@ def test_missing_or_foreign_metadata_does_not_start_thread(scheduler):
 
 
 def test_bind_failure_is_reported_and_thread_is_cleaned_up(scheduler):
-    with zmq.Context.instance().socket(zmq.REP) as occupied:
+    with Context.instance().socket(SocketType.REP) as occupied:
         occupied.bind("tcp://127.0.0.1:*")
-        scheduler.side_channel_port = int(occupied.getsockopt(zmq.LAST_ENDPOINT).decode().rsplit(":", 1)[1])
+        scheduler.side_channel_port = int(occupied.getsockopt(SocketOption.LAST_ENDPOINT).decode().rsplit(":", 1)[1])
         with pytest.raises(RuntimeError, match="metadata thread failed"):
             scheduler.set_xfer_handshake_metadata_from_workers(workers())
         assert scheduler._metadata_thread is None
