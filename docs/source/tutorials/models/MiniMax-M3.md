@@ -12,7 +12,7 @@ MiniMax-M3 is a multimodal large language model that supports text, image, and v
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
-This document is written based on the vLLM Ascend main branch. This model is supported on this branch.
+This document is written based on the vLLM Ascend `releases/v0.32.0rc` branch. This model is supported on this branch.
 
 ## 2 Supported Features
 
@@ -29,11 +29,13 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 | `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
 | `MiniMax-M3-w8a8` (W8A8) | 1 Atlas 800I A3 node (64GB × 16) or 1 Atlas 800 A2 node (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) | / |
 | `MiniMax-M3-MXFP8` (MXFP8) | 1 950DT node (96GB × 8) | [ModelScope](https://www.modelscope.cn/models/MiniMax/MiniMax-M3-MXFP8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache. |
-| `MiniMax-M3-EAGLE3-GQA` | / | [ModelScope](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA) | Draft model for EAGLE3 speculative decoding; uses Grouped Query Attention (GQA). |
+| `MiniMax-M3-DSpark` | / | [Hugging Face](https://huggingface.co/nvidia/MiniMax-M3-DSpark) | Standalone DSpark draft model for MiniMax-M3 (`Qwen3DSparkModel`). |
 
 It is recommended to place the model weight in a shared cache directory.
 
-Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `EAGLE3_WEIGHT_PATH` to the downloaded EAGLE3 draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
+Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `DSPARK_WEIGHT_PATH` to the downloaded DSpark draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
+
+The speculative-decoding examples use the standalone `nvidia/MiniMax-M3-DSpark` checkpoint with three draft tokens (`num_speculative_tokens=3`). Set `"enforce_eager":true` in `--speculative-config` for the draft model; this does not disable graph execution for the target model. For general DSpark configuration, see [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark). The 1M-context examples in Section 5.4 continue to run without speculative decoding.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -155,7 +157,7 @@ Start the online serving service with the deployment commands in the following s
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
-The `--speculative-config` examples use single-quoted JSON. The `'"${EAGLE3_WEIGHT_PATH}"'` segment expands the draft-weight path within that JSON.
+The `--speculative-config` examples use single-quoted JSON. The `'"${DSPARK_WEIGHT_PATH}"'` segment expands the draft-weight path within that JSON.
 
 ### 5.1 Single-Node Deployment
 
@@ -213,7 +215,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     ```bash
     WEIGHT_PATH="<MINIMAX_M3_W8A8_PATH>"
-    EAGLE3_WEIGHT_PATH="<MINIMAX_M3_EAGLE3_GQA_PATH>"
+    DSPARK_WEIGHT_PATH="<MINIMAX_M3_DSPARK_PATH>"
     LOG_PATH="./minimax-m3-w8a8.log"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -241,7 +243,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
       --additional-config '{
           "enable_cpu_binding": true,
           "enable_flashcomm1": true,
@@ -258,7 +260,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     ```bash
     WEIGHT_PATH="<MINIMAX_M3_MXFP8_PATH>"
-    EAGLE3_WEIGHT_PATH="<MINIMAX_M3_EAGLE3_GQA_PATH>"
+    DSPARK_WEIGHT_PATH="<MINIMAX_M3_DSPARK_PATH>"
     LOG_PATH="./minimax-m3-mxfp8.log"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -289,7 +291,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
       --safetensors-load-strategy prefetch > "${LOG_PATH}" 2>&1 &
     ```
 
@@ -299,7 +301,7 @@ Text requests do not require `--limit-mm-per-prompt`, but omitting this flag doe
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
+Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `DSPARK_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
 
 === "A3 series (BF16)"
 
@@ -334,7 +336,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -372,7 +374,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -412,7 +414,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -451,7 +453,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
@@ -602,7 +604,7 @@ The templates use named environment variables instead of positional shell argume
 | -------- | ------- | ------------- |
 | `LOCAL_IP` | Current node's communication IP | Fill in `<CURRENT_NODE_IP>` separately on each node. |
 | `NIC_NAME` | NIC associated with `LOCAL_IP` | Fill in `<CURRENT_NODE_NIC>`. |
-| `MODEL_PATH` / `EAGLE3_WEIGHT_PATH` | Target / draft weight directories | Use the same mounted paths on every node. |
+| `MODEL_PATH` / `DSPARK_WEIGHT_PATH` | Target / draft weight directories | Use the same mounted paths on every node. |
 | `DP_SIZE` / `TP_SIZE` / `PP_SIZE` | Global DP size / TP and PP size within one rank | Numeric values are exported in each launch command below. |
 | `LOCAL_DP_SIZE` | Number of engines on the current node | Passed to the launcher as `--dp-size-local`. |
 | `DP_RANK_START` | First global DP rank on this node | Passed as `--dp-rank-start`; differs between the two Decode nodes. |
@@ -636,7 +638,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
 === "A3 series (W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-DSpark`.
 
 
     **1. Prefill node**
@@ -648,7 +650,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-1}
@@ -706,7 +708,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -729,7 +731,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-8}
@@ -785,7 +787,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -901,7 +903,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
 === "950DT products"
 
-    Prefill-Decode disaggregation can be deployed on two 950DT nodes (96GB × 8, 1P1D) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`, and scales to three nodes while remaining 1P1D (one Prefill service group and one Decode service group; see below). On SuperPod systems (UB fabric), export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` as in the templates below; mounting `/etc/hixlep/` applies to RoCE-attached 950DT instead. The examples explicitly enable Model Runner V2.
+    Prefill-Decode disaggregation can be deployed on two 950DT nodes (96GB × 8, 1P1D) for `MiniMax-M3-MXFP8` with `MiniMax-M3-DSpark`, and scales to three nodes while remaining 1P1D (one Prefill service group and one Decode service group; see below). On SuperPod systems (UB fabric), export `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` as in the templates below; mounting `/etc/hixlep/` applies to RoCE-attached 950DT instead. The examples explicitly enable Model Runner V2.
 
     Set `PREFILL_IP` and `DECODE_IP` to the Prefill and Decode communication IPs. For the three-node variant, also set `DECODE0_IP` and `DECODE1_IP`. Set `LOCAL_IP` and `NIC_NAME` separately in each node's template.
 
@@ -915,7 +917,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-2}
@@ -970,7 +972,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --safetensors-load-strategy prefetch \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
@@ -998,7 +1000,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-2}
@@ -1055,7 +1057,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config \
         '{
@@ -1210,8 +1212,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31060 31061 31062 31063
     ```
 
-    In a contributor-verified text-only run using this three-node layout with MXFP8, EAGLE3, fp8 KV cache and the optional `--language-model-only` flag, all 232 requests succeeded at 128k input / 1k output and concurrency 58. Average TPOT was 27.3 ms and aggregate output throughput was about 1840 tokens/s. In that setup, enabling Decode FlashComm1 increased output throughput from 1807.9 to 1840.7 tokens/s (about 1.8%). These measurements describe that workload and configuration; the launch templates leave `--language-model-only` optional.
-
 Key Parameter Descriptions:
 
 **`launch_online_dp.py` parameters:**
@@ -1234,12 +1234,12 @@ Key Parameter Descriptions:
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: The ordinary-context Decode examples and the single-node examples in Section 5.4.1 use full graph capture for decode-only batches. Section 5.4.2 uses eager execution for its 1M-context PD layout.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
+- `--speculative-config '{"method":"dspark", ...}'`: Enables the standalone `MiniMax-M3-DSpark` draft model. Set `"enforce_eager":true` inside this JSON to keep draft execution eager; the target model retains its configured graph mode. For 950DT FP8 KV-cache serving, keep the draft `"kv_cache_dtype":"bfloat16"`.
 
 **Decode node-specific configurations:**
 
 - `--language-model-only` (optional): For text-only tests, add this flag as needed based on the available KV cache capacity to avoid reserving memory for multimodal processing.
-- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
+- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With DSpark speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `128`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
@@ -1423,7 +1423,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
 
 === "A3 series (W8A8)"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-DSpark`.
 
     One Prefill node uses `DP1 × TP4 × PP4`; two Decode nodes form a global `DP8 × TP4 × PP1` group, with four local ranks per node. Copy the same Decode template to both D nodes and use the node-specific launch blocks below. Service settings match Section 5.3.1; `MultiConnector` adds the KV pool. The `--language-model-only` option remains in the existing optional guidance rather than the launch commands.
 
@@ -1436,7 +1436,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-1}
@@ -1504,7 +1504,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MultiConnector",
@@ -1544,7 +1544,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_W8A8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-8}
@@ -1610,7 +1610,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}' \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MultiConnector",
@@ -1645,7 +1645,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
 
 === "950DT products"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/`, `/etc/hccn.conf`, and the local SSD directory from Section 5.3.2.1. Place the Prefill / Decode `mooncake.json` from Section 5.3.2.1 next to `run_dp_template.sh` (`global_segment_size` is `64GB` on both roles, with SSD offload enabled). Set `master_server_address` to the same reachable Mooncake Master on both nodes.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-DSpark`. Mount `/etc/hixlep/`, `/etc/hccn.conf`, and the local SSD directory from Section 5.3.2.1. Place the Prefill / Decode `mooncake.json` from Section 5.3.2.1 next to `run_dp_template.sh` (`global_segment_size` is `64GB` on both roles, with SSD offload enabled). Set `master_server_address` to the same reachable Mooncake Master on both nodes.
 
     **1. Prefill node**
 
@@ -1657,7 +1657,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-2}
@@ -1719,7 +1719,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
       --kv-cache-dtype fp8 \
       --reasoning-parser minimax_m3 \
       --safetensors-load-strategy prefetch \
-      --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+      --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
       --enforce-eager \
       --enable-chunked-prefill \
       --enable-prefix-caching \
@@ -1765,7 +1765,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
     export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
     export MODEL_PATH="${MODEL_PATH:-<MINIMAX_M3_MXFP8_PATH>}"
-    export EAGLE3_WEIGHT_PATH="${EAGLE3_WEIGHT_PATH:-<MINIMAX_M3_EAGLE3_GQA_PATH>}"
+    export DSPARK_WEIGHT_PATH="${DSPARK_WEIGHT_PATH:-<MINIMAX_M3_DSPARK_PATH>}"
 
     # Role defaults; the launcher overrides these for each engine.
     export DP_SIZE=${DP_SIZE:-2}
@@ -1829,7 +1829,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"model":"'"${DSPARK_WEIGHT_PATH}"'", "method":"dspark", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16", "enforce_eager":true}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
         '{
@@ -2190,7 +2190,7 @@ This example uses three Atlas 800I A3 nodes (16 × 64GB NPUs per node) with W8A8
 | First Decode node | 4 / 8 / 1 | 0–1 | 31260, 31261 | 8 | 8 |
 | Second Decode node | 4 / 8 / 1 | 2–3 | 31260, 31261 | 8 | 8 |
 
-Both roles use Model Runner V2, `--max-model-len 1049600`, `--max-num-seqs 1`, `--kv-cache-dtype auto`, FLASHCOMM1, chunked prefill, and text-only serving. Prefix caching, asynchronous scheduling, shared-expert DP, static kernels, and EAGLE3 are disabled. Prefill splits the 60 layers as `30,30` and enables shared-expert multistream overlap; Decode disables that overlap.
+Both roles use Model Runner V2, `--max-model-len 1049600`, `--max-num-seqs 1`, `--kv-cache-dtype auto`, FLASHCOMM1, chunked prefill, and text-only serving. Prefix caching, asynchronous scheduling, shared-expert DP, static kernels, and speculative decoding are disabled. Prefill splits the 60 layers as `30,30` and enables shared-expert multistream overlap; Decode disables that overlap.
 
 Both P and D use `--enforce-eager` with `cudagraph_mode=NONE` in this PD configuration. The earlier Decode candidate using `FULL_DECODE_ONLY` and an automatically sized KV cache failed during allocation in the tested environment. The successful configuration uses a Decode token budget and long-prefill threshold of `8`, plus an explicit KV cache budget of `47620449894` bytes (about 44.35 GiB) per worker. This is a functional long-context deployment example; tune performance separately.
 
