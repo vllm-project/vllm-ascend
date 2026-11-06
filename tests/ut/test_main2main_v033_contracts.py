@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -52,6 +53,60 @@ class ArrayBuffer:
 
 
 class TestMain2MainContracts(unittest.TestCase):
+    def test_replayssm_temporal_guard_retains_conv_copy_and_count_normalization(self):
+        path = ROOT / "vllm_ascend/ops/triton/v1/mamba/postprocess.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        kernel = next(
+            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "postprocess_mamba_fused_kernel"
+        )
+        # Execute the actual launch-independent tail between address calculation
+        # and the memory transfer. Triton compilation/copies remain hardware CI.
+        start = next(
+            i for i, n in enumerate(kernel.body) if isinstance(n, ast.If) and "state_idx == 0" in ast.unparse(n.test)
+        )
+        end = next(
+            i
+            for i, n in enumerate(kernel.body)
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "offsets" for t in n.targets)
+        )
+        fragment = ast.FunctionDef(
+            name="before_copy",
+            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=kernel.body[start : end + 1],
+            decorator_list=[],
+        )
+        module = compile(ast.fix_missing_locations(ast.Module(body=[fragment], type_ignores=[])), str(path), "exec")
+        for skip_temporal in (False, True):
+            for conv_width in (0, 4):
+                with self.subTest(skip_temporal=skip_temporal, conv_width=conv_width):
+                    output = [2]
+                    transfers = MagicMock()
+
+                    def store(_ptr, value, output=output):
+                        output[0] = value
+
+                    ns: dict[str, Any] = dict(
+                        src_block_idx=1,
+                        dest_block_idx=1,
+                        state_idx=0,
+                        tile_idx=0,
+                        accept_token_bias=1,
+                        num_accepted_tokens_out_ptr=0,
+                        num_accepted_tokens_ptr=0,
+                        req_idx=0,
+                        conv_width=conv_width,
+                        SKIP_TEMPORAL_STATE_COPY=skip_temporal,
+                        COPY_BLOCK_SIZE=1024,
+                        tl=SimpleNamespace(store=store, arange=transfers),
+                    )
+                    exec(module, ns)
+                    ns["before_copy"]()
+                    self.assertEqual(output, [1])
+                    if skip_temporal and conv_width == 0:
+                        transfers.assert_not_called()
+                    else:
+                        transfers.assert_called_once_with(0, 1024)
+
     def test_310p_initialization_forwards_versioned_graph_shapes(self):
         path = ROOT / "vllm_ascend/_310p/worker/v2/model_runner.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
