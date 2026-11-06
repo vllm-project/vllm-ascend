@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import msgspec
 import pytest
-import zmq
+from zmq.constants import SocketOption, SocketType
+from zmq.error import Again
+from zmq.sugar.context import Context
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
@@ -57,9 +59,9 @@ def completion(**changes):
 
 
 def send(worker, message):
-    with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, 2000)
+    with Context() as ctx, ctx.socket(SocketType.REQ) as sock:
+        sock.setsockopt(SocketOption.LINGER, 0)
+        sock.setsockopt(SocketOption.RCVTIMEO, 2000)
         sock.connect(worker._decode_listener_thread.address)
         sock.send(msgspec.msgpack.encode(message))
         reply = msgspec.msgpack.decode(sock.recv())
@@ -173,9 +175,9 @@ def test_failed_done_is_not_lost_when_same_source_reports_success(worker, early)
 )
 def test_invalid_done_does_not_stop_listener_or_finish_request(worker, frames):
     worker.start_load_kv(metadata())
-    with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, 2000)
+    with Context() as ctx, ctx.socket(SocketType.REQ) as sock:
+        sock.setsockopt(SocketOption.LINGER, 0)
+        sock.setsockopt(SocketOption.RCVTIMEO, 2000)
         sock.connect(worker._decode_listener_thread.address)
         sock.send_multipart(frames)
         reply = msgspec.msgpack.decode(sock.recv())
@@ -197,7 +199,7 @@ def test_done_ack_send_error_reports_request_failure(worker):
     worker.start_load_kv(metadata())
 
     def fail_send(frames):
-        raise zmq.Again()
+        raise Again()
 
     worker._decode_listener_thread._handle_done_message(
         SimpleNamespace(send_multipart=fail_send), [b"producer", b"", msgspec.msgpack.encode(completion())]

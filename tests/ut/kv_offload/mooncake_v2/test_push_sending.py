@@ -13,7 +13,8 @@ from unittest.mock import Mock
 
 import msgspec
 import pytest
-import zmq
+from zmq.constants import SocketOption, SocketType
+from zmq.sugar.context import Context
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
@@ -405,9 +406,9 @@ def test_abort_waits_for_submitted_write(worker):
 def test_done_socket_timeout_is_bounded(worker, monkeypatch):
     monkeypatch.setattr(push_worker.envs, "VLLM_MOONCAKE_CONNECTOR_TIMEOUT", 0.02)
     message = destination_message()
-    with zmq.Context() as ctx, ctx.socket(zmq.REP) as sock:
+    with Context() as ctx, ctx.socket(SocketType.REP) as sock:
         sock.bind("tcp://127.0.0.1:*")
-        message["completion_address"] = sock.getsockopt(zmq.LAST_ENDPOINT).decode()
+        message["completion_address"] = sock.getsockopt(SocketOption.LAST_ENDPOINT).decode()
         assert not push_worker.MooncakePushConnectorWorker._send_done(worker, message, "failed")
 
 
@@ -422,7 +423,7 @@ def test_dcp_is_rejected_before_initialization():
 def test_metadata_query_and_done_real_sockets(worker, monkeypatch, write_fails):
     """Run P's actual metadata query and completion against D protocol servers."""
 
-    result_queue = queue.SimpleQueue()
+    result_queue: queue.SimpleQueue[tuple[str, str, dict[str, object]]] = queue.SimpleQueue()
     d = SimpleNamespace(
         _stop_event=threading.Event(),
         engine_id="d",
@@ -439,10 +440,10 @@ def test_metadata_query_and_done_real_sockets(worker, monkeypatch, write_fails):
     address = []
 
     def serve_metadata():
-        with zmq.Context() as ctx, ctx.socket(zmq.REP) as sock:
-            sock.setsockopt(zmq.RCVTIMEO, 3000)
+        with Context() as ctx, ctx.socket(SocketType.REP) as sock:
+            sock.setsockopt(SocketOption.RCVTIMEO, 3000)
             sock.bind("tcp://127.0.0.1:*")
-            address.append(sock.getsockopt(zmq.LAST_ENDPOINT).decode())
+            address.append(sock.getsockopt(SocketOption.LAST_ENDPOINT).decode())
             started.set()
             assert msgspec.msgpack.decode(sock.recv()) == [b"get_meta_msg", "d"]
             sock.send(msgspec.msgpack.encode(remote_metadata()))
