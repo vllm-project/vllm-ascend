@@ -32,7 +32,7 @@ import torch.nn.functional as F
 import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
@@ -108,6 +108,120 @@ def _is_mxfp8_dynamic(linear) -> bool:
 # ``DSA_INDEXER_KV_DTYPES`` in ``vllm/v1/attention/backends/mla/indexer.py``.
 _A5_INDEXER_KV_DTYPES = ("fp8",)
 _A3_INDEXER_KV_DTYPES = ("int8",)
+
+# Below this many prefill rows per rank, keep every rank scoring the whole
+# batch: short batches spend more on the extra TP gather than the removed
+# duplicate scoring saves. Chunked prefill caps a single prompt's batch at
+# ``max_num_batched_tokens`` minus the speculative reserve (8186 rows at the
+# 8192/7-token deployment), so the floor must stay below that: at TP8 a
+# 1024/rank floor (8192 rows) would decline every real chunk. 512/rank lets
+# full-size chunks through while the cost floor below still declines the
+# small and first-chunk work.
+MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK = 512
+
+# Sharding also needs enough cumulative scoring work to amortize the padded
+# TP gather. A boundary fresh 8k-token prompt at the TP8 row floor scores
+# ~8.4Mi compressed-key pairs and measured 2.0% of its prefill window on
+# 910B; twice that boundary work separates batches that gain from batches
+# that only pay the extra collective. TP-independent and conservative.
+MIN_DSV4_INDEXER_TP_SHARD_COST = 16 * 1024 * 1024
+
+# Planner skew cap: reject splits whose padded gather (tp x largest slice)
+# exceeds 2x the batch's row count. Bounds the gather workspace at 2x
+# capacity rows instead of tp x capacity, so the workspace worst case is
+# (1 + 2) * capacity * width * 4B (36 MiB at TP8 / 8192 rows / 512 int32
+# columns) instead of (1 + tp) * ... (144 MiB). No-op at TP2, where the
+# largest possible slice already fits the bound.
+MAX_DSV4_INDEXER_TP_SHARD_SKEW = 2
+
+# One (scratch, gather) pair per device, shared by every C4 indexer layer and
+# the MTP draft layers; layers execute sequentially within a step.
+_PREFILL_SHARD_EXCHANGE_WORKSPACE: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def prefill_shard_exchange_supported(parallel_config: typing.Any, cudagraph_mode: typing.Any) -> bool:
+    """Config-level precheck: can the sharded exchange ever run here?
+
+    The per-batch floors (row count, cumulative cost, skew) are judged at
+    planning time; this deployment-shape predicate only gates the workspace
+    reservation made at model-build time.
+    """
+    return (
+        parallel_config.tensor_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and cudagraph_mode != CUDAGraphMode.FULL
+    )
+
+
+def ensure_prefill_shard_exchange_workspace(
+    device: torch.device, capacity: int, width: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single scratch/gather pair per device, shared by every indexer layer.
+
+    Allocated once per process at builder init -- before the memory profile
+    on every model runner (MRv2 profiles with skip_attn and never executes
+    the exchange), so the KV-cache budget always accounts for the worst
+    sharded step. Gather rows follow the planner skew cap (2x capacity)
+    rather than tp x capacity.
+    """
+    workspace = _PREFILL_SHARD_EXCHANGE_WORKSPACE.get(device)
+    if workspace is None:
+        workspace = (
+            torch.empty((capacity, width), dtype=torch.int32, device=device),
+            torch.empty((MAX_DSV4_INDEXER_TP_SHARD_SKEW * capacity, width), dtype=torch.int32, device=device),
+        )
+        _PREFILL_SHARD_EXCHANGE_WORKSPACE[device] = workspace
+    assert workspace[0].shape[1] == width, "shared prefill-shard exchange workspace width mismatch"
+    return workspace
+
+
+def exchange_prefill_shard_topk(
+    local_topk: torch.Tensor,
+    shard_sizes: tuple[int, ...],
+    leading_topk: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Gather per-rank TopK slices and restore the global row order.
+
+    Ascend's TP communicator has no variadic all_gatherv, so every rank pads
+    its slice to the largest per-rank row count; the regular
+    all_gather_into_tensor then writes straight into the preallocated
+    workspace and each rank trims by rank offsets. The padding rows never
+    leave this exchange. ``leading_topk`` (replicated decode rows) is
+    prepended locally instead of being gathered.
+    """
+    from vllm.distributed import get_tp_group
+
+    world_size = len(shard_sizes)
+    num_rows = local_topk.shape[0]
+    max_rows = max(shard_sizes)
+    assert num_rows <= max_rows, "local TopK rows exceed the prefill shard capacity"
+    tail_shape = local_topk.shape[1:]
+    width = 1
+    for s in tail_shape:
+        width *= s
+    # The planner caps tp * max slice at 2x the batch rows, so sizing a
+    # lazily-created workspace by the batch always satisfies the gather; the
+    # production workspace reserved at builder init (capacity = max batched
+    # tokens) is strictly larger.
+    scratch, gather_out = ensure_prefill_shard_exchange_workspace(local_topk.device, sum(shard_sizes), width)
+    assert gather_out.shape[0] >= world_size * max_rows, "exchange workspace smaller than the planned shard"
+    local = scratch[:max_rows]
+    local[:num_rows].copy_(local_topk.reshape(num_rows, width))
+    if num_rows < max_rows:
+        local[num_rows:].fill_(-1)
+    gathered = gather_out[: world_size * max_rows]
+    torch.distributed.all_gather_into_tensor(gathered, local, group=get_tp_group().device_group)
+    chunks = []
+    total_rows = 0
+    if leading_topk is not None:
+        chunks.append(leading_topk.reshape(leading_topk.shape[0], width))
+        total_rows += leading_topk.shape[0]
+    for rank, size in enumerate(shard_sizes):
+        if size:
+            chunks.append(gathered[rank * max_rows : rank * max_rows + size])
+            total_rows += size
+    return torch.cat(chunks, dim=0).reshape(total_rows, *tail_shape)
 
 
 def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
@@ -243,7 +357,24 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
-        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+        prefill_row_shard = getattr(metadata, "prefill_row_shard", None)
+        op_metadata = metadata
+        if prefill_row_shard is not None:
+            num_decode_tokens = prefill_row_shard.num_decode_tokens
+
+            def pack_decode_and_local_prefill(value: torch.Tensor) -> torch.Tensor:
+                local_prefill = value[prefill_row_shard.start : prefill_row_shard.stop]
+                if num_decode_tokens == 0:
+                    return local_prefill.contiguous()
+                return torch.cat((value[:num_decode_tokens], local_prefill), dim=0)
+
+            # Decode rows stay replicated and precede this rank's prefill
+            # slice; the QLI metadata swaps to the rank-local, rebased copy.
+            query = pack_decode_and_local_prefill(query)
+            weights = pack_decode_and_local_prefill(weights)
+            query_scale = pack_decode_and_local_prefill(query_scale)
+            op_metadata = prefill_row_shard
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata.qli_metadata))
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
@@ -252,17 +383,24 @@ class AscendIndexerOps:
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
             topk=self.index_topk,
             quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
-            cu_seqlens_q=metadata.qli_cu_seqlens_q,
-            seqused_k=metadata.qli_seqused_k,
-            cmp_residual_k=metadata.qli_cmp_residual_k,
-            block_table=metadata.block_table,
-            metadata=metadata.qli_metadata,
+            cu_seqlens_q=op_metadata.qli_cu_seqlens_q,
+            seqused_k=op_metadata.qli_seqused_k,
+            cmp_residual_k=op_metadata.qli_cmp_residual_k,
+            block_table=op_metadata.block_table,
+            metadata=op_metadata.qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",
             mask_mode=3,
             cmp_ratio=4,
             return_value=0,
         )
+        if prefill_row_shard is not None:
+            num_decode_tokens = prefill_row_shard.num_decode_tokens
+            return exchange_prefill_shard_topk(
+                topk_idxs[num_decode_tokens:],
+                prefill_row_shard.sizes,
+                leading_topk=topk_idxs[:num_decode_tokens] if num_decode_tokens else None,
+            )
         return topk_idxs
 
     def quantize_update_cache_and_select_topk(

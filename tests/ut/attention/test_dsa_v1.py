@@ -33,11 +33,13 @@ from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSABackend,
     AscendDSAImpl,
+    AscendDSAIndexerMetadataBuilder,
     AscendDSALayerMetadata,
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     OProjBufferPool,
+    balanced_prefill_row_shard,
     build_compressor_metadata_out,
     build_vision_bidirectional_swa_indices,
 )
@@ -45,6 +47,8 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
+    MIN_DSV4_INDEXER_TP_SHARD_COST,
+    MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK,
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
@@ -2931,3 +2935,342 @@ def test_o_proj_without_sharding_skips_buffers_and_collectives(otp_size):
     get_capacity.assert_not_called()
     all_to_all.assert_not_called()
     reduce_scatter.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Prefill indexer row sharding
+# ---------------------------------------------------------------------------
+
+
+def _prefill_row_costs(seq_lens: list[int], query_lens: list[int], compress_ratio: int = 4):
+    return [
+        (seq_len - query_len + 1 + row) // compress_ratio
+        for seq_len, query_len in zip(seq_lens, query_lens)
+        for row in range(query_len)
+    ]
+
+
+class TestBalancedPrefillRowShard:
+    @pytest.mark.parametrize("tp_size", [2, 4, 8])
+    @pytest.mark.parametrize(
+        ("seq_lens", "query_lens", "must_shard"),
+        [
+            # A fresh prompt's row cost grows with its offset ((1+r)//4), so
+            # a cost-balanced split is front-loaded and the skew cap declines
+            # it at TP8 while smaller TP still shards: both outcomes valid.
+            ([16384], [16384], False),
+            # Deep histories dominate the row cost, giving near-uniform work
+            # that shards evenly at every TP.
+            ([216384], [16384], True),
+            # Ragged requests of similar depth still balance cleanly.
+            ([40000, 38000, 36000], [8192, 4096, 8192], True),
+            # Deployment shapes under chunked prefill (mnbt 8192 with a
+            # 7-token speculative reserve -> 8186-row chunks): a full-size
+            # chunk over a same-size prefix, and the ragged tail chunk of a
+            # 21k prompt. Both must shard at every TP; a 1024/rank row floor
+            # would decline the 8186-row chunk outright, so these lock the
+            # floor below the real chunk size.
+            ([16372], [8186], True),
+            ([21006], [4634], True),
+            # Fresh-vs-deep mixtures can only balance by handing one rank
+            # most of the cheap rows, past the skew cap; declining (None)
+            # is the designed answer for these.
+            ([8192, 9007, 69536], [8192, 7, 4096], False),
+            ([500000 + 4096, 12288], [4096, 12288], False),
+        ],
+    )
+    def test_balances_scored_key_work(self, tp_size, seq_lens, query_lens, must_shard):
+        sizes = balanced_prefill_row_shard(
+            torch.tensor(seq_lens),
+            torch.tensor(query_lens),
+            4,
+            tp_size,
+            MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK,
+        )
+        rows = sum(query_lens)
+        if sizes is None:
+            assert not must_shard, f"expected a shard for tp={tp_size}"
+            return
+
+        assert len(sizes) == tp_size
+        assert min(sizes) > 0
+        assert sum(sizes) == rows
+
+        costs = _prefill_row_costs(seq_lens, query_lens)
+
+        def imbalance(parts):
+            rank_costs, offset = [], 0
+            for size in parts:
+                rank_costs.append(sum(costs[offset : offset + size]))
+                offset += size
+            return max(rank_costs) / (sum(rank_costs) / len(rank_costs))
+
+        base, remainder = divmod(rows, tp_size)
+        even_sizes = [base + (rank < remainder) for rank in range(tp_size)]
+        assert imbalance(sizes) <= imbalance(even_sizes) + 1e-9
+        # Skew cap in product form: tp x largest slice <= 2 x rows.
+        assert max(sizes) * tp_size <= 2 * rows
+
+    def test_declines_below_row_floor(self):
+        rows = 4095  # < 1024 * 4 scheduled rows
+        assert balanced_prefill_row_shard(torch.tensor([rows]), torch.tensor([rows]), 4, 4, 1024) is None
+
+    def test_declines_below_cost_floor(self):
+        rows = 8192  # a fresh 8k prompt scores ~8.4Mi pairs < 16Mi floor
+        sizes = balanced_prefill_row_shard(torch.tensor([rows]), torch.tensor([rows]), 4, 8, 1024)
+        assert sizes is None
+        assert sum(_prefill_row_costs([rows], [rows])) < MIN_DSV4_INDEXER_TP_SHARD_COST
+
+    def test_fresh_mnbt_chunk_declines_on_cost_not_rows(self):
+        # The real first chunk (8186 rows = mnbt 8192 minus the 7-token
+        # speculative reserve) sits above the 512/rank row floor yet still
+        # under the cost floor: it declines via cost, keeping the replicated
+        # path for a prompt's cheapest chunk while continuation chunks shard.
+        rows = 8186
+        sizes = balanced_prefill_row_shard(
+            torch.tensor([rows]),
+            torch.tensor([rows]),
+            4,
+            8,
+            MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK,
+        )
+        assert sizes is None
+        assert rows >= MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK * 8
+        assert sum(_prefill_row_costs([rows], [rows])) < MIN_DSV4_INDEXER_TP_SHARD_COST
+
+    def test_declines_skewed_splits(self):
+        # 7000 fresh rows are nearly free while 1200 rows of a 5M-token
+        # history carry almost all the cost: the balanced planner would hand
+        # one rank almost every cheap row, past the skew cap.
+        assert (
+            balanced_prefill_row_shard(
+                torch.tensor([7000, 5_000_000]),
+                torch.tensor([7000, 1200]),
+                4,
+                8,
+                1024,
+            )
+            is None
+        )
+
+
+def _gate_builder() -> AscendDSAIndexerMetadataBuilder:
+    builder = AscendDSAIndexerMetadataBuilder.__new__(AscendDSAIndexerMetadataBuilder)
+    builder.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4"))
+    builder.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+    )
+    builder.compressor_ratio = 4
+    builder.num_prefills = 1
+    return builder
+
+
+class TestPrefillRowShardGate:
+    def test_supports_pure_tp_prefill(self):
+        builder = _gate_builder()
+        with patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+            return_value=4,
+        ):
+            assert builder._prefill_row_sharding_supported(full_graph_mode=False)
+
+    @pytest.mark.parametrize(
+        ("override", "value"),
+        [
+            ("world_size", 1),
+            ("prefill_context_parallel_size", 2),
+            ("decode_context_parallel_size", 2),
+            ("num_prefills", 0),
+            ("full_graph_mode", True),
+            ("model_type", "deepseek_v3"),
+            ("compressor_ratio", 128),
+        ],
+    )
+    def test_declines_unsupported_shapes(self, override, value):
+        builder = _gate_builder()
+        if override == "world_size":
+            world_size = value
+        else:
+            world_size = 4
+        if override == "prefill_context_parallel_size":
+            builder.vllm_config.parallel_config.prefill_context_parallel_size = value
+        if override == "decode_context_parallel_size":
+            builder.vllm_config.parallel_config.decode_context_parallel_size = value
+        if override == "num_prefills":
+            builder.num_prefills = value
+        if override == "model_type":
+            builder.model_config.hf_config.model_type = value
+        if override == "compressor_ratio":
+            builder.compressor_ratio = value
+        full_graph_mode = value if override == "full_graph_mode" else False
+        with patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+            return_value=world_size,
+        ):
+            assert not builder._prefill_row_sharding_supported(full_graph_mode)
+
+
+def _shard_builder(num_decodes: int, num_decode_tokens: int) -> AscendDSAIndexerMetadataBuilder:
+    builder = _gate_builder()
+    builder.device = "cpu"
+    builder.num_decodes = num_decodes
+    builder.num_decode_tokens = num_decode_tokens
+    builder.block_table = torch.tensor([[10, 11], [20, 21], [30, 31], [40, 41]], dtype=torch.int32)
+    builder.prefill_shard_qli_metadata_buffer = torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder.prefill_shard_qli_seqused_k = torch.zeros(8, dtype=torch.int32)
+    builder.prefill_shard_qli_cmp_residual_k = torch.zeros(8, dtype=torch.int32)
+    builder.prefill_shard_cu_seqlens_q = torch.zeros(8, dtype=torch.int32)
+    builder.common_ratio_to_sas_metadata = {}
+    return builder
+
+
+class TestPreparePrefillRowShard:
+    @pytest.mark.skipif(
+        not getattr(torch, "npu", None) or not torch.npu.is_available(),
+        reason="cross-device rebase needs an NPU device",
+    )
+    def test_rebase_writes_npu_buffers_from_cpu_metadata(self):
+        # The crash shape from the first 910B E2E run: CPU rebase math written
+        # into NPU persistent buffers must go through copy_, not out=.
+        builder = _shard_builder(num_decodes=0, num_decode_tokens=0)
+        builder.prefill_shard_qli_metadata_buffer = builder.prefill_shard_qli_metadata_buffer.npu()
+        builder.prefill_shard_qli_seqused_k = builder.prefill_shard_qli_seqused_k.npu()
+        builder.prefill_shard_qli_cmp_residual_k = builder.prefill_shard_qli_cmp_residual_k.npu()
+        builder.prefill_shard_cu_seqlens_q = builder.prefill_shard_cu_seqlens_q.npu()
+        builder.block_table = builder.block_table.npu()
+        common = SimpleNamespace(
+            num_reqs=2,
+            query_start_loc_cpu=torch.tensor([0, 4, 10], dtype=torch.int32),
+            _seq_lens_cpu=None,
+            seq_lens_cpu=torch.tensor([8, 10]),
+            seq_lens=torch.tensor([8, 10]),
+        )
+        with (
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
+            patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_rank", return_value=1),
+            patch(
+                "vllm_ascend.attention.dsa_v1.balanced_prefill_row_shard",
+                return_value=(3, 7),
+            ),
+        ):
+            shard = builder._prepare_prefill_row_shard(common, num_actual_reqs=2, full_graph_mode=False)
+
+        assert shard is not None
+        assert shard.qli_seqused_k.device.type == "npu"
+        assert shard.qli_cu_seqlens_q.device.type == "npu"
+        assert torch.equal(shard.qli_seqused_k.cpu(), torch.tensor([2, 2], dtype=torch.int32))
+        assert torch.equal(shard.qli_cmp_residual_k.cpu(), torch.tensor([0, 2], dtype=torch.int32))
+        assert torch.equal(shard.qli_cu_seqlens_q.cpu(), torch.tensor([0, 1, 7], dtype=torch.int32))
+
+    def test_rebases_pure_prefill_batch(self):
+        builder = _shard_builder(num_decodes=0, num_decode_tokens=0)
+        common = SimpleNamespace(
+            num_reqs=2,
+            query_start_loc_cpu=torch.tensor([0, 4, 10], dtype=torch.int32),
+            _seq_lens_cpu=None,
+            seq_lens_cpu=torch.tensor([8, 10]),
+            seq_lens=torch.tensor([8, 10]),
+        )
+        with (
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
+            patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_rank", return_value=1),
+            patch(
+                "vllm_ascend.attention.dsa_v1.balanced_prefill_row_shard",
+                return_value=(3, 7),
+            ),
+        ):
+            shard = builder._prepare_prefill_row_shard(common, num_actual_reqs=2, full_graph_mode=False)
+
+        assert shard is not None
+        assert (shard.start, shard.stop, shard.sizes) == (3, 10, (3, 7))
+        assert shard.num_decode_tokens == 0
+        assert torch.equal(shard.qli_cu_seqlens_q, torch.tensor([0, 1, 7], dtype=torch.int32))
+        assert torch.equal(shard.qli_seqused_k, torch.tensor([2, 2], dtype=torch.int32))
+        assert torch.equal(shard.qli_cmp_residual_k, torch.tensor([0, 2], dtype=torch.int32))
+        assert shard.max_seqlen_q == 6
+        assert shard.max_seqlen_kv == 10
+        assert torch.equal(shard.block_table, builder.block_table[:2])
+
+    def test_preserves_decode_rows_in_mixed_batch(self):
+        builder = _shard_builder(num_decodes=2, num_decode_tokens=3)
+        common = SimpleNamespace(
+            num_reqs=4,
+            query_start_loc_cpu=torch.tensor([0, 1, 3, 7, 13], dtype=torch.int32),
+            _seq_lens_cpu=None,
+            seq_lens_cpu=torch.tensor([9, 14, 8, 10]),
+            seq_lens=torch.tensor([9, 14, 8, 10]),
+        )
+        with (
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
+            patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_rank", return_value=1),
+            patch(
+                "vllm_ascend.attention.dsa_v1.balanced_prefill_row_shard",
+                return_value=(3, 7),
+            ) as balance,
+        ):
+            shard = builder._prepare_prefill_row_shard(common, num_actual_reqs=4, full_graph_mode=False)
+
+        assert shard is not None
+        assert (shard.start, shard.stop) == (6, 13)
+        assert shard.num_decode_tokens == 3
+        assert torch.equal(shard.qli_cu_seqlens_q, torch.tensor([0, 1, 3, 4, 10], dtype=torch.int32))
+        assert torch.equal(shard.qli_seqused_k, torch.tensor([2, 3, 2, 2], dtype=torch.int32))
+        assert torch.equal(shard.qli_cmp_residual_k, torch.tensor([1, 2, 0, 2], dtype=torch.int32))
+        assert shard.max_seqlen_q == 6
+        assert shard.max_seqlen_kv == 14
+        assert torch.equal(shard.block_table, builder.block_table)
+        balance_args = balance.call_args.args
+        assert torch.equal(balance_args[0], torch.tensor([8, 10]))
+        assert torch.equal(balance_args[1], torch.tensor([4, 6]))
+
+    def test_seq_lens_fallback_prefers_cached_then_private_field(self):
+        builder = _shard_builder(num_decodes=0, num_decode_tokens=0)
+        common = SimpleNamespace(
+            num_reqs=2,
+            query_start_loc_cpu=torch.tensor([0, 4, 10], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([8, 10]),
+            seq_lens_cpu=None,
+            seq_lens=torch.tensor([99, 99]),
+        )
+        with (
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
+            patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_rank", return_value=1),
+            patch(
+                "vllm_ascend.attention.dsa_v1.balanced_prefill_row_shard",
+                return_value=(3, 7),
+            ),
+        ):
+            shard = builder._prepare_prefill_row_shard(common, num_actual_reqs=2, full_graph_mode=False)
+        # The _seq_lens_cpu field won over the device tensor's .cpu() copy.
+        assert shard is not None
+        assert torch.equal(shard.qli_seqused_k, torch.tensor([2, 2], dtype=torch.int32))
+
+    def test_declines_when_decode_token_count_mismatches(self):
+        builder = _shard_builder(num_decodes=2, num_decode_tokens=5)
+        common = SimpleNamespace(
+            num_reqs=4,
+            query_start_loc_cpu=torch.tensor([0, 1, 3, 7, 13], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([9, 14, 8, 10]),
+            seq_lens_cpu=None,
+            seq_lens=torch.tensor([9, 14, 8, 10]),
+        )
+        with patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+            return_value=2,
+        ):
+            assert builder._prepare_prefill_row_shard(common, num_actual_reqs=4, full_graph_mode=False) is None

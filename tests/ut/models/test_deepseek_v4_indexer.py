@@ -7,20 +7,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
+    _PREFILL_SHARD_EXCHANGE_WORKSPACE,
     AscendIndexerMetadata,
     AscendIndexerOps,
     DeepseekV4Indexer,
     IndexerOverlapPlan,
+    ensure_prefill_shard_exchange_workspace,
+    exchange_prefill_shard_topk,
     get_indexer_k_dtype,
     hadamard_linear,
     hadamard_scale,
+    prefill_shard_exchange_supported,
     rotate_activation,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
 def _make_indexer(topk_indices_buffer: torch.Tensor | None) -> DeepseekV4Indexer:
@@ -526,3 +532,216 @@ class TestGetIndexerKDtype:
             pytest.raises(ValueError, match="is not supported by the DeepSeek V4"),
         ):
             get_indexer_k_dtype(vllm_config)
+
+
+class TestPrefillShardExchangeWorkspace:
+    def setup_method(self):
+        _PREFILL_SHARD_EXCHANGE_WORKSPACE.clear()
+
+    def test_workspace_is_shared_per_device_and_width_checked(self):
+        first = ensure_prefill_shard_exchange_workspace(torch.device("cpu"), 16, 512)
+        second = ensure_prefill_shard_exchange_workspace(torch.device("cpu"), 32, 512)
+        assert first[0].data_ptr() == second[0].data_ptr()
+        assert first[1].data_ptr() == second[1].data_ptr()
+        assert first[1].shape[0] == 2 * 16, "gather rows follow the 2x skew cap"
+
+        with pytest.raises(AssertionError, match="width mismatch"):
+            ensure_prefill_shard_exchange_workspace(torch.device("cpu"), 16, 1024)
+
+    def test_reservation_predicate_is_pure_tp_non_full_graph(self):
+        positive = SimpleNamespace(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+        assert prefill_shard_exchange_supported(positive, CUDAGraphMode.FULL_DECODE_ONLY)
+
+        for override in (
+            {"tensor_parallel_size": 1},
+            {"prefill_context_parallel_size": 2},
+            {"decode_context_parallel_size": 2},
+        ):
+            cfg = SimpleNamespace(**{**positive.__dict__, **override})
+            assert not prefill_shard_exchange_supported(cfg, CUDAGraphMode.FULL_DECODE_ONLY)
+        assert not prefill_shard_exchange_supported(positive, CUDAGraphMode.FULL)
+
+
+class TestPrefillShardExchange:
+    def setup_method(self):
+        _PREFILL_SHARD_EXCHANGE_WORKSPACE.clear()
+
+    def test_restores_global_order_and_keeps_padding_local(self):
+        sizes = (3, 1, 2, 2)
+        max_rows = max(sizes)
+        local_topk = torch.arange(6, dtype=torch.int32).reshape(3, 1, 2)
+        decode_topk = torch.tensor([[[100, 101]]], dtype=torch.int32)
+
+        def fake_gather(gathered, local, group=None):
+            for rank, size in enumerate(sizes):
+                for row in range(max_rows):
+                    target = gathered[rank * max_rows + row]
+                    if row < size:
+                        target.fill_(1000 + rank * 10 + row)
+                    else:
+                        target.fill_(-1)
+
+        with (
+            patch("torch.distributed.all_gather_into_tensor", side_effect=fake_gather),
+            patch(
+                "vllm.distributed.get_tp_group",
+                return_value=SimpleNamespace(device_group="tp-group"),
+            ) as tp_group,
+        ):
+            restored = exchange_prefill_shard_topk(local_topk, sizes, leading_topk=decode_topk)
+
+        assert tp_group.called
+        expected = torch.tensor(
+            [
+                [100, 101],
+                [1000, 1000],
+                [1001, 1001],
+                [1002, 1002],
+                [1010, 1010],
+                [1020, 1020],
+                [1021, 1021],
+                [1030, 1030],
+                [1031, 1031],
+            ],
+            dtype=torch.int32,
+        )
+        assert restored.shape == (9, 1, 2)
+        assert torch.equal(restored.reshape(9, 2), expected)
+        # Padded rows never leave the exchange.
+        assert (restored != -1).all()
+
+    def test_without_decode_rows_nothing_is_prepended(self):
+        sizes = (2, 2)
+        local_topk = torch.zeros(2, 1, 2, dtype=torch.int32)
+
+        def fake_gather(gathered, local, group=None):
+            gathered.fill_(7)
+
+        with (
+            patch("torch.distributed.all_gather_into_tensor", side_effect=fake_gather),
+            patch("vllm.distributed.get_tp_group", return_value=SimpleNamespace(device_group="g")),
+        ):
+            restored = exchange_prefill_shard_topk(local_topk, sizes)
+        assert restored.shape == (4, 1, 2)
+        assert (restored == 7).all()
+
+
+def _make_prefill_shard(num_decode_tokens: int, start: int, stop: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        start=start,
+        stop=stop,
+        sizes=(2, 2, 2),
+        block_table=torch.tensor([[7], [8]], dtype=torch.int32),
+        qli_metadata=torch.zeros(8, dtype=torch.int32),
+        qli_cu_seqlens_q=torch.tensor([0, 1, 3], dtype=torch.int32),
+        qli_seqused_k=torch.tensor([8, 9], dtype=torch.int32),
+        qli_cmp_residual_k=torch.tensor([1, 2], dtype=torch.int32),
+    )
+
+
+class TestSelectTopkPrefillShard:
+    def _ops(self) -> AscendIndexerOps:
+        return AscendIndexerOps(index_topk=3)
+
+    def test_slices_prefill_rows_and_swaps_metadata(self):
+        ops = self._ops()
+        query = torch.arange(48, dtype=torch.int8).reshape(8, 1, 6)
+        weights = torch.arange(8, dtype=torch.float16).reshape(8, 1)
+        query_scale = torch.arange(8, dtype=torch.float16).reshape(8, 1)
+        key_cache = torch.empty(1, 1, 1, 6, dtype=torch.int8)
+        scale_cache = torch.empty(1, 1, 1, 1, dtype=torch.float16)
+        shard = _make_prefill_shard(num_decode_tokens=0, start=2, stop=4)
+        local_topk = torch.arange(12, dtype=torch.int32).reshape(2, 1, 6)
+        gathered = torch.arange(48, dtype=torch.int32).reshape(8, 1, 6)
+
+        with (
+            patch.object(DeviceOperator, "prepare_dsa_indexer_weights", side_effect=lambda v: v),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_query_scale", side_effect=lambda v: v),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_key_scale", side_effect=lambda v: v),
+            patch.object(DeviceOperator, "get_dsa_indexer_quant_mode", return_value=2),
+            patch("vllm_ascend.models.deepseek_v4.indexer.wait_for_device_metadata") as wait,
+            patch(
+                "torch.ops._C_ascend.npu_quant_lightning_indexer_v2",
+                create=True,
+                return_value=(local_topk, None),
+            ) as qli,
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.exchange_prefill_shard_topk",
+                return_value=gathered,
+            ) as gather,
+        ):
+            actual = ops.select_topk(
+                query,
+                weights,
+                query_scale,
+                key_cache,
+                scale_cache,
+                SimpleNamespace(prefill_row_shard=shard),
+            )
+
+        assert actual is gathered
+        wait.assert_called_once_with(DeviceMetadataStage.INDEXER, id(shard.qli_metadata))
+        kwargs = qli.call_args.kwargs
+        assert torch.equal(kwargs["query"], query[2:4])
+        assert torch.equal(kwargs["weights"], weights[2:4])
+        assert torch.equal(kwargs["query_dequant_scale"], query_scale[2:4])
+        assert kwargs["cu_seqlens_q"] is shard.qli_cu_seqlens_q
+        assert kwargs["block_table"] is shard.block_table
+        assert kwargs["metadata"] is shard.qli_metadata
+        gather.assert_called_once()
+        gather_args, gather_kwargs = gather.call_args
+        assert torch.equal(gather_args[0], local_topk)
+        assert gather_args[1] is shard.sizes
+        assert gather_kwargs["leading_topk"] is None
+
+    def test_packs_decode_rows_before_local_prefill_slice(self):
+        ops = self._ops()
+        query = torch.arange(64, dtype=torch.int8).reshape(8, 1, 8)
+        weights = torch.arange(8, dtype=torch.float16).reshape(8, 1)
+        query_scale = torch.arange(8, dtype=torch.float16).reshape(8, 1)
+        key_cache = torch.empty(1, 1, 1, 8, dtype=torch.int8)
+        scale_cache = torch.empty(1, 1, 1, 1, dtype=torch.float16)
+        shard = _make_prefill_shard(num_decode_tokens=2, start=4, stop=6)
+        local_topk = torch.arange(48, dtype=torch.int32).reshape(4, 1, 12)
+        gathered = torch.arange(96, dtype=torch.int32).reshape(8, 1, 12)
+
+        with (
+            patch.object(DeviceOperator, "prepare_dsa_indexer_weights", side_effect=lambda v: v),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_query_scale", side_effect=lambda v: v),
+            patch.object(DeviceOperator, "prepare_dsa_indexer_key_scale", side_effect=lambda v: v),
+            patch.object(DeviceOperator, "get_dsa_indexer_quant_mode", return_value=2),
+            patch("vllm_ascend.models.deepseek_v4.indexer.wait_for_device_metadata"),
+            patch(
+                "torch.ops._C_ascend.npu_quant_lightning_indexer_v2",
+                create=True,
+                return_value=(local_topk, None),
+            ) as qli,
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.exchange_prefill_shard_topk",
+                return_value=gathered,
+            ) as gather,
+        ):
+            actual = ops.select_topk(
+                query,
+                weights,
+                query_scale,
+                key_cache,
+                scale_cache,
+                SimpleNamespace(prefill_row_shard=shard),
+            )
+
+        expected_rows = torch.tensor([0, 1, 4, 5])
+        kwargs = qli.call_args.kwargs
+        assert torch.equal(kwargs["query"], query.index_select(0, expected_rows))
+        assert torch.equal(kwargs["weights"], weights.index_select(0, expected_rows))
+        gather.assert_called_once()
+        gather_args, gather_kwargs = gather.call_args
+        assert torch.equal(gather_args[0], local_topk[2:])
+        assert gather_args[1] is shard.sizes
+        assert torch.equal(gather_kwargs["leading_topk"], local_topk[:2])
+        assert actual is gathered
