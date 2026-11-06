@@ -41,7 +41,25 @@ class _CopyPlan:
         state.index_copy_(0, indices[valid].long(), packed[valid])
 
 
-def _paged_layer(runtime, batch=4, spec_len=8):
+class _FusedCopyPlan:
+    """Device-copy double; validate raw block-table/NULL semantics on CPU."""
+
+    def __init__(self):
+        self.calls = []
+
+    def copy(self, cache, conv, recurrent, conv_indices, state_indices, *, to_cache):
+        self.calls.append(to_cache)
+        for source, packed, indices in zip(cache, (conv, recurrent), (conv_indices, state_indices)):
+            valid = (indices >= 0) & (indices < source.shape[0]) & (indices != 0)
+            if to_cache:
+                source.index_copy_(0, indices[valid].long(), packed[valid])
+            else:
+                safe = indices.clamp(0, source.shape[0] - 1).long()
+                packed.copy_(source.index_select(0, safe))
+                packed[~valid] = 0
+
+
+def _paged_layer(runtime, batch=4, spec_len=8, *, fused=False):
     layer = contracts._attention(runtime, batch=batch, spec_len=spec_len)
     conv, recurrent = layer.kv_cache
     # One raw backing with physical pages. This mirrors the V2 hybrid overlay,
@@ -61,7 +79,11 @@ def _paged_layer(runtime, batch=4, spec_len=8):
     layer._mega_max_batch = batch
     assert layer._prepare_mega_weights({})
     layer._mega_cache_adapter = runtime["MegaKDAPagedCache"](
-        layer.kv_cache, layer._mega_cache_workspace, _CopyPlan(), _CopyPlan()
+        layer.kv_cache,
+        layer._mega_cache_workspace,
+        _CopyPlan(),
+        _CopyPlan(),
+        copy_plan=_FusedCopyPlan() if fused else None,
     )
     return layer, backing, page_bytes
 
@@ -81,9 +103,29 @@ def test_v2_workspace_is_shared_by_layers_and_prepared_before_cache_binding(runt
     assert workspace.recurrent.shape == (33, 2, 4, 4)
 
 
+def test_legacy_adapter_reuses_flags_only_for_the_strict_copy_plan(runtime):
+    layer, _, _ = _paged_layer(runtime)
+    adapter = layer._mega_cache_adapter
+    adapter.gather_flags = True, False
+    calls = []
+
+    class RecordingPlan(_CopyPlan):
+        def gather_into(self, state, packed, indices, flags=None):
+            calls.append(flags)
+            super().gather_into(state, packed, indices, flags)
+
+    adapter.conv_plan = adapter.recurrent_plan = RecordingPlan()
+    table = torch.arange(1, 33, dtype=torch.int32).reshape(4, 8)
+    adapter.gather(layer.kv_cache, table[:, 0], table.flatten(), 4, 8)
+    assert calls[0].data_ptr() == adapter.workspace.copy_flags.data_ptr()
+    assert calls[0].tolist() == [True] * 4
+    assert calls[1] is None  # Byte-copy fallback needs no masked_fill on all-true flags.
+
+
 @pytest.mark.parametrize("padding", [False, True])
-def test_v2_paged_update_preserves_unscheduled_pages_and_null_slot(runtime, padding):
-    layer, backing, page_bytes = _paged_layer(runtime)
+@pytest.mark.parametrize("fused", [False, True])
+def test_v2_paged_update_preserves_unscheduled_pages_and_null_slot(runtime, padding, fused):
+    layer, backing, page_bytes = _paged_layer(runtime, fused=fused)
     metadata = contracts._metadata()
     if padding:
         metadata.num_spec_decodes = 3
@@ -123,10 +165,13 @@ def test_v2_paged_update_preserves_unscheduled_pages_and_null_slot(runtime, padd
     # Compare raw bytes, including null block 0, padding, guards and all other
     # groups' unowned pages; matching logical output alone would miss overlap.
     torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+    if fused:
+        assert layer._mega_cache_adapter.copy_plan.calls == [False, True]
 
 
-def test_v2_operator_failure_does_not_scatter_or_retry(runtime):
-    layer, backing, _ = _paged_layer(runtime)
+@pytest.mark.parametrize("fused", [False, True])
+def test_v2_operator_failure_does_not_scatter_or_retry(runtime, fused):
+    layer, backing, _ = _paged_layer(runtime, fused=fused)
     _, hidden = contracts._plan(runtime, layer, contracts._metadata())
     before = backing.clone()
     layer._mega_operator.side_effect = RuntimeError("partial staging write")
@@ -134,6 +179,8 @@ def test_v2_operator_failure_does_not_scatter_or_retry(runtime):
         layer.forward(hidden, torch.arange(32))
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
     layer._forward_default.assert_not_called()
+    if fused:
+        assert layer._mega_cache_adapter.copy_plan.calls == [False]
 
 
 def test_v2_staging_capacity_is_checked_before_any_copy(runtime):
@@ -149,7 +196,8 @@ def test_v2_staging_capacity_is_checked_before_any_copy(runtime):
 
 
 @pytest.mark.parametrize("fail_seal", [False, True])
-def test_v2_adapter_initialization_prepares_once_and_publishes_only_after_seal(runtime, monkeypatch, fail_seal):
+@pytest.mark.parametrize("fused", [False, True])
+def test_v2_adapter_initialization_prepares_once_and_publishes_only_after_seal(runtime, monkeypatch, fail_seal, fused):
     layers = [_paged_layer(runtime)[0] for _ in range(2)]
     before = [[state.clone() for state in layer.kv_cache] for layer in layers]
     prepared = []
@@ -171,9 +219,23 @@ def test_v2_adapter_initialization_prepares_once_and_publishes_only_after_seal(r
 
     module = ModuleType("vllm_ascend.ops.kda_state_copy_plan")
     module.KDAStateCopyPlan = module.StridedKDAFallbackPlan = Plan
-    module.supports_kda_state_copy = lambda state: True
+    module.supports_kda_state_copy = lambda state: fused
     module.cache_signature = runtime["_mega_cache_layout"]
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    fused_module = ModuleType("vllm_ascend.ops.triton.mega_kda_cache")
+
+    class FusedPlan:
+        @classmethod
+        def prepare(cls, cache, max_batch, spec_len):
+            plan = cls()
+            plan.limit = max_batch, max_batch * spec_len
+            prepared.append(plan)
+            return plan
+
+        seal = Plan.seal
+
+    fused_module.MegaKDAPagedCopyPlan = FusedPlan
+    monkeypatch.setitem(sys.modules, fused_module.__name__, fused_module)
     contracts._definitions("vllm_ascend/ops/kimi_mega_kda.py", {"initialize_mega_kda_cache"}, runtime)
     initialize = runtime["initialize_mega_kda_cache"]
     context = {str(index): layer for index, layer in enumerate(layers)}
@@ -183,10 +245,13 @@ def test_v2_adapter_initialization_prepares_once_and_publishes_only_after_seal(r
         assert all(layer._mega_cache_adapter is None for layer in layers)
     else:
         initialize(context)
-        assert len(prepared) == 2  # Conv and SSM, deduplicated across layers.
-        assert [plan.limit for plan in prepared] == [4, 32]
+        assert len(prepared) == (1 if fused else 2)
+        assert [plan.limit for plan in prepared] == ([(4, 32)] if fused else [4, 32])
         assert all(plan.sealed for plan in prepared)
-        assert layers[0]._mega_cache_adapter.conv_plan is layers[1]._mega_cache_adapter.conv_plan
+        if fused:
+            assert layers[0]._mega_cache_adapter.copy_plan is layers[1]._mega_cache_adapter.copy_plan
+        else:
+            assert layers[0]._mega_cache_adapter.conv_plan is layers[1]._mega_cache_adapter.conv_plan
         # A cache rebind may change every address without changing its layout.
         initialize(context)
         assert all(layer._mega_cache_adapter.supports(layer.kv_cache, 8, 4) for layer in layers)
@@ -442,15 +507,15 @@ def test_v2_hybrid_state_to_builder_to_planner_to_operator(runtime, mode, preced
         expected = state.num_accepted_tokens_gpu[batch.idx_mapping].tolist() + [1] * (4 - live)
         assert plan.num_accepted_tokens.tolist() == expected
         assert plan.conv_num_accepted_tokens.tolist() == ([8] * live + [1] * (4 - live) if first else expected)
+        assert plan.conv_num_accepted_tokens.data_ptr() == metadata.mega_conv_accepted_tokens.data_ptr()
         layer.forward(hidden, torch.arange(32))
         batch.seq_lens[:live] += 1
         batch.seq_lens_np[:live] += 1
     assert layer._mega_operator.call_count == 2
     layer._forward_default.assert_not_called()
-    if preceding_step == "capture":
-        assert builder._mega_tracker.context.eq(-1).all()  # Dummy NULL rows only.
-    else:
-        assert builder._mega_tracker is None  # Real V2 steps use request history.
+    # Capture supplies a synthetic first-verify flag; real V2 steps use
+    # request history. Neither should instantiate the V1 physical-slot tracker.
+    assert builder._mega_tracker is None
 
 
 def test_v2_request_index_zero_and_reuse_reset_independently(runtime):

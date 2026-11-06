@@ -89,6 +89,7 @@ def runtime():
         CUDAGraphMode=SimpleNamespace(NONE="none"),
         get_forward_context=MagicMock(),
         eager_break_during_capture=lambda f: f,
+        is_breakable_cudagraph_enabled=lambda: False,
         logger=MagicMock(),
         _PACKED_CONV_WEIGHT_NAME="ascend_conv1d_weight",
         _MEGA_KDA_MAX_BATCH_MULTIPLIER=32,
@@ -269,9 +270,9 @@ def test_planner_rejects_unaligned_or_oversized_batch(runtime, batch):
         {"num_decodes": 1},
         {"mega_has_folded_prefills": True},
         {"mega_first_verify": None},
+        {"mega_first_verify": torch.ones(3, dtype=torch.int32)},
         {"mega_query_lens": (8, 8, 0, 0)},
         {"mega_query_lens": (7, 9, 8, 8)},
-        {"num_actual_tokens": 31},
         {"spec_state_indices_tensor": torch.ones(4, 7, dtype=torch.int32)},
         {"spec_state_indices_tensor": torch.ones(4, dtype=torch.int32)},
     ],
@@ -300,6 +301,23 @@ def test_runtime_query_length_must_match_source_pr_contract(runtime, spec_len):
     layer = _attention(runtime)
     plan, _ = _plan(runtime, layer, _metadata(spec_len=spec_len))
     assert plan is None
+
+
+def test_first_verify_buffer_may_include_unused_capacity(runtime):
+    layer = _attention(runtime)
+    metadata = _metadata()
+    metadata.mega_first_verify = torch.tensor([1, 0, 1, 0, 1, 1], dtype=torch.int32)
+    plan, _ = _plan(runtime, layer, metadata)
+    assert plan is not None
+    assert plan.conv_num_accepted_tokens.tolist() == [8, 2, 8, 2]
+
+
+def test_dispatch_uses_runtime_shape_instead_of_reported_token_count(runtime):
+    layer = _attention(runtime)
+    metadata = _metadata()
+    metadata.num_actual_tokens = 31
+    plan, _ = _plan(runtime, layer, metadata, rows=32)
+    assert plan is not None
 
 
 @pytest.mark.parametrize("rows", [31, 33, 34, 64])
@@ -337,6 +355,32 @@ def test_breakable_segment_writes_to_the_same_output_buffer(runtime):
         torch.testing.assert_close(output, torch.full_like(hidden, value + 1))
 
 
+def test_non_breakable_forward_returns_operator_storage_without_output_copy(runtime):
+    layer = _attention(runtime)
+    _, hidden = _plan(runtime, layer, _metadata())
+    layer.tp_size = 1
+    result = torch.randn_like(hidden)
+    layer._mega_operator.return_value = result
+    layer._allocate_mega_output = MagicMock(side_effect=AssertionError("redundant output allocation"))
+    layer._forward_mega_kda = MagicMock(side_effect=AssertionError("redundant output copy"))
+    assert layer.forward(hidden, torch.arange(32)).data_ptr() == result.data_ptr()
+
+
+def test_planner_reuses_group_conv_acceptance_without_per_layer_device_ops(runtime, monkeypatch):
+    layer = _attention(runtime)
+    metadata = _metadata()
+    metadata.mega_conv_accepted_tokens = torch.tensor([8, 2, 8, 2], dtype=torch.int32)
+    hidden = torch.zeros(32, 32, dtype=torch.bfloat16)
+    runtime["get_forward_context"].return_value = SimpleNamespace(attn_metadata={layer.prefix: metadata})
+    monkeypatch.setattr(torch, "where", MagicMock(side_effect=AssertionError("per-layer Select")))
+    monkeypatch.setattr(torch, "full_like", MagicMock(side_effect=AssertionError("per-layer Fill")))
+    for _ in range(2):
+        plan = layer._plan_mega_kda(hidden)
+        assert plan.conv_num_accepted_tokens.data_ptr() == metadata.mega_conv_accepted_tokens.data_ptr()
+    metadata.mega_conv_accepted_tokens = metadata.mega_conv_accepted_tokens[:3]
+    assert layer._plan_mega_kda(hidden) is None
+
+
 def test_compiler_boundary_resolves_current_layer_and_metadata(runtime):
     _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda_with_output", "_kimi_kda_with_output_fake"}, runtime)
     layer = _attention(runtime)
@@ -358,8 +402,22 @@ def test_compiler_boundary_resolves_current_layer_and_metadata(runtime):
     runtime["get_forward_context"].assert_not_called()
 
 
-def test_torch_compile_does_not_freeze_profile_time_routing(runtime):
-    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda_with_output", "_kimi_kda_with_output_fake"}, runtime)
+def test_functional_fake_requires_only_shape_and_no_forward_context(runtime):
+    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda_fake"}, runtime)
+    hidden = torch.empty(32, 32, dtype=torch.bfloat16)
+    result = runtime["_kimi_kda_fake"](hidden, torch.arange(32), "target", 16)
+    assert result.shape == (16, 32) and result.dtype == hidden.dtype
+    runtime["get_forward_context"].assert_not_called()
+
+
+@pytest.mark.parametrize("breakable", [False, True])
+def test_torch_compile_does_not_freeze_profile_time_routing(runtime, breakable):
+    _definitions(
+        "vllm_ascend/ops/kimi_kda.py",
+        {"_kimi_kda", "_kimi_kda_fake", "_kimi_kda_with_output", "_kimi_kda_with_output_fake"},
+        runtime,
+    )
+    runtime["is_breakable_cudagraph_enabled"] = lambda: breakable
     # Register the production schema with CPU dispatch for this isolated test.
     # This exercises real Dynamo/FakeTensor without pretending to execute NPU.
     library = torch.library.Library("vllm", "FRAGMENT")
@@ -368,17 +426,27 @@ def test_torch_compile_does_not_freeze_profile_time_routing(runtime):
     )
     library.impl("ascend_kimi_kda_with_output", runtime["_kimi_kda_with_output"], "CPU")
     torch.library.register_fake("vllm::ascend_kimi_kda_with_output", runtime["_kimi_kda_with_output_fake"], lib=library)
+    library.define(
+        "ascend_kimi_kda(Tensor hidden_states, Tensor positions, str layer_name, SymInt output_rows) -> Tensor"
+    )
+    library.impl("ascend_kimi_kda", runtime["_kimi_kda"], "CPU")
+    torch.library.register_fake("vllm::ascend_kimi_kda", runtime["_kimi_kda_fake"], lib=library)
     layer = _attention(runtime)
     _, hidden = _plan(runtime, layer, _metadata())
     context = runtime["get_forward_context"].return_value
     context.no_compile_layers = {layer.prefix: layer}
     layer._mega_operator.return_value = torch.zeros_like(hidden)
-    compiled = torch.compile(layer, backend="eager", fullgraph=True)
-    context.attn_metadata = None
-    torch.testing.assert_close(compiled(hidden, torch.arange(32)), layer._forward_default.return_value.to(hidden.dtype))
-    context.attn_metadata = {layer.prefix: _metadata()}
-    torch.testing.assert_close(compiled(hidden, torch.arange(32)), torch.ones_like(hidden))
-    assert layer._mega_operator.call_count == 1
+    layer._forward_default.return_value = layer._forward_default.return_value.to(hidden.dtype)
+    try:
+        compiled = torch.compile(layer, backend="eager", fullgraph=True)
+        context.attn_metadata = None
+        torch.testing.assert_close(compiled(hidden, torch.arange(32)), layer._forward_default.return_value)
+        context.attn_metadata = {layer.prefix: _metadata()}
+        torch.testing.assert_close(compiled(hidden, torch.arange(32)), torch.ones_like(hidden))
+        assert layer._mega_operator.call_count == 1
+    finally:
+        torch._dynamo.reset()
+        library._destroy()
 
 
 @pytest.mark.parametrize("conv_size", [3, 4, 5])
@@ -611,9 +679,14 @@ def test_builder_uses_bound_capacity_and_resets_folded_prefill(runtime, graph_ba
             self.spec_sequence_indices = torch.arange(graph_batch)
             self.use_full_cuda_graph = graph_batch > 2
             self.use_spec_decode = True
+            self.num_spec = 7
 
         def build(self, *args):
-            return SimpleNamespace(num_spec_decodes=2, spec_state_indices_tensor=torch.zeros(graph_batch, 8))
+            return SimpleNamespace(
+                num_spec_decodes=2,
+                spec_state_indices_tensor=torch.zeros(graph_batch, 8),
+                num_accepted_tokens=torch.full((graph_batch,), 2, dtype=torch.int32),
+            )
 
     runtime.update(
         AscendGDNHostMetadataBuilder=BaseBuilder,

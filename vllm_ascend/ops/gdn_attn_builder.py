@@ -1017,6 +1017,7 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         self._mega_layer_names = tuple(layer_names)
         self._mega_tracker = None
         self._mega_first_verify = torch.zeros_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_conv_accepted = torch.empty_like(self.spec_sequence_indices, dtype=torch.int32)
 
     def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
         # Capture omits scheduler draft tokens, which would make _plan_mega_kda
@@ -1083,6 +1084,7 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         # Without scheduler phase information the first-round contract cannot
         # be established safely. Keep the existing KDA implementation.
         metadata.mega_first_verify = None
+        metadata.mega_conv_accepted_tokens = None
         metadata.mega_has_folded_prefills = True
         metadata.mega_query_lens = ()
         if is_prefilling is None or (mega_first_verify is None and not self._ensure_mega_tracker()):
@@ -1119,6 +1121,16 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
                 first.index_select(0, self.spec_sequence_indices[: metadata.num_spec_decodes])
             )
             metadata.mega_first_verify = first_buffer
+            # One preparation per metadata group/step, shared by every KDA
+            # layer. Keep the output address stable across FULL replays.
+            conv_accepted = self._mega_conv_accepted[:graph_batch]
+            torch.where(
+                first_buffer > 0,
+                torch.full_like(conv_accepted, self.num_spec + 1),
+                metadata.num_accepted_tokens[:graph_batch].to(torch.int32),
+                out=conv_accepted,
+            )
+            metadata.mega_conv_accepted_tokens = conv_accepted
         return metadata
 
 

@@ -24,6 +24,7 @@ from vllm_ascend.ops.kimi_mega_kda import (
     run_mega_recurrent_kda,
 )
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
+from vllm_ascend.ops.triton.mega_kda_cache import MegaKDAPagedCopyPlan, _mega_kda_cache_copy_kernel
 
 # Production per-rank shape of the PR #6 TP=8 deployment.
 HIDDEN_SIZE = 7168
@@ -40,6 +41,68 @@ STATE_RTOL = 0.01
 STATE_ATOL = 0.001
 BENCHMARK_WARMUP_ROUNDS = 3
 BENCHMARK_MEASURE_ROUNDS = 20
+
+
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@torch.inference_mode()
+def test_mega_kda_fused_page_copy_dynamic_batch_and_null_guards(index_dtype, monkeypatch):
+    """Actual fused copies: strided/unaligned indices, bounds and page guards.
+
+    Serving must use the sealed launch table for dynamic selected counts;
+    neither a new JIT specialization nor an index-preparation op is needed.
+    """
+    rows, max_batch, spec_len = 70, 8, 8
+    conv_shape, state_shape = (5, 24), (2, 4, 4)
+    conv_bytes = 5 * 24 * 2
+    state_bytes = 2 * 4 * 4 * 4
+    guard = 64
+    page_bytes = conv_bytes + state_bytes + guard
+    backing = torch.full((guard + rows * page_bytes + guard,), 37, dtype=torch.int8, device="npu")
+    raw = backing[guard:-guard]
+    conv = torch.as_strided(raw.view(torch.bfloat16), (rows, *conv_shape), (page_bytes // 2, 24, 1))
+    state = torch.as_strided(raw[conv_bytes:].view(torch.float32), (rows, *state_shape), (page_bytes // 4, 16, 4, 1))
+    conv.normal_()
+    state.normal_()
+    cache = conv, state
+    plan = MegaKDAPagedCopyPlan.prepare(cache, max_batch, spec_len)
+    plan.seal()
+    assert all(t.data_ptr() % 16 == 0 for t in cache)
+
+    def forbid_jit(*args, **kwargs):
+        raise AssertionError("MegaKDA steady-state copy must not enter JIT")
+
+    monkeypatch.setattr(_mega_kda_cache_copy_kernel, "run", forbid_jit)
+    table = torch.empty(max_batch * spec_len + 1, dtype=index_dtype, device="npu")[1:].reshape(max_batch, spec_len)
+    table.copy_(torch.arange(1, max_batch * spec_len + 1, device="npu", dtype=index_dtype).reshape(max_batch, spec_len))
+    table[0, 0] = 0
+    table[0, 1] = -1
+    table[1, 0] = rows
+    table[-1, -1] = rows + 3
+    for count in (1, 3, max_batch):
+        conv_indices, state_indices = table[:count, 0], table[:count].flatten()
+        packed_conv = torch.empty(count, *conv_shape, dtype=conv.dtype, device="npu")
+        packed_state = torch.empty(count * spec_len, *state_shape, device="npu")
+        before = backing.clone()
+        plan.copy(cache, packed_conv, packed_state, conv_indices, state_indices, to_cache=False)
+        for source, packed, indices in zip(cache, (packed_conv, packed_state), (conv_indices, state_indices)):
+            valid = (indices > 0) & (indices < rows)
+            expected = source.index_select(0, indices.clamp(0, rows - 1).long())
+            expected[~valid] = 0
+            torch.testing.assert_close(packed, expected, rtol=0, atol=0)
+        torch.testing.assert_close(backing, before, rtol=0, atol=0)
+        packed_conv.add_(1)
+        packed_state.add_(2)
+        plan.copy(cache, packed_conv, packed_state, conv_indices, state_indices, to_cache=True)
+        expected_backing = before.clone()
+        for packed, indices, offset, item_bytes in (
+            (packed_conv, conv_indices, 0, conv_bytes),
+            (packed_state, state_indices, conv_bytes, state_bytes),
+        ):
+            for selected, row in enumerate(indices.cpu().tolist()):
+                if 0 < row < rows:
+                    start = guard + row * page_bytes + offset
+                    expected_backing[start : start + item_bytes].copy_(packed[selected].flatten().view(torch.int8))
+        torch.testing.assert_close(backing, expected_backing, rtol=0, atol=0)
 
 
 def _make_attention():

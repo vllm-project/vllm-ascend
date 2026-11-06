@@ -88,6 +88,7 @@ class MegaKDACacheWorkspace:
         self.recurrent = torch.zeros((max_batch * spec_len + 1, *recurrent_shape), dtype=torch.float32, device=device)
         self.conv_indices = torch.arange(1, max_batch + 1, dtype=torch.int32, device=device)
         self.recurrent_indices = torch.arange(1, max_batch * spec_len + 1, dtype=torch.int32, device=device)
+        self.copy_flags = torch.ones(max_batch * spec_len, dtype=torch.bool, device=device)
 
 
 @dataclass(frozen=True)
@@ -113,10 +114,14 @@ def _mega_cache_layout(state):
 class MegaKDAPagedCache:
     """Adapt page-strided V2 caches without changing physical block ownership."""
 
-    def __init__(self, cache, workspace, conv_plan, recurrent_plan):
+    def __init__(
+        self, cache, workspace, conv_plan=None, recurrent_plan=None, *, copy_plan=None, gather_flags=(False, False)
+    ):
         self.workspace = workspace
         self.conv_plan = conv_plan
         self.recurrent_plan = recurrent_plan
+        self.copy_plan = copy_plan
+        self.gather_flags = gather_flags
         self.layouts = tuple(_mega_cache_layout(state) for state in cache)
 
     def supports(self, cache, spec_len, batch):
@@ -138,10 +143,27 @@ class MegaKDAPagedCache:
         workspace = self.workspace
         conv = workspace.conv[: batch + 1]
         recurrent = workspace.recurrent[: batch * spec_len + 1]
-        global_conv = self._indices(conv_indices, cache[0].shape[0])
-        global_recurrent = self._indices(recurrent_indices, cache[1].shape[0])
-        self.conv_plan.gather_into(cache[0].unsqueeze(1), conv[1:].unsqueeze(1), global_conv)
-        self.recurrent_plan.gather_into(cache[1], recurrent[1:], global_recurrent)
+        if self.copy_plan is not None:
+            # The fused copy accepts the block-table column's actual stride.
+            # Bounds/NULL masking is part of its payload load/store, not a
+            # sequence of per-layer comparison, Select and Cast launches.
+            global_conv, global_recurrent = conv_indices, recurrent_indices
+            self.copy_plan.copy(cache, conv[1:], recurrent[1:], global_conv, global_recurrent, to_cache=False)
+        else:
+            global_conv = self._indices(conv_indices, cache[0].shape[0])
+            global_recurrent = self._indices(recurrent_indices, cache[1].shape[0])
+            self.conv_plan.gather_into(
+                cache[0].unsqueeze(1),
+                conv[1:].unsqueeze(1),
+                global_conv,
+                workspace.copy_flags[:batch] if self.gather_flags[0] else None,
+            )
+            self.recurrent_plan.gather_into(
+                cache[1],
+                recurrent[1:],
+                global_recurrent,
+                workspace.copy_flags[: batch * spec_len] if self.gather_flags[1] else None,
+            )
         return MegaKDAPagedBatch(
             conv,
             recurrent,
@@ -154,8 +176,18 @@ class MegaKDAPagedCache:
     def scatter(self, cache, batch):
         # Each live destination is unique; invalid / null rows are skipped by
         # the prepared kernels, including all graph-padding destinations.
-        self.conv_plan.scatter(cache[0].unsqueeze(1), batch.conv[1:].unsqueeze(1), batch.global_conv_indices)
-        self.recurrent_plan.scatter(cache[1], batch.recurrent[1:], batch.global_recurrent_indices)
+        if self.copy_plan is not None:
+            self.copy_plan.copy(
+                cache,
+                batch.conv[1:],
+                batch.recurrent[1:],
+                batch.global_conv_indices,
+                batch.global_recurrent_indices,
+                to_cache=True,
+            )
+        else:
+            self.conv_plan.scatter(cache[0].unsqueeze(1), batch.conv[1:].unsqueeze(1), batch.global_conv_indices)
+            self.recurrent_plan.scatter(cache[1], batch.recurrent[1:], batch.global_recurrent_indices)
 
 
 def initialize_mega_kda_cache(static_forward_context):
@@ -178,6 +210,7 @@ def initialize_mega_kda_cache(static_forward_context):
         cache_signature,
         supports_kda_state_copy,
     )
+    from vllm_ascend.ops.triton.mega_kda_cache import MegaKDAPagedCopyPlan
 
     plans = {}
     bindings = []
@@ -192,6 +225,17 @@ def initialize_mega_kda_cache(static_forward_context):
             workspace.recurrent.shape[1:]
         ):
             continue
+        if all(supports_kda_state_copy(state) for state in (cache[0].unsqueeze(1), cache[1])):
+            key = (
+                MegaKDAPagedCopyPlan,
+                *(cache_signature(state) for state in cache),
+                workspace.max_batch,
+                workspace.spec_len,
+            )
+            if key not in plans:
+                plans[key] = MegaKDAPagedCopyPlan.prepare(cache, workspace.max_batch, workspace.spec_len)
+            bindings.append((layer, MegaKDAPagedCache(cache, workspace, copy_plan=plans[key])))
+            continue
         layer_plans = []
         for state, limit in (
             (cache[0].unsqueeze(1), workspace.max_batch),
@@ -202,7 +246,17 @@ def initialize_mega_kda_cache(static_forward_context):
             if key not in plans:
                 plans[key] = plan_type.prepare(state, limit)
             layer_plans.append(plans[key])
-        bindings.append((layer, MegaKDAPagedCache(cache, workspace, *layer_plans)))
+        bindings.append(
+            (
+                layer,
+                MegaKDAPagedCache(
+                    cache,
+                    workspace,
+                    *layer_plans,
+                    gather_flags=tuple(isinstance(plan, KDAStateCopyPlan) for plan in layer_plans),
+                ),
+            )
+        )
     for plan in plans.values():
         plan.seal()
     for layer, adapter in bindings:
