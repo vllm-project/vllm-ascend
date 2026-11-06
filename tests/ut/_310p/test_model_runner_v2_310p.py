@@ -540,7 +540,8 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
 
 
 @pytest.mark.parametrize("has_rejection_sampler", [False, True])
-def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler):
+@pytest.mark.parametrize("needs_cpu_history", [False, True])
+def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler, needs_cpu_history):
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
     runner.rejection_sampler = MagicMock() if has_rejection_sampler else None
@@ -548,6 +549,7 @@ def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler):
     runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
     tokens = torch.tensor([[11], [22]], dtype=torch.int32)
     runner.sampler = MagicMock(return_value=SimpleNamespace(sampled_token_ids=tokens))
+    runner.sampler.needs_cpu_token_history.return_value = needs_cpu_history
     runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
     runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
     for name, dtype in (
@@ -577,17 +579,21 @@ def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler):
         logits_indices=torch.tensor([0, 1]),
         seq_lens_np=np.array([2, 1]),
         prefill_len_np=np.array([2, 2]),
+        idx_mapping_np=runner._postprocess_idx_mapping_np,
     )
     output, num_sampled, num_rejected = runner.sample(torch.zeros(2, 3), batch, grammar_output=None)
-    assert runner._sampled_tokens_cpu.device.type == "cpu"
+    if needs_cpu_history:
+        assert runner._sampled_tokens_cpu.device.type == "cpu"
+    else:
+        assert runner._sampled_tokens_cpu is None
     runner.postprocess_sampled(torch.tensor([1, 0]), output.sampled_token_ids, num_sampled, num_rejected)
     # Only the first batch row has completed prefill, and it belongs to slot 1.
-    assert runner.req_states.all_token_ids.cpu[1, 2].item() == 11
+    assert runner.req_states.all_token_ids.cpu[1, 2].item() == (11 if needs_cpu_history else 0)
     assert runner.req_states.all_token_ids.cpu[0, 2].item() == 0
-    assert runner.req_states.total_len.np.tolist() == [2, 3]
-    assert runner.req_states.last_sampled_tokens_cpu[:, 0].tolist() == [0, 11]
+    assert runner.req_states.total_len.np.tolist() == [2, 3 if needs_cpu_history else 2]
+    assert runner.req_states.last_sampled_tokens_cpu[:, 0].tolist() == [0, 11 if needs_cpu_history else 0]
     assert runner.req_states.last_sampled_tokens[:, 0].tolist() == [0, 11]
-    if has_rejection_sampler:
+    if has_rejection_sampler and needs_cpu_history:
         assert runner.rejection_sampler is not None
         runner.rejection_sampler.synchronize_cpu.assert_called_once()
 
@@ -1018,17 +1024,17 @@ def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
 def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
     """Align with MRV1 ``tests/ut/sample/test_sampler.py`` mask checks.
 
-    310P MRV2 calls the same Triton-free ``apply_top_k_top_p`` path; assert
-    discarded logits become ``-inf`` and the kept set size matches top-k / top-p.
+    310P MRV2 keeps the Triton-free reference masking path; assert discarded
+    logits become ``-inf`` and the kept set size matches top-k / top-p.
     """
-    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+    from vllm_ascend.worker.v2.sample.apply_top_k_top_p import _apply_top_k_top_p_pytorch
 
     # token0 > token1 >> rest
     logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
     k = torch.tensor([2], dtype=torch.int32)
     p = torch.tensor([0.5], dtype=torch.float32)
 
-    top_k_only = apply_top_k_top_p(logits.clone(), k, None)
+    top_k_only = _apply_top_k_top_p_pytorch(logits.clone(), k, None)
     finite_k = (top_k_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
     assert finite_k.tolist() == [0, 1]
     assert top_k_only[0, 0] == pytest.approx(5.0)
@@ -1036,12 +1042,12 @@ def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
     assert not torch.isfinite(top_k_only[0, 2:]).any()
 
     # Mirror MRV1: combined filter keeps finite values and original shape.
-    filtered = apply_top_k_top_p(logits.clone(), k, p)
+    filtered = _apply_top_k_top_p_pytorch(logits.clone(), k, p)
     assert filtered.shape == logits.shape
     assert torch.isfinite(filtered).any()
     assert 0 in (filtered[0] > float("-inf")).nonzero(as_tuple=False).view(-1).tolist()
 
-    top_p_only = apply_top_k_top_p(logits.clone(), None, p)
+    top_p_only = _apply_top_k_top_p_pytorch(logits.clone(), None, p)
     finite_p = (top_p_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
     assert 0 in finite_p.tolist()
     assert finite_p.numel() >= 1

@@ -12,6 +12,7 @@ test_cases:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - "--tensor-parallel-size"
       - "8"
@@ -42,13 +43,18 @@ test_cases:
       - "--additional-config"
       - '{"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
     benchmarks:
-      spec_decode:
-        case_type: spec_decode
+      acc_gsm8k:
+        case_type: accuracy
         dataset_path: vllm-ascend/gsm8k
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         max_out_len: 8192
         batch_size: 32
         temperature: 0
-        baseline: [0.89, 0.79, 0.65, 0.55, 0.47, 0.40, 0.34]
-        threshold: 0.05
+        baseline: 95
+        threshold: 5
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      baseline: [0.89, 0.79, 0.67, 0.58, 0.50, 0.43, 0.37]
+      tolerance: 0.05

@@ -885,6 +885,34 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
 
+    def test_init_device_selects_mm_encoder_runner_under_cuda_wrapper(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        device = torch.device("npu:0")
+        wrapper = MagicMock()
+        wrapper_context = wrapper.return_value
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
+            patch.object(NPUWorker, "_init_device", return_value=device),
+            patch("vllm_ascend.worker.worker.init_workspace_manager"),
+            patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
+            patch("vllm_ascend.worker.v2.utils.torch_cuda_wrapper", wrapper),
+            patch("vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner") as mm_encoder_runner,
+        ):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
+            worker.rank = 1
+
+            worker.init_device()
+
+        wrapper.assert_called_once_with()
+        wrapper_context.__enter__.assert_called_once_with()
+        mm_encoder_runner.assert_called_once_with(worker.vllm_config, device)
+        self.assertIs(worker.model_runner, mm_encoder_runner.return_value)
+        report_usage_stats.assert_not_called()
+
     def test_profile_start_stop(self):
         """Test profile method start and stop"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -1225,6 +1253,7 @@ class TestNPUWorker(TestBase):
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
         worker.vllm_config = MagicMock(kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
 
         # Capture the active vLLM config while profile_run() executes, so we can
@@ -1241,8 +1270,36 @@ class TestNPUWorker(TestBase):
 
         self.assertEqual(result, 4096)
         worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
-        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
         self.assertEqual(profile_run_configs, [worker.vllm_config])
+
+    def test_explicit_kv_cache_memory_converts_kvpp_budget_after_offload(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
+        worker.vllm_config = MagicMock(kv_transfer_config=None)
+        worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker.model_runner = MagicMock()
+        worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
+        worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+        # The KVPP plan consumes physical bytes and returns a block count;
+        # the worker advertises the corresponding logical cache bytes.
+        plan = SimpleNamespace(
+            get_num_blocks=MagicMock(return_value=8),
+            logical_cache_spec={
+                "layer0": SimpleNamespace(page_size_bytes=64),
+                "layer1": SimpleNamespace(page_size_bytes=32),
+            },
+        )
+        worker._kvpp_cache_allocation_plan = plan
+
+        self.assertEqual(worker.determine_available_memory(), 8 * (64 + 32))
+        self.assertEqual(worker.available_kv_cache_memory_bytes, 4096)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
+        plan.get_num_blocks.assert_called_once_with(4096)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")

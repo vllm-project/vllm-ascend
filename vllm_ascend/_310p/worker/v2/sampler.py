@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 from vllm_ascend._310p.worker.v2.sample import (
-    apply_top_k_top_p_npu,
+    apply_top_k_top_p,
     gather_logprobs,
 )
 from vllm_ascend._310p.worker.v2.sample.bad_words import apply_bad_words
@@ -248,6 +248,9 @@ class Ascend310PSampler:
         self.top_k_cpu[unset] = self.vocab_size
         self.sampling_states.top_k.gpu[unset] = self.vocab_size
 
+    def needs_cpu_token_history(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self._use_penalty[idx_mapping_np]) or np.any(self._use_bad_words[idx_mapping_np]))
+
     def _batch_needs_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
         temp = self._temperature_np[idx_mapping_np]
         return bool(
@@ -355,7 +358,7 @@ class Ascend310PSampler:
         do_top_p = np.any(self._top_p_np[idx_mapping_np] != 1.0)
         top_k = self.sampling_states.top_k.gpu[expanded_idx_mapping] if do_top_k else None
         top_p = self.sampling_states.top_p.gpu[expanded_idx_mapping] if do_top_p else None
-        return apply_top_k_top_p_npu(logits, top_k, top_p)
+        return apply_top_k_top_p(logits, top_k, top_p)
 
     def apply_sampling_params(
         self,
