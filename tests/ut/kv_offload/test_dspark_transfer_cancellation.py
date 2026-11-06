@@ -155,6 +155,8 @@ def _fixture(names=("cancel",), *, admit=True):
     upstream.finished_req_ids = set()
     upstream.finished_req_ids_dict = None
     upstream._inflight_prefills = set()
+    upstream._parked_reservations = {}
+    upstream._parked_reserved_blocks = 0
     upstream._kv_fetch_stages = None
     upstream.aux_output_connector = None
     upstream.ec_connector = None
