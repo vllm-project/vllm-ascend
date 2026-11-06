@@ -1056,6 +1056,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
+        self._attach_leapquant_metadata(attn_metadata, m, num_decodes, num_prefills)
         return self._finalize_metadata(attn_metadata)
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:
@@ -1075,6 +1076,34 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_sequence_indices,
             )
         return has_initial_state
+
+    def _attach_leapquant_metadata(
+        self,
+        attn_metadata: GDNAttentionMetadata,
+        m: CommonAttentionMetadata,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> None:
+        """Attach per-request post-step sequence lengths for LeapQuant (M1).
+
+        The GDN layer reads this CPU tensor after its recurrent update and
+        re-quantizes the state of every request whose sequence length is an
+        exact multiple of the LeapQuant window (the post-step token count of
+        a request *is* its seq_len, decode or prefill alike). Speculative
+        decoding and FULL cudagraphs are rejected at config validation, so
+        the CPU upper bound on seq_lens is exact for every row here.
+        """
+        from vllm_ascend.quantization.methods.mamba_state.leapquant import leapquant_config_or_none
+
+        if leapquant_config_or_none() is None:
+            return
+        seq_lens_cpu = m.seq_lens_cpu_upper_bound
+        if seq_lens_cpu is None:
+            return
+        # Skip full-graph padding rows: leapquant rejects FULL cudagraph, so
+        # this slice is exactly the real decodes-then-prefills request rows
+        # that non_spec_state_indices_tensor addresses.
+        attn_metadata.leapquant_seq_lens = seq_lens_cpu[: num_decodes + num_prefills].to(torch.int64)
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):

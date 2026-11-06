@@ -72,6 +72,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
+| `leapquant_config`                  | dict | `{}`    | Configuration options for LeapQuant online recurrent-state (GDN/KDA) quantization. See <a href="#leapquant_config">leapquant_config</a> and the [quantization guide](../feature_guide/quantization.md#leapquant-recurrent-state-quantization). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
@@ -142,6 +143,27 @@ Both warmups run on a background thread during weight loading. The worker waits 
 | ---- | ---- | ------- | ----------- |
 | `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. The rejection sampler and penalty kernels are v1-only and skipped by the v2 model runner. |
 | `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
+
+**leapquant_config**
+
+LeapQuant ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166)) quantizes the recurrent state of hybrid linear-attention models (GDN/KDA) at window boundaries instead of after every decode step. Inside a window the state stays full precision; every `window` tokens the state is decomposed into a small high-precision low-rank compensator plus int8 residual codes, which bounds quantization-error accumulation over long contexts while keeping most of the state at one byte per element. Only the Atlas A3 vector core is supported in this version.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Whether to enable LeapQuant recurrent-state quantization. |
+| `window` | int | `16` | Number of tokens between two state flushes. One of `8`, `16`, `32`, `64`. |
+| `compensator_tokens` | int | `4` | Rank `r` of the high-precision (fp16) low-rank compensator kept outside the int8 codes. `1`–`8`; `4` matches the paper. |
+| `bits` | int | `8` | Code width. Only `8` (int8) is supported in this version. |
+
+Example:
+
+```bash
+vllm serve Qwen/Qwen3.5-9B --additional-config '{
+  "leapquant_config": {"enabled": true, "window": 16, "compensator_tokens": 4}
+}'
+```
+
+Enabling LeapQuant requires: Atlas A3, a GDN/KDA hybrid model (e.g. Qwen3.5, Kimi linear attention), graph mode `NONE` or `PIECEWISE`, and non-aligned Mamba cache mode. It is rejected at startup together with speculative decoding, PD-disaggregation KV connectors, or C8 KV cache quantization.
 
 **eplb_config**
 
