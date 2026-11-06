@@ -343,11 +343,14 @@ def test_installing_the_norm_twice_does_not_stack_it():
 
     muse_spark.adopt_post_expert_norm(stage)
     norm = _post_expert_norm(hidden_size)
-    stage.post_expert_norm_fn = norm.forward
+    # Bound once: `norm.forward` builds a new bound method on every access, so
+    # holding the attribute is the only way to compare identity.
+    norm_fn = norm.forward
+    stage.post_expert_norm_fn = norm_fn
     once = stage.apply_gmm2(None, None, None)
 
     muse_spark.adopt_post_expert_norm(stage)
-    assert stage.post_expert_norm_fn is norm.forward
+    assert stage.post_expert_norm_fn is norm_fn
     torch.testing.assert_close(stage.apply_gmm2(None, None, None), once)
 
 
@@ -523,6 +526,9 @@ def _moe_vllm_config(
     )
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=text_config, dtype=torch.float32),
+        # The real VllmConfig always carries this, and the MoE hands it to the
+        # expert factory. None is the unquantized case these tests build.
+        quant_config=None,
         parallel_config=SimpleNamespace(
             enable_expert_parallel=enable_expert_parallel,
             enable_eplb=enable_eplb,
