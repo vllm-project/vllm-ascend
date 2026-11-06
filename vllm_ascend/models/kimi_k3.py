@@ -23,6 +23,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
@@ -85,9 +86,16 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.kimi_attn_res import (
+    AttnResBackend,
+    AttnResQueryPlan,
+    load_attn_res_fused_ops,
+    resolve_attn_res_mode,
+)
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -717,6 +725,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         defer_mlp_add: bool = False,
         optimize_prefill: bool = False,
+        attn_res_op=None,
         **kwargs,
     ):
         if self.use_attn_residuals:
@@ -728,6 +737,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prepared_attn_input=prepared_attn_input,
                 defer_mlp_add=defer_mlp_add,
                 optimize_prefill=optimize_prefill,
+                attn_res_op=attn_res_op,
             )
         return super().forward(positions, hidden_states, residual, **kwargs)
 
@@ -746,11 +756,13 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         addend: torch.Tensor | None = None,
         return_materialized: bool = False,
         optimize_prefill: bool = False,
+        attn_res_op=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # The previous MLP add is rounded to BF16 before it becomes either a
         # DSpark raw prefix or an AttnRes input. A block boundary stores that
         # same prefix, while the mixture reads only the older valid slots.
-        return torch.ops._C_ascend.attn_res_fwd(
+        op = torch.ops._C_ascend.attn_res_fwd if attn_res_op is None else attn_res_op
+        return op(
             prefix_sum,
             addend,
             block_residual,
@@ -773,11 +785,12 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         prepared_attn_input: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         defer_mlp_add: bool = False,
         optimize_prefill: bool = False,
+        attn_res_op=None,
     ):
-        """Each residual point runs one native add/AttnRes/RMSNorm kernel."""
+        """Run each residual point through the selected add/AttnRes/RMSNorm backend."""
         if prepared_attn_input is None:
             prepared_attn_input = self.prepare_attn_residual(
-                hidden_states, block_residual, optimize_prefill=optimize_prefill
+                hidden_states, block_residual, optimize_prefill=optimize_prefill, attn_res_op=attn_res_op
             )
         hidden_states, prefix_sum, _ = prepared_attn_input
         if self.is_block_write_layer:
@@ -794,7 +807,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             hidden_states = sp_reduce_scatter(hidden_states)
 
         mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
-        op = torch.ops._C_ascend.attn_res_fwd
+        op = torch.ops._C_ascend.attn_res_fwd if attn_res_op is None else attn_res_op
         hidden_states, prefix_sum, _ = op(
             hidden_states if prefix_sum is None else prefix_sum,
             None if prefix_sum is None else hidden_states,
@@ -856,6 +869,23 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
         self.config = config
+        self.attn_res_fused_ops = None
+        if (
+            config.attn_res_block_size is not None
+            and getattr(config, "attn_res_mode", "fused") == "fused"
+            and ascend_envs.VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED
+        ):
+            self.attn_res_fused_ops = load_attn_res_fused_ops()
+        self.attn_res_mode = resolve_attn_res_mode(config, fused_available=self.attn_res_fused_ops is not None)
+        if config.attn_res_block_size is not None:
+            if getattr(config, "attn_res_mode", "fused") == "fused" and self.attn_res_mode == "two_phase":
+                logger.warning_once("Kimi K3 fused AttnRes unavailable or disabled; falling back to two_phase")
+            logger.info("Kimi K3 AttnRes mode: %s", self.attn_res_mode)
+            if self.attn_res_fused_ops is not None:
+                logger.info(
+                    "Kimi K3 AttnRes Update+RMSNorm fusion: %s", self.attn_res_fused_ops.update_rms_norm is not None
+                )
+        self.attn_res_query_plan: AttnResQueryPlan | None = None
         self.vocab_size = config.vocab_size
         # Only the last PP stage loads the drafter. Select its aux contract
         # on every stage before upstream reserves receive buffers/relay slots.
@@ -986,9 +1016,36 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(
+        result = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        if self.config.attn_res_block_size is not None and self.attn_res_mode != "native":
+            self._prepare_attn_res_query_plan()
+        return result
+
+    def _prepare_attn_res_query_plan(self) -> None:
+        specs = []
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            specs.append((layer.self_attention_res_proj, layer.self_attention_res_norm, layer.prev_valid_blocks))
+            specs.append(
+                (
+                    layer.mlp_res_proj,
+                    layer.mlp_res_norm,
+                    layer.prev_valid_blocks + int(layer.is_block_write_layer),
+                )
+            )
+        if get_pp_group().is_last_rank:
+            specs.append(
+                (
+                    self.output_attn_res_proj,
+                    self.output_attn_res_norm,
+                    cdiv(self.end_layer, self.config.attn_res_block_size),
+                )
+            )
+        if self.attn_res_query_plan is None:
+            self.attn_res_query_plan = AttnResQueryPlan(specs)
+        else:
+            self.attn_res_query_plan.refresh(specs)
 
     def forward(
         self,
@@ -1055,6 +1112,12 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         residual = block_residual
 
         optimize_attn_res_prefill = _use_attn_res_prefill_cache()
+        attn_res_op = None
+        if self.attn_res_mode != "native":
+            if self.attn_res_query_plan is None:
+                # Dummy/model warmup may precede checkpoint loading.
+                self._prepare_attn_res_query_plan()
+            attn_res_op = AttnResBackend(self.attn_res_mode, self.attn_res_query_plan, self.attn_res_fused_ops)
         pending_mlp_output = None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
@@ -1066,6 +1129,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 pending_mlp_output,
                 return_materialized=materialized_aux and layer_idx in self.aux_hidden_state_layers,
                 optimize_prefill=optimize_attn_res_prefill,
+                attn_res_op=attn_res_op,
             )
             if layer_idx > self.start_layer and not materialized_aux:
                 self._maybe_add_hidden_state(aux_hidden_states, layer_idx, prepared[1], None)
@@ -1078,10 +1142,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 prepared_attn_input=prepared,
                 defer_mlp_add=True,
                 optimize_prefill=optimize_attn_res_prefill,
+                attn_res_op=attn_res_op,
             )
 
         if not get_pp_group().is_last_rank and pending_mlp_output is not None:
-            hidden_states = hidden_states + pending_mlp_output
+            hidden_states = (
+                attn_res_op.finish_partial(hidden_states, pending_mlp_output)
+                if self.attn_res_mode == "fused"
+                else hidden_states + pending_mlp_output
+            )
             if not materialized_aux:
                 # Publish the completed raw prefix at the PP boundary once.
                 self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, hidden_states, None)
@@ -1099,7 +1168,8 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 aux_hidden_states,
             )
 
-        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
+        final_op = torch.ops._C_ascend.attn_res_fwd if attn_res_op is None else attn_res_op
+        hidden_states, final_prefix, _ = final_op(
             hidden_states,
             pending_mlp_output,
             residual,
