@@ -59,6 +59,7 @@ env_common: &env_common
   PYTHONDONTWRITEBYTECODE: "1"
   SERVER_PORT: "${PORT}"
   VLLM_USE_MODELSCOPE: "true"
+  TORCH_EXTENSIONS_DIR: "/tmp/minimax_m3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
 
 env_prefill: &env_prefill
   <<: *env_common
