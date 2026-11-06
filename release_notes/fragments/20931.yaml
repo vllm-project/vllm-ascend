@@ -1,0 +1,6 @@
+pr: 20931
+entries:
+  - category: bugfix
+    text: >-
+      Bound host-memory growth from SHM notification mailboxes during sustained
+      inference by periodically polling busy readers.
