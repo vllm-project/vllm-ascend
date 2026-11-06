@@ -1614,13 +1614,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 last_layer = self.layers[self.end_layer - 1]
                 break
             last_layer = layer
-            # DSpark consumes the residual stream entering its configured
-            # target layers. The runner expresses checkpoint IDs as one-based.
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
-                aux_hidden_state = hidden_states.mean(dim=1)
-                if use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
             if layer.engram is not None and token_mask.numel():
                 # Without SP the earlier mask slices are views. Delay the wait
                 # until the first actual consumer so early layers can overlap
@@ -1648,8 +1641,21 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
                 )
+            # V4.1 DSpark checkpoint IDs are zero-based attention inputs,
+            # captured after Engram injection (not the preceding layer's input).
+            if layer.layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_state = hidden_states.mean(dim=1)
+                if use_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
+        # The final boundary has no successor layer at which to capture it.
+        if last_layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            aux_hidden_state = hidden_states.mean(dim=1)
+            if use_sequence_parallel:
+                aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+            aux_hidden_states.append(aux_hidden_state)
         # MTP needs full HC states
         if self._mtp_hidden_buffer is not None:
             if use_sequence_parallel:
@@ -1670,7 +1676,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux = []
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 residual = hidden_states.mean(dim=1)
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]

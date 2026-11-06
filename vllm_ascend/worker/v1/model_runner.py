@@ -821,6 +821,22 @@ class NPUModelRunner(GPUModelRunner):
         return eagle_config.get("use_aux_hidden_state", True)
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
+        if self.speculative_config and self.speculative_config.use_dspark():
+            hf_config = self.speculative_config.draft_model_config.hf_config
+            text_config = getattr(hf_config, "text_config", None) or hf_config
+            if getattr(hf_config, "model_type", None) == "deepseek_v41" or getattr(
+                text_config, "model_type", None
+            ) in ("deepseek_v41", "deepseek_v41_text"):
+                explicit_layers = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None) or getattr(
+                    text_config, "eagle_aux_hidden_state_layer_ids", None
+                )
+                if isinstance(explicit_layers, (list, tuple)) and explicit_layers:
+                    return tuple(explicit_layers)
+                dspark_layer_ids = getattr(text_config, "dspark_target_layer_ids", None)
+                if dspark_layer_ids:
+                    # V4.1 consumes zero-based attention inputs. Older vLLM
+                    # resolvers apply V4's capture-after +1 convention.
+                    return tuple(dspark_layer_ids)
         layer_ids = super()._get_eagle3_aux_layers_from_config()
         if layer_ids:
             return layer_ids
