@@ -125,7 +125,6 @@ from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
-from vllm_ascend.worker.v2.profile import profile_pcp
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
@@ -756,10 +755,7 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
-                profile_pcp(self, randomize_inputs=randomize_inputs)
-            else:
-                super().profile_run(**profile_kwargs)
+            super().profile_run(**profile_kwargs)
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -1200,6 +1196,27 @@ class NPUModelRunner(GPUModelRunner):
             self.speculator = previous_speculator
             self.max_num_reqs = previous_max_num_reqs
 
+    def _get_pcp_profile_num_tokens(self) -> int:
+        """Keep replicated draft requests when profiling PCP-local prefill.
+
+        Initial memory profiling precedes KV/PCP-manager initialization.
+        Block drafters retain the global budget: their context-KV precompute
+        processes all target hidden states, independently of short queries.
+        """
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size <= 1:
+            return self.max_num_tokens
+        query_per_req = 1
+        spec = self.speculative_config
+        if spec is not None:
+            # Use shared config, not the last PP rank's speculator instance:
+            # every pipeline stage must profile the same target token shape.
+            if spec.method not in ("mtp", "eagle", "eagle3"):
+                return self.max_num_tokens
+            query_per_req = 1 + spec.num_speculative_tokens
+        local_tokens = (self.max_num_tokens + pcp_size - 1) // pcp_size
+        return min(self.max_num_tokens, max(local_tokens, self.max_num_reqs * query_per_req))
+
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -1216,6 +1233,10 @@ class NPUModelRunner(GPUModelRunner):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
+        # Only shrink the main startup dummy, not MC2 reservation, capture or
+        # CPP profiling. Keep max_num_tokens global for upstream scheduling.
+        if is_profile and skip_attn and not uniform_decode and not profile_cpp and num_tokens == self.max_num_tokens:
+            num_tokens = self._get_pcp_profile_num_tokens()
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a

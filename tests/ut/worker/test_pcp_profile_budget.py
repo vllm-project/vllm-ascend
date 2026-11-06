@@ -6,115 +6,114 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-import torch
+from vllm.config import CUDAGraphMode
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-from vllm_ascend.worker.v2.profile import _profile_draft, _profile_target, profile_pcp
-
-
-def make_runner():
-    return SimpleNamespace(
-        max_num_tokens=16384,
-        max_num_reqs=64,
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(prefill_context_parallel_size=16),
-            aux_output_config=SimpleNamespace(enabled=False),
-        ),
-        supports_mm_inputs=False,
-        is_first_pp_rank=True,
-        is_last_pp_rank=True,
-        pooling_runner=None,
-        model=object(),
-        speculator=None,
-        _dummy_sampler_run=Mock(),
-        reset_encoder_cache=Mock(),
-        _finalize_dump_data=Mock(),
-    )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
-@pytest.mark.parametrize("tokens,pcp,expected", [(16384, 16, 1024), (17, 4, 5), (8, 16, 1)])
-def test_target_and_draft_profile_budgets_are_independent(tokens, pcp, expected):
-    runner = make_runner()
+def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_tokens = tokens
-    runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp
-    runner.speculator = object()
-    state = SimpleNamespace(hidden_states=torch.zeros(1, 8), aux_hidden_states=[torch.zeros(1, 8)])
-    with (
-        patch("vllm_ascend.worker.v2.profile._profile_target", return_value=state) as target,
-        patch("vllm_ascend.worker.v2.profile._profile_draft") as draft,
-        patch("vllm_ascend.worker.v2.profile.upstream.get_drafter_hidden_states", side_effect=lambda _, h: h),
-        patch("torch.accelerator.synchronize"),
-    ):
-        profile_pcp(runner, randomize_inputs=True)
-    target.assert_called_once_with(runner, expected, True)
-    args = draft.call_args.args
-    assert args[1:3] == (tokens, expected)
-    assert args[3].shape == (tokens, 8)
-    assert args[4][0].shape == (tokens, 8)
-    assert runner._dummy_sampler_run.call_args.args[0].shape[0] == min(tokens, 64)
+    runner.max_num_reqs = requests
+    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp))
+    runner.speculative_config = SimpleNamespace(
+        method="dspark" if replicated else "mtp", num_speculative_tokens=query - 1
+    )
+    runner.speculator = None  # Non-last PP stages have no local drafter.
+    return runner
+
+
+@pytest.mark.parametrize(
+    "tokens,pcp,requests,query,replicated,expected",
+    [
+        (16384, 1, 64, 4, False, 16384),
+        (16384, 16, 64, 4, False, 1024),
+        (16384, 16, 512, 4, False, 2048),
+        (17, 4, 2, 1, False, 5),
+        (17, 16, 64, 4, False, 17),
+        (16384, 16, 64, 9, True, 16384),
+    ],
+)
+def test_local_prefill_preserves_draft_requests(tokens, pcp, requests, query, replicated, expected):
+    runner = make_runner(tokens, pcp, requests, query, replicated)
+    assert runner._get_pcp_profile_num_tokens() == expected
     assert runner.max_num_tokens == tokens
-    assert runner.max_num_reqs == 64
+    assert runner.max_num_reqs == requests
 
 
-@pytest.mark.parametrize("sharded,query,context", [(True, 1, 8), (False, 8, 128), (False, 9, 128)])
-def test_mtp_local_prefill_and_block_draft_global_context(sharded, query, context):
-    spec = SimpleNamespace(
-        num_query_per_req=query,
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(prefill_context_parallel_size=16 if sharded else 1)
-        ),
-        supports_mm_inputs=False,
-        propose=Mock(),
-    )
-    runner = SimpleNamespace(
-        speculator=spec,
-        max_num_reqs=4,
-        input_buffers=object(),
-        device=torch.device("cpu"),
-        sampler=SimpleNamespace(
-            sampling_states=SimpleNamespace(temperature=SimpleNamespace(gpu=None), seeds=SimpleNamespace(gpu=None))
-        ),
-        req_states=SimpleNamespace(last_sampled_tokens=None, next_prefill_tokens=None),
-        _draft_workspace_lane=object(),
-    )
-    with (
-        patch(
-            "vllm_ascend.worker.v2.profile.InputBatch.make_dummy",
-            side_effect=lambda b, t, *_args, **_kwargs: SimpleNamespace(num_reqs=b, num_tokens=t, idx_mapping=None),
-        ) as batch,
-        patch("vllm_ascend.worker.v2.profile.upstream.use_workspace_lane", return_value=nullcontext()),
-    ):
-        _profile_draft(runner, 128, 8, torch.zeros(128, 16), None)
-    assert batch.call_args.args[:2] == (4, context)
-    kwargs = spec.propose.call_args.kwargs
-    assert kwargs["last_hidden_states"].shape == (context, 16)
-    assert kwargs["num_sampled"].shape == (4,)
-    assert kwargs["dp_sync_state"] is None
-    assert kwargs["skip_attn_for_dummy_run"] is True
+def test_no_draft_preserves_target_decode_requests():
+    runner = make_runner(requests=2048)
+    runner.speculative_config = None
+    assert runner._get_pcp_profile_num_tokens() == 2048
+
+
+def test_non_model_draft_keeps_global_budget():
+    runner = make_runner()
+    runner.speculative_config.method = "ngram"
+    assert runner._get_pcp_profile_num_tokens() == 16384
+
+
+@pytest.mark.parametrize("method", ["dflash", "dspark", "draft_model"])
+def test_replicated_draft_context_is_not_reduced(method):
+    runner = make_runner()
+    runner.speculative_config.method = method
+    assert runner._get_pcp_profile_num_tokens() == runner.max_num_tokens
+
+
+@pytest.mark.parametrize("tokens,requests", [(16384, 64), (16384, 512), (17, 64)])
+def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
+    runner = make_runner(tokens=tokens, requests=requests)
+    local_tokens = runner._get_pcp_profile_num_tokens()
+    runner.speculator = SimpleNamespace(num_query_per_req=4, num_extra_query_per_req=0)
+    runner.kv_connector = Mock()
+    runner.is_first_pp_rank = True
+    runner.lora_config = None
+    runner.maybe_dummy_run_with_lora = Mock(return_value=nullcontext())
+    batches = []
+
+    def execute(output, **kwargs):
+        batches.append(output.num_scheduled_tokens)
+        # Stop before any model execution or NPU allocation.
+        raise RuntimeError("observed scheduler batch")
+
+    runner.execute_model = execute
+    for count in (tokens, local_tokens):
+        with pytest.raises(RuntimeError, match="observed scheduler batch"):
+            GPUModelRunner._dummy_run(runner, count, skip_attn=True, is_profile=True)
+    assert len(batches[0]) == len(batches[1]) == min(requests, tokens // 4)
+    assert sum(batches[1].values()) == local_tokens
+    assert runner.max_num_tokens == tokens
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_target_only_forward_restores_connector_and_does_not_draft(fail):
-    runner = make_runner()
-    runner.speculator = Mock()
-    runner.lora_config = None
-    runner.kv_connector = Mock()
-    runner.maybe_dummy_run_with_lora = Mock(return_value=nullcontext())
-    state = object()
-    runner.execute_model_state = state
+def test_startup_dummy_keeps_global_limits_on_success_and_failure(fail):
+    runner = make_runner(requests=512)
+    runner.adaptive_verification = None
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+    runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())
+    runner._finalize_dump_data = Mock()
+    seen = []
 
-    def execute(output, **kwargs):
-        assert output.total_num_scheduled_tokens == 17
-        assert sum(output.num_scheduled_tokens.values()) == 17
-        assert kwargs["skip_attn_for_dummy_run"] is True
+    def parent(self, num_tokens, *args, **kwargs):
+        seen.append(num_tokens)
+        assert self.max_num_tokens == 16384
+        assert self.max_num_reqs == 512
         if fail:
-            raise RuntimeError("target failed")
+            raise RuntimeError("profile failed")
+        return num_tokens
 
-    runner.execute_model = execute
-    if fail:
-        with pytest.raises(RuntimeError, match="target failed"):
-            _profile_target(runner, 17, False)
-    else:
-        assert _profile_target(runner, 17, False) is state
-        assert runner.execute_model_state is None
-    assert [c.args for c in runner.kv_connector.set_disabled.call_args_list] == [(True,), (False,)]
-    runner.speculator.propose.assert_not_called()
+    with patch.object(GPUModelRunner, "_dummy_run", parent):
+        if fail:
+            with pytest.raises(RuntimeError, match="profile failed"):
+                runner._dummy_run(16384, skip_attn=True, is_profile=True, skip_eplb=True)
+            assert seen == [2048]
+        else:
+            assert runner._dummy_run(16384, skip_attn=True, is_profile=True, skip_eplb=True) == 2048
+            # Independent MC2 reservation and graph dummies retain their shape.
+            assert runner._dummy_run(4096, skip_attn=True, is_profile=True, skip_eplb=True) == 4096
+            assert runner._dummy_run(16384, is_profile=True, skip_eplb=True) == 16384
+            assert runner._dummy_run(16384, skip_attn=True, skip_eplb=True) == 16384
+    assert runner.max_num_tokens == 16384
+    assert runner.max_num_reqs == 512
