@@ -335,3 +335,36 @@ def test_add_lora_logits_uses_sampler_indices() -> None:
     wrapper.add_lora_logits(y, x, a, b, 0.5)
     assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([1, 0]))
     wrapper.bgmv_expand.assert_called_once()
+
+
+@pytest.mark.parametrize("pass_token_mapping", [False, True])
+def test_add_lora_fused_moe_skips_no_lora_batch(pass_token_mapping: bool) -> None:
+    """A base-model-only batch must not allocate the shrink buffer or launch bgmv."""
+    wrapper = _make_wrapper(no_lora=True)
+    a = torch.ones(1, 1, 2, 4)
+    b = torch.ones(1, 1, 4, 2)
+    y = torch.zeros(2, 4)
+    kwargs = {"expert_ids": torch.tensor([0, 1]), "adapter_enabled": torch.tensor([1])}
+    if pass_token_mapping:
+        kwargs["token_lora_mapping"] = torch.tensor([-1, -1])
+
+    wrapper.add_lora_fused_moe(y, torch.ones(2, 4), (a,), (b,), **kwargs)
+
+    wrapper.bgmv_shrink.assert_not_called()
+    wrapper.bgmv_expand_slice.assert_not_called()
+    torch.testing.assert_close(y, torch.zeros(2, 4))
+
+
+def test_add_lora_fused_moe_still_rejects_unexpanded_rows_without_lora() -> None:
+    """The row-shape contract is checked before the idle-batch short-circuit."""
+    wrapper = _make_wrapper(no_lora=True)
+    with pytest.raises(AssertionError, match="top_k_num=1"):
+        wrapper.add_lora_fused_moe(
+            torch.zeros(1, 4),
+            torch.ones(1, 4),
+            (torch.ones(1, 1, 2, 4),),
+            (torch.ones(1, 1, 4, 2),),
+            expert_ids=torch.tensor([0]),
+            adapter_enabled=torch.tensor([1]),
+            top_k_num=2,
+        )
