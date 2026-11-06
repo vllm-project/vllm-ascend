@@ -189,7 +189,7 @@ def should_use_dsa_pd_mooncake_long_context_kv(vllm_config: Any) -> bool:
         use_sparse=_is_dsa_sparse_model(vllm_config),
         is_kv_consumer=_is_mooncake_kv_consumer(vllm_config),
         enable_cpu_kv_store=bool(_config_get(dsa_sparse_attention_config, "enable_cpu_kv_store", False)),
-        dsa_sparse_attention_mode=_config_get(dsa_sparse_attention_config, "mode", None),
+        dsa_sparse_attention_mode=_config_get(dsa_sparse_attention_config, "mode", "baseline"),
     )
 
 

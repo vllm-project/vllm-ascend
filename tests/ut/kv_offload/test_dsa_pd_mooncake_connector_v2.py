@@ -4,6 +4,7 @@
 import ctypes
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -20,7 +21,12 @@ from .mooncake_v2.test_pull_worker import make_thread
 
 
 @pytest.fixture(autouse=True)
-def clear_registry():
+def clear_registry(monkeypatch):
+    # These regressions exercise CPU byte copies and lifecycle ordering.
+    # Do not pass the fake streams into an installed torch_npu runtime.
+    monkeypatch.setattr(torch.npu, "stream", lambda _stream: nullcontext())
+    monkeypatch.setattr(torch.npu, "Event", MagicMock())
+    monkeypatch.setattr(torch.npu, "synchronize", MagicMock())
     registry.reset_dsa_pd_mooncake_kv_registries()
     yield
     registry.reset_dsa_pd_mooncake_kv_registries()
