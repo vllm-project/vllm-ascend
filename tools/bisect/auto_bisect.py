@@ -497,4 +497,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from tools.bisect.tool_env import ensure_tool_environment
+
+    ensure_tool_environment()
     raise SystemExit(main())
