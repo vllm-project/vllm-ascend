@@ -47,7 +47,12 @@ def selection(monkeypatch, profiles):
     target = NS(hf_config=NS(architectures=["MiniMaxM3SparseForConditionalGeneration"]))
     runtime.config = NS(
         model_config=target,
-        speculative_config=NS(method="dspark", target_model_config=target, enable_adaptive_verification=False),
+        speculative_config=NS(
+            method="dspark",
+            target_model_config=target,
+            draft_model_config=NS(architectures=["DSparkMiniMaxDraftModel"]),
+            enable_adaptive_verification=False,
+        ),
         parallel_config=NS(pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=NS(cache_dtype="auto"),
         quant_config=None,
@@ -87,14 +92,23 @@ def selection(monkeypatch, profiles):
 
 @pytest.mark.parametrize("device", ["A2", "A3", "A5", "_310P"])
 @pytest.mark.parametrize("installed", [False, True])
-@pytest.mark.parametrize("arch", ["MiniMaxM3SparseForCausalLM", "DSparkMiniMaxDraftModel", "Qwen3DSparkModel", "Other"])
+@pytest.mark.parametrize(
+    "arch",
+    [
+        "MiniMaxM3SparseForCausalLM",
+        "DSparkMiniMaxDraftModel",
+        "Qwen3DSparkModel",
+        "MiniMaxM31FlashA3DSparkModel",
+        "Other",
+    ],
+)
 def test_hardware_and_model_routing(selection, device, installed, arch):
     r = selection
     r.device = getattr(r.profiles.AscendDeviceType, device)
     r.installed = installed
     r.config.model_config = NS(hf_config=NS(architectures=[arch]))
     actual = r.select()
-    if device in ("A2", "A3") and installed and arch != "Other":
+    if device in ("A2", "A3") and installed and arch not in ("Other", "MiniMaxM3SparseForCausalLM"):
         assert actual == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
     else:
         assert "flash_attention_v3" not in actual

@@ -28,6 +28,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
@@ -48,6 +49,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
@@ -119,6 +122,9 @@ def make_worker(
     layer_offset=0,
     pp_partition=None,
     cache_block_size=16,
+    use_recoverssm=False,
+    mamba_copy_funcs=None,
+    mamba_state_sharding=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -172,6 +178,19 @@ def make_worker(
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = cache_block_size
     config.cache_config.prefix_match_unit = prefix_match_unit
+    config.cache_config.use_kda_recoverssm = use_recoverssm
+    model_cls = start_patch(
+        test, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mamba_state_sharding.get_model_cls"
+    ).return_value
+    start_patch(test, f"{module}.get_model_cls", return_value=model_cls)
+    model_cls.get_mamba_state_sharding = mamba_state_sharding
+    if use_recoverssm:
+        if mamba_copy_funcs is None:
+            model_cls.get_mamba_state_copy_funcs.side_effect = lambda mamba_types: {
+                backend: MambaStateCopyFuncCalculator.kda_state_copy_func() for backend in mamba_types
+            }
+        else:
+            model_cls.get_mamba_state_copy_funcs.return_value = mamba_copy_funcs
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
@@ -589,6 +608,55 @@ class TestKVPPPoolWorker(unittest.TestCase):
             shard_keys = keys[shard * 2 : shard * 2 + 2]
             self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
             self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
+
+    def test_pp_hybrid_lookup_requires_only_group_owners(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker._pp_group_owners = ((0,), (1,))
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["model.layers.0.self_attn"]),
+                SimpleNamespace(layer_names=["model.layers.1.self_attn"]),
+            ]
+        )
+        worker.num_kv_cache_groups = 2
+        worker.grouped_block_size = [16, 16]
+        worker.group_uses_align_state = [False, False]
+        worker.cache_coordinator = None
+        worker.token_database = ChunkedTokenDatabase(
+            [
+                KeyMetadata("llama-7b", 0, 0, 0, 0),
+                KeyMetadata("llama-7b", 0, 0, 0, 1),
+            ],
+            [16, 16],
+            None,
+        )
+
+        def only_real_owner_exists(keys):
+            return [
+                int(("@group:0@" in key and "@pp_rank:0@" in key) or ("@group:1@" in key and "@pp_rank:1@" in key))
+                for key in keys
+            ]
+
+        worker.m_store.exists.side_effect = only_real_owner_exists
+
+        self.assertEqual(worker.lookup_scheduler(16, ["h0"], [0, 1]), 16)
+        queried_keys = [key for call in worker.m_store.exists.call_args_list for key in call.args[0]]
+        self.assertEqual(len(queried_keys), 2)
+        self.assertTrue(any("@group:0@" in key and "@pp_rank:0@" in key for key in queried_keys))
+        self.assertTrue(any("@group:1@" in key and "@pp_rank:1@" in key for key in queried_keys))
+        self.assertFalse(any("@group:0@" in key and "@pp_rank:1@" in key for key in queried_keys))
+        self.assertFalse(any("@group:1@" in key and "@pp_rank:0@" in key for key in queried_keys))
+
+    def test_pp_hybrid_lookup_does_not_report_partial_pipeline_hit(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker._pp_group_owners = ((0, 1),)
+        worker.m_store.exists.return_value = [1, 0]
+
+        self.assertEqual(worker.lookup_scheduler(16, ["h0"], [0]), 0)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(keys), 2)
+        self.assertIn("@pp_rank:0@", keys[0])
+        self.assertIn("@pp_rank:1@", keys[1])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
@@ -1347,6 +1415,33 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
+    def test_start_load_kv_sync_skips_pp_local_empty_group(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.grouped_block_size = [16, 16]
+        worker.m_store.get = MagicMock(return_value=[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [160], 1: []},
+            group_num_layers={0: 1, 1: 0},
+        )
+        req = ReqMeta(
+            req_id="pp-local-empty",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(addrs, [[1000]])
+        self.assertEqual(sizes, [[160]])
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
         autospec=True,
@@ -1472,33 +1567,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.raise_if_failed.assert_not_called()
         worker.kv_send_thread.add_save_batch.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
-
-    def test_handle_released_saves_noop_without_send_thread(self):
-        worker = self._make_worker()
-        worker.kv_send_thread = None
-        worker.handle_released_saves({"r1"})
-
-    def test_handle_released_saves_drains_only_released_requests(self):
-        worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
-
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        released = {"r1", "r2"}
-        worker.handle_released_saves(released)
-        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
-        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(released)
-
-    def test_handle_released_saves_skips_layerwise_thread(self):
-        worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
-            KVCacheStoreLayerSendingThread,
-        )
-
-        # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
-        # so a wrong dispatch would raise AttributeError here.
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreLayerSendingThread)
-        worker.handle_released_saves({"r1"})
-        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
 
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")

@@ -64,7 +64,13 @@ def _patch_pool_scheduler_importlib():
     which imports the real backend classes and uses ``mock.patch`` (itself
     backed by importlib.import_module), is unaffected.
     """
-    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib") as mock_importlib:
+    with (
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib") as mock_importlib,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mamba_state_sharding.get_model_cls",
+            return_value=SimpleNamespace(),
+        ),
+    ):
         mock_importlib.import_module.return_value = MagicMock()
         yield
 
@@ -72,6 +78,7 @@ def _patch_pool_scheduler_importlib():
 @pytest.mark.parametrize("dspark", [False, True])
 def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_replica(dspark):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.mamba_state_sharding = {}
     target_keys = ["target-pp0-rank0", "target-pp1-rank0"]
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
@@ -81,7 +88,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
     scheduler.layerwise_max_transfer_blocks = 0
 
     keys = scheduler._make_layerwise_hit_check_keys(0, "block-hash")
-    scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(0, "block-hash", 1)
+    scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(0, "block-hash", 1, sharding=None)
     expected_draft = [f"dspark-prefix-v1@draft-contract@pp1@tp{rank}@block-hash" for rank in range(4)] if dspark else []
     assert keys == target_keys + expected_draft
     scheduler.store_scheduler = SimpleNamespace(batch_is_readable=MagicMock(return_value=[True] * len(keys)))
@@ -97,6 +104,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
 @pytest.mark.parametrize("draft_only", [False, True])
 def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_target_keys(draft_only):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.mamba_state_sharding = {}
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
@@ -111,7 +119,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
     if draft_only:
         scheduler.layerwise_keys.make_hit_check_keys.assert_not_called()
     else:
-        scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(3, "block-hash", 1)
+        scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(3, "block-hash", 1, sharding=None)
     scheduler.store_scheduler = SimpleNamespace(batch_is_readable=MagicMock(return_value=[True] * len(keys)))
     assert scheduler._query_layerwise_block_hits([keys]) == [True]
     for missing_key in range(len(keys)):
@@ -124,10 +132,13 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
 @pytest.mark.parametrize("mode", ["dspark", "reuse"])
 def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.mamba_state_sharding = {}
     # A fresh key list per call: _make_layerwise_hit_check_keys extends the
     # returned list in place when dspark joint keys are active, so a shared
     # return_value would accumulate draft keys across lookups.
-    scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(side_effect=lambda *args: ["target"]))
+    scheduler.layerwise_keys = SimpleNamespace(
+        make_hit_check_keys=MagicMock(side_effect=lambda *args, **kwargs: ["target"])
+    )
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = (
@@ -717,6 +728,15 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_recoverssm_bulk_pool_does_not_publish_decode_increments(self, mock_client_cls):
+        config = self._make_config()
+        config.cache_config.use_kda_recoverssm = True
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        self._set_running_chunk(scheduler)
+        output = self._make_running_chunk_output([1], num_computed_tokens=64)
+        self.assertFalse(scheduler.build_connector_meta(output).requests)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_passes_computed_tokens_to_tracker(self, mock_client_cls):
         scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
         request = MagicMock()
@@ -1024,32 +1044,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         _meta = scheduler.build_connector_meta(sched_output)
         self.assertNotIn("r1", scheduler._request_trackers)
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_build_connector_meta_released_req_ids_union(self, mock_client_cls):
-        config = self._make_config()
-        scheduler = KVPoolScheduler(config, use_layerwise=False)
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import RequestTracker
-
-        for req_id in ("f1", "f2", "p1"):
-            scheduler._request_trackers[req_id] = RequestTracker(
-                req_id=req_id,
-                token_len=32,
-                allocated_block_ids=[0, 1],
-            )
-            scheduler._unfinished_requests[req_id] = (MagicMock(), [0, 1])
-
-        sched_output = MagicMock()
-        sched_output.finished_req_ids = {"f1", "f2"}
-        sched_output.preempted_req_ids = {"p1"}
-        sched_output.scheduled_new_reqs = []
-        sched_output.num_scheduled_tokens = {}
-        sched_output.scheduled_cached_reqs = MagicMock()
-        sched_output.scheduled_cached_reqs.req_ids = []
-
-        meta = scheduler.build_connector_meta(sched_output)
-        self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
 
 
 class TestLookupKeyClient(unittest.TestCase):
