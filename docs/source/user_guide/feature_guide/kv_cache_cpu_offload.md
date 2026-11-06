@@ -70,6 +70,7 @@ kv_transfer_config = KVTransferConfig(
         "cpu_bytes_to_use": 8 * (1 << 30),
         "blocks_per_chunk": 8,
         "spec_name": "TieringOffloadingSpec",
+        "pin_shared_mmap": True,
         "secondary_tiers": [
             {
                 "type": "fs",
@@ -87,10 +88,50 @@ kv_transfer_config = KVTransferConfig(
 - `cpu_bytes_to_use`: Total bytes reserved for the CPU tier across all workers. This is required by the vLLM offloading specs.
 - `blocks_per_chunk`: Number of NPU KV-cache blocks in one offloaded chunk. It must be greater than zero. Alternatively, `block_size` can specify the chunk size in tokens when all KV-cache groups use the same block size; the two options are mutually exclusive.
 - `spec_name`: Use the upstream names `"CPUOffloadingSpec"` for CPU-only offload or `"TieringOffloadingSpec"` for multi-tier offload. vLLM Ascend transparently maps them to the NPU implementations.
+- `pin_shared_mmap`: Boolean, defaults to `true`. Applies to `TieringOffloadingSpec`; set to `false` to disable registration of its shared CPU mapping as pinned host memory.
 - `secondary_tiers`: Optional list of vLLM tiering backends used by `TieringOffloadingSpec`. Each entry is a dict; common keys:
     - `type`: Backend type. Use `"fs"` for filesystem storage.
     - `root_dir`: Directory the tier writes block files into.
     - `n_read_threads` / `n_write_threads`: Thread-pool sizes for the tier's I/O. For high-bandwidth backends (e.g. 3FS over RDMA) increasing these helps saturate parallel bandwidth.
+
+### Pinning the shared CPU tier
+
+`pin_shared_mmap` defaults to `true` for `TieringOffloadingSpec`. On supported
+Ascend runtimes, it registers the existing shared CPU mapping as page-locked
+host memory for direct batched NPU transfers.
+
+To disable registration, set `pin_shared_mmap` to `false` in
+`kv_connector_extra_config`, for example when comparing pinned and pageable
+offload performance:
+
+```json
+{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "spec_name": "TieringOffloadingSpec",
+        "cpu_bytes_to_use": 8589934592,
+        "blocks_per_chunk": 8,
+        "pin_shared_mmap": false,
+        "secondary_tiers": [
+            {"type": "fs", "root_dir": "/tmp/vllm_kv_offload"}
+        ]
+    }
+}
+```
+
+Registration scope follows the cache layout automatically: replicated MLA
+workers register the whole shared region; other layouts register each worker's
+page-aligned slots when the upstream vLLM range API is available, otherwise the
+whole region is registered.
+
+If the Ascend extension lacks the required host-registration/batched-copy APIs,
+or registration fails, the worker rolls back completed registrations and falls
+back to pageable mmap with a warning. Startup logs report the registered bytes
+and range count when registration succeeds.
+
+`CPUOffloadingSpec` uses PyTorch's pinned tensor allocator and does not use this
+option.
 
 ### Tuning the filesystem (SSD / 3FS) secondary tier
 
@@ -134,6 +175,6 @@ llm = LLM(
 
 - This feature requires vLLM v1 engine.
 - Adjust `cpu_bytes_to_use` based on available CPU memory. Reserving too much may cause out-of-memory errors on the host.
-- `CPUOffloadingSpec` uses pinned (page-locked) tensors when available. `TieringOffloadingSpec` must use vLLM's shared mmap primary tier; CANN does not provide a memory-copy-compatible equivalent of CUDA's arbitrary mmap host registration, so its NPU↔CPU bandwidth must be benchmarked separately on the target host and CANN version.
+- `CPUOffloadingSpec` uses pinned (page-locked) tensors when available. `TieringOffloadingSpec` uses a shared mmap primary tier and attempts host registration when `pin_shared_mmap` is enabled. Benchmark offload bandwidth on the target host and CANN version.
 - The `gpu_memory_utilization` parameter controls how much NPU memory is reserved for KV cache. Lower values leave less NPU memory for KV cache, making offloading more active.
 - For production workloads, benchmark with realistic request patterns to find the optimal `cpu_bytes_to_use` and `blocks_per_chunk` settings.
