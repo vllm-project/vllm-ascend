@@ -587,6 +587,72 @@ def test_c2_builder_keeps_fixed_rows_for_mixed_parity_and_padding(config, runtim
     assert not idle.c2_complete_mask.any()
 
 
+@pytest.mark.parametrize("plane", ["swa_cache", "long_kv_cache", "indexer.k_cache", "compressor.state_cache"])
+def test_adaptive_v41_cache_planes_follow_device_boundaries(runtime, monkeypatch, plane):
+    monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None)
+    monkeypatch.setattr(dsa_v41, "get_cos_and_sin_dsa", lambda *args, **kwargs: ({}, {}))
+    spec = collect_specs(runtime)[f"model.layers.2.self_attn.{plane}"]
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    pointers = []
+    # Keep the physical graph at 16 rows while changing actual query ownership.
+    # Host scheduling evenly splits the budget; device confidence ranking does not.
+    for lengths, host_lengths in (([6, 1], [4, 3]), ([1, 1], [1, 1]), ([1, 6], [3, 4])):
+        histories = [121, 255]
+        starts = [0, lengths[0], sum(lengths), sum(lengths), sum(lengths)]
+        host_starts = [0, host_lengths[0], sum(lengths), sum(lengths), sum(lengths)]
+        positions = [p for h, n in zip(histories, lengths) for p in range(h, h + n)]
+        live_tokens = len(positions)
+        # Deliberately poison the tail with otherwise-valid addresses and odd
+        # positions: neither C1/SWA nor C2 may publish these padding rows.
+        positions += [299] * (16 - live_tokens)
+        slots = [128 * (r + 1) + p % 64 for r, (h, n) in enumerate(zip(histories, lengths)) for p in range(h, h + n)]
+        slots += [999] * (16 - live_tokens)
+        common = SimpleNamespace(
+            slot_mapping=torch.tensor(slots),
+            block_table_tensor=torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [0] * 5, [0] * 5]),
+            query_start_loc=torch.tensor(starts, dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor(host_starts, dtype=torch.int32),
+            seq_lens=torch.tensor([h + n for h, n in zip(histories, lengths)] + [999, 999], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([h + n for h, n in zip(histories, host_lengths)] + [0, 0], dtype=torch.int32),
+            positions=torch.tensor(positions),
+            num_reqs=4,
+            num_actual_tokens=16,
+            num_input_tokens=16,
+            max_query_len=6,
+            max_seq_len=512,
+            is_prefilling=torch.zeros(4, dtype=torch.bool),
+            replay_start=torch.tensor([120, 253, 0, 0], dtype=torch.int32),
+        )
+        metadata = builder.build(0, common, num_actual_reqs=2, full_graph_mode=True)
+        assert metadata.max_query_len == 6
+        assert metadata.seq_lens.tolist() == [h + n for h, n in zip(histories, lengths)] + [0, 0]
+        if plane == "compressor.state_cache":
+            assert metadata.c2_ring_metadata[0].tolist() == [121, 255, 0, 0]
+            assert metadata.c2_ring_metadata[1].tolist() == lengths + [0, 0]
+            expected = [p % 2 == 1 for p in positions[:live_tokens]] + [False] * (16 - live_tokens)
+            assert metadata.c2_complete_mask.tolist() == expected
+            pointers.append(metadata.c2_ring_metadata.data_ptr())
+        else:
+            ratio = 1 if plane == "swa_cache" else 2
+            expected_slots = [
+                s // ratio if ratio == 1 or p % 2 == 1 else -1 for s, p in zip(slots[:live_tokens], positions)
+            ]
+            assert metadata.flat_slot_mapping.tolist() == expected_slots + [-1] * (16 - live_tokens)
+            if plane == "swa_cache":
+                expected_visible = [
+                    p - max(120 if req == 0 else 253, p - 127) + 1
+                    for req, (history, count) in enumerate(zip(histories, lengths))
+                    for p in range(history, history + count)
+                ]
+                assert metadata.ori_topk_length[:, 0].tolist() == expected_visible + [0] * (16 - live_tokens)
+                assert metadata.ori_topk_length.data_ptr() == builder._replay_visible_lens.data_ptr()
+            if ratio == 2:
+                assert metadata.cache_seq_lens.tolist() == [(h + n) // 2 for h, n in zip(histories, lengths)] + [0, 0]
+                assert metadata.cmp_residual.tolist() == [(h + n) % 2 for h, n in zip(histories, lengths)] + [0, 0]
+            pointers.append(metadata.flat_slot_mapping.data_ptr())
+    assert len(set(pointers)) == 1
+
+
 @pytest.mark.parametrize("full_graph_mode", [False, True])
 @pytest.mark.parametrize("index_first", [False, True])
 @pytest.mark.parametrize(

@@ -1,0 +1,6 @@
+# Replace 0 and rename this fragment when a PR number is assigned.
+pr: 0
+entries:
+  - category: feature
+    text: Added DeepSeek-V4.1-Flash DSpark adaptive verification on Model Runner V2 with bounded variable-length FULL decode graphs, padding-safe cache writes and C2 state handling. Hardware-specific accuracy and performance qualification is required.
+    model: deepseek-v4.1-flash
