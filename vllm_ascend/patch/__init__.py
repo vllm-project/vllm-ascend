@@ -1157,11 +1157,11 @@
 #       The upstream CUDA causal_conv1d kernels use `tl.extra.cuda.gdc_wait`,
 #       which Ascend Triton does not provide.
 #    How：
-#       Rebind the two upstream symbols to the AscendC implementations in
+#       Rebind the two upstream symbols to the generic torch implementations in
 #       `vllm_ascend.ops.causal_conv1d`, dropping the CUDA-only block-table and
-#       spec-decode kwargs those kernels do not accept. The NPU Triton update
-#       kernel is layered on top in `worker/patch_triton.py`, so this module must
-#       be imported first (see `worker/__init__.py`).
+#       spec-decode kwargs those kernels do not accept. This module owns the
+#       generic convolution bindings; GLM5Next uses its model-specific fla_npu
+#       AscendC entry points independently.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatch hook for the
 #       causal_conv1d kernels.
