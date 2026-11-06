@@ -114,8 +114,8 @@ def _ascend_resolve_kv_cache_block_sizes(
     This restriction is correct for CUDA but not for Ascend, which implements
     context parallelism for MLA and SWA-MLA layers independently.
 
-    For multiple KV cache groups with DCP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp to maintain alignment.
+    For multiple KV cache groups with DCP, align scheduler blocks to the LCM
+    of each group's token span. Replicated groups retain their local block size.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -145,15 +145,18 @@ def _ascend_resolve_kv_cache_block_sizes(
         # After filtering a private tail, it can therefore be smaller than the
         # sole cacheable group's token-page size.
         block_size = groups[0].kv_cache_spec.block_size if filtered_private_groups else cache_config.block_size
-        bs = block_size * dcp
+        group_dcp = dcp if groups and groups[0].kv_cache_spec.dcp_sharded else 1
+        bs = block_size * group_dcp
         return bs, bs
 
     group_block_sizes = [group.kv_cache_spec.block_size for group in groups]
     if dcp != 1:
-        # Ascend supports CP with multiple KV cache groups; compute
-        # scheduler_block_size using the LCM of all group block sizes
-        # multiplied by DCP for proper alignment.
-        scheduler_block_size = math.lcm(*group_block_sizes) * dcp
+        # Sharded target pages and replicated draft/state pages have
+        # different token spans in the same scheduler.
+        effective_sizes = [
+            group.kv_cache_spec.block_size * (dcp if group.kv_cache_spec.dcp_sharded else 1) for group in groups
+        ]
+        scheduler_block_size = math.lcm(*effective_sizes)
         if not cache_config.enable_prefix_caching:
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)
@@ -206,11 +209,12 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
 
     attention_specs = [*target_attention_specs.values(), *draft_attention_specs.values()]
     all_specs = [*attention_specs, *mamba_specs.values()]
-    # Only attention layers share a scheduler block table. Mamba keeps its
-    # own groups and may use max_model_len as block_size when cache_mode=none.
+    # Replicated draft attention owns a separate block table: target pages span
+    # DCP * block_size tokens while draft pages span only block_size tokens.
     if (
         len({spec.block_size for spec in attention_specs}) != 1
         or len({spec.page_size_bytes for spec in all_specs}) != 1
+        or len({spec.dcp_sharded for spec in attention_specs}) != 1
     ):
         return None
 
@@ -642,6 +646,29 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
+def _get_replicated_draft_pools(
+    groups: list[KVCacheGroupSpec],
+) -> list[list[KVCacheGroupSpec]] | None:
+    """Keep contiguous dense draft K/V outside the target/state alias pool."""
+    if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
+        return None
+    target_groups = []
+    draft_pools = []
+    for group in groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if all(
+            isinstance(s, FullAttentionSpec) and not isinstance(s, MLAAttentionSpec) and not s.dcp_sharded
+            for s in specs
+        ):
+            draft_pools.append([group])
+        else:
+            target_groups.append(group)
+    if target_groups and draft_pools:
+        return [target_groups, *draft_pools]
+    return None
+
+
 def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -654,6 +681,9 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    pools = _get_replicated_draft_pools(kv_cache_groups)
+    if pools is not None:
+        return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -675,7 +705,8 @@ def _has_ascend_multi_allocation_kv_cache_layout(
 ) -> bool:
     """Whether Ascend materializes these groups as several device allocations."""
     return (
-        tq_cache.uses_turboquant_groups(kv_cache_groups)
+        _get_replicated_draft_pools(kv_cache_groups) is not None
+        or tq_cache.uses_turboquant_groups(kv_cache_groups)
         or is_deepseek_v41_cache(kv_cache_groups)
         or _get_glm5_next_cache_layout(kv_cache_groups) is not None
         or _is_deepseek_v4_groups(kv_cache_groups)
@@ -815,7 +846,33 @@ def _ascend_get_kv_cache_config_from_groups(
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
-    if qwen_config is not None:
+    pools = _get_replicated_draft_pools(kv_cache_groups)
+    if pools is not None:
+        # Every physical pool shares the scheduler's block count, but owns a
+        # disjoint byte range. Use the same aggregate divisor as admission and
+        # rank re-planning, then retain upstream's per-pool stride descriptors.
+        pool_bytes = [_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools]
+        bytes_per_block = sum(pool_bytes)
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+        total_size = num_blocks * bytes_per_block
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for pool, pool_bytes_per_block in zip(pools, pool_bytes):
+            pool_size = num_blocks * pool_bytes_per_block
+            pool_config = _orig_get_kv_cache_config_from_groups(vllm_config, pool, pool_size)
+            assert pool_config.num_blocks == num_blocks
+            tensors.extend(
+                replace(tensor, size=total_size, offset=offset + tensor.offset)
+                for tensor in pool_config.kv_cache_tensors
+            )
+            offset += pool_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+    elif qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)

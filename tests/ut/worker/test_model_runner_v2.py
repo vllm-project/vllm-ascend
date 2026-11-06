@@ -2221,7 +2221,8 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
             int(before[runner.req_states.req_id_to_index[req_id]]) + output.num_scheduled_tokens[req_id]
             for req_id in req_ids
         ]
-        assert runner.input_buffers.seq_lens_cpu[2:].tolist() == [777, 777]
+        # Padded graph rows have no KV even when the prior batch was larger.
+        assert runner.input_buffers.seq_lens_cpu[2:].tolist() == [0, 0]
         # Simulate the upstream optimistic host count advancing to the next step.
         runner.req_states.num_computed_tokens_cpu[:2] += 6
         runner.req_states.num_computed_tokens.gpu[:2] += 6

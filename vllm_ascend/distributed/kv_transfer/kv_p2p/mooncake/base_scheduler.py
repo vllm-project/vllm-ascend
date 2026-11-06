@@ -17,7 +17,6 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -176,11 +175,7 @@ class MooncakeBaseConnectorScheduler:
                 )
                 transfer_block_ids.append(blocks[:-num_speculative_blocks] if num_speculative_blocks else blocks)
             else:
-                # SWA remains TP-sharded/replicated and keeps its original
-                # logical block size even when FullAttention uses DCP.
-                cp_size = (
-                    1 if all(isinstance(spec, SlidingWindowSpec) for spec in group_specs) else max(1, self.dcp_size)
-                )
+                cp_size = max(1, self.dcp_size) if any(spec.dcp_sharded for spec in group_specs) else 1
                 num_prompt_blocks = cdiv(prompt_len, block_size * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)

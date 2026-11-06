@@ -33,6 +33,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+    dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
 
@@ -41,6 +42,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
+            ("dcp_sharded", self.dcp_sharded),
             ("kv_caches_base_addr", self.kv_caches_base_addr),
             ("block_strides", self.block_strides),
             ("block_lens", self.block_lens),
@@ -104,6 +106,7 @@ class MooncakePPTransferMetadata:
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+    dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
 
 

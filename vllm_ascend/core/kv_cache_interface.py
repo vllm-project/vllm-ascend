@@ -260,6 +260,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
                 spec.indexes_kv_by_block_stride,
+                spec.dcp_sharded,
             )
             for spec in specs
         }
@@ -289,7 +290,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         # Note(hc): each dcp rank only need save
         # (max_model_len//dcp_world_size) tokens locally.
-        if dcp_world_size > 1:
+        if self.dcp_sharded and dcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
@@ -338,6 +339,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
+        assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
             len(cache_dtype_str_set) == 1
             and len(dtype_set) == 1
@@ -354,6 +356,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         )
         return cls(
             block_size=specs[0].block_size,
+            dcp_sharded=specs[0].dcp_sharded,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=dtype_set.pop(),
@@ -407,6 +410,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        assert len({spec.dcp_sharded for spec in specs}) == 1
         # ``extra_retained_tokens`` belongs to ``SlidingWindowSpec`` and
         # ``bounded_replay`` arrives with vLLM #56227. This override builds the
         # merged spec from scratch rather than through the parent's ``merge``,
@@ -435,6 +439,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             carried_kwargs.update(declared_kwarg(cls, "extra_retained_tokens", extra_retained_set.pop()))
         return cls(
             block_size=specs[0].block_size,
+            dcp_sharded=specs[0].dcp_sharded,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
