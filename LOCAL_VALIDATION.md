@@ -82,3 +82,24 @@ accuracy are not demonstrated.
 No commit, push or PR was made. The release fragment uses PR 0 as a local
 placeholder: rename it and replace the number when opening the PR. Include
 failed/unrun checks, hardware results and AI assistance in the PR description.
+
+## Cold/cache-hit consistency fix
+
+Enabled Qwen layers use the same Triton recurrence for both checkpoint-bearing
+prefills and cache-hit tails. The metadata fast path remains available for
+pure decode and feature-disabled prefills. At exported boundaries, FP32
+accumulators are rounded through the SSM cache dtype before continuing, so a
+cold request does not carry precision absent from a restored BF16/FP16 state.
+The newer upstream planner, exporter and all-layer capability hooks are retained.
+
+Device regressions cover FP32/BF16/FP16 cache roundtrips, strided inputs and
+restored-tail outputs/states. They still require NPU execution. After restarting
+the server to discard old cache entries, repeat the same greedy request twice
+with a verified cache hit, compare outputs and first-divergence logits, and
+remeasure both cold and warm TTFT/TPOT. Uniform prefill backend selection can
+change warm-tail performance. Host tests do not prove whole-model token identity.
+
+The user reports that the corresponding dev implementation has been tested
+on device and resolves the repeated-request output mismatch. This is supporting
+evidence for the shared recurrence/rounding fix; the source branch's newer
+vLLM integration still needs its own device regression and performance checks.

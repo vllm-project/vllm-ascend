@@ -794,7 +794,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoints
 
             ascend_checkpoint = build_gdn_checkpoints(self, m, spec_sequence_masks_cpu, num_decodes)
-        if runtime_batch and num_actual_reqs > 0 and ascend_checkpoint is None:
+        if runtime_batch and num_actual_reqs > 0 and not (self._ascend_gdn_checkpoints and num_prefills):
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
             )
@@ -964,7 +964,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
-                    build_device_metadata=self.build_device_chunk_metadata or ascend_checkpoint is not None,
+                    build_device_metadata=self.build_device_chunk_metadata or self._ascend_gdn_checkpoints,
                 )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64

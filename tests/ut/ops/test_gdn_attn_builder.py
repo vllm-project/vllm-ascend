@@ -516,7 +516,7 @@ def test_host_builder_exposes_host_descriptors_without_device_chunks(has_pcp_con
 
 
 @pytest.mark.parametrize("creates_checkpoint", [False, True])
-def test_host_builder_materializes_device_chunks_only_for_internal_checkpoint(monkeypatch, creates_checkpoint):
+def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(monkeypatch, creates_checkpoint):
     from vllm_ascend.ops import gdn_checkpoint
 
     _patch_missing_runtime_cdiv(monkeypatch)
@@ -542,7 +542,7 @@ def test_host_builder_materializes_device_chunks_only_for_internal_checkpoint(mo
         "chunk_indices_large_block",
         "block_indices_cumsum",
     ):
-        assert (getattr(chunk, field) is not None) == creates_checkpoint
+        assert getattr(chunk, field) is not None
     assert getattr(metadata, "ascend_checkpoint", None) is checkpoint
 
 

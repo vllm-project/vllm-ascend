@@ -95,8 +95,8 @@ def build_gdn_checkpoints(builder, common, spec_masks_cpu, num_decodes):
 
 
 def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initial_state, cu_seqlens):
-    checkpoint = metadata.ascend_checkpoint
-    states = layer._ascend_checkpoint_workspace[: initial_state.shape[0]]
+    checkpoint = getattr(metadata, "ascend_checkpoint", None)
+    states = None if checkpoint is None else layer._ascend_checkpoint_workspace[: initial_state.shape[0]]
     output, final_state = chunk_gated_delta_rule_checkpoint(
         q,
         k,
@@ -107,16 +107,18 @@ def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initi
         cu_seqlens,
         metadata.non_spec_prefill_metadata.chunk,
         states,
-        checkpoint.checkpoint_offsets,
+        None if checkpoint is None else checkpoint.checkpoint_offsets,
+        checkpoint_state_dtype=layer.kv_cache[1].dtype,
     )
-    # Ascend's conv state is [page, history, channel]; the shared exporter
-    # accepts [page, channel, history]. Preserve its padded page strides.
-    layer._checkpoint_exporter.export(
-        checkpoint,
-        raw_qkv=raw_qkv,
-        conv_state=layer.kv_cache[0].transpose(-1, -2),
-        recurrent_checkpoint=states,
-        recurrent_state=layer.kv_cache[1],
-        cu_seqlens=cu_seqlens,
-    )
+    if checkpoint is not None:
+        # Ascend's conv state is [page, history, channel]; the shared exporter
+        # accepts [page, channel, history]. Preserve its padded page strides.
+        layer._checkpoint_exporter.export(
+            checkpoint,
+            raw_qkv=raw_qkv,
+            conv_state=layer.kv_cache[0].transpose(-1, -2),
+            recurrent_checkpoint=states,
+            recurrent_state=layer.kv_cache[1],
+            cu_seqlens=cu_seqlens,
+        )
     return output, final_state.transpose(-1, -2).contiguous()

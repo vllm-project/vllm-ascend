@@ -800,7 +800,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
             # Gate on the model dtype so fp16 models (e.g. ColQwen3.5) fall back
             # to the Triton pipeline instead of hitting an aclnn dtype error.
-            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16
+            use_checkpoint_prefill = (
+                getattr(self, "_ascend_internal_checkpoint_enabled", False) and self._exports_checkpoints
+            )
+            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16 and not use_checkpoint_prefill
             use_fla_gdn_prefill = (
                 supports_fused_dtype
                 and get_pcp_group().world_size == 1
@@ -817,7 +820,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 and AscendGatedDeltaNetAttention._probe_fused_chunk()
                 and get_pcp_group().world_size == 1
             )
-            if checkpoint is not None:
+            # Keep the same numerical recurrence on cold requests and
+            # cache-hit tails, even when the tail creates no new checkpoint.
+            if use_checkpoint_prefill:
                 initial_state = gather_ssm_states(ssm_state, prefill_state_indices, prefill_has_initial_state)
                 core_attn_out_non_spec, last_recurrent_state = run_gdn_checkpoint_prefill(
                     self,

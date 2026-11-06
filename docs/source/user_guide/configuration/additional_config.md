@@ -403,7 +403,11 @@ worker cannot safely assume the same internal checkpoint boundary in these modes
 Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
 AscendC FwdH implementation to export only selected FP32 chunk-start states.
 Convolution history and recurrent state are written through the shared upstream
-checkpoint exporter. Decode is unchanged. This backend change needs numerical
+checkpoint exporter. Enabled layers use the same Triton recurrence for cold
+prefills and cache-hit tails, including tails without a new checkpoint. At an
+exported boundary, the cold FP32 accumulator is rounded to the configured SSM
+cache dtype before continuing, matching the state restored by a cache hit.
+Decode is unchanged. This backend change needs numerical
 and performance qualification; skipping a model forward does not guarantee a
 net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
 `max_num_seqs * local_value_heads * 128 * 128 * 4` bytes. Eligible layers

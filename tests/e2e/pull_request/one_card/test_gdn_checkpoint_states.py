@@ -8,7 +8,8 @@ import torch
 from vllm_ascend.ops.triton.fla.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 
 
-def test_fp32_internal_state_matches_truncated_recurrence():
+@pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_internal_state_matches_cache_roundtrip(cache_dtype):
     torch.manual_seed(17)
     device = "npu"
     k = torch.randn(1, 192, 2, 128, device=device, dtype=torch.bfloat16) * 0.01
@@ -17,7 +18,7 @@ def test_fp32_internal_state_matches_truncated_recurrence():
     g = torch.zeros(1, 2, 192, device=device, dtype=torch.float32)
     initial = torch.randn(1, 2, 128, 128, device=device, dtype=torch.float32) * 0.01
     states = torch.empty_like(initial)
-    chunk_gated_delta_rule_fwd_h(
+    _, _, full_final = chunk_gated_delta_rule_fwd_h(
         k,
         w,
         u,
@@ -26,6 +27,7 @@ def test_fp32_internal_state_matches_truncated_recurrence():
         True,
         checkpoint_output=states,
         checkpoint_offsets=torch.tensor([128], dtype=torch.int32, device=device),
+        checkpoint_state_dtype=cache_dtype,
     )
     _, _, truncated = chunk_gated_delta_rule_fwd_h(
         k[:, :128].contiguous(),
@@ -36,7 +38,16 @@ def test_fp32_internal_state_matches_truncated_recurrence():
         True,
     )
     assert states.dtype == torch.float32
-    torch.testing.assert_close(states.transpose(-1, -2), truncated, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(states.transpose(-1, -2), truncated.to(cache_dtype).float(), rtol=0, atol=0)
+    _, _, resumed_final = chunk_gated_delta_rule_fwd_h(
+        k[:, 128:].contiguous(),
+        w[:, 128:].contiguous(),
+        u[:, 128:].contiguous(),
+        g[:, :, 128:].contiguous(),
+        states.to(cache_dtype).transpose(-1, -2).contiguous(),
+        True,
+    )
+    torch.testing.assert_close(resumed_final, full_final, rtol=1e-5, atol=1e-6)
 
 
 def test_shared_exporter_preserves_ascend_conv_layout_and_mtp_slots():
@@ -72,12 +83,13 @@ def test_shared_exporter_preserves_ascend_conv_layout_and_mtp_slots():
 
 
 @pytest.mark.parametrize("layout", ["head_first", "token_slice"])
-def test_checkpoint_prefill_matches_dense_inputs(layout):
+@pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_checkpoint_prefill_matches_dense_inputs_and_restored_tail(layout, cache_dtype):
     from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
     from vllm_ascend.ops.triton.fla import chunk
 
     torch.manual_seed(23)
-    lengths = [129, 65, 193]
+    lengths = [145, 65, 209]
     total, heads, dim = sum(lengths), 4, 128
 
     def strided_input():
@@ -90,7 +102,7 @@ def test_checkpoint_prefill_matches_dense_inputs(layout):
     g = -torch.rand(1, total * 2, heads, device="npu")[:, ::2] * 0.01
     beta = torch.rand(1, total * 2, heads, device="npu", dtype=torch.bfloat16)[:, ::2]
     initial = torch.randn(3, heads, dim, dim, device="npu", dtype=torch.float32) * 0.01
-    cu_cpu = torch.tensor([0, 129, 194, total], dtype=torch.int32)
+    cu_cpu = torch.tensor([0, 145, 210, total], dtype=torch.int32)
     cu = cu_cpu.to("npu")
     builder = SimpleNamespace(
         vllm_config=SimpleNamespace(
@@ -106,7 +118,19 @@ def test_checkpoint_prefill_matches_dense_inputs(layout):
         patch.object(chunk, "get_forward_context", return_value=SimpleNamespace(attn_metadata=None)),
         patch.object(chunk, "get_pcp_group", return_value=SimpleNamespace(world_size=1)),
     ):
-        actual = chunk.chunk_gated_delta_rule_checkpoint(q, k, v, g, beta, initial, cu, metadata, snapshots, offsets)
+        actual = chunk.chunk_gated_delta_rule_checkpoint(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial,
+            cu,
+            metadata,
+            snapshots,
+            offsets,
+            checkpoint_state_dtype=cache_dtype,
+        )
         expected = chunk.chunk_gated_delta_rule_checkpoint(
             q.contiguous(),
             k.contiguous(),
@@ -118,7 +142,27 @@ def test_checkpoint_prefill_matches_dense_inputs(layout):
             metadata,
             dense_snapshots,
             offsets,
+            checkpoint_state_dtype=cache_dtype,
         )
+        # A real cache hit restores the cache dtype and computes only the tail;
+        # no new checkpoint is created, but the recurrence must stay the same.
+        tail_cu_cpu = torch.tensor([0, 17], dtype=torch.int32)
+        tail_metadata = _build_non_spec_chunked_prefill_metadata(builder, tail_cu_cpu, torch.device("npu"))
+        restored = chunk.chunk_gated_delta_rule_checkpoint(
+            q[:, 128:145],
+            k[:, 128:145],
+            v[:, 128:145],
+            g[:, 128:145],
+            beta[:, 128:145],
+            snapshots[:1].to(cache_dtype).transpose(-1, -2).contiguous(),
+            tail_cu_cpu.to("npu"),
+            tail_metadata,
+            None,
+            None,
+            checkpoint_state_dtype=cache_dtype,
+        )
+    torch.testing.assert_close(restored[0], actual[0][:, 128:145], rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(restored[1], actual[1][:1], rtol=1e-4, atol=1e-5)
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(snapshots[[0, 2]], dense_snapshots[[0, 2]], rtol=1e-5, atol=1e-6)

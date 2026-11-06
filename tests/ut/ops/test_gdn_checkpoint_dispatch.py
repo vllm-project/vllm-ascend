@@ -55,7 +55,10 @@ class CheckpointDispatchTest(unittest.TestCase):
 
     def test_checkpoint_entrypoint_requires_complete_device_metadata(self):
         entry = function_from_source(
-            ROOT / "vllm_ascend/ops/triton/fla/chunk.py", "chunk_gated_delta_rule_checkpoint", {}, stop_at="q"
+            ROOT / "vllm_ascend/ops/triton/fla/chunk.py",
+            "chunk_gated_delta_rule_checkpoint",
+            {"torch": SimpleNamespace(float32="fp32")},
+            stop_at="q",
         )
         fields = {
             name: object()
@@ -90,6 +93,7 @@ class CheckpointDispatchTest(unittest.TestCase):
         output, final_state = object(), object()
 
         def forward(q, k, v, g, beta, scale, initial_state, output_final_state, **kwargs):
+            self.assertTrue(kwargs["use_triton_recurrence"])
             for tensor in (q, k, v, g, beta, initial_state, kwargs["cu_seqlens"], kwargs["checkpoint_offsets"]):
                 self.assertTrue(tensor.is_contiguous)
             self.assertIs(kwargs["checkpoint_output"], states)
@@ -98,7 +102,7 @@ class CheckpointDispatchTest(unittest.TestCase):
         entry = function_from_source(
             ROOT / "vllm_ascend/ops/triton/fla/chunk.py",
             "chunk_gated_delta_rule_checkpoint",
-            {"l2norm_fwd": normalize, "chunk_gated_delta_rule_fwd": forward},
+            {"l2norm_fwd": normalize, "chunk_gated_delta_rule_fwd": forward, "torch": SimpleNamespace(float32="fp32")},
         )
         metadata = SimpleNamespace(
             **{
@@ -131,8 +135,15 @@ class CheckpointDispatchTest(unittest.TestCase):
             def contiguous(self):
                 return self
 
-        for checkpoint in (False, True):
-            with self.subTest(checkpoint=checkpoint):
+            def __getitem__(self, key):
+                return self
+
+            def clone(self):
+                raise AssertionError("Uncompacted Triton states must not be scattered again")
+
+        for checkpoint, force_triton in ((False, False), (True, False), (False, True)):
+            with self.subTest(checkpoint=checkpoint, force_triton=force_triton):
+                uses_triton = checkpoint or force_triton
                 q, k, v, g, beta, initial = (Tensor() for _ in range(6))
                 w, u, h, v_new, final, output = (Tensor() for _ in range(6))
                 states, offsets = object(), object()
@@ -164,6 +175,26 @@ class CheckpointDispatchTest(unittest.TestCase):
                         "SUPPRESS_LEVEL": 0,
                     },
                 )
+                metadata = None
+                if force_triton:
+                    # Triton already preserves the layout of zero-length rows.
+                    metadata = SimpleNamespace(
+                        **{
+                            name: None
+                            for name in (
+                                "block_indices_cumsum",
+                                "cu_seqlens_host",
+                                "chunk_indices_chunk64",
+                                "chunk_indices_chunk64_host",
+                                "chunk_offsets_chunk64",
+                                "update_chunk_offsets_chunk64",
+                                "final_chunk_indices_chunk64",
+                                "chunk_indices_large_block",
+                                "cu_seqlens_kern",
+                            )
+                        },
+                        keep_meta=object(),
+                    )
                 result = forward(
                     q,
                     k,
@@ -175,31 +206,38 @@ class CheckpointDispatchTest(unittest.TestCase):
                     True,
                     checkpoint_output=states if checkpoint else None,
                     checkpoint_offsets=offsets if checkpoint else None,
+                    use_triton_recurrence=force_triton,
+                    prebuilt_meta=metadata,
                 )
-                self.assertEqual((w.conversions, u.conversions), (0, 0) if checkpoint else (1, 1))
-                self.assertEqual(triton_kernel.call_count, int(checkpoint))
-                self.assertEqual(ascendc_kernel.call_count, int(not checkpoint))
-                if checkpoint:
+                self.assertEqual((w.conversions, u.conversions), (0, 0) if uses_triton else (1, 1))
+                self.assertEqual(triton_kernel.call_count, int(uses_triton))
+                self.assertEqual(ascendc_kernel.call_count, int(not uses_triton))
+                if uses_triton:
                     arguments = triton_kernel.call_args.kwargs
                     self.assertIs(arguments["w"], w)
                     self.assertIs(arguments["u"], u)
                     self.assertIs(arguments["initial_state"], initial)
-                    self.assertIs(arguments["checkpoint_output"], states)
-                    self.assertIs(arguments["checkpoint_offsets"], offsets)
+                    self.assertIs(arguments["checkpoint_output"], states if checkpoint else None)
+                    self.assertIs(arguments["checkpoint_offsets"], offsets if checkpoint else None)
                 else:
                     self.assertIs(ascendc_kernel.call_args.args[1], w)
                     self.assertIs(ascendc_kernel.call_args.args[2], u)
                 self.assertIs(result[1], output)
                 self.assertIs(result[3], final)
 
-    def test_decode_and_prefill_without_checkpoint_keep_fused_route(self):
-        for num_prefills, checkpoint, expected_calls in [(0, None, 1), (1, None, 1), (1, object(), 0)]:
+    def test_checkpoint_prefills_bypass_fused_metadata_but_decode_keeps_fast_path(self):
+        for enabled, num_prefills, checkpoint, expected_calls in (
+            (False, 1, None, 1),
+            (True, 0, None, 1),
+            (True, 1, None, 0),
+            (True, 1, object(), 0),
+        ):
             with self.subTest(num_prefills=num_prefills, checkpoint=checkpoint):
                 sentinel = object()
                 builder = SimpleNamespace(
                     use_full_cuda_graph=False,
                     use_spec_decode=False,
-                    _ascend_gdn_checkpoints=True,
+                    _ascend_gdn_checkpoints=enabled,
                     _build_fused_metadata=Mock(return_value=sentinel),
                 )
                 module = ModuleType("vllm_ascend.ops.gdn_checkpoint")
@@ -224,7 +262,47 @@ class CheckpointDispatchTest(unittest.TestCase):
                     result = build(builder, 0, SimpleNamespace(num_reqs=1), num_actual_reqs=1)
                 self.assertEqual(builder._build_fused_metadata.call_count, expected_calls)
                 self.assertIs(result, sentinel if expected_calls else None)
-                self.assertEqual(module.build_gdn_checkpoints.call_count, int(bool(num_prefills)))
+                self.assertEqual(module.build_gdn_checkpoints.call_count, int(enabled and bool(num_prefills)))
+
+    def test_cold_and_cache_hit_prefill_share_backend_and_cache_dtype(self):
+        class Tensor:
+            shape = (1, 4, 128, 128)
+            dtype = "bf16"
+
+            def transpose(self, *args):
+                return self
+
+            def contiguous(self):
+                return self
+
+            def __getitem__(self, key):
+                return self
+
+        run = function_from_source(
+            ROOT / "vllm_ascend/ops/gdn_checkpoint.py",
+            "run_gdn_checkpoint_prefill",
+            {},
+        )
+        for creates_checkpoint in (False, True):
+            with self.subTest(creates_checkpoint=creates_checkpoint):
+                output, final = Tensor(), Tensor()
+                backend = Mock(return_value=(output, final))
+                run.__globals__["chunk_gated_delta_rule_checkpoint"] = backend
+                workspace = Tensor()
+                exporter = Mock()
+                layer = SimpleNamespace(
+                    _ascend_checkpoint_workspace=workspace, kv_cache=(Tensor(), Tensor()), _checkpoint_exporter=exporter
+                )
+                checkpoint = SimpleNamespace(checkpoint_offsets=object()) if creates_checkpoint else None
+                metadata = SimpleNamespace(
+                    ascend_checkpoint=checkpoint, non_spec_prefill_metadata=SimpleNamespace(chunk=object())
+                )
+                result = run(layer, metadata, Tensor(), *(Tensor() for _ in range(7)))
+                self.assertEqual(result, (output, final))
+                self.assertEqual(backend.call_args.kwargs["checkpoint_state_dtype"], "bf16")
+                self.assertIs(backend.call_args.args[8], workspace if creates_checkpoint else None)
+                self.assertIs(backend.call_args.args[9], checkpoint.checkpoint_offsets if creates_checkpoint else None)
+                self.assertEqual(exporter.export.call_count, int(creates_checkpoint))
 
     def test_checkpoint_workspace_is_shared_only_for_matching_device_and_shape(self):
         context = {}
