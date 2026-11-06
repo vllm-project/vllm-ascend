@@ -1,4 +1,0 @@
-pr: 21167
-entries:
-  - category: feature
-    text: Added an AscendStore block_only mode for whole-page external KV cache transfers while preserving fine-grained local prefix-cache hits.
