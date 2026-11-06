@@ -58,7 +58,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
-    # the mixin sample_draft alignment is not used; instead load_draft_model
+    # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
     # the group-agreed capacity and trim the logits back (no _sample_sequential
     # override, upstream sampling logic untouched).
@@ -116,7 +116,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         DSpark feeds its vocab-sharded draft LM head directly through
         ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
         ``_sample_sequential_topk``), which bypasses the mixin's
-        ``sample_draft`` alignment. Wrap the method instead of overriding the
+        speculator-level logits hook. Wrap the method instead of overriding the
         sampling loop: every rank feeds the group-agreed capacity
         (``max_num_reqs * num_speculative_steps``) into the LM-head
         collectives, then the logits are trimmed back to the real rows.
