@@ -42,6 +42,7 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+from vllm_ascend.ops.triton.compute_slot_mapping_2d import compute_slot_mapping_2d
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -1108,29 +1109,42 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         flat_output=self._flat_slot_mapping[:num_input_tokens],
                     )
                 else:
-                    if compressed and ratio != 1:
-                        active_slots = compressed_slot_mapping(active_slots, ratio)
-                    valid = active_slots >= 0
-                    if compressed and ratio == 2:
-                        if kwargs.get("skip_ring_state_update", False):
-                            valid.zero_()
-                        else:
-                            valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
-                            valid &= torch.arange(num_input_tokens, device=active_slots.device) < valid_end
-                            if positions is not None:
-                                valid &= positions.remainder(2) == 1
-                    physical = active_slots.clamp_min(0)
-                    self._slot_mapping_2d[:num_input_tokens, 0].copy_(
-                        torch.where(
-                            valid,
-                            torch.div(physical, storage_block_size, rounding_mode="floor"),
-                            -1,
+                    if active_slots.device.type == "npu" and not (compressed and ratio == 2):
+                        # Fused path: one kernel computes (optional compression +
+                        # div / rem / where / copy) that previously emitted ~10
+                        # eager ops per group (GeScalar/ClampMin/DivMods/
+                        # Remainder/SWhere/ViewCopy).
+                        compute_slot_mapping_2d(
+                            active_slots=active_slots,
+                            storage_block_size=storage_block_size,
+                            ratio=ratio if compressed else 1,
+                            slot2d=self._slot_mapping_2d[:num_input_tokens],
+                            flat=self._flat_slot_mapping[:num_input_tokens],
                         )
-                    )
-                    self._slot_mapping_2d[:num_input_tokens, 1].copy_(
-                        torch.where(valid, physical.remainder(storage_block_size), -1)
-                    )
-                    self._flat_slot_mapping[:num_input_tokens].copy_(torch.where(valid, active_slots, -1))
+                    else:
+                        if compressed and ratio != 1:
+                            active_slots = compressed_slot_mapping(active_slots, ratio)
+                        valid = active_slots >= 0
+                        if compressed and ratio == 2:
+                            if kwargs.get("skip_ring_state_update", False):
+                                valid.zero_()
+                            else:
+                                valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
+                                valid &= torch.arange(num_input_tokens, device=active_slots.device) < valid_end
+                                if positions is not None:
+                                    valid &= positions.remainder(2) == 1
+                        physical = active_slots.clamp_min(0)
+                        self._slot_mapping_2d[:num_input_tokens, 0].copy_(
+                            torch.where(
+                                valid,
+                                torch.div(physical, storage_block_size, rounding_mode="floor"),
+                                -1,
+                            )
+                        )
+                        self._slot_mapping_2d[:num_input_tokens, 1].copy_(
+                            torch.where(valid, physical.remainder(storage_block_size), -1)
+                        )
+                        self._flat_slot_mapping[:num_input_tokens].copy_(torch.where(valid, active_slots, -1))
                     prepared_slots = self._slot_mapping_2d[:num_input_tokens]
                     prepared_flat_slots = self._flat_slot_mapping[:num_input_tokens]
                 shared[slot_key] = prepared_slots
