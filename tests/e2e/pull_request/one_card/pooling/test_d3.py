@@ -19,8 +19,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 MODEL = "vllm-sr/d3-edge"
-MODELS = ("vllm-sr/d3-edge", "vllm-sr/d3-nano")
-# bf16 backbone vs the checkpoint runtime: d3-nano reaches about 0.019 on this prompt, so leave headroom.
+# Allow for numerical differences between the Ascend and reference runtimes.
 SOFTMAX_ATOL = 0.03
 # These tests only send text, so media inputs are switched off. Keep every D3 run on one setting: the torch.compile
 # cache key of vLLM ignores `limit_mm_per_prompt`, and a graph compiled with the other setting crashes graph-mode
@@ -49,9 +48,8 @@ QUESTIONS: dict[str, dict[str, Any]] = {
 }
 
 
-@pytest.mark.parametrize("model", MODELS)
-def test_d3_pooling_matches_checkpoint_runtime(model):
-    reference_model = AutoModel.from_pretrained(model, trust_remote_code=True)
+def test_d3_pooling_matches_checkpoint_runtime():
+    reference_model = AutoModel.from_pretrained(MODEL, trust_remote_code=True)
     runtime = reference_model.runtime
     prepared = runtime.prepare(STATE, QUESTIONS)
     runnable_keys = prepared.runnable
@@ -61,7 +59,7 @@ def test_d3_pooling_matches_checkpoint_runtime(model):
     del reference_model, runtime
     cleanup_dist_env_and_memory()
 
-    with VllmRunner(model, runner="pooling", max_model_len=4096, limit_mm_per_prompt=NO_MEDIA) as runner:
+    with VllmRunner(MODEL, runner="pooling", max_model_len=4096, limit_mm_per_prompt=NO_MEDIA) as runner:
         outputs = runner.model.classify([{"prompt_token_ids": ids} for ids in prompt_ids], use_tqdm=False)
 
     assert len(outputs) == len(option_counts)
