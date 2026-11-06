@@ -423,6 +423,24 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_disabled_with_flashcomm1_sp(self, mock_fix_incompatible_config):
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the int8
+        # all-reduce wrapper would never be invoked. Warn and disable it.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.parallel_config.data_parallel_size = 2
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "enable_flashcomm1": True,
+            "quantized_all_reduce_config": {"enable": True},
+        }
+        with patch("vllm_ascend.ascend_config.logger.warning_once") as mock_warning:
+            ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
+        self.assertTrue(any("FlashComm1/SP" in str(call) for call in mock_warning.call_args_list))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
