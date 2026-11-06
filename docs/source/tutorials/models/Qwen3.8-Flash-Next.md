@@ -10,7 +10,7 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This tutorial covers model preparation, installation, colocated and prefill/decode (PD) deployment, functional verification, and evaluation on A2 series, A3 series, and Ascend 950 DT. Section 5.4 describes basic PD deployment with a MemCache three-tier KV cache pool on A3 series and Ascend 950 DT.
+This tutorial covers model preparation, installation, colocated and prefill/decode (PD) deployment, functional verification, and evaluation on A2 series, A3 series, and Ascend 950 DT. Section 5.4 describes basic PD deployment with a MemCache three-tier KV cache pool on A2 series, A3 series, and Ascend 950 DT.
 
 Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`. The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT) and additional performance settings; they require separate runtime and accuracy validation. For the best performance, it is recommended to use **vLLM-Ascend v0.32.0rc** (`releases/v0.32.0rc`).
 
@@ -42,13 +42,17 @@ The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD r
 
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
-Use the v0.32.0rc image for the target hardware.
+Select the image for your target hardware.
+
+!!! note
+
+    Run Docker on the host: `IMAGE` selects the image, and `NAME` sets the container name used by `docker exec`. The documentation build supplies the image version; when copying the Markdown source, replace the version template with the release version of the documentation you are using.
 
 === "A2 series"
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -81,7 +85,7 @@ Use the v0.32.0rc image for the target hardware.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -122,7 +126,7 @@ Use the v0.32.0rc image for the target hardware.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -154,6 +158,8 @@ Use the v0.32.0rc image for the target hardware.
       -it $IMAGE bash
     ```
 
+The A2/A3 `/etc/hccn.conf` mount supplies the communication configuration for the PD examples; check that the host file exists, and omit this mount if running only colocated deployment.
+
 Ensure the CANN and ATB environments are initialized in the serving shell. If the image does not initialize them automatically, source the corresponding `set_env.sh` scripts from their installation directories. Then verify that vLLM and vLLM-Ascend can be imported:
 
 ```bash
@@ -168,23 +174,107 @@ Initialize the CANN and ATB environments in the serving shell as described in th
 
 ### 4.3 Docker for Three-Tier PD Pooling
 
-Use the following containers for the A3 series and Ascend 950 DT basic PD pooling configuration in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). For colocated, ordinary PD, and image-and-text 10K deployment, use Section 4.1. The commands below retain `--privileged=true` from the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks); this tutorial has not validated a configuration with reduced container privileges.
+Use the following containers for the A2 series, A3 series, and Ascend 950 DT basic PD pooling configuration in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). For colocated, ordinary PD, and image-and-text 10K deployment, use Section 4.1. The commands below retain `--privileged=true` from the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks); this tutorial has not validated a configuration with reduced container privileges.
 
-Before creating the container, prepare the dedicated SSD or loop device using the storage preparation steps in Section 5.4. Replace `<SSD_DEVICE_PATH>` with its actual host path in both sides of the device mapping. For multiple devices, add one `--device` entry per device and join their container paths with colons in the storage configuration file, for example `ubsio.disk.path = /dev/loop0:/dev/loop1` when those are the allocated devices. Create loop devices on the host, not inside the container.
+The examples below use one container per host for MetaService, the P/D engines with their embedded LocalServices, and the proxy. Run the following preparation on the **host**, then choose the matching hardware tab; Section 5.4 starts the services inside that container.
 
-Set `MEMCACHE_CONFIG_DIR` to the existing directory containing `mmc-local.conf` for the selected hardware. Docker mounts this directory at the same absolute path and passes the variable into the container. All configuration paths below use this variable. If starting new storage services with Section 5.4, prepare `mmc-meta.conf` in the same directory and, for A3 standalone storage, prepare `mmc-local-standalone.conf` there as well.
+For A2, repeat the host preparation and create one container on each of the two hosts from Section 5.2. Each host uses its own SSD and personal configuration directory. Run Prefill, MetaService, and Proxy on the prefill host, and Decode on the decode host; both hosts connect to the same MetaService and ConfigStore.
+
+!!! note "A2 host HDK requirement"
+
+    A2 three-tier pooling requires **HDK 25.5.1 or later on both hosts**. HDK is installed on the host, not in the Docker image. Run `npu-smi info` on each host to check the version; if it is older, follow the [HDK upgrade guide](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/softwareinst/instg/instg_0029.html) and check again before starting the containers.
+
+**Prepare the SSD device on the host:**
+
+```bash
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+```
+
+Choose a dedicated device with no partitions, mount points, filesystem signatures, or data to retain. Do not use a system disk. If a suitable device is already available, skip the loop-file commands below.
+
+For a test without a dedicated disk, select a new backing-file path on an existing SSD filesystem. Set `LOOP_BACKING_SIZE` to the capacity planned for this deployment, including its unit. Its parent directory must exist and have sufficient free space:
+
+```bash
+export LOOP_BACKING_FILE="<ABSOLUTE_PATH_TO_NEW_BACKING_FILE>"
+export LOOP_BACKING_SIZE="<BACKING_FILE_SIZE_WITH_UNIT>"
+df -h "$(dirname "${LOOP_BACKING_FILE}")"
+test ! -e "${LOOP_BACKING_FILE}" || exit 1
+sudo fallocate -l "${LOOP_BACKING_SIZE}" "${LOOP_BACKING_FILE}"
+sudo losetup --find --show --direct-io=on "${LOOP_BACKING_FILE}"
+```
+
+Record the device returned by `losetup` and use that device path for `SSD_DEVICE_PATH` below; `LOOP_BACKING_FILE` is the host backing file, not the device path. A loop device is a testing alternative, not an additional requirement for a deployment with a dedicated disk.
+
+**Prepare the personal configuration directory and device mapping:**
+
+Set `MEMCACHE_CONFIG_DIR` to your chosen absolute host directory for personal configuration copies, separate from the image's package-template directory, and `SSD_DEVICE_PATH` to the actual dedicated or loop device. Run these commands in the same host terminal used for `docker run`:
+
+```bash
+export MEMCACHE_CONFIG_DIR="<ABSOLUTE_PERSONAL_CONFIG_DIR>"
+export SSD_DEVICE_PATH="<ACTUAL_SSD_DEVICE_PATH>"
+mkdir -p "${MEMCACHE_CONFIG_DIR}"
+test -b "${SSD_DEVICE_PATH}" || exit 1
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "${SSD_DEVICE_PATH}"
+sudo blkid "${SSD_DEVICE_PATH}"
+```
+
+Proceed only after confirming that the selected device has no filesystem signature or mount point; `blkid` normally prints nothing and returns a nonzero status for a blank device. The commands below map one device. For multiple devices, add one `--device` mapping per device and separate the matching `ubsio.disk.path` entries with `:`.
+
+!!! warning
+
+    In Section 5.4, `MEMCACHE_FORCE_NEW_DISK` controls `ubsio.standalone.force_new_disk`. Setting it to `true` reinitializes cache storage at startup. Select its value for the target deployment and use only dedicated cache storage.
+
+!!! note
+
+    Set `MEMCACHE_CONFIG_DIR` with the host-side `export` above before running Docker: `-e MEMCACHE_CONFIG_DIR` passes its value into the container, while `-v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}"` mounts the actual directory at the same path. Inside the container, Section 5.4 uses this variable to prepare the personal configuration files and set `MMC_META_CONFIG_PATH` and `MMC_LOCAL_CONFIG_PATH`; the image's original templates remain unchanged.
+
+`SSD_DEVICE_PATH` is expanded by the host shell in `--device`; it is not passed into the container as an environment variable. In Section 5.4, set `MEMCACHE_SSD_PATHS` to the same mapped paths for the selected hardware platform.
 
 Verify that all host device and file paths exist before running Docker. The 950 DT example retains the device, driver, and communication-tool mounts from the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
-Additional communication-file mounts depend on the installed stack. The [950 DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements) describe when `/lib/route.conf` is needed; CANN 9.2.0 and later do not require it. If the target environment requires `/etc/hccl_rootinfo.json` or other communication configuration files, add the mounts specified by that environment. These files are not MemCache configuration files and are not assumed to exist in the commands below.
+=== "A2 series"
+
+    ```bash
+    # Reuse the host model cache at /root/.cache.
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
+    export NAME=vllm-ascend-qwen38-pool
+
+    docker run --rm \
+      --name $NAME \
+      -e MEMCACHE_CONFIG_DIR \
+      --net=host \
+      --privileged=true \
+      --shm-size=128g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v /root/.cache:/root/.cache \
+      -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
+      -it $IMAGE bash
+    ```
 
 === "A3 series"
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend-qwen38-pool
-    export MEMCACHE_CONFIG_DIR="<EXISTING_MEMCACHE_CONFIG_DIR>"
 
     docker run --rm \
       --name $NAME \
@@ -209,7 +299,7 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
       --device /dev/davinci14 \
       --device /dev/davinci15 \
       --device /dev/davinci_manager \
-      --device "<SSD_DEVICE_PATH>:<SSD_DEVICE_PATH>" \
+      --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
       --device /dev/devmm_svm \
       --device /dev/hisi_hdc \
       -v /usr/local/dcmi:/usr/local/dcmi \
@@ -228,9 +318,8 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend-qwen38-pool
-    export MEMCACHE_CONFIG_DIR="<EXISTING_MEMCACHE_CONFIG_DIR>"
 
     docker run --rm \
       --name $NAME \
@@ -239,7 +328,7 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
       --privileged=true \
       --shm-size=500g \
       --device /dev/davinci_manager \
-      --device "<SSD_DEVICE_PATH>:<SSD_DEVICE_PATH>" \
+      --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
       --device /dev/hisi_hdc \
       --device /dev/ummu \
       --device /dev/uburma \
@@ -267,7 +356,15 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
       -it $IMAGE bash
     ```
 
-Start MetaService first. For A3, start the standalone MemCache storage process as described in Section 5.4 and wait for successful initialization before starting Prefill on devices 0–7 and Decode on devices 8–15 in separate terminals. The standalone process stores KV cache and does not run model inference. For 950 DT, start the P/D engines after MetaService; their workers initialize the embedded LocalServices. The disk is reinitialized when the storage service starts with `force_new_disk=true`; use only storage dedicated to this pool.
+Keep this container running. Use Section 5.4 to prepare the configurations and start MetaService, P/D, and Proxy in order. To open another shell in the same container, run the following from a new **host** terminal:
+
+```bash
+docker exec -it vllm-ascend-qwen38-pool bash
+```
+
+The container inherits `MEMCACHE_CONFIG_DIR`, including in new `docker exec` shells, but exports made inside one shell are not shared with other shells. Repeat the library and service-specific exports from Section 5.4 in each service terminal; if you change `NAME` when creating the container, use that name in the `docker exec` command above.
+
+Keep `MEMCACHE_CONFIG_DIR` set to the path passed at container creation; changing the host variable later does not update the running container's environment or mounts. Files written to this mounted directory from inside the container are the same personal copies visible on the host.
 
 After entering the container, check that the model and storage dependencies are available:
 
@@ -449,9 +546,13 @@ The response should list the configured model name. After startup, use [Section 
 
 Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Replace the IP-address and network-interface placeholders with the actual values for each host before running the commands. Keep the host addresses consistent across terminals; `nic_name` must identify the interface that owns `local_ip`. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
 
+!!! note
+
+    Set `PREFILL_HOST`, `DECODE_HOST`, `local_ip`, and `nic_name` where shown in each command block; these are shell variables, and a new terminal does not inherit values assigned in another terminal. The `VLLM_HOST_IP`/`HCCL_IF_IP` and socket-interface exports use those values for communication, while `no_proxy`/`NO_PROXY` bypass HTTP proxies for the listed service addresses.
+
 === "A2 series"
 
-    This W4A8 deployment uses two eight-device A2 series hosts. Prefill runs on `PREFILL_HOST` and Decode runs on `DECODE_HOST`, each using devices 0–7. Each role uses TP2 × DP4 and loads the same checkpoint.
+    This W4A8 deployment uses two eight-device A2 series hosts. Prefill runs on `PREFILL_HOST` and Decode runs on `DECODE_HOST`, each using devices 0–7. Prefill uses TP4 × PP2 × DP1, and Decode uses TP2 × DP4, matching the A3 model topology. Both roles load the same checkpoint; the proxy routes requests through one API endpoint per role (1P1D).
 
     Before starting:
 
@@ -468,6 +569,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
+    unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
@@ -490,8 +592,9 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --served-model-name qwen38-flash-next-a2-pd \
         --trust-remote-code \
         --quantization ascend \
-        --tensor-parallel-size 2 \
-        --data-parallel-size 4 \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
         --max-model-len 141312 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -499,11 +602,13 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
-        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
     **Decode:**
@@ -516,6 +621,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
+    unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
@@ -547,11 +653,13 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
-        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
     **Proxy:**
@@ -572,7 +680,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     **Service Verification:**
 
-    From the prefill host, check that both APIs list `qwen38-flash-next-a2-pd`:
+    Check the startup logs for TP4 × PP2 × DP1 on Prefill and TP2 × DP4 with `enable_static_kernel=true` on Decode. From the prefill host, check that both APIs list `qwen38-flash-next-a2-pd`:
 
     ```bash
     PREFILL_HOST="<PREFILL_LOCAL_IP>"
@@ -601,13 +709,13 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     **Key parameters:**
 
-    - Both roles enable prefix caching; the current runtime automatically changes the default Mamba cache mode from `none` to `align`.
-    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. This DP configuration satisfies the DP > 1 requirement; elastic EP is not supported with shared memory.
-    - Prefill sets `cudagraph_mode=NONE`, enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
-    - Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling. Super kernels remain disabled.
-    - Both roles use three MTP draft tokens.
+    - Both roles enable prefix caching and explicitly set `--mamba-cache-mode align` and `--mamba-ssm-cache-dtype bfloat16`.
+    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. Prefill uses DP1 and sets `dp_shared_memory=false`; Decode uses DP4 and sets it to `true`. Elastic EP is not supported with shared memory.
+    - Prefill distributes the model across two pipeline stages, with TP4 in each stage. It runs in eager mode (`--enforce-eager`), enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP4 × PP2 × DP1 before increasing the batch token budget.
+    - Decode uses four TP2 replicas without pipeline parallelism. It enables `FULL_DECODE_ONLY`, NPU graph extension, `enable_static_kernel=true`, and recompute scheduling. Static kernels are enabled for Decode; Prefill retains eager execution. Super kernels remain disabled.
+    - Both roles use three MTP draft tokens; Prefill sets MTP `enforce_eager=true` and Decode sets it to `false`. Both roles use `--max-num-batched-tokens 8192`; Prefill retains `HCCL_BUFFSIZE=8192` and Decode retains `HCCL_BUFFSIZE=512`.
     - `enable_fused_mc2=0` disables fused MC2, so it does not conflict with `multistream_overlap_shared_expert=true`. The decode command relies on the runtime's default value of zero.
-    - Keep the Mooncake DP4 / TP2 declarations synchronized with both services' parallel settings.
+    - Keep the Mooncake declarations synchronized on both roles: Prefill uses DP1 / TP4 / PP2, and Decode uses DP4 / TP2. No custom layer partition is specified; clear `VLLM_PP_LAYER_PARTITION` in both terminals to use the runtime's default partition.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
 
 === "A3 series"
@@ -1179,116 +1287,189 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
 ### 5.4 PD Separation with MemCache Three-Tier KV Cache Pool
 
-This example extends [Section 5.2](#52-basic-pd-separation-deployment) with three-tier KV caching: NPU HBM, pooled DRAM, and SSD storage through MemCache/UBS IO. `MultiConnector` combines the P-to-D transport with `AscendStoreConnector`. This section covers A3 series and Ascend 950 DT basic PD deployment only. The image-and-text TP2 × PP2 case in Section 5.3 is a separate configuration.
+This section adds MemCache three-tier KV caching (NPU HBM, DRAM, and SSD) to the A2 series, A3 series, and Ascend 950 DT basic PD examples in [Section 5.2](#52-basic-pd-separation-deployment); it does not cover the image-and-text 10K case. `MultiConnector` combines Mooncake P-to-D transport with `AscendStoreConnector` for external storage.
 
-The A3 example extends the complete 1P1D serving path in Section 5.2: TP4 × PP2 × DP1 Prefill, TP2 × DP4 Decode, and the proxy. Prefill retains eager execution, and Decode retains static kernels. MemCache adds external KV storage to this deployment. The 950 DT connector settings are adapted from its pooling reference scripts. Validate these configurations with the installed runtime and checkpoint; the examples do not establish measured cache-hit rates or performance results.
+**1. Check the container environment:**
 
-**Prepare the environment:**
-
-For Docker deployment, use [Section 4.3](#43-docker-for-three-tier-pd-pooling) and complete the host disk preparation below before creating the container. `MEMCACHE_CONFIG_DIR` identifies the same existing directory on the host and inside the container. When running without Docker, set this variable to the existing configuration directory before starting any storage service or P/D engine.
-
-Follow the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for the matching HDK/CANN, communication libraries, container mounts, and host-memory preparation. Use compatible `memcache-hybrid` and `memfabric-hybrid` packages, both at least version 1.3.0 as required by that guide, together with Mooncake. A3 HCCS `device_sdma` requires a compatible LingQu Computing Network version (at least 1.5). Confirm that the installed vLLM-Ascend registers the connector named in the hardware tab.
+Start the matching container from [Section 4.3](#43-docker-for-three-tier-pd-pooling), which mounts and passes `MEMCACHE_CONFIG_DIR`. Run the following steps **inside that container**, beginning with the available-memory check. For A2, complete steps 1–3 in both containers after checking the host HDK requirement in Section 4.3; create the MetaService configuration and run step 4 only on the prefill host:
 
 ```bash
-pip show memcache-hybrid memfabric-hybrid
+free -h
 ```
 
-Use the reported package location to find the MemCache and MemFabric library directories. Use `MEMCACHE_CONFIG_DIR` for the existing configuration directory used by the reference scripts. Replace `<MEMCACHE_LIB_DIR>`, `<MEMFABRIC_LIB_DIR>`, and `<PYTHON_LIB_DIR>` with the installed library paths. All P/D processes must use the same checkpoint and connect to the same MetaService and ConfigStore.
-
-**Prepare SSD storage:**
-
-On every host contributing SSD storage, inspect the disks and available filesystem space:
+Follow the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for compatible HDK/CANN, Mooncake, and communication libraries; `memcache-hybrid` and `memfabric-hybrid` must be at least version 1.3.0. A3 HCCS also requires LingQu Computing Network 1.5 or later and a runtime supporting the connectors below.
 
 ```bash
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+python -m pip show memcache-hybrid memfabric-hybrid
 ```
 
-Use a dedicated disk that has no partitions, mount points, filesystem signatures, or data to retain. Set `ubsio.disk.path` to the verified device path; separate multiple devices with `:`. Do not copy another host's disk names without checking them locally.
-
-If no dedicated disk is available, use a loop-backed file for testing. The following example allocates 100 GiB in an existing `/data` filesystem; verify its free space and choose a capacity suitable for the test before running it. Use a new backing-file name for each deployment:
+If either package is missing, install compatible versions and repeat the import check from Section 4.3:
 
 ```bash
-df -h /data
-test ! -e /data/qwen38-memcache-ssd.img || exit 1
-sudo fallocate -l 100G /data/qwen38-memcache-ssd.img
-sudo losetup --find --show --direct-io=on /data/qwen38-memcache-ssd.img
+python -m pip install "memcache-hybrid>=1.3.0" "memfabric-hybrid>=1.3.0"
 ```
 
-Record the returned device path and use it as `<SSD_DEVICE_PATH>` below. Pass the actual disk or loop device into each container that accesses it, for example by adding `--device /dev/loop0:/dev/loop0` only when `/dev/loop0` is the allocated device. A loop device is an alternative to a dedicated disk, not an additional requirement. Its underlying storage must be suitable for the intended SSD test.
+Use the reported container package locations: `MEMCACHE_LIB_DIR` is `Location` plus `/memcache_hybrid/lib`, and `MEMFABRIC_LIB_DIR` is `Location` plus `/memfabric_hybrid/lib`. Run these exports in **every service terminal**, preserving existing Torch, torch_npu, and Mooncake entries; `PYTHON_LIB_DIR` is obtained from the active interpreter:
 
-!!! warning
+```bash
+export MEMCACHE_LIB_DIR="<MEMCACHE_LIBRARY_DIRECTORY>"
+export MEMFABRIC_LIB_DIR="<MEMFABRIC_LIBRARY_DIRECTORY>"
+export PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+export LD_LIBRARY_PATH="${MEMCACHE_LIB_DIR}:${MEMFABRIC_LIB_DIR}:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+```
 
-    `ubsio.standalone.force_new_disk=true` reinitializes the configured cache disks when the service starts. Use only storage dedicated to this experiment. Do not share those disks with another active pool or restart storage services during a cache-reuse test.
+`LD_LIBRARY_PATH` supplies shared-library search paths; `${LD_LIBRARY_PATH:-}` retains existing entries or expands to an empty string when unset. Resolve library or import errors before continuing.
 
-**Configure MetaService:**
+**2. Copy the configuration templates:**
 
-If starting a new MetaService, prepare `mmc-meta.conf` in the configuration directory for the selected hardware, as mounted in Section 4.3. Reuse the existing MetaService when it already serves this pool. Use an address reachable from every participating host; `127.0.0.1` is suitable only when all clients share that host/network namespace. Keep ports 5000, 6000, and 8000 available for this deployment:
+!!! note "Image template path and personal configuration directory"
 
-```ini
-ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
-ock.mmc.meta_service.config_store_url = tcp://<META_SERVICE_IP>:6000
-ock.mmc.meta_service.metrics_url = http://<META_SERVICE_IP>:8000
+    `/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/config/` is an example path **inside the container**; the actual path varies with the image, Python version, and package installation location. Copy `mmc-local.conf` and `mmc-meta.conf` into your own directory mounted in Section 4.3 (`MEMCACHE_CONFIG_DIR`), then edit and use those personal copies rather than the image templates or another user's directory.
+
+Set `MEMCACHE_TEMPLATE_DIR` to the existing `memcache_hybrid/config/` directory under the `Location` reported in step 1:
+
+```bash
+export MEMCACHE_TEMPLATE_DIR="<IMAGE_MEMCACHE_CONFIG_DIR>"
+ls "${MEMCACHE_TEMPLATE_DIR}"
+cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+```
+
+For a new pool, also copy the MetaService template:
+
+```bash
+cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
+```
+
+`cp -n` preserves existing files, but the `cat >` commands below replace the selected personal files. If a file contains required image-specific settings, edit its keys in place instead, substituting the actual values.
+
+**3. Edit the configuration files:**
+
+Set these endpoints in the configuration-editing terminal, using the actual MetaService and ConfigStore addresses, including their ports. When reusing a running pool, use its existing endpoints, leave `mmc-meta.conf` unchanged, and skip its creation and step 4. For a new pool, choose available ports on the serving host. For A2, use the prefill host address reachable from both hosts, not `127.0.0.1`, and use the same MetaService and ConfigStore URLs in both containers:
+
+```bash
+export MEMCACHE_META_URL="tcp://<META_SERVICE_IP>:<META_SERVICE_PORT>"
+export MEMCACHE_CONFIG_STORE_URL="tcp://<CONFIG_STORE_IP>:<CONFIG_STORE_PORT>"
+```
+
+For a new pool, set the metrics endpoint and eviction thresholds from the target deployment configuration, then write `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`:
+
+```bash
+export MEMCACHE_METRICS_URL="http://<METRICS_IP>:<METRICS_PORT>"
+export MEMCACHE_EVICT_HIGH="<HIGH_EVICTION_THRESHOLD_PERCENT>"
+export MEMCACHE_EVICT_LOW="<LOW_EVICTION_THRESHOLD_PERCENT>"
+
+cat > "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf" <<EOF
+ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
+ock.mmc.meta_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
+ock.mmc.meta_service.metrics_url = ${MEMCACHE_METRICS_URL}
 ock.mmc.log_level = info
-ock.mmc.evict_threshold_high = 70
-ock.mmc.evict_threshold_low = 60
+ock.mmc.evict_threshold_high = ${MEMCACHE_EVICT_HIGH}
+ock.mmc.evict_threshold_low = ${MEMCACHE_EVICT_LOW}
+EOF
 ```
 
-**Configure storage and P/D engines:**
+**Select the storage configuration and P/D connector for your hardware:**
 
-The hardware tabs below provide LocalService settings and replacements for the `--kv-transfer-config` argument in Section 5.2. Keep the existing device assignments, API ports, model IDs, TP/PP/DP topology, and proxy commands unless a change is explicitly listed. Replace the existing connector argument rather than appending a second one. Keep prefix caching and Model Runner V2 enabled.
+In the same configuration-editing terminal, set the following values from the target deployment's `mmc-local.conf` and memory budget. Use the SSD paths mapped in Section 4.3, separated by `:` for multiple devices. The commands expand these variables into literal values when writing the files; MemCache does not need these shell variables in the service terminals.
 
-Add these exports in every Prefill and Decode terminal before its `vllm serve` command. Preserve the existing Torch, torch_npu, and Mooncake library paths:
+```bash
+export MEMCACHE_SSD_PATHS="<MAPPED_SSD_DEVICE_PATHS_SEPARATED_BY_COLONS>"
+export MEMCACHE_WORLD_SIZE="<POOL_LOCAL_SERVICE_CAPACITY>"
+export MEMCACHE_DRAM_SIZE="<DRAM_SIZE_PER_LOCAL_SERVICE_WITH_UNIT>"
+export MEMCACHE_MAX_DRAM_SIZE="<MAX_DRAM_SIZE_WITH_UNIT>"
+export MEMCACHE_UBS_IO_MEM_GB="<UBS_IO_MEMORY_GB_PER_LOCAL_SERVICE>"
+export MEMCACHE_DEVICE_COUNT="<DRAM_ENABLED_LOCAL_SERVICE_COUNT_ON_THIS_HOST>"
+export MEMCACHE_FORCE_NEW_DISK="<true_OR_false_FOR_THIS_DEPLOYMENT>"
+```
+
+Run these common exports in every P/D terminal:
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
 export PYTHONHASHSEED=0
 export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
-export LD_LIBRARY_PATH="<MEMCACHE_LIB_DIR>:<MEMFABRIC_LIB_DIR>:<PYTHON_LIB_DIR>:${LD_LIBRARY_PATH:-}"
 ```
 
-The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled LocalService. Budget their aggregate across the host, plus Engram CPU offload, vLLM, and operating-system memory. `world_size=256` is the maximum supported LocalService count, not the model DP size. For memory sizing and limits, see [MemCache SSD cache](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache).
+`MMC_LOCAL_CONFIG_PATH` selects the P/D LocalService configuration; `MMC_META_CONFIG_PATH` in step 4 selects the MetaService configuration.
+
+`dram.size` and `ubsio.mem.size_in_gb` apply **per DRAM-enabled LocalService**; budget their host-wide total plus Engram, vLLM, and operating-system memory. `world_size` is the pool's LocalService capacity, not model DP size. `device_count` is the number of DRAM-enabled LocalServices on the host, not the SSD count; determine it from the actual deployment rather than assuming it equals the NPU count.
+
+=== "A2 series"
+
+    Keep the A2 model configuration from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode, on separate eight-device hosts. On each host, use the common MetaService and ConfigStore endpoints and pool `world_size`, but set SSD paths and memory values for that host. Write the RoCE configuration:
+
+    ```bash
+    : "${MEMCACHE_CONFIG_DIR:?Set the personal configuration directory in Section 4.3}"
+
+    cat > "${MEMCACHE_CONFIG_DIR}/mmc-local.conf" <<EOF
+    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
+    ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
+    ock.mmc.log_level = info
+    ock.mmc.local_service.world_size = ${MEMCACHE_WORLD_SIZE}
+    ock.mmc.local_service.protocol = device_rdma
+    ock.mmc.local_service.dram.size = ${MEMCACHE_DRAM_SIZE}
+    ock.mmc.local_service.max.dram.size = ${MEMCACHE_MAX_DRAM_SIZE}
+    ock.mmc.local_service.storage.enabled = true
+    ubsio.disk.path = ${MEMCACHE_SSD_PATHS}
+    ubsio.mem.size_in_gb = ${MEMCACHE_UBS_IO_MEM_GB}
+    ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
+    ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
+    EOF
+    ```
+
+    The `ubsio.standalone.*` key names do not require a separate standalone service.
+
+    Export the following in the Prefill and Decode terminals. Section 5.2 sets each host's IP and socket interfaces; clear incompatible HCCS/UB settings inherited from another experiment:
+
+    ```bash
+    unset ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export HCCL_INTRA_ROCE_ENABLE=1
+    ```
+
+    **Prefill connector argument:**
+
+    ```text
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
+    ```
+
+    **Decode connector argument:**
+
+    ```text
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
+    ```
 
 === "A3 series"
 
-    Use the single-host layout from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode. This tab follows the HCCS SSD deployment with a separate MemCache storage process. The vLLM clients do not allocate DRAM or own the SSD. Configure `${MEMCACHE_CONFIG_DIR}/mmc-local.conf` as follows:
+    Keep the A3 model configuration from Section 5.2. Use the endpoints and resource values set above to write the HCCS configuration:
 
-    ```ini
-    ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
-    ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+    ```bash
+    : "${MEMCACHE_CONFIG_DIR:?Set the personal configuration directory in Section 4.3}"
+
+    cat > "${MEMCACHE_CONFIG_DIR}/mmc-local.conf" <<EOF
+    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
+    ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
     ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.world_size = ${MEMCACHE_WORLD_SIZE}
     ock.mmc.local_service.protocol = device_sdma
-    ock.mmc.local_service.dram.size = 0GB
-    ock.mmc.local_service.max.dram.size = 1024GB
-    ock.mmc.local_service.storage.enabled = false
-    ```
-
-    Prepare `${MEMCACHE_CONFIG_DIR}/mmc-local-standalone.conf` for the storage process. Replace `<POOL_DRAM_SIZE>` with the validated pool capacity including its unit, such as `100GB`; reserve a further 50 GB for UBS IO and sufficient memory for Engram and vLLM. Both files must use the same MetaService, ConfigStore, protocol, and `world_size`.
-
-    ```ini
-    ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
-    ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
-    ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = 256
-    ock.mmc.local_service.protocol = device_sdma
-    ock.mmc.local_service.dram.size = <POOL_DRAM_SIZE>
-    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.dram.size = ${MEMCACHE_DRAM_SIZE}
+    ock.mmc.local_service.max.dram.size = ${MEMCACHE_MAX_DRAM_SIZE}
     ock.mmc.local_service.storage.enabled = true
-    ubsio.disk.path = <SSD_DEVICE_PATH>
-    ubsio.mem.size_in_gb = 50
-    ubsio.standalone.device_count = 1
-    ubsio.standalone.force_new_disk = true
+    ubsio.disk.path = ${MEMCACHE_SSD_PATHS}
+    ubsio.mem.size_in_gb = ${MEMCACHE_UBS_IO_MEM_GB}
+    ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
+    ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
+    EOF
     ```
 
-    Export the following in the storage, Prefill, and Decode terminals. Clear incompatible RoCE/UB settings inherited from another experiment:
+    The `ubsio.standalone.*` key names do not require a separate standalone service.
+
+    Export the following in the Prefill and Decode terminals. Clear incompatible RoCE/UB settings inherited from another experiment:
 
     ```bash
     unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     ```
-
-    Retain the A3 1P1D settings from Section 5.2: Prefill uses TP4 × PP2 × DP1 and Decode uses TP2 × DP4 with `enable_static_kernel=true`; P/D batch token budgets are both 8192, P uses `HCCL_BUFFSIZE=8192`, and D uses `HCCL_BUFFSIZE=512`. Keep `MooncakeConnectorV2` as the P-to-D transport and add `AscendStoreConnector` through `MultiConnector`. The storage settings above are additional requirements for the HCCS SSD pool; they do not replace the model execution settings. Validate the combined PP and three-tier pooling configuration on the target runtime.
 
     **Prefill connector argument:**
 
@@ -1304,21 +1485,25 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
 
 === "Ascend 950 DT"
 
-    Use the eight-device TP2 × DP2 layout from Section 5.2. Apply the common exports and connector replacement to all four P/D rank commands. This retains the documented per-rank API endpoints. For UB, configure `${MEMCACHE_CONFIG_DIR}/mmc-local.conf` as follows:
+    Keep the 950 DT model configuration from Section 5.2 and apply the common exports to all four P/D rank terminals. Use the endpoints and resource values set above to write the UB configuration:
 
-    ```ini
-    ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
-    ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+    ```bash
+    : "${MEMCACHE_CONFIG_DIR:?Set the personal configuration directory in Section 4.3}"
+
+    cat > "${MEMCACHE_CONFIG_DIR}/mmc-local.conf" <<EOF
+    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
+    ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
     ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.world_size = ${MEMCACHE_WORLD_SIZE}
     ock.mmc.local_service.protocol = device_urma
-    ock.mmc.local_service.dram.size = 10GB
-    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.dram.size = ${MEMCACHE_DRAM_SIZE}
+    ock.mmc.local_service.max.dram.size = ${MEMCACHE_MAX_DRAM_SIZE}
     ock.mmc.local_service.storage.enabled = true
-    ubsio.disk.path = <SSD_DEVICE_PATH>
-    ubsio.mem.size_in_gb = 10
-    ubsio.standalone.device_count = 8
-    ubsio.standalone.force_new_disk = true
+    ubsio.disk.path = ${MEMCACHE_SSD_PATHS}
+    ubsio.mem.size_in_gb = ${MEMCACHE_UBS_IO_MEM_GB}
+    ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
+    ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
+    EOF
     ```
 
     Add the UB environment setting in every rank terminal and clear the HCCS/RoCE settings from other experiments:
@@ -1327,8 +1512,6 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
     unset HCCL_INTRA_ROCE_ENABLE ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     ```
-
-    The shown settings budget 80 GB for pool DRAM and 80 GB for UBS IO on this eight-worker host, before the other memory requirements. This tab covers UB. UBOE requires `device_uboe` and the matching resource configuration and mounts from the MemCache backend guide. Do not mix UB and UBOE settings.
 
     **Prefill connector argument:**
 
@@ -1342,56 +1525,43 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
     --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
     ```
 
-**Start the storage services:**
+**4. Start MetaService:**
 
-Start one MetaService for this pool, unless the matching service is already running:
+In the first service terminal, apply the library export from step 1 and confirm that `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf` is readable, then start MetaService and keep the terminal open:
 
 ```bash
 export MMC_META_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
 
-For A3 HCCS only, open another terminal in the prepared container, set the HCCS exports from the A3 tab, and start the standalone storage process before either engine. Keep it running:
+Check `ss -lntp` in another terminal: the configured MetaService, ConfigStore, and metrics ports must be listening. For all hardware examples, LocalServices initialize inside the P/D workers; no separate storage process is needed.
 
-```bash
-export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-standalone.conf"
-export LD_LIBRARY_PATH="<MEMCACHE_LIB_DIR>:<MEMFABRIC_LIB_DIR>:<PYTHON_LIB_DIR>:${LD_LIBRARY_PATH:-}"
-python -u - <<'PY'
-import time
-from memcache_hybrid import DistributedObjectStore
+**5. Start Prefill, Decode, and Proxy:**
 
-store = DistributedObjectStore()
-result = store.init(0)
-if result != 0:
-    raise RuntimeError(f"MemCache initialization failed: {result}")
-print("Successfully initialized MemCache", flush=True)
-while True:
-    time.sleep(1)
-PY
-```
+Open a separate container shell for each entry below using `docker exec -it vllm-ascend-qwen38-pool bash` from the host. Keep the MetaService terminal running.
 
-Wait for successful MemCache initialization. In both A3 engine terminals, `MMC_LOCAL_CONFIG_PATH` must point to `mmc-local.conf`, not the standalone file. 950 DT uses embedded LocalServices initialized by the engine workers and does not run this standalone process.
+| Hardware | Model terminals | Expected model API ports | Proxy terminal |
+| --- | --- | --- | --- |
+| A2 series | Prefill on `PREFILL_HOST`; Decode on `DECODE_HOST` | 25568 on prefill host; 25569 on decode host | A2 Proxy from Section 5.2, on prefill host |
+| A3 series | Prefill; Decode | 25568; 25569 | A3 Proxy from Section 5.2 |
+| Ascend 950 DT | Prefill Rank 0; Prefill Rank 1; Decode Rank 0; Decode Rank 1 | 8088; 8089; 8092; 8093 | 950 DT Proxy from Section 5.2 |
 
-**Start Prefill, Decode, and Proxy:**
+In each model terminal, apply the library, common P/D, and hardware-specific exports above, and confirm that `MMC_LOCAL_CONFIG_PATH` points to the readable file from step 3. Run the corresponding Section 5.2 command, replacing only its `--kv-transfer-config` argument with the matching argument above; keep all other model settings unchanged.
 
-Run the matching commands from Section 5.2 in separate terminals with the exports and connector replacements above. Keep `VLLM_ENGINE_READY_TIMEOUT_S=4800`. All P/D connector topology declarations must match the actual TP/PP/DP layout. After every model API is ready, start the same proxy command and run the service verification for that hardware. Use the existing API address and served model name from Section 6.
+Check each API with `curl --fail http://127.0.0.1:<API_PORT>/v1/models`, using the ports above on each service's own host; for A2, also run the cross-host API checks from Section 5.2 on the prefill host. Expect HTTP 200 and the configured model name. Once all APIs are ready, start the matching Section 5.2 Proxy command in its own terminal.
 
-**Verify three-tier cache reuse:**
+**6. Verify three-tier cache reuse:**
 
-1. Verify the effective engine configuration. For A3, confirm TP4 × PP2 × DP1 and eager execution on Prefill, and TP2 × DP4, `FULL_DECODE_ONLY`, and `enable_static_kernel=true` on Decode. Send a request through the proxy and verify output correctness and normal P-to-D transfer.
-2. Send requests with reusable prefixes and different suffixes. Observe MemCache lookup, put, get, and hit activity. A successful response or a local prefix-cache hit alone does not establish external pool reuse.
-3. Use enough distinct prefixes to exceed the configured DRAM eviction watermark and observe SSD eviction activity, including `evict_to_ssd` when exposed by the installed metrics version. Keep the storage processes running throughout the test.
-4. Request an evicted prefix again. Verify SSD read/restore activity and correct generated output. Distinguish this from a hit still served from NPU or DRAM memory; SSD writes alone do not prove successful restoration.
-5. Record the runtime versions, storage configuration, input/output lengths, pool hit/eviction/restore metrics, TTFT, and output-quality results. Use the same workload for the basic-PD comparison.
+1. **Service:** Run the Section 5.2 chat-completion request through the proxy and verify correct output and P-to-D transfer.
+2. **External cache:** Send requests with shared prefixes and different suffixes; check MemCache lookup, put, get, and hit activity. A local prefix-cache hit alone does not prove external cache reuse.
+3. **SSD restore:** Fill DRAM past the eviction watermark, confirm SSD eviction, then request an evicted prefix again and verify SSD read/restore activity and correct output. Keep MetaService and P/D running; SSD writes alone do not prove restoration.
 
-Inspect `/var/log/memcache_hybrid`, `/var/log/memfabric_hybrid`, and `/var/log/ubsio/` for initialization and storage failures. Metric names and available counters depend on the installed MemCache version.
+Use the MemCache, MemFabric, and UBS IO logs or available metrics to check these results; counter names depend on the installed version.
 
 **Key parameters:**
 
-- Keep `PYTHONHASHSEED=0` consistent across P/D workers. `lookup_rpc_port` identifies a local lookup IPC endpoint; the connector appends the DP index. Use distinct P/D identifiers and different identifiers for other pools sharing the same IPC directory.
-- Keep `use_layerwise=false` for this reference configuration. Prefill performs external prefix lookup and cache writes; Decode receives the request's KV/state through the P-to-D connector. Optional Decode-side pool loading/writing is not enabled by these examples.
-- Do not copy DeepSeek-specific cache block sizes into Qwen3.8. Its hybrid attention state requires compatible model and connector implementations. The KV Cache Pool guide excludes hybrid-attention models from `kv_load_failure_policy=recompute`; do not add that fallback to these commands.
-- The A3 HCCS storage ownership differs from the embedded 950 DT example: only its standalone process enables SSD and contributes DRAM. Do not give both the vLLM clients and the standalone process ownership of the same disks.
+- Keep `PYTHONHASHSEED=0` consistent across workers. `lookup_rpc_port` identifies a local IPC endpoint with a DP-index suffix; use distinct P/D identifiers and avoid collisions with other pools.
+- Retain `use_layerwise=false`: Prefill performs external prefix lookup and cache writes, while Decode receives KV/state through the P-to-D connector.
 
 ## 6 Functional Verification
 
@@ -1596,7 +1766,7 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A2 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
 | A3 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
 | Ascend 950 DT | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
-| A2 series | Prefill | 0–7 on prefill host | 2 × 1 × 4 | 141312 | 32 | 8192 |
+| A2 series | Prefill | 0–7 on prefill host | 4 × 2 × 1 | 141312 | 32 | 8192 |
 | A3 series | Prefill | 0–7 | 4 × 2 × 1 | 141312 | 32 | 8192 |
 | Ascend 950 DT | Prefill | 0–3 | 2 × 1 × 2 | 141312 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
@@ -1605,9 +1775,9 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | Ascend 950 DT | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
 | Ascend 950 DT | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
 
-For A3 series PD deployment, use the Prefill and Decode rows together: each role occupies eight devices, for 16 devices in total. Prefill uses eager execution with PP2; Decode enables static kernels with TP2 × DP4.
+For A2 series and A3 series PD deployment, use the Prefill and Decode rows together: each role occupies eight devices, for 16 devices in total. A2 uses two eight-device hosts; A3 uses one 16-device host. Prefill uses eager execution with TP4 × PP2 × DP1; Decode enables static kernels with TP2 × DP4.
 
-For A3 series and Ascend 950 DT MemCache three-tier pooling, retain the basic PD token budgets above and apply the hardware-specific storage and communication settings in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
+For A2 series, A3 series, and Ascend 950 DT MemCache three-tier pooling, retain the basic PD token budgets above and apply the hardware-specific pooling settings in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
 
 ### 9.2 Tuning Guidelines
 
