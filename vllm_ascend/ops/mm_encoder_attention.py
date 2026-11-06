@@ -25,10 +25,12 @@ matching the LLM full-graph pattern in :mod:`vllm_ascend.attention.attention_v1`
 from __future__ import annotations
 
 import einops
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
@@ -46,6 +48,23 @@ FIA_BLOCK_SIZE: int = 128
 
 
 class AscendMMEncoderAttention(MMEncoderAttention):
+    @classmethod
+    def maybe_recompute_cu_seqlens(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        cu_seqlens: np.ndarray,
+        hidden_size: int,
+        tp_size: int,
+        device: torch.device,
+        fp8_padded_hidden_size: int | None = None,
+    ) -> torch.Tensor:
+        # Ascend FIA consumes host token endpoints, not device offsets. Keep
+        # CPU-generated metadata on CPU instead of uploading it here and
+        # synchronously copying it back in every vision attention block.
+        # Own the storage so later mutation of the NumPy input cannot change
+        # metadata retained by the encoder graph manager.
+        return torch.tensor(cu_seqlens, dtype=torch.int32, device="cpu")
+
     def __init__(
         self,
         num_heads: int,
