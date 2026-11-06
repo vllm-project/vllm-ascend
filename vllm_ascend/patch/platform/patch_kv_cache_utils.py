@@ -543,11 +543,13 @@ def _get_deepseek_v4_cache_layout(
         specs = group.kv_cache_spec.kv_cache_specs
         b: dict[int, list[str]] = defaultdict(list)
         for name in group.layer_names:
+            padded = getattr(specs[name], "page_size_padded", None)
+            page_size = padded if padded is not None else specs[name].page_size_bytes
             if "mtp" not in name:
-                b[specs[name].page_size_bytes].append(name)
+                b[page_size].append(name)
             else:
                 mtp_layer_names.append(name)
-                mtp_page_size = specs[name].page_size_bytes
+                mtp_page_size = page_size
         bucketed.append(b)
 
     # num_layer_tuples = longest bucket list across all groups. For the
@@ -668,38 +670,6 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
 
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples
-
-
-def _has_ascend_multi_allocation_kv_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> bool:
-    """Whether Ascend materializes these groups as several device allocations."""
-    return (
-        tq_cache.uses_turboquant_groups(kv_cache_groups)
-        or is_deepseek_v41_cache(kv_cache_groups)
-        or _get_glm5_next_cache_layout(kv_cache_groups) is not None
-        or _is_deepseek_v4_groups(kv_cache_groups)
-    )
-
-
-def _ascend_builder_pool_bytes_per_block(
-    builder: Any,
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    """Report aggregate bytes for layouts backed by several device tensors.
-
-    Newer vLLM KV-cache planning probes the builder with one block and expects
-    all device tensors to have the same backing size. Ascend's packed layouts
-    use several backing tensors with different sizes, so their aggregate pool
-    size must be supplied directly through the builder hook.
-    """
-    if _has_ascend_multi_allocation_kv_cache_layout(kv_cache_groups):
-        return _ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-
-    # Keep upstream's one-block placement probe for layouts that use the
-    # default single-allocation placement.
-    return _orig_builder_pool_bytes_per_block(builder, vllm_config, kv_cache_groups)
 
 
 # vLLM #42309 threads the platform's ``KVCacheConfigBuilder`` through KV cache
@@ -876,15 +846,6 @@ KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
-
-# vLLM's builder-based planner derives the pool size by probing a one-block
-# placement unless the builder overrides this hook. Ascend's DSV4.1, DSV4, GLM5
-# and TurboQuant layouts can contain multiple device allocations, so install
-# the matching aggregate-size hook when this vLLM API is available.
-_default_kv_cache_builder = getattr(_kv_cache_planning, "DefaultKVCacheConfigBuilder", None)
-if _default_kv_cache_builder is not None:
-    _orig_builder_pool_bytes_per_block = _default_kv_cache_builder._get_pool_bytes_per_block
-    _default_kv_cache_builder._get_pool_bytes_per_block = _ascend_builder_pool_bytes_per_block
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402
