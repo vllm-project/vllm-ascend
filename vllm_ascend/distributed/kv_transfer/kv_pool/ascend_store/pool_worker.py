@@ -439,6 +439,7 @@ class KVPoolWorker:
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
+            self.kv_send_thread.raise_if_failed()
         if self.load_async:
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreRecvingThread(
@@ -456,6 +457,7 @@ class KVPoolWorker:
             )
             self.kv_recv_thread.start()
             ready_event.wait()
+            self.kv_recv_thread.raise_if_failed()
         self._transfer_threads_started = True
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:

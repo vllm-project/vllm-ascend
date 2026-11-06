@@ -1,0 +1,6 @@
+pr: 20986
+entries:
+  - category: bugfix
+    text: >-
+      KV pool initialization now reports transfer-thread device-binding failures instead of
+      waiting indefinitely for a startup signal.

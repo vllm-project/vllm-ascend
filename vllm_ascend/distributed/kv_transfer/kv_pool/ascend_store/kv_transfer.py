@@ -316,8 +316,13 @@ class KVTransferThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self._set_os_thread_name()
-        self.m_store.set_device()
-        self.ready_event.set()
+        try:
+            self.m_store.set_device()
+        except Exception as exc:
+            self._fatal_error = exc
+            return
+        finally:
+            self.ready_event.set()
         while True:
             request_data = None
             try:
