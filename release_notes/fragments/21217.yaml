@@ -1,0 +1,4 @@
+pr: 21217
+entries:
+  - category: bugfix
+    text: Boolean environment variables COMPILE_CUSTOM_KERNELS and VERBOSE now accept true/false (case-insensitive) in addition to 1/0, treat an empty value as unset, and reject invalid values with an error naming the variable instead of an unclear ValueError or silent coercion to True.
