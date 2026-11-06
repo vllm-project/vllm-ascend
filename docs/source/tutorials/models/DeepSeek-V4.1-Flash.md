@@ -389,6 +389,10 @@ revision.
     with `combine_quant_mode: 4` and the recompute scheduler. The examples use
     the 950DT defaults for CPU binding, DSA overlap, and Decode Engram overlap.
 
+    `multistream_engram_overlap` uses an auxiliary NPU stream to overlap Engram
+    preparation (hash calculation, table lookups, and DP/TP exchanges) with
+    model computation.
+
     Prefill and Decode form separate DP groups on different servers, so both
     can use RPC port `12321`. Within each group, all ranks must use the same
     coordinator IP and RPC port.
