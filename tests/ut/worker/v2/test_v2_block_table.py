@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -26,6 +27,8 @@ def _parent_init(
     cp_rank=0,
     cp_interleave=1,
     slot_mapping_enabled=None,
+    dcp_sharded=None,
+    sliding_window_reach=None,
 ):
     self.block_sizes = block_sizes
     # vLLM main dropped `kernel_block_sizes` from BlockTables; only the release
@@ -126,6 +129,39 @@ def test_init_forwards_single_group_slot_mapping_enabled():
     ):
         AscendBlockTables([4], 2, 8, [4], torch.device("cpu"), slot_mapping_enabled=[True])
     assert seen["kwargs"]["slot_mapping_enabled"] == [True]
+
+
+def test_init_forwards_sliding_window_reach_when_supported():
+    seen: dict[str, Any] = {}
+
+    def recording_init(self, *args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        _parent_init(self, *args, **kwargs)
+
+    reach = [0, 32]
+    with (
+        patch.object(BlockTables, "__init__", recording_init),
+        patch(
+            "vllm_ascend.worker.v2.block_table.triton.next_power_of_2",
+            return_value=16,
+            create=True,
+        ),
+    ):
+        AscendBlockTables(
+            [4, 4],
+            2,
+            8,
+            [4, 4],
+            torch.device("cpu"),
+            dcp_sharded=[True, True],
+            sliding_window_reach=reach,
+        )
+    supported = "sliding_window_reach" in inspect.signature(BlockTables).parameters
+    if supported:
+        assert seen["kwargs"]["sliding_window_reach"] is reach
+    else:
+        assert "sliding_window_reach" not in seen["kwargs"]
 
 
 def _make_uninitialized_tables():
