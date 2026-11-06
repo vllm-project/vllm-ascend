@@ -2782,18 +2782,13 @@ to evaluate the deployed service.
 
 ### 7.2 Accuracy Results
 
-The following table lists accuracy results for the
-`DeepSeek-V4.1-Flash-1017-w4a8` checkpoint on A3 products and the generation
-parameters used for each dataset.
+The following table lists accuracy results for A3 W4A8 and 950DT MXFP
+deployments of DeepSeek-V4.1-Flash-1017.
 
 | Dataset | Hardware | Score | generation_kwargs |
 |---------|----------|-------|-------------------|
 | GPQA | A3 series | 89.9 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
-| MMMU-PRO | A3 series | 81.3 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
-
-These scores apply to the A3 W4A8 checkpoint. Accuracy results for the
-950DT MXFP configurations are not yet provided; evaluate the selected
-configuration with AISBench before using it as an accuracy baseline.
+| GPQA | 950DT products | 90.4 | / |
 
 ## 8 Performance Evaluation
 
