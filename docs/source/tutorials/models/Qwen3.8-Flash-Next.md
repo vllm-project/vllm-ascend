@@ -166,6 +166,114 @@ For source installation on A2 series, A3 series, or Ascend 950 DT, follow the [i
 
 Initialize the CANN and ATB environments in the serving shell as described in the installation guide. For multi-node deployment, set up the environment on each node.
 
+### 4.3 Docker for Three-Tier PD Pooling
+
+Use the following containers for the A3 series and Ascend 950 DT basic PD pooling configuration in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). For colocated, ordinary PD, and image-and-text 10K deployment, use Section 4.1. These pooling examples use privileged containers, following the MemCache deployment guide; run them only on hosts intended for this deployment.
+
+Before creating the container, prepare the dedicated SSD or loop device using the storage preparation steps in Section 5.4. Replace `<SSD_DEVICE_PATH>` with its actual host path in both sides of the device mapping. If using multiple devices, add one `--device` entry per device and list the same container paths in `ubsio.disk.path`. Create loop devices on the host, not inside the container.
+
+Prepare a host directory containing the configuration files from Section 5.4 and replace `/path/to/memcache-config` below with that existing directory. It is mounted at `/etc/memcache`, so use `/etc/memcache` for `<MEMCACHE_CONFIG_DIR>` in the service commands. A3 requires `mmc-meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`; 950 DT requires `mmc-meta.conf` and `mmc-local.conf`. Only the host selected to run MetaService needs to launch that service.
+
+Verify that all host device and file paths exist before running Docker. In particular, prepare the platform-generated 950 DT `/lib/route.conf`, `/etc/hccl_rootinfo.json`, and `/etc/hixlep` configuration and the `urma_admin` tool according to the [MemCache environment preparation guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
+=== "A3 series"
+
+    ```bash
+    # Reuse the host model cache at /root/.cache.
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a3
+    export NAME=vllm-ascend-qwen38-pool
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --privileged=true \
+      --shm-size=128g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci8 \
+      --device /dev/davinci9 \
+      --device /dev/davinci10 \
+      --device /dev/davinci11 \
+      --device /dev/davinci12 \
+      --device /dev/davinci13 \
+      --device /dev/davinci14 \
+      --device /dev/davinci15 \
+      --device /dev/davinci_manager \
+      --device "<SSD_DEVICE_PATH>:<SSD_DEVICE_PATH>" \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v /root/.cache:/root/.cache \
+      -v /path/to/memcache-config:/etc/memcache \
+      -it $IMAGE bash
+    ```
+
+=== "Ascend 950 DT"
+
+    ```bash
+    # Reuse the host model cache at /root/.cache.
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
+    export NAME=vllm-ascend-qwen38-pool
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --privileged=true \
+      --shm-size=500g \
+      --device /dev/davinci_manager \
+      --device "<SSD_DEVICE_PATH>:<SSD_DEVICE_PATH>" \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+      -v /root/host:/root/host \
+      -v /usr/local/sbin:/usr/local/sbin \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /var/log/npu:/usr/slog \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /etc/hixlep:/etc/hixlep \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
+      -v /lib/route.conf:/lib/route.conf \
+      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
+      -v /root/.cache:/root/.cache \
+      -v /path/to/memcache-config:/etc/memcache \
+      -it $IMAGE bash
+    ```
+
+In the A3 container, run both model roles from Section 5.2: Prefill on devices 0–7 and Decode on devices 8–15. Start the standalone MemCache storage process in an additional terminal using its configuration from Section 5.4; this process stores KV cache and does not run model inference. In the 950 DT container, the vLLM workers initialize the LocalServices. The disk is reinitialized when the storage service starts with `force_new_disk=true`; use only storage dedicated to this pool.
+
+After entering the container, check that the model and storage dependencies are available:
+
+```bash
+python -c "import vllm, vllm_ascend, mooncake, memcache_hybrid, memfabric_hybrid; print('Model and pool dependencies are available')"
+ls -l /etc/memcache
+```
+
+An import check does not validate version compatibility; complete the MemCache dependency checks in Section 5.4. `--shm-size` controls the container's `/dev/shm` limit and does not allocate the MemCache DRAM pool or the UBS IO buffers.
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
@@ -501,7 +609,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
 === "A3 series"
 
-    This W4A8 deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses devices 0–7 and Decode uses devices 8–15. Prefill uses TP4 × PP2 × DP1, and Decode uses TP4 × DP2. Both roles load the same checkpoint.
+    This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP4 × PP2 × DP1 on devices 0–7; Decode uses TP2 × DP4 on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
 
     Before starting:
 
@@ -555,7 +663,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --enforce-eager \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":2,"tp_size":4}}}'
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
     **Decode:**
@@ -589,8 +697,8 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --served-model-name qwen38-flash-next-a3-pd \
         --trust-remote-code \
         --quantization ascend \
-        --tensor-parallel-size 4 \
-        --data-parallel-size 2 \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
         --max-model-len 141312 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
@@ -602,9 +710,9 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --mamba-ssm-cache-dtype bfloat16 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":2,"tp_size":4}}}'
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
     **Proxy:**
@@ -624,7 +732,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     **Service Verification:**
 
-    From the prefill host, check that both APIs list `qwen38-flash-next-a3-pd`:
+    Check the startup logs for TP4 × PP2 × DP1 on Prefill and TP2 × DP4 with `enable_static_kernel=true` on Decode. From the serving host, check that both APIs list `qwen38-flash-next-a3-pd`:
 
     ```bash
     curl --fail "http://127.0.0.1:25568/v1/models"
@@ -651,12 +759,12 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Key parameters:**
 
     - Both roles enable prefix caching and explicitly set `--mamba-cache-mode align` and `--mamba-ssm-cache-dtype bfloat16`.
-    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. Prefill uses DP1 and sets `dp_shared_memory=false`; Decode uses DP2 and sets it to `true`. Elastic EP is not supported with shared memory.
-    - Prefill uses `--enforce-eager`, enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP4 × PP2 × DP1 before increasing the batch token budget.
-    - Decode enables `FULL_DECODE_ONLY`, NPU graph extension, and recompute scheduling. Static kernels and super kernels are disabled, matching the TP4/PP2 reference configuration.
+    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. Prefill uses DP1 and sets `dp_shared_memory=false`; Decode uses DP4 and sets it to `true`. Elastic EP is not supported with shared memory.
+    - Prefill distributes the model across two pipeline stages, with TP4 in each stage. It runs in eager mode (`--enforce-eager`), enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP4 × PP2 × DP1 before increasing the batch token budget.
+    - Decode uses four TP2 replicas without pipeline parallelism. It enables `FULL_DECODE_ONLY`, NPU graph extension, `enable_static_kernel=true`, and recompute scheduling. Static kernels are enabled for Decode; Prefill retains eager execution. Super kernels remain disabled.
     - Both roles use three MTP draft tokens; Prefill sets MTP `enforce_eager=true` and Decode sets it to `false`. Both roles use `--max-num-batched-tokens 8192`; Prefill retains `HCCL_BUFFSIZE=8192` and Decode retains `HCCL_BUFFSIZE=512`.
     - `enable_fused_mc2=0` disables fused MC2, so it does not conflict with `multistream_overlap_shared_expert=true`. The decode command relies on the runtime's default value of zero.
-    - Keep the Mooncake declarations synchronized on both roles: Prefill uses DP1 / TP4 / PP2, and Decode uses DP2 / TP4. No custom layer partition is specified; clear `VLLM_PP_LAYER_PARTITION` in both terminals to use the runtime's default partition.
+    - Keep the Mooncake declarations synchronized on both roles: Prefill uses DP1 / TP4 / PP2, and Decode uses DP4 / TP2. No custom layer partition is specified; clear `VLLM_PP_LAYER_PARTITION` in both terminals to use the runtime's default partition.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
 
 === "Ascend 950 DT"
@@ -1070,9 +1178,11 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
 This example extends [Section 5.2](#52-basic-pd-separation-deployment) with three-tier KV caching: NPU HBM, pooled DRAM, and SSD storage through MemCache/UBS IO. `MultiConnector` combines the P-to-D transport with `AscendStoreConnector`. This section covers A3 series and Ascend 950 DT basic PD deployment only. The image-and-text TP2 × PP2 case in Section 5.3 is a separate configuration.
 
-The A3 example keeps the latest TP4/PP2 PD reference configuration and adds the MemCache SSD settings. The 950 DT connector settings are adapted from its pooling reference scripts. Validate these configurations with the installed runtime and checkpoint; the examples do not establish measured cache-hit rates or performance results.
+The A3 example extends the complete 1P1D serving path in Section 5.2: TP4 × PP2 × DP1 Prefill, TP2 × DP4 Decode, and the proxy. Prefill retains eager execution, and Decode retains static kernels. MemCache adds external KV storage to this deployment. The 950 DT connector settings are adapted from its pooling reference scripts. Validate these configurations with the installed runtime and checkpoint; the examples do not establish measured cache-hit rates or performance results.
 
 **Prepare the environment:**
+
+For Docker deployment, use [Section 4.3](#43-docker-for-three-tier-pd-pooling) and complete the host disk preparation below before creating the container. The configuration directory is mounted at `/etc/memcache`.
 
 Follow the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for the matching HDK/CANN, communication libraries, container mounts, and host-memory preparation. Use compatible `memcache-hybrid` and `memfabric-hybrid` packages, both at least version 1.3.0 as required by that guide, together with Mooncake. A3 HCCS `device_sdma` requires a compatible LingQu Computing Network version (at least 1.5). Confirm that the installed vLLM-Ascend registers the connector named in the hardware tab.
 
@@ -1137,7 +1247,7 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
 
 === "A3 series"
 
-    Use the single-host layout from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP4 × DP2 for Decode. This tab follows the HCCS SSD deployment with a separate MemCache storage process. The vLLM clients do not allocate DRAM or own the SSD; configure their `mmc-local.conf` as follows:
+    Use the single-host layout from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode. This tab follows the HCCS SSD deployment with a separate MemCache storage process. The vLLM clients do not allocate DRAM or own the SSD; configure their `mmc-local.conf` as follows:
 
     ```ini
     ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
@@ -1175,18 +1285,18 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
     ```
 
-    Retain the latest A3 TP4/PP2 settings from Section 5.2: P/D batch token budgets are both 8192, P uses `HCCL_BUFFSIZE=8192`, and D uses `HCCL_BUFFSIZE=512`. Keep `MooncakeConnectorV2` as the P-to-D transport and add `AscendStoreConnector` through `MultiConnector`. The storage settings above are additional requirements for the HCCS SSD pool; they do not replace the model execution settings. Validate the combined PP and three-tier pooling configuration on the target runtime.
+    Retain the A3 1P1D settings from Section 5.2: Prefill uses TP4 × PP2 × DP1 and Decode uses TP2 × DP4 with `enable_static_kernel=true`; P/D batch token budgets are both 8192, P uses `HCCL_BUFFSIZE=8192`, and D uses `HCCL_BUFFSIZE=512`. Keep `MooncakeConnectorV2` as the P-to-D transport and add `AscendStoreConnector` through `MultiConnector`. The storage settings above are additional requirements for the HCCS SSD pool; they do not replace the model execution settings. Validate the combined PP and three-tier pooling configuration on the target runtime.
 
     **Prefill connector argument:**
 
     ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":2,"tp_size":4}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
     ```
 
     **Decode connector argument:**
 
     ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":2,"tp_size":4}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
     ```
 
 === "Ascend 950 DT"
@@ -1261,11 +1371,11 @@ Wait for successful MemCache initialization. In both A3 engine terminals, `MMC_L
 
 **Start Prefill, Decode, and Proxy:**
 
-Run the matching commands from Section 5.2 in separate terminals with the exports and connector replacements above. Keep `VLLM_ENGINE_READY_TIMEOUT_S=4800`. All P/D connector topology declarations must match the actual TP/DP layout. After every model API is ready, start the same proxy command and run the service verification for that hardware. Use the existing API address and served model name from Section 6.
+Run the matching commands from Section 5.2 in separate terminals with the exports and connector replacements above. Keep `VLLM_ENGINE_READY_TIMEOUT_S=4800`. All P/D connector topology declarations must match the actual TP/PP/DP layout. After every model API is ready, start the same proxy command and run the service verification for that hardware. Use the existing API address and served model name from Section 6.
 
 **Verify three-tier cache reuse:**
 
-1. Send a request through the proxy and verify output correctness and normal P-to-D transfer.
+1. Verify the effective engine configuration. For A3, confirm TP4 × PP2 × DP1 and eager execution on Prefill, and TP2 × DP4, `FULL_DECODE_ONLY`, and `enable_static_kernel=true` on Decode. Send a request through the proxy and verify output correctness and normal P-to-D transfer.
 2. Send requests with reusable prefixes and different suffixes. Observe MemCache lookup, put, get, and hit activity. A successful response or a local prefix-cache hit alone does not establish external pool reuse.
 3. Use enough distinct prefixes to exceed the configured DRAM eviction watermark and observe SSD eviction activity, including `evict_to_ssd` when exposed by the installed metrics version. Keep the storage processes running throughout the test.
 4. Request an evicted prefix again. Verify SSD read/restore activity and correct generated output. Distinguish this from a hit still served from NPU or DRAM memory; SSD writes alone do not prove successful restoration.
@@ -1487,10 +1597,12 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A3 series | Prefill | 0–7 | 4 × 2 × 1 | 141312 | 32 | 8192 |
 | Ascend 950 DT | Prefill | 0–3 | 2 × 1 × 2 | 141312 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| A3 series | Decode | 8–15 | 4 × 1 × 2 | 141312 | 32 | 8192 |
+| A3 series | Decode | 8–15 | 2 × 1 × 4 | 141312 | 32 | 8192 |
 | Ascend 950 DT | Decode | 4–7 | 2 × 1 × 2 | 141312 | 64 | 4096 |
 | Ascend 950 DT | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
 | Ascend 950 DT | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
+
+For A3 series PD deployment, use the Prefill and Decode rows together: each role occupies eight devices, for 16 devices in total. Prefill uses eager execution with PP2; Decode enables static kernels with TP2 × DP4.
 
 For A3 series and Ascend 950 DT MemCache three-tier pooling, retain the basic PD token budgets above and apply the hardware-specific storage and communication settings in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
 
