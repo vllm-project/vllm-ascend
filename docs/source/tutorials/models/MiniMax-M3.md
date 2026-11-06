@@ -35,8 +35,6 @@ It is recommended to place the model weight in a shared cache directory.
 
 Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `DSPARK_WEIGHT_PATH` to the downloaded DSpark draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
 
-The speculative-decoding examples use the standalone `nvidia/MiniMax-M3-DSpark` checkpoint with seven draft tokens (`num_speculative_tokens=7`). Set `"enforce_eager":true` in `--speculative-config` for the draft model; this does not disable graph execution for the target model. If omitted, the draft follows the graph mode passed by Model Runner V2: a Decode service using `FULL_DECODE_ONLY` attempts draft graph capture, while an eager Prefill service remains eager. For general DSpark configuration, see [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark). The 1M-context examples in Section 5.4 continue to run without speculative decoding.
-
 ### 3.2 Verify Multi-node Communication (Optional)
 
 For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
