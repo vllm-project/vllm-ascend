@@ -26,6 +26,51 @@ _sort = _resolve_triton_ascend_op("sort")
 
 
 @triton.jit
+def _exact_div_nonnegative(value, DIVISOR: tl.constexpr, SHIFT: tl.constexpr):
+    WIDTH: tl.constexpr = value.dtype.primitive_bitwidth
+    if DIVISOR >= 1 << (WIDTH - 1):
+        return tl.full(value.shape, 0, value.dtype)
+    if DIVISOR == 1 << SHIFT:
+        return value >> SHIFT
+    # The high word of value * ceil(2**WIDTH / d) overestimates the quotient
+    # by at most one. Split the product into half words to avoid uint64
+    # mulhi. Every intermediate fits the original unsigned width.
+    HALF: tl.constexpr = WIDTH // 2
+    MASK: tl.constexpr = (1 << HALF) - 1
+    MAGIC: tl.constexpr = ((1 << WIDTH) + DIVISOR - 1) // DIVISOR
+    low = value & MASK
+    high = value >> HALF
+    product = low * (MAGIC & MASK)
+    middle = high * (MAGIC & MASK) + (product >> HALF)
+    carry = low * (MAGIC >> HALF) + (middle & MASK)
+    quotient = high * (MAGIC >> HALF) + (middle >> HALF) + (carry >> HALF)
+    return quotient - (quotient * DIVISOR > value).to(value.dtype)
+
+
+@triton.jit
+def _remap_values(
+    idx,
+    DCP_SIZE: tl.constexpr,
+    RANK,
+    INTERLEAVE_SIZE: tl.constexpr,
+    DCP_BITS: tl.constexpr,
+    INTERLEAVE_BITS: tl.constexpr,
+):
+    WIDTH: tl.constexpr = idx.dtype.primitive_bitwidth
+    if DCP_SIZE == 1 << DCP_BITS and INTERLEAVE_SIZE == 1 << INTERLEAVE_BITS and DCP_BITS + INTERLEAVE_BITS < WIDTH:
+        owner = (idx >> INTERLEAVE_BITS) & (DCP_SIZE - 1)
+        local = ((idx >> (INTERLEAVE_BITS + DCP_BITS)) << INTERLEAVE_BITS) + (idx & (INTERLEAVE_SIZE - 1))
+    else:
+        # Negative sentinels do not participate in the unsigned arithmetic.
+        value = tl.maximum(idx, 0).to(tl.uint64 if idx.dtype == tl.int64 else tl.uint32)
+        block = _exact_div_nonnegative(value, INTERLEAVE_SIZE, INTERLEAVE_BITS)
+        cycle = _exact_div_nonnegative(block, DCP_SIZE, DCP_BITS)
+        owner = block - cycle * DCP_SIZE
+        local = (cycle * INTERLEAVE_SIZE + value - block * INTERLEAVE_SIZE).to(idx.dtype)
+    return local, (idx >= 0) & (owner == RANK)
+
+
+@triton.jit
 def _remap_sort(
     indices,
     output,
@@ -34,13 +79,14 @@ def _remap_sort(
     RANK: tl.constexpr,
     INTERLEAVE_BITS: tl.constexpr,
     BLOCK: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    INTERLEAVE_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK)
     idx = tl.load(indices + row * K + offsets, offsets < K, -1)
-    owner = (idx >> INTERLEAVE_BITS) & ((1 << DCP_BITS) - 1)
-    valid = (offsets < K) & (idx >= 0) & (owner == RANK)
-    local = ((idx >> (INTERLEAVE_BITS + DCP_BITS)) << INTERLEAVE_BITS) + (idx & ((1 << INTERLEAVE_BITS) - 1))
+    local, valid = _remap_values(idx, DCP_SIZE, RANK, INTERLEAVE_SIZE, DCP_BITS, INTERLEAVE_BITS)
+    valid &= offsets < K
     # Unique FP32 position keys preserve top-k order, including duplicate IDs.
     # Only positions are converted numerically; integer payloads stay exact.
     order = _sort(tl.where(valid, offsets.to(tl.float32), float("inf")), descending=False)
@@ -62,6 +108,8 @@ def remap_sparse_indices_fused_kernel(
     INTERLEAVE_BITS: tl.constexpr,
     BLOCK: tl.constexpr,
     NUM_CHUNKS: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    INTERLEAVE_SIZE: tl.constexpr,
 ):
     """Fused remap + per-chunk compaction + output tail pre-fill.
 
@@ -79,11 +127,8 @@ def remap_sparse_indices_fused_kernel(
     in_bounds = offsets < topk_count
 
     idx = tl.load(indices_ptr + row * topk_count + offsets, mask=in_bounds, other=-1)
-    # This backend's vector divsi loses integer boundaries above 2**24.
-    # Power-of-two topology uses exact shifts, never rounded vector division.
-    owner = (idx >> INTERLEAVE_BITS) & ((1 << DCP_BITS) - 1)
-    remapped = ((idx >> (INTERLEAVE_BITS + DCP_BITS)) << INTERLEAVE_BITS) + (idx & ((1 << INTERLEAVE_BITS) - 1))
-    valid = (idx >= 0) & (owner == dcp_rank)
+    remapped, valid = _remap_values(idx, DCP_SIZE, dcp_rank, INTERLEAVE_SIZE, DCP_BITS, INTERLEAVE_BITS)
+    valid &= in_bounds
 
     valid_i32 = valid.to(tl.int32)
     chunk_out = chunk_out_ptr + (row * NUM_CHUNKS + chunk) * BLOCK
@@ -123,25 +168,6 @@ def remap_sparse_indices_compact_gather_kernel(
         write_pos += cnt
 
 
-def _remap_sparse_indices_integer(
-    indices: torch.Tensor, dcp_size: int, dcp_rank: int, interleave_size: int
-) -> torch.Tensor:
-    """Exact fallback; do not reintroduce FP32 index arithmetic above 2**24.
-
-    Integer sorting may use AICPU on Ascend. This fallback favors correctness
-    outside the power-of-two DCP/interleave two-kernel fast path.
-    """
-    integer = indices.to(torch.int64)
-    blocks = torch.div(integer, interleave_size, rounding_mode="floor")
-    valid = (integer >= 0) & (blocks.remainder(dcp_size) == dcp_rank)
-    mapped = torch.div(blocks, dcp_size, rounding_mode="floor") * interleave_size + integer.remainder(interleave_size)
-    mapped = torch.where(valid, mapped, -1).to(indices.dtype)
-    count = indices.shape[-1]
-    order = torch.arange(count, dtype=torch.int64, device=indices.device)
-    keys = (~valid).to(torch.int64) * count + order
-    return torch.gather(mapped, -1, keys.argsort(dim=-1))
-
-
 def remap_sparse_indices_triton(
     topk_indices: torch.Tensor,
     dcp_size: int,
@@ -179,8 +205,6 @@ def remap_sparse_indices_triton(
         raise TypeError("DCP sparse indices must be INT32 or INT64")
     if dcp_size <= 0 or interleave_size <= 0 or not 0 <= dcp_rank < dcp_size:
         raise ValueError("DCP size/interleave must be positive and rank must belong to the group")
-    if dcp_size & (dcp_size - 1) or interleave_size & (interleave_size - 1):
-        return _remap_sparse_indices_integer(topk_indices, dcp_size, dcp_rank, interleave_size)
     orig_shape = topk_indices.shape
     if not topk_indices.is_contiguous():
         topk_indices = topk_indices.contiguous()
@@ -205,6 +229,8 @@ def remap_sparse_indices_triton(
             dcp_rank,
             interleave_size.bit_length() - 1,
             next_power_of_2(topk_count),
+            dcp_size,
+            interleave_size,
         )
         out = out.view(orig_shape)
         return out
@@ -226,6 +252,8 @@ def remap_sparse_indices_triton(
         INTERLEAVE_BITS=interleave_size.bit_length() - 1,
         BLOCK=block,
         NUM_CHUNKS=num_chunks,
+        DCP_SIZE=dcp_size,
+        INTERLEAVE_SIZE=interleave_size,
         multibuffer=False,
     )
     remap_sparse_indices_compact_gather_kernel[(rows,)](
