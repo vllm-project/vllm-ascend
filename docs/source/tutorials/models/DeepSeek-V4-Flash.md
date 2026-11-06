@@ -2608,12 +2608,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | 5 | On | On | Off | PCP=1 |
 | Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | 5 | Off | On | Off | PCP=1 |
 
-> `FC` reports FlashComm1. Neither configuration enables FlashComm1.
->
-> These A3 configurations use MRv2. `PCP=8` means eight-way context parallelism; `PCP=1` means no context parallelism. Keep `enable_dsa_cp` disabled on MRv2. When switching configurations, update the launcher arguments and the Prefill/Decode topology in `--kv-transfer-config` together, including the nested transport connector for KV Cache Pool deployment.
->
-> Keep Fused MC2 enabled on Prefill for both configurations with `enable_fused_mc2: 1`. Both roles must use `--max-model-len 1048576` for the long-context reference; the value is the total budget for prompt and generated tokens. Reduce concurrency or the actual input length if memory is insufficient.
->
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment). For A3, refer to the two configurations in the tables above: Short Sequence and Long Context (~1M Input, Reference).
 
 ### 9.2 Tuning Guidelines
