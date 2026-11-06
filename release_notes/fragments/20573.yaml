@@ -1,0 +1,6 @@
+pr: 20573
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4.1-Flash DS-original W8A8 MXFP8 startup with tensor parallelism by padding odd trailing scale groups.
+    model: deepseek-v4.1
+    hardware: [A5]
