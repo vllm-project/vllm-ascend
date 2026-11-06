@@ -2791,7 +2791,7 @@ deployments of DeepSeek-V4.1-Flash-1017.
 | Dataset | Hardware | Score | generation_kwargs |
 |---------|----------|-------|-------------------|
 | GPQA | A3 series | 89.9 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
-| GPQA | 950DT products | 90.4 | / |
+| GPQA | 950DT products | 90.4 | `temperature=1.0, top_p=1.0` |
 
 ## 8 Performance Evaluation
 
