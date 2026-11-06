@@ -215,7 +215,7 @@ def initialize_kv_cache(
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().
         if self.vllm_config.aux_output_config.enabled:
-            if vllm_version_is("0.32.0"):
+            if vllm_version_is("0.33.0"):
                 self.aux_output_connector = upstream.get_aux_output_connector(  # type: ignore[call-arg]
                     self.model, self.vllm_config, kv_cache_config
                 )

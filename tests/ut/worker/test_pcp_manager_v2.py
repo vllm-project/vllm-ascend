@@ -34,7 +34,6 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -1189,7 +1188,7 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
     local_batch = _make_local_pcp_batch()
 
     # vLLM main renamed the upstream staging hook; patch and call the live name.
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_for_capture_or_profile"
     with (
         patch.object(PCPManager, stage_name) as stage,
         patch.object(manager, "partition_batch", return_value=local_batch) as partition,
@@ -1211,7 +1210,7 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
     legacy_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_for_capture_or_profile"
     with (
         patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,

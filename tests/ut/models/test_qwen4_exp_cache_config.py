@@ -820,7 +820,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
 
     from vllm_ascend.models.qwen4_exp import qsa
 
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
 
         QSARawKeyCache = qsa_module.QSAKeyStateCache
