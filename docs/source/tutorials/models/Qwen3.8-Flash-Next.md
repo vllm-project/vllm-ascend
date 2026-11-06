@@ -230,7 +230,11 @@ For a new pool, proceed only after confirming that each selected device has no f
 
 In Section 5.4, set `MEMCACHE_SSD_PATHS` to the device paths mapped by `--device`.
 
-Verify that all host device and file paths exist before running Docker. For 950DT products, the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) also requires `/lib/route.conf` and `/etc/hccl_rootinfo.json` in its deployment environment. The supplied Qwen startup scripts do not show how these files are provisioned, so they do not establish that the files can be omitted. Before using a new environment, confirm its communication prerequisites with the image/platform provider. If these files are required, use the platform-provided files and the guide's mounts, and verify their contents inside the container before starting services.
+Verify that all host device and file paths exist before running Docker.
+
+!!! note "950DT products communication prerequisites"
+
+    Prepare the communication environment following the [950DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements) and [MemCache environment preparation](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). Add communication-file mounts required by the selected runtime and transport; the container requirements describe when `/lib/route.conf` can be omitted.
 
 === "A2 series"
 
