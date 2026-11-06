@@ -72,6 +72,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to verify that every context-parallel rank captured the same ACL
+    # graph set (mode, piece count, per-piece token extents) right after graph
+    # capture. A mismatch otherwise hangs on the first replay step. The check
+    # costs two small collectives per capture phase.
+    # Default: "1" (enabled). Valid values: "0" or "1". Not sensitive.
+    "VLLM_ASCEND_CP_GRAPH_CHECK": lambda: bool(int(os.getenv("VLLM_ASCEND_CP_GRAPH_CHECK", "1"))),
 }
 
 # end-env-vars-definition

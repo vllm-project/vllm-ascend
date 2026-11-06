@@ -42,6 +42,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.compilation.cp_graph_fingerprint import verify_cp_capture_consistency
 from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
@@ -219,7 +220,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         model = ModelWithContext(model, device_metadata=metadata)
         try:
             with communicator_switch():
-                return super().capture(
+                result = super().capture(
                     model,
                     model_state,
                     input_buffers,
@@ -233,6 +234,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
                 )
+            # CP ranks must agree on the captured set before the first replay;
+            # a mismatch would otherwise surface as a collective hang.
+            verify_cp_capture_consistency(self.vllm_config, phase="v2 graph capture")
+            return result
         finally:
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:

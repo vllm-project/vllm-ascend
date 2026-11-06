@@ -38,6 +38,7 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.attention.context_parallel.graph_spec import cp_piecewise_capability_for_config
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -270,6 +271,10 @@ class AscendPCPManager(PCPManager):
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         if cudagraph_mode == CUDAGraphMode.FULL:
             raise NotImplementedError("MRV2 PCP does not support FULL CUDA graphs.")
+        if cudagraph_mode.has_piecewise_cudagraphs():
+            # Fail at startup instead of hanging on the first replay when the
+            # backend cannot run its CP attention path with piecewise graphs.
+            cp_piecewise_capability_for_config(vllm_config).raise_if_unsupported()
 
     def get_global_graph_num_reqs(self, batch_desc: BatchExecutionDescriptor) -> int | None:
         """Global request capacity of a sharded FULL decode graph, if any.
