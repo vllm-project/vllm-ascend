@@ -184,12 +184,14 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
     # method fallback and the A16 path keeps activations unquantized.
     fused_activations = frozenset()
 
-    def __init__(self) -> None:
+    def __init__(self, group_size: int | None = None) -> None:
         self.num_bits = 4  # dtype = torch.int4
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32
 
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+        self.group_size = (
+            group_size if group_size is not None else vllm_config.quant_config.quant_description.get("group_size", 32)
+        )
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
 
     def get_weight(

@@ -1,0 +1,6 @@
+pr: 20984
+entries:
+  - category: bugfix
+    text: >-
+      Fixed compressed-tensors W4A16 MoE loading to honor each checkpoint group's quantization
+      group size instead of silently using 32.
