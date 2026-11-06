@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -13,6 +14,55 @@ from vllm_ascend.attention import dsa_v41
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+
+def test_fused_swa_cache_store_consumes_raw_projection(monkeypatch):
+    projected = torch.randn(3, 512, dtype=torch.bfloat16)
+    weight = torch.randn(512, dtype=torch.bfloat16)
+    cos = torch.randn(3, 1, 1, 64)
+    sin = torch.randn_like(cos)
+    cache = torch.zeros(2, 8, 1, 512, dtype=torch.bfloat16)
+    slots = torch.tensor([[0, 2], [-1, -1], [1, 7]], dtype=torch.int32)
+    norm = Mock(side_effect=AssertionError("baseline RMSNorm must not run"))
+    norm.weight = weight
+    norm.variance_epsilon = 1e-6
+    attn = SimpleNamespace(
+        kv_norm=norm,
+        nope_head_dim=448,
+        head_dim=512,
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[cache])),
+    )
+    metadata = SimpleNamespace(slot_mapping=slots)
+    calls = []
+    module = ModuleType("vllm_ascend.ops.triton.dsv41_swa_cache")
+
+    def fused(*args):
+        calls.append(args)
+
+    module.dsv41_rmsnorm_rope_cache = fused
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_can_fuse_swa_cache", staticmethod(lambda *args: True))
+    monkeypatch.setattr(
+        dsa_v41.AscendDSAV41Impl,
+        "_apply_rotary",
+        staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("baseline RoPE must not run"))),
+    )
+    monkeypatch.setattr(
+        dsa_v41.AscendDSAV41Impl,
+        "_write_swa_cache",
+        staticmethod(lambda *args: (_ for _ in ()).throw(AssertionError("baseline scatter must not run"))),
+    )
+
+    dsa_v41.AscendDSAV41Impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+
+    assert len(calls) == 1
+    actual = calls[0]
+    assert actual[0] is projected
+    assert actual[1] is weight
+    assert actual[2] is cos and actual[3] is sin
+    assert actual[4] is cache and actual[5] is slots
+    assert actual[6:] == (1e-6, 448)
+    norm.assert_not_called()
 
 
 def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
