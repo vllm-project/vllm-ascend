@@ -25,11 +25,6 @@ from typing import Any
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
-# Boolean environment variables parsed through _bool_env(). Kept as a module
-# constant (not part of env_variables) so tests and docs can enumerate them
-# without affecting __dir__().
-BOOLEAN_ENV_VARS: tuple[str, ...] = ("COMPILE_CUSTOM_KERNELS", "VERBOSE")
-
 
 def _bool_env(name: str, default: bool) -> bool:
     """Parse a boolean environment variable with clear diagnostics.
