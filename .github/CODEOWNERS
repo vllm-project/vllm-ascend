@@ -59,7 +59,7 @@
 # /vllm_ascend/attention/
 /vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/attention/sfa_v1.py @lijiahang226
-/vllm_ascend/attention/dsa*.py @weijinqian0 
+/vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
 
@@ -73,9 +73,9 @@
 # distributed
 /vllm_ascend/distributed @LCAIZJ
 /vllm_ascend/distributed/eplb @freyfwt
-/vllm_ascend/distributed/weight_transfer @Ronald1995
+/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
-/vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888
+/vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024
 
 # lora
@@ -93,7 +93,7 @@
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 
 # quantization
-/vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129
+/vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan
 
 # sample
 /vllm_ascend/sample @realliujiaxu
@@ -169,9 +169,14 @@
 
 # Models
 /vllm_ascend/models/minimax_m3 @realliujiaxu
+/vllm_ascend/models/deepseek_v4 @lcfenglinwan
+/vllm_ascend/models/deepseek_v41 @lcfenglinwan
+/vllm_ascend/models/deepseek_mtp.py @lcfenglinwan
+/vllm_ascend/models/glm5next @lijiahang226
+/vllm_ascend/models/glm5_dspark.py @lijiahang226
 
 # 310P
-/vllm_ascend/_310p @Tflowers-0129
+/vllm_ascend/_310p @Tflowers-0129 @YangShuai52
 
 # xlite
 /vllm_ascend/xlite @lulina
