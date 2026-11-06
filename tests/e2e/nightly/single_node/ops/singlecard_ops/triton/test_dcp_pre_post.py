@@ -131,9 +131,11 @@ def test_local_lengths_empty_requests(rows):
         (1, 1, 3, 0, 768, torch.int64),
         (6, 2048, 16, 15, 768, torch.int64),
         (6, 2048, 8, 7, 1536, torch.int64),
+        (2, 1025, 3, 2, 127, torch.int64),
         (1, 4097, 8, 7, 1536, torch.int32),
         (1, 2049, 3, 2, 127, torch.int64),
         (2, 4096, 8, 7, 1, torch.int32),
+        (1, 4096, 16, 15, 768, torch.int32),
         (2, 2048, 8, 7, 128, torch.int64),
         (2, 31, 1, 0, 768, torch.int64),
         (2, 31, 5, 4, 1, torch.int64),
@@ -153,7 +155,11 @@ def test_remap_exact_integer_boundaries_and_graph_replay(rows, topk, world, rank
     for anchor in boundaries.copy():
         start = (anchor // (world * interleave) * world + rank) * interleave
         boundaries += [start, start + interleave]
-    values = [-1, -2] + [x + delta for x in boundaries for delta in (-1, 0, 1) if 0 <= x + delta <= maximum]
+    # These INT32 values set the high bit in reciprocal partial products.
+    values = [-1, -2, 171821997, 725140015]
+    if dtype == torch.int64:
+        values += [-(2**31), -(2**32), -(2**40), torch.iinfo(dtype).min]
+    values += [x + delta for x in boundaries for delta in (-1, 0, 1) if 0 <= x + delta <= maximum]
     source = torch.randint(0, maximum, (rows, 1, topk), dtype=dtype)
     edge_values = torch.tensor(values, dtype=dtype)
     source.flatten()[: min(source.numel(), edge_values.numel())] = edge_values[: source.numel()]
@@ -179,8 +185,13 @@ def test_remap_exact_integer_boundaries_and_graph_replay(rows, topk, world, rank
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         actual = remap_sparse_indices_triton(data, world, rank, interleave)
-    for invalid in (False, True, False):
-        source = original.flip(-1) if not invalid else torch.full_like(original, -1)
+    small = original.clamp_min(0).remainder(1 << 20)
+    replays = [original.flip(-1), small, torch.full_like(original, -1), original]
+    if dtype == torch.int64 and topk > 1024:
+        mixed = original.clone()
+        mixed[..., 1024:] = small[..., 1024:]
+        replays.insert(2, mixed)
+    for source in replays:
         data.copy_(source)
         graph.replay()
         assert torch.equal(actual.cpu(), expected())
