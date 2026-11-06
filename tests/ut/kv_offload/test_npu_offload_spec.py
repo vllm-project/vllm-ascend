@@ -222,6 +222,8 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     spec.config = SimpleNamespace(
         parallel=SimpleNamespace(world_size=world_size, rank=worker_rank),
     )
+    barrier_calls = []
+    monkeypatch.setattr(npu_mod.cpu_spec, "_all_workers_barrier", lambda: barrier_calls.append(True))
     spec._engine_id = "engine-dp0"
     spec.extra_config = {}
     spec.replicated_layout = replicated_layout
@@ -239,6 +241,15 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     assert captured["rank"] == expected_rank
     assert captured["kv_bytes_per_chunk"] == 4096
     assert captured["cpu_page_size"] == 64
+    assert "barrier" not in captured
+    assert barrier_calls == [True]
+    num_segments = getattr(npu_mod.cpu_spec, "REGION_SEGMENTS", getattr(npu_mod.cpu_spec, "_REGION_SEGMENTS", None))
+    if num_segments is not None:
+        assert captured["num_segments"] == num_segments
+        assert captured["populate_shard"] == ((worker_rank, world_size) if replicated_layout else None)
+    else:
+        assert "num_segments" not in captured
+        assert "populate_shard" not in captured
     assert captured["worker_kwargs"] == {
         "kv_caches": kv_caches,
         "blocks_per_chunk": 2,

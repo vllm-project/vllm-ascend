@@ -5,3 +5,8 @@ entries:
       Native multi-tier KV-cache offloading now pins its shared CPU mapping on
       supported Ascend runtimes for direct batched transfers, with per-worker
       registration for non-replicated layouts and configurable pageable fallback.
+  - category: performance
+    text: >-
+      Native multi-tier KV-cache startup now reuses upstream worker barriers and,
+      on supported vLLM versions, segmented shared files and disjoint MLA
+      pre-fault shards to avoid populating the entire region on every worker.
