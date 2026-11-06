@@ -168,13 +168,15 @@ Initialize the CANN and ATB environments in the serving shell as described in th
 
 ### 4.3 Docker for Three-Tier PD Pooling
 
-Use the following containers for the A3 series and Ascend 950 DT basic PD pooling configuration in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). For colocated, ordinary PD, and image-and-text 10K deployment, use Section 4.1. These pooling examples use privileged containers, following the MemCache deployment guide; run them only on hosts intended for this deployment.
+Use the following containers for the A3 series and Ascend 950 DT basic PD pooling configuration in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). For colocated, ordinary PD, and image-and-text 10K deployment, use Section 4.1. The commands below retain `--privileged=true` from the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks); this tutorial has not validated a configuration with reduced container privileges.
 
-Before creating the container, prepare the dedicated SSD or loop device using the storage preparation steps in Section 5.4. Replace `<SSD_DEVICE_PATH>` with its actual host path in both sides of the device mapping. If using multiple devices, add one `--device` entry per device and list the same container paths in `ubsio.disk.path`. Create loop devices on the host, not inside the container.
+Before creating the container, prepare the dedicated SSD or loop device using the storage preparation steps in Section 5.4. Replace `<SSD_DEVICE_PATH>` with its actual host path in both sides of the device mapping. For multiple devices, add one `--device` entry per device and join their container paths with colons in the storage configuration file, for example `ubsio.disk.path = /dev/loop0:/dev/loop1` when those are the allocated devices. Create loop devices on the host, not inside the container.
 
-Prepare a host directory containing the configuration files from Section 5.4 and replace `/path/to/memcache-config` below with that existing directory. It is mounted at `/etc/memcache`, so use `/etc/memcache` for `<MEMCACHE_CONFIG_DIR>` in the service commands. A3 requires `mmc-meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`; 950 DT requires `mmc-meta.conf` and `mmc-local.conf`. Only the host selected to run MetaService needs to launch that service.
+Prepare a host directory containing the configuration files from Section 5.4 and replace `/path/to/memcache-config` below with that existing directory. `/etc/memcache` is the example container mount path chosen in this tutorial, not a required MemCache installation path. If you change it, update `<MEMCACHE_CONFIG_DIR>` in the service commands to the same container path. The file names follow the [MemCache configuration examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-3-configure-memcache-config-file): `mmc-meta.conf` configures MetaService, and `mmc-local.conf` configures the engine-side LocalServices. The A3 HCCS example additionally uses `mmc-local-standalone.conf` for its separate storage process, following the [separated-storage configuration](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache). `MMC_META_CONFIG_PATH` and `MMC_LOCAL_CONFIG_PATH` select the files used by each process.
 
-Verify that all host device and file paths exist before running Docker. In particular, prepare the platform-generated 950 DT `/lib/route.conf`, `/etc/hccl_rootinfo.json`, and `/etc/hixlep` configuration and the `urma_admin` tool according to the [MemCache environment preparation guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+Verify that all host device and file paths exist before running Docker. The 950 DT example retains the device, driver, and communication-tool mounts from the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
+Additional communication-file mounts depend on the installed stack. The [950 DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements) describe when `/lib/route.conf` is needed; CANN 9.2.0 and later do not require it. If the target environment requires `/etc/hccl_rootinfo.json` or other communication configuration files, add the mounts specified by that environment. These files are not MemCache configuration files and are not assumed to exist in the commands below.
 
 === "A3 series"
 
@@ -256,14 +258,12 @@ Verify that all host device and file paths exist before running Docker. In parti
       -v /etc/hixlep:/etc/hixlep \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
-      -v /lib/route.conf:/lib/route.conf \
-      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
       -v /root/.cache:/root/.cache \
       -v /path/to/memcache-config:/etc/memcache \
       -it $IMAGE bash
     ```
 
-In the A3 container, run both model roles from Section 5.2: Prefill on devices 0–7 and Decode on devices 8–15. Start the standalone MemCache storage process in an additional terminal using its configuration from Section 5.4; this process stores KV cache and does not run model inference. In the 950 DT container, the vLLM workers initialize the LocalServices. The disk is reinitialized when the storage service starts with `force_new_disk=true`; use only storage dedicated to this pool.
+Start MetaService first. For A3, start the standalone MemCache storage process as described in Section 5.4 and wait for successful initialization before starting Prefill on devices 0–7 and Decode on devices 8–15 in separate terminals. The standalone process stores KV cache and does not run model inference. For 950 DT, start the P/D engines after MetaService; their workers initialize the embedded LocalServices. The disk is reinitialized when the storage service starts with `force_new_disk=true`; use only storage dedicated to this pool.
 
 After entering the container, check that the model and storage dependencies are available:
 
@@ -444,7 +444,7 @@ The response should list the configured model name. After startup, use [Section 
 
 ### 5.2 Basic PD Separation Deployment
 
-Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Replace the quoted `<...>` placeholders before running the commands. Keep the host addresses consistent across terminals; `nic_name` must identify the interface that owns `local_ip`. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
+Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Replace the IP-address and network-interface placeholders with the actual values for each host before running the commands. Keep the host addresses consistent across terminals; `nic_name` must identify the interface that owns `local_ip`. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
 
 === "A2 series"
 
@@ -1232,7 +1232,7 @@ ock.mmc.evict_threshold_low = 60
 
 **Configure storage and P/D engines:**
 
-The hardware tabs below provide LocalService settings and replacements for the `--kv-transfer-config` argument in Section 5.2. Keep the existing device assignments, API ports, model IDs, TP/DP topology, and proxy commands unless a change is explicitly listed. Replace the existing connector argument rather than appending a second one. Keep prefix caching and Model Runner V2 enabled.
+The hardware tabs below provide LocalService settings and replacements for the `--kv-transfer-config` argument in Section 5.2. Keep the existing device assignments, API ports, model IDs, TP/PP/DP topology, and proxy commands unless a change is explicitly listed. Replace the existing connector argument rather than appending a second one. Keep prefix caching and Model Runner V2 enabled.
 
 Add these exports in every Prefill and Decode terminal before its `vllm serve` command. Preserve the existing Torch, torch_npu, and Mooncake library paths:
 
