@@ -174,6 +174,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         skip_topk: bool = False,
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
+        kv_sharing_target_layer_name: str | None = None,
+        sliding_window: int | None = None,
         # Upstream fuses the q_a/kv_a RMSNorms on the CUDA path. On Ascend the
         # whole MLA preprocess runs inside the attention impl, which receives
         # both layernorms as extra args, so this flag has no effect here and is
@@ -228,6 +230,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            sliding_window=sliding_window,
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,

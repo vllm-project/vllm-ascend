@@ -2323,7 +2323,11 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     return layer
 
 
-def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
+@pytest.mark.parametrize(
+    ("cache_dtype", "expected_dtype"),
+    [("int8", torch.int8), ("fp8_ds_mla", torch.float8_e4m3fn)],
+)
+def test_kpool_sfa_c8_main_cache_spec(monkeypatch, cache_dtype, expected_dtype):
     layer_name = "language_model.model.layers.3.self_attn.attn"
     layer = _make_mla_layer(sparse_c8=True)
     layer.kv_lora_rank = 512
@@ -2333,7 +2337,7 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     vllm_config = SimpleNamespace(
         additional_config={},
         attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
-        cache_config=SimpleNamespace(block_size=16, cache_dtype="int8"),
+        cache_config=SimpleNamespace(block_size=16, cache_dtype=cache_dtype),
         kv_transfer_config=None,
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -2359,7 +2363,7 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.cache_sparse_sfa_c8
     assert spec.head_size == 528
-    assert spec.dtype == torch.int8
+    assert spec.dtype == expected_dtype
 
 
 def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):

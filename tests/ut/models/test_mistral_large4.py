@@ -80,10 +80,11 @@ class _ImplWithTopkHook(_Impl):
 
 
 class _Attn:
-    """Stand-in for the MLAAttention module: callable, and carries an impl."""
+    """Stand-in for the outer Ascend MLA wrapper."""
 
     def __init__(self, impl: _Impl | None = None, on_call=None):
         self.impl = impl if impl is not None else _Impl()
+        self.mla_attn = SimpleNamespace(impl=self.impl)
         self._on_call = on_call
 
     def __call__(self, *_args, **_kwargs):
@@ -96,7 +97,7 @@ def _attn(spec):
     module = ml4.MistralMLAAttention.__new__(ml4.MistralMLAAttention)
     torch.nn.Module.__init__(module)
     module.spec = spec
-    module.attn = SimpleNamespace(impl=_Impl())
+    module.attn = _Attn()
     module.indexer_stream = object()
     module.indexer_events = [object(), object()]
     return module
@@ -124,6 +125,15 @@ def test_shared_kv_skip_narrows_the_slot_mapping_to_nothing():
     # A zero-row view, not a sentinel: -1 would scatter onto the last slot.
     assert mapped.dtype == torch.int32
     assert not (mapped == -1).any()
+
+
+def test_shared_kv_skip_finds_the_nested_ascend_impl():
+    impl = _Impl()
+    inner = SimpleNamespace(impl=None, mla_attn=SimpleNamespace(impl=impl))
+
+    ml4.adopt_shared_kv_skip(SimpleNamespace(attn=inner))
+
+    assert ml4.has_shared_kv_skip(impl)
 
 
 def test_a_layer_that_owns_its_kv_still_writes_every_row():
@@ -186,8 +196,7 @@ def test_adopt_switches_the_attention_class_and_drops_the_cuda_stream():
         assert layer.indexer_events == []
 
 
-def test_forward_projects_then_attends_and_skips_the_hook():
-    """Serial order, and no call to a method the Ascend SFA impl lacks."""
+def test_forward_delegates_hidden_states_to_the_outer_ascend_mla():
     calls: list[str] = []
     attn = _attn(_spec(0, 0))
     attn.__class__ = ml4.AscendMistralMLAAttention
@@ -196,25 +205,16 @@ def test_forward_projects_then_attends_and_skips_the_hook():
     # Driving the indexer is AscendSFAImpl's job, not this module's.
     attn.indexer = lambda *a, **k: pytest.fail("the model must not run the indexer")
 
-    def _project(*_args):
-        calls.append("project")
-        return torch.zeros(3, 2, 8), torch.zeros(3, 16), torch.zeros(3, 1, 4)
-
-    def _o_proj(x):
-        calls.append("o_proj")
-        return (x,)
-
-    attn._project_qkv = _project
-    # A plain _Impl, which has no record_logical_topk_ready, as on Ascend.
+    attn._project_qkv = lambda *_a: pytest.fail("the outer Ascend MLA owns projection")
     attn.attn = _Attn(on_call=lambda: calls.append("attn"))
-    attn.o_proj = _o_proj
+    attn.o_proj = lambda *_a: pytest.fail("the outer Ascend MLA owns o_proj")
 
     attn.forward(torch.zeros(3), torch.zeros(3, 16), torch.zeros(3), None)
 
-    assert calls == ["project", "attn", "o_proj"]
+    assert calls == ["attn"]
 
 
-def test_forward_calls_the_topk_hook_when_the_impl_defines_it():
+def test_forward_does_not_call_the_upstream_topk_hook():
     calls: list[str] = []
     attn = _attn(_spec(0, 0))
     attn.__class__ = ml4.AscendMistralMLAAttention
@@ -231,7 +231,7 @@ def test_forward_calls_the_topk_hook_when_the_impl_defines_it():
 
     attn.forward(torch.zeros(3), torch.zeros(3, 16), torch.zeros(3), None)
 
-    assert calls == ["topk_ready"]
+    assert calls == []
 
 
 # ------------------------------------------------------------- rejections
@@ -333,6 +333,21 @@ def test_a_dense_config_is_left_alone(monkeypatch):
 
 
 # ---------------------------------------------------------------- indexer
+
+
+@pytest.mark.parametrize(
+    "layer_idx,expected",
+    [(0, False), (16, True), (17, False), (18, False), (19, False), (20, True)],
+)
+def test_only_the_producer_before_shared_layers_caches_topk(layer_idx, expected):
+    config = SimpleNamespace(index_sharing=["full"] * 17 + ["shared", "shared", "full", "full", "shared"])
+    spec = _spec(layer_idx, layer_idx, has_indexer=config.index_sharing[layer_idx] == "full")
+
+    assert ml4._produces_topk_for_shared_layers(config, spec) is expected
+
+
+def test_no_index_sharing_needs_no_topk_cache_copy():
+    assert not ml4._produces_topk_for_shared_layers(SimpleNamespace(index_sharing=None), _spec(0, 0))
 
 
 def test_prepare_supplies_the_three_scalars_the_backend_reads():

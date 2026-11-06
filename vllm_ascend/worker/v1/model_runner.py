@@ -472,7 +472,11 @@ class NPUModelRunner(GPUModelRunner):
             getattr(vllm_config, "model_config", None)
         )
         # dsa c8
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in [
+            "fp8",
+            "int8",
+            "fp8_ds_mla",
+        ]
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
         if self.enable_sparse_li_c8:
             self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
@@ -484,9 +488,11 @@ class NPUModelRunner(GPUModelRunner):
             elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
         if self.enable_sparse_sfa_c8:
-            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
-                vllm_config.cache_config.cache_dtype, 
-                vllm_config.model_config
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            self.c8_cache_dtype = (
+                torch.float8_e4m3fn
+                if cache_dtype == "fp8_ds_mla"
+                else kv_cache_dtype_str_to_dtype(cache_dtype, vllm_config.model_config)
             )
 
         self.attn_backend = get_attn_backend(
@@ -6658,6 +6664,13 @@ class NPUModelRunner(GPUModelRunner):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+        try:
+            from vllm.models.mistral.amd.indexer import MistralIndexerCache
+        except ImportError:
+            sfa_indexer_cache_types = (DeepseekV32IndexerCache,)
+        else:
+            sfa_indexer_cache_types = (DeepseekV32IndexerCache, MistralIndexerCache)
+
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
@@ -6776,7 +6789,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     attn_layer_names.add(layer_name)
 
-            elif isinstance(attn_module, DeepseekV32IndexerCache):
+            elif isinstance(attn_module, sfa_indexer_cache_types):
                 if not getattr(
                     getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
                     "runtime_has_indexer",
