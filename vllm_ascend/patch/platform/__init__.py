@@ -95,6 +95,13 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #       Remove this patch when upstream's generic KV-cache layout supports the
 #       Ascend GLM-Next cache topology.
 #
+#       On main, Ascend grouping and pool accounting live in
+#       `vllm_ascend.core.kv_cache_config_builder`, which the platform selects
+#       through `NPUPlatform.get_kv_cache_config_builder_cls`; its default
+#       materialization delegates back to the patched planning functions
+#       applied by this file. The v0.32.0 lane, which has no pluggable
+#       builder, applies the same rules directly from this file.
+#
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
