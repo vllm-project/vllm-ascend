@@ -1,0 +1,4 @@
+pr: 20517
+entries:
+  - category: bugfix
+    text: Corrected KV-fetch stage metrics in the synchronous and asynchronous RecomputeScheduler so active transfers are counted as in progress and running requests no longer remain counted as waiting for KV.
