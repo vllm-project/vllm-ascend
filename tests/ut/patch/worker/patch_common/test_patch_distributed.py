@@ -190,7 +190,7 @@ def _load_patch_distributed_module():
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
     # The patch only uses this to decide whether to set ``cpu_timeout`` (vLLM
-    # main) or leave it to the upstream base class (0.32.0); no test here
+    # main) or leave it to the upstream base class (0.33.0); no test here
     # asserts on that branch.
     utils_module.vllm_version_is = lambda _target: False
 

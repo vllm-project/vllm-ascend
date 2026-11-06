@@ -59,7 +59,7 @@ def copy_kv_cache_blocks_inplace(
             # Main keys on that geometry; the release lane keys on (device, address).
             key = (
                 (tensor.device, data_ptr)
-                if vllm_version_is("0.32.0")
+                if vllm_version_is("0.33.0")
                 else (tensor.device, data_ptr, tuple(tensor.shape), tuple(tensor.stride()), tensor.element_size())
             )
             if key in seen_tensors:

@@ -76,7 +76,6 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
-    vllm_version_is,
 )
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 
@@ -981,25 +980,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
-        # scenario the graph is captured once, so every later weight update
-        # reload has to refresh the stored tensors in place instead of
-        # rebinding the attributes to freshly allocated tensors.
-        # `replace_parameter(..., prefer_copy=True)` does exactly that on
-        # v0.32.0: it copies into the existing storage while the new value stays
-        # compatible, and rebinds only when shape/dtype/device actually
-        # changes. vLLM main (#62326) dropped `prefer_copy` and keeps the
-        # parameter object by default. This mirrors how upstream vLLM refreshes
-        # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
-        # raise on a shape mismatch.
+        # replace_parameter preserves the parameter object and compatible storage on both supported versions.
         w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
         w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
-        if vllm_version_is("0.32.0"):
-            replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
-            replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
-        else:
-            replace_parameter(self, "W_UV", w_uv)
-            replace_parameter(self, "W_UK_T", w_uk_t)
+        replace_parameter(self, "W_UV", w_uv)
+        replace_parameter(self, "W_UK_T", w_uk_t)
 
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
