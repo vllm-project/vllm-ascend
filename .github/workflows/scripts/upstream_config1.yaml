@@ -1,0 +1,3 @@
+e2e-upstream_a2_2:
+  - name: tests/models/language/pooling_mteb_test/test_qwen3_reranker.py
+    estimated_time: 20

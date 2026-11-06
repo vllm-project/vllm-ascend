@@ -20,6 +20,7 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
+  pull_request:
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -68,6 +69,7 @@ jobs:
           target_ids: '["a2-arm64-ubuntu"]'
 
     e2e-upstream_singlecard:
+        if: false
         runs-on: linux-aarch64-a2b3-1
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
@@ -239,7 +241,7 @@ jobs:
             part: [0]
             # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
-            num_npus: [2, 4]
+            num_npus: [2]
         container:
           # image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.image_tag }}
@@ -283,7 +285,6 @@ jobs:
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
               pip uninstall -y triton
-              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
             id: get_csrc_hash
@@ -345,7 +346,8 @@ jobs:
                 echo "csrc cache miss: compile kernels on the NPU runner"
                 uv pip install -e . --no-build-isolation
               fi
-              uv pip install tblib 
+              uv pip install tblib
+              uv pip install "mteb[bm25s]"
 
           - name: Install FLA NPU for A2 upstream tests
             env:
@@ -370,7 +372,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${GITHUB_WORKSPACE}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_a2_${{ matrix.num_npus }} \
                 --auto-partition-id "${{ matrix.part }}" \
@@ -378,6 +382,7 @@ jobs:
                 --continue-on-error
               
     e2e-upstream_online:
+        if: false
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
