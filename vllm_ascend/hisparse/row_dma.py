@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 _WORKER_SHA256 = "864e2c7ce4e2cff320b4f68f8dccc9691adb829f0e50fdf6a27dc9c7885040e5"
+_RUNTIME_SHA256 = "16e33814eb5d6b44093429fbb74aaf436e8994b11b43b07d1c39851baf563759"
 # Large prefill batches keep the scalar path to bound temporary memory.
 _MAX_DESCRIPTORS = 32768
 
@@ -108,7 +109,7 @@ def _try_enqueue(worker, geometry, layer_indices, ready_event) -> bool:
     return True
 
 
-def _install_worker(worker_type, backend_type) -> None:
+def _install_worker(worker_type, backend_type, bind_recycled=None) -> None:
     original_init = worker_type._init_dma
     original_enqueue = worker_type._enqueue_row_dma
     if getattr(original_enqueue, "_ascend_row_dma", False):
@@ -118,8 +119,11 @@ def _install_worker(worker_type, backend_type) -> None:
     def init(worker):
         original_init(worker)
         worker._ascend_row_dma_geometry = None
-        if isinstance(worker.backend, backend_type) and worker.is_host_writer and worker.shared_host_region is None:
-            worker._ascend_row_dma_geometry = _Geometry.bind(worker)
+        if isinstance(worker.backend, backend_type):
+            if worker.is_host_writer and worker.shared_host_region is None:
+                worker._ascend_row_dma_geometry = _Geometry.bind(worker)
+            if bind_recycled is not None:
+                worker._ascend_recycled_invalidator = bind_recycled(worker)
 
     @wraps(original_enqueue)
     def enqueue(worker, layer_indices, ready_event=None):
@@ -130,11 +134,29 @@ def _install_worker(worker_type, backend_type) -> None:
     enqueue._ascend_row_dma = True
     worker_type._init_dma = init
     worker_type._enqueue_row_dma = enqueue
+    if bind_recycled is not None:
+        # Keep the same pinned adapter until Core exposes this backend hook.
+        original_invalidate = worker_type.invalidate_blocks
+
+        @wraps(original_invalidate)
+        def invalidate(worker, block_ids, request_state_indices):
+            owner = getattr(worker, "_ascend_recycled_invalidator", None)
+            if owner is None or not owner.try_call(worker, block_ids, request_state_indices):
+                return original_invalidate(worker, block_ids, request_state_indices)
+
+        worker_type.invalidate_blocks = invalidate
 
 
 def install(backend_type) -> None:
     """Only adapt the exact Core implementation reviewed for this experiment."""
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import worker
+    from vllm.v1.hisparse import runtime
 
-    if sha256(Path(worker.__file__).read_bytes()).hexdigest() == _WORKER_SHA256:
-        _install_worker(worker.HiSparseConnectorWorker, backend_type)
+    if sha256(Path(worker.__file__).read_bytes()).hexdigest() != _WORKER_SHA256:
+        return
+    bind_recycled = None
+    if sha256(Path(runtime.__file__).read_bytes()).hexdigest() == _RUNTIME_SHA256:
+        from vllm_ascend.hisparse.recycled_invalidate import RecycledGroupInvalidator
+
+        bind_recycled = RecycledGroupInvalidator.bind
+    _install_worker(worker.HiSparseConnectorWorker, backend_type, bind_recycled)
