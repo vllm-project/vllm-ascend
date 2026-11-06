@@ -573,6 +573,8 @@ class AscendConfig:
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
+    # Opt-in A3/MRV2 graph-external SAS/QLI producers; disabled by default.
+    dsv41_metadata_async_config: dict[str, Any] = dataclasses.field(default_factory=dict)
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
