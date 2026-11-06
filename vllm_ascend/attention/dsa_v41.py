@@ -270,7 +270,6 @@ class DeepseekV41PreparedIndexer:
 
     query: torch.Tensor | None
     weights: torch.Tensor
-    use_multistream: bool = True
     quantized_query: torch.Tensor | None = None
     query_scale: torch.Tensor | None = None
     quantize_done: Any = None
@@ -431,7 +430,7 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
-    def _use_multistream(self, query_tokens: int, cache_tokens: int) -> bool:
+    def _use_qkv_multistream(self, query_tokens: int, cache_tokens: int) -> bool:
         return self.multistream_dsv4_dsa_overlap and (
             max(query_tokens, cache_tokens) <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
             or not torch.npu.is_current_stream_capturing()
@@ -445,8 +444,8 @@ class AscendDSAV41Impl:
             return None, None, None
         cos, sin = query_metadata.rope(attn.rotary_emb.layername, query_hidden.shape[0])
         kv_cos, kv_sin = cache_metadata.rope(attn.rotary_emb.layername, cache_hidden.shape[0])
-        use_multistream = self._use_multistream(query_hidden.shape[0], cache_hidden.shape[0])
-        if use_multistream and cache_hidden.shape[0]:
+        use_qkv_multistream = self._use_qkv_multistream(query_hidden.shape[0], cache_hidden.shape[0])
+        if use_qkv_multistream and cache_hidden.shape[0]:
             q, qr = self.multistream_preprocess(
                 attn,
                 query_hidden,
@@ -464,15 +463,7 @@ class AscendDSAV41Impl:
                 self._write_swa_cache(attn, cache_metadata.swa, kv)
         self._apply_rotary(attn, q, cos, sin)
         # Consume local Query RoPE before compression can reuse source tables.
-        prepared_indexer = self._prepare_indexer_inputs(
-            attn,
-            query_hidden,
-            qr,
-            cos,
-            sin,
-            query_metadata,
-            use_multistream=use_multistream,
-        )
+        prepared_indexer = self._prepare_indexer_inputs(attn, query_hidden, qr, cos, sin, query_metadata)
         if self.role.is_kv_source and cache_hidden.shape[0]:
             self._write_compressed_source(
                 attn,
@@ -490,26 +481,22 @@ class AscendDSAV41Impl:
     def _indexer_hidden_states(self, hidden_states, metadata):
         return hidden_states[: metadata.swa.num_actual_tokens]
 
-    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata, *, use_multistream):
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
 
         query = indexer.project_query(qr)
-        if use_multistream:
-            main_stream = torch.npu.current_stream()
-            aux_stream = dsv4_dsa_overlap_stream()
-            weights_start = main_stream.record_event()
-            with npu_stream_switch(aux_stream, enabled=True):
-                aux_stream.wait_event(weights_start)
-                weights = indexer.project_weights(hidden_states)
-                weights_done = aux_stream.record_event()
-        else:
+        weights_start = main_stream.record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            aux_stream.wait_event(weights_start)
             weights = indexer.project_weights(hidden_states)
+            weights_done = aux_stream.record_event()
         indexer.apply_query_rope(query, cos, sin)
-        if use_multistream:
-            main_stream.wait_event(weights_done)
-        return DeepseekV41PreparedIndexer(query=query, weights=weights, use_multistream=use_multistream)
+        main_stream.wait_event(weights_done)
+        return DeepseekV41PreparedIndexer(query=query, weights=weights)
 
     @staticmethod
     def _should_quantize_indexer(prepared, metadata):
@@ -523,9 +510,6 @@ class AscendDSAV41Impl:
 
     def _quantize_indexer_query(self, attn, prepared, metadata):
         if not self._should_quantize_indexer(prepared, metadata):
-            return
-        if not prepared.use_multistream:
-            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
             return
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()

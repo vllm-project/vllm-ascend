@@ -41,7 +41,7 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
         (True, True, 4, 2, 5, False),
     ],
 )
-def test_multistream_policy_uses_largest_input(
+def test_qkv_multistream_policy_uses_largest_input(
     monkeypatch,
     configured,
     capturing,
@@ -55,19 +55,21 @@ def test_multistream_policy_uses_largest_input(
     impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
     impl.multistream_dsv4_dsa_overlap = configured
 
-    assert impl._use_multistream(query_tokens, cache_tokens) is expected
+    assert impl._use_qkv_multistream(query_tokens, cache_tokens) is expected
 
 
 @pytest.mark.parametrize(
-    "configured,capturing,threshold,expected_stream",
+    "configured,capturing,threshold,expected_qkv_multistream",
     [
-        (False, False, 4, "main"),
-        (True, True, 3, "main"),
-        (True, True, 4, "aux"),
-        (True, False, 3, "aux"),
+        (False, False, 4, False),
+        (True, True, 3, False),
+        (True, True, 4, True),
+        (True, False, 3, True),
     ],
 )
-def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, capturing, threshold, expected_stream):
+def test_indexer_streams_are_independent_of_qkv_policy(
+    monkeypatch, configured, capturing, threshold, expected_qkv_multistream
+):
     trace = []
     active_stream = "main"
 
@@ -118,7 +120,7 @@ def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, capt
     impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
     impl.multistream_dsv4_dsa_overlap = configured
     impl.role = SimpleNamespace(has_long_context=True, is_index_source=True)
-    use_multistream = impl._use_multistream(hidden_states.shape[0], hidden_states.shape[0])
+    assert impl._use_qkv_multistream(hidden_states.shape[0], hidden_states.shape[0]) is expected_qkv_multistream
 
     prepared = impl._prepare_indexer_inputs(
         attn,
@@ -127,13 +129,12 @@ def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, capt
         None,
         None,
         metadata,
-        use_multistream=use_multistream,
     )
     impl._quantize_indexer_query(attn, prepared, metadata)
 
-    assert next(stream for stream, operation, _ in trace if operation == "weights") == expected_stream
-    assert next(stream for stream, operation, _ in trace if operation == "quantize") == expected_stream
-    assert (prepared.quantize_done is not None) is use_multistream
+    assert next(stream for stream, operation, _ in trace if operation == "weights") == "aux"
+    assert next(stream for stream, operation, _ in trace if operation == "quantize") == "aux"
+    assert prepared.quantize_done is not None
 
 
 @pytest.mark.parametrize("overlap", [False, True])
