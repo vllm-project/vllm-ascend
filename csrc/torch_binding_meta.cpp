@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+#include "mla_preprocess/mla_preprocess_validation.h"
 
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
@@ -88,9 +89,13 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     at::Tensor &kv_cache_out0,
     at::Tensor &q_out1,
     at::Tensor &kv_cache_out1,
-    at::Tensor &inner_out
+    at::Tensor &inner_out,
+    double q_epsilon,
+    double kv_epsilon
     )
 {
+    mla_preprocess_detail::ValidateRmsNormEpsilon(q_epsilon, "q_epsilon");
+    mla_preprocess_detail::ValidateRmsNormEpsilon(kv_epsilon, "kv_epsilon");
     TORCH_CHECK(
         cos.has_value() == sin.has_value(),
         "mla_preprocess requires cos and sin to both be tensors or both be None.");
