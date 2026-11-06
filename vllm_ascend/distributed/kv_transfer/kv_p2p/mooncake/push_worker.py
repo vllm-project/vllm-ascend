@@ -220,7 +220,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
-            # TODO: map KVPP cache owners and their readiness events for Push.
+            # KVPP is outside the Push support plan.
             if self.ascend_config.kvpp_config.size > 1:
                 raise ValueError("Mooncake Push does not support KVPP yet")
             self._device = torch.npu.current_device()
@@ -524,11 +524,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         return LayerTransferRequest(request_id, tuple(local_ids), tuple(remote_ids), start, end), event
 
     def _execute_layer_transfer(self, batch: LayerTransferBatch) -> str | None:
-        # Follow the original layerwise connector: a returned synchronous WRITE
-        # ends the task, including failures. Native quiescence after a transport
-        # timeout and fault-safe memory reuse are outside this prototype's scope.
-        # TODO: establish transport cancellation/drain semantics before treating
-        # native timeout recovery as safe for P/D block reuse.
+        # Backend contract: synchronous WRITE returns only after host/device
+        # accesses finish, including on failure. The connector waits for this
+        # return before notifying D or allowing source blocks to be reused.
         src_list, dst_list, length_list = [], [], []
         try:
             local_index = self._layer_indices[batch.layer_name]
@@ -698,14 +696,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def _send_completions(self) -> None:
         """Queue DONE after a request's complete set of submitted WRITEs."""
+        transfers_by_request: dict[str, list[Future]] = {}
+        pending_by_request: dict[str, dict[WorkerRank, dict[str, int]]] = {}
+        for batch, future in self._pending_sends:
+            for request in batch.requests:
+                transfers_by_request.setdefault(request.request_id, []).append(future)
+                pending_tokens = pending_by_request.setdefault(request.request_id, {})
+                pending_tokens.setdefault(batch.remote_rank, {})[batch.layer_name] = request.end_token
         for request_id, state in self._reqs_send_state.items():
-            transfers = []
-            pending_tokens: dict[WorkerRank, dict[str, int]] = {}
-            for batch, future in self._pending_sends:
-                for request in batch.requests:
-                    if request.request_id == request_id:
-                        transfers.append(future)
-                        pending_tokens.setdefault(batch.remote_rank, {})[batch.layer_name] = request.end_token
+            transfers = transfers_by_request.get(request_id, [])
+            pending_tokens = pending_by_request.get(request_id, {})
             for rank, destination in state.destinations.items():
                 if destination.completion is not None:
                     continue
