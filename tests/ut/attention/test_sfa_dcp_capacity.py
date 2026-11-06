@@ -47,7 +47,7 @@ def _create_builder(spec, config, indexer):
 
     with (
         patch.object(DCPMetadataBuilderMixin, "__init__", init_base),
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp", return_value=True),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled", return_value=True),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.get_dcp_group",
             return_value=SimpleNamespace(ranks=list(range(8))),
@@ -142,6 +142,23 @@ def test_wider_table_is_packed_with_operator_row_stride():
     assert local.stride() == (138, 1)
     torch.testing.assert_close(local, table[:, :138])
     assert local.flatten()[29 * 138] == table[29, 0]
+
+
+def test_dcp_builder_refreshes_captured_local_block_table():
+    config = _config(140000, 768)
+    spec = AscendMLAAttentionSpec(block_size=768, num_kv_heads=1, head_size=128, dtype=torch.uint8)
+    builder = _create_builder(spec, config, False)
+    backing = torch.arange(2 * 144, dtype=torch.int32).reshape(2, 144)
+    captured = builder._get_dcp_local_block_table(backing, 2)
+    other = backing.clone()
+    independent = builder._get_dcp_local_block_table(other, 2)
+
+    backing.add_(1000)
+    current = builder._get_dcp_local_block_table(backing, 2)
+    assert current.data_ptr() == captured.data_ptr()
+    torch.testing.assert_close(captured, backing[:, :138])
+    torch.testing.assert_close(independent, other[:, :138])
+    assert current.stride() == (138, 1)
 
 
 @pytest.mark.parametrize("interleave", [1, 128, 768])

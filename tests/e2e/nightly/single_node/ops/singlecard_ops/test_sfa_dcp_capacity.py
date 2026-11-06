@@ -14,10 +14,39 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
-    get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
 )
+
+
+@pytest.mark.parametrize("batch", [2, 30])
+@torch.inference_mode()
+def test_local_block_table_refresh_between_graph_replays(batch):
+    backing = torch.zeros(batch, 144, dtype=torch.int32, device="npu")
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+    builder.max_local_block_table_cols = 138
+    builder.dcp_local_seq_lens_buf = torch.empty(batch, dtype=torch.int32, device="npu")
+    builder._local_block_table_buffers = {}
+    table = builder._get_dcp_local_block_table(backing, batch)
+    pages = torch.arange(batch * 2, dtype=torch.float32, device="npu")
+
+    def read_pages():
+        return torch.index_select(pages, 0, table[:, 0].to(torch.int64))
+
+    for _ in range(3):
+        read_pages()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = read_pages()
+    for offset in (batch, 0):
+        expected = torch.arange(batch, dtype=torch.int32) + offset
+        backing[:, 0].copy_(expected.npu())
+        table = builder._get_dcp_local_block_table(backing, batch)
+        graph.replay()
+        assert torch.equal(result.cpu(), expected.float())
+        torch.testing.assert_close(result, read_pages(), rtol=0, atol=0)
+    graph.reset()
 
 
 @pytest.mark.parametrize("batch", [1, 30])
@@ -33,6 +62,7 @@ def test_qsfa_dcp_tail_eager_and_graph(batch, local_len):
     # so dropping or misaddressing the tail changes the numerical result.
     base = (torch.arange(batch) % 4 + 1).float()
     values = base[:, None].expand(batch, cols).clone()
+    values[:, 0] += 16
     values[:, -1] += 4
     key_nope = values[:, :, None, None, None].expand(batch, cols, page_size, 1, nope).contiguous().to(dtype)
     key_rope = torch.zeros(batch, cols, page_size, 1, rope, dtype=torch.bfloat16)
@@ -40,9 +70,13 @@ def test_qsfa_dcp_tail_eager_and_graph(batch, local_len):
     packed = torch.cat((key_nope.view(torch.uint8), key_rope.view(torch.uint8), scales.view(torch.uint8)), -1)
     cache = packed.reshape(batch * cols, page_size, 1, 656).view(dtype).npu()
     query = torch.zeros(batch * queries, heads, nope + rope, dtype=torch.bfloat16, device="npu")
-    table = get_sfa_dcp_local_block_table(
-        torch.arange(batch * cols, dtype=torch.int32, device="npu").reshape(batch, cols), batch, cols
-    )
+    backing = torch.zeros(batch, cols + 6, dtype=torch.int32, device="npu")
+    backing[:, :cols].copy_(torch.arange(batch * cols, dtype=torch.int32, device="npu").reshape(batch, cols))
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+    builder.max_local_block_table_cols = cols
+    builder.dcp_local_seq_lens_buf = torch.empty(batch, dtype=torch.int32, device="npu")
+    builder._local_block_table_buffers = {}
+    table = builder._get_dcp_local_block_table(backing, batch)
     indices = torch.full((batch * queries, 1, 2048), -1, dtype=torch.int32, device="npu")
     q_lens = torch.arange(queries, (batch + 1) * queries, queries, dtype=torch.int32, device="npu")
     kv_lens = torch.full((batch,), local_len, dtype=torch.int32, device="npu")
@@ -78,7 +112,8 @@ def test_qsfa_dcp_tail_eager_and_graph(batch, local_len):
 
     def check(result, selected):
         output, maximum, total = [tensor.cpu().float() for tensor in result]
-        reference = values[:, selected.long() // page_size].mean(-1)
+        page_ids = backing.cpu()[:, :cols][:, selected.long() // page_size]
+        reference = values.flatten()[page_ids.long()].mean(-1)
         reference = reference.repeat_interleave(queries)[:, None, None].expand_as(output)
         torch.testing.assert_close(output, reference, atol=0.04, rtol=0.01)
         lse = maximum + total.log()
@@ -91,8 +126,14 @@ def test_qsfa_dcp_tail_eager_and_graph(batch, local_len):
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         result = run()
-    # Replay must consume newly selected tail tokens at the captured pointers.
+    # Rebuild metadata outside capture after changing the physical KV pages.
+    last_page = (local_len - 1) // page_size
+    backing[:, [0, last_page]] = backing[:, [last_page, 0]]
+    table = builder._get_dcp_local_block_table(backing, batch)
     selected = select(32)
     graph.replay()
     torch.npu.synchronize()
     check(result, selected)
+    eager = run()
+    torch.testing.assert_close(result[0], eager[0])
+    graph.reset()

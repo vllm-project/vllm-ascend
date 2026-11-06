@@ -35,6 +35,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_max_num_reqs,
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
@@ -718,6 +719,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._lim_token_masks: dict[object, CpuGpuBuffer] = {}
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
+        self._max_num_reqs = get_sfa_max_num_reqs(vllm_config)
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
         self._rope_capacity = max_num_input_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
@@ -745,10 +747,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
         self.blocks_per_phys_block = physical_block_size // self.replicated_view_block_size
 
-        max_num_reqs = scheduler_config.max_num_seqs
-        if self.use_pcp:
-            max_num_reqs *= 2
-        max_num_reqs += 1
         self.max_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
             vllm_config.model_config.max_model_len,
             physical_block_size,
@@ -756,7 +754,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.blocks_per_phys_block,
         )
         max_replicated_block_table_cols = self.max_local_block_table_cols * self.dcp_size
-        self._dcp_block_table_shape = (max_num_reqs, max_replicated_block_table_cols)
+        self._dcp_block_table_shape = (self._max_num_reqs, max_replicated_block_table_cols)
         self.replicated_col_idx_buf = torch.arange(
             max_replicated_block_table_cols,
             dtype=torch.int32,
@@ -1159,9 +1157,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             buffers = self._sharded_seq_buffers.get(buffer_key)
             if buffers is None:
                 buffers = (
-                    torch.empty(
-                        self.vllm_config.scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=self.device
-                    ),
+                    torch.empty(self._max_num_reqs, dtype=torch.int32, device=self.device),
                     torch.empty(
                         (0 if self.use_native_dcp_qli else self._slot_capacity, 1),
                         dtype=torch.int32,
@@ -1170,6 +1166,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 )
                 self._sharded_seq_buffers[buffer_key] = buffers
             key_buffer, visible_buffer = buffers
+            if num_reqs > key_buffer.numel():
+                raise ValueError(f"Sharded indexer request count {num_reqs} exceeds capacity {key_buffer.numel()}")
             actual_seq_lengths_key = key_buffer[:num_reqs]
             if self.use_native_dcp_qli:
                 build_local_key_lengths(

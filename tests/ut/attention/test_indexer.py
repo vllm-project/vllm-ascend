@@ -200,6 +200,54 @@ def test_sfa_indexer_builder_defers_local_qli_only_in_target_scope(mock_cos_sin,
         kernel.assert_called_once()
 
 
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("rows", [8, 9, 10])
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
+    # Four PCP prefills become eight segments, plus one possible graph dummy.
+    builder = _make_builder(pcp_size=2)
+    builder.use_sharded_dcp = True
+    builder.use_native_dcp_qli = native
+    builder.vllm_config.parallel_config.cp_kv_cache_interleave_size = 2
+    mock_cos_sin.return_value = (torch.zeros(rows * 2, 1, 1, 8), torch.zeros(rows * 2, 1, 1, 8))
+    common = _make_common_metadata()
+    common.num_reqs = rows
+    common.num_actual_tokens = common.num_input_tokens = rows * 2
+    common.slot_mapping = torch.arange(rows * 2)
+    common.positions = torch.arange(rows * 2)
+    common.query_start_loc = torch.arange(0, rows * 2 + 1, 2, dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens = torch.arange(2, rows * 2 + 1, 2, dtype=torch.int32)
+    common.block_table_tensor = torch.zeros(rows, 2, dtype=torch.int32)
+    common.is_prefilling = torch.ones(rows, dtype=torch.bool)
+    expected_lengths = torch.tensor(
+        [sum(p // 2 % 2 == 1 for p in range(int(n))) for n in common.seq_lens], dtype=torch.int32
+    )
+
+    def lengths(seq_lens, out, *args):
+        assert out.numel() == seq_lens.numel(), "request output is smaller than the kernel write range"
+        out.copy_(expected_lengths)
+
+    ops = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    ops.build_local_key_lengths = Mock(side_effect=lengths)
+    ops.build_local_lengths = Mock(side_effect=lambda seq, query, out, visible, *args: lengths(seq, out))
+    with (
+        patch.dict("sys.modules", {ops.__name__: ops}),
+        patch(
+            "vllm_ascend.attention.indexer.get_dcp_group", return_value=SimpleNamespace(world_size=2, rank_in_group=1)
+        ),
+        patch("vllm_ascend.attention.indexer.uses_native_int8_sparse_adaptor", return_value=False),
+    ):
+        if rows > 9:
+            with pytest.raises(ValueError, match="request.*capacity"):
+                builder.build(0, common)
+            ops.build_local_key_lengths.assert_not_called()
+            ops.build_local_lengths.assert_not_called()
+        else:
+            metadata = builder.build(0, common)
+            torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
+
+
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos_sin, mock_get_ascend_config):

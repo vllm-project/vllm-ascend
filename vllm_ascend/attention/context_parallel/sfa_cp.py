@@ -25,6 +25,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_max_num_reqs,
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
@@ -402,15 +403,13 @@ class AscendSFADCPMetadataBuilder(
         # while decode requests remain one local row. A mixed batch can
         # therefore require up to twice max_num_seqs rows on each PCP rank.
         # Full-graph FIA padding can append one additional dummy request.
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-            max_num_reqs *= 2
-        max_num_reqs += 1
+        max_num_reqs = get_sfa_max_num_reqs(vllm_config)
         self.dcp_local_seq_lens_buf = torch.empty(
             max_num_reqs,
             dtype=torch.int32,
             device=device,
         )
+        self._local_block_table_buffers: dict[int, torch.Tensor] = {}
         self.replicated_view_block_size = self.kernel_block_size
         physical_block_size = getattr(kv_cache_spec, "block_table_block_size", None) or kv_cache_spec.block_size
         if physical_block_size % self.replicated_view_block_size != 0:
@@ -473,10 +472,27 @@ class AscendSFADCPMetadataBuilder(
         )
 
     def _get_dcp_local_block_table(self, block_table: torch.Tensor, num_reqs: int) -> torch.Tensor:
+        local = block_table[:num_reqs, : self.max_local_block_table_cols]
+        if local.is_contiguous():
+            return get_sfa_dcp_local_block_table(block_table, num_reqs, self.max_local_block_table_cols)
+        # Metadata is rebuilt outside FULL capture. Refresh the captured compact
+        # storage, keeping distinct source tables (including draft steps) separate.
+        key = block_table.data_ptr()
+        out = self._local_block_table_buffers.get(key)
+        if out is None:
+            out = torch.empty(
+                (self.dcp_local_seq_lens_buf.numel(), self.max_local_block_table_cols),
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            self._local_block_table_buffers[key] = out
+        if num_reqs > out.shape[0]:
+            raise ValueError(f"DCP block table request count {num_reqs} exceeds capacity {out.shape[0]}")
         return get_sfa_dcp_local_block_table(
             block_table,
             num_reqs,
             self.max_local_block_table_cols,
+            out=out[:num_reqs],
         )
 
     def _ensure_replicated_view_buffers(

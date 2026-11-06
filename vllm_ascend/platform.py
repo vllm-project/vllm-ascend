@@ -1615,6 +1615,17 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
         and interleave > 0
         and cache_config.block_size % interleave == 0
     )
+    if use_dcp and hybrid_kernel_interleave:
+        from vllm.v1.worker.utils import select_common_block_size
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        kernel_block_size = select_common_block_size(cache_config.block_size, [AscendSFABackend])
+        if interleave % kernel_block_size:
+            raise ValueError(
+                "Mooncake local DCP interleave must be a positive multiple of the kernel block size: "
+                f"interleave={interleave}, kernel_block_size={kernel_block_size}"
+            )
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
