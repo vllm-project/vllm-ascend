@@ -188,8 +188,8 @@ class HostUvaBuffer:
                 # retrieving the device pointer directly; skip unregister in
                 # close() since no registration was performed.
                 logger.warning(
-                    "aclrtHostRegisterV2 failed: rc=%d size=%d; "
-                    "trying direct device pointer on A5", rc, size)
+                    "aclrtHostRegisterV2 failed: rc=%d size=%d; trying direct device pointer on A5", rc, size
+                )
                 self._registered = False
             else:
                 self._registered = True
@@ -347,8 +347,10 @@ class SharedUvaBuffer:
                 # rc=507899.  Fall back to direct device pointer retrieval;
                 # skip unregister in close() since no registration was done.
                 logger.warning(
-                    "aclrtHostRegisterV2 failed for shared Engram: rc=%d size=%d; "
-                    "trying direct device pointer on A5", rc, size)
+                    "aclrtHostRegisterV2 failed for shared Engram: rc=%d size=%d; trying direct device pointer on A5",
+                    rc,
+                    size,
+                )
                 self._registered = False
             else:
                 self._registered = True
