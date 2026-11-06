@@ -1371,9 +1371,7 @@ def test_is_target_attn_groups_excludes_draft_only_groups(draft_pcp_size) -> Non
 
 
 def _get_draft_input_buffers(manager, buffers, num_tokens):
-    """Call the live upstream signature; vLLM main also returns the MoE padding mask."""
-    if vllm_version_is("0.32.0"):
-        return manager.get_draft_input_buffers(buffers)
+    """Both supported upstream versions return the MoE padding mask."""
     return manager.get_draft_input_buffers(buffers, num_tokens)[0]
 
 
