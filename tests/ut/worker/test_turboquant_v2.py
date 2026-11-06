@@ -111,7 +111,7 @@ def test_non_turboquant_v2_rejects_noncontiguous_pages_before_allocation(monkeyp
     runtime = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4")),
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     allocate = Mock(side_effect=AssertionError("Invalid pages must fail before allocation"))
@@ -151,7 +151,7 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         additional_config={},
         cache_config=SimpleNamespace(num_gpu_blocks_override=None),
         kv_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4")),
     )
     num_blocks, descriptors = cache.cache_config(runtime, groups, cache.pool_bytes_per_block(groups) * 3)
     config = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=descriptors, kv_cache_groups=groups)
