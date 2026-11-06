@@ -61,7 +61,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     BaseKVPoolScheduler,
     KVPoolScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker, KVPoolWorker
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
@@ -78,7 +78,7 @@ def create_kv_pool_worker(
     vllm_config: VllmConfig,
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
-) -> KVPoolWorker:
+) -> BaseKVPoolWorker:
     mode = resolve_kv_pool_transfer_mode(vllm_config, use_layerwise)
     if mode is KVPoolTransferMode.CROSS_LAYER_KV:
         worker_class = CrossLayerKVPoolWorker
@@ -189,7 +189,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         self.connector_scheduler: BaseKVPoolScheduler | None = None
-        self.connector_worker: KVPoolWorker | None = None
+        self.connector_worker: BaseKVPoolWorker | None = None
         self.dspark_prefix_cache_enabled = False
 
         if role == KVConnectorRole.SCHEDULER:
@@ -233,7 +233,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def restore_dspark_prefix(self, metadata: Any, request_id: str, offset: int, block_ids: Any) -> int:
         assert self.connector_worker is not None
-        cache = self.connector_worker.dspark_prefix_cache
+        cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is None or request is None:
             raise RuntimeError("DSpark prefix hit has no registered draft cache or load metadata")
@@ -241,7 +241,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def save_dspark_prefix(self, metadata: Any, request_id: str, through_tokens: int, block_ids: Any) -> None:
         assert self.connector_worker is not None
-        cache = self.connector_worker.dspark_prefix_cache
+        cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is not None and request is not None:
             cache.save(request, through_tokens, block_ids)
@@ -513,7 +513,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         assert self.connector_worker is not None
-        self.connector_worker.wait_for_save(self._get_connector_metadata())
+        cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""

@@ -75,11 +75,11 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
 
     def test_layerwise_constructor_matches_base_signature(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
         config, cache = MagicMock(), MagicMock()
         with (
-            patch.object(KVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
+            patch.object(BaseKVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
             patch.object(LayerwiseKVPoolWorker, "_init_layerwise_config") as configure,
         ):
             worker = LayerwiseKVPoolWorker(config, True, cache)
