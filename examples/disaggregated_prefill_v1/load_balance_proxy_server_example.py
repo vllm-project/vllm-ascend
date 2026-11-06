@@ -896,6 +896,13 @@ def auth_headers(request_id: str) -> dict[str, str]:
 
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
+    # Chat uses max_completion_tokens in preference to the deprecated max_tokens.
+    # Preserve the explicit client budget before reducing the P-side work to one
+    # token. An omitted budget stays omitted: only the serving model knows its
+    # generation defaults, so the proxy must not invent a limit.
+    original_max_tokens = payload.get("max_tokens")
+    if "messages" in payload and payload.get("max_completion_tokens") is not None:
+        original_max_tokens = payload["max_completion_tokens"]
     payload["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
@@ -904,6 +911,8 @@ def build_prefill_request(req_data: dict) -> dict:
         "remote_host": None,
         "remote_port": None,
     }
+    if original_max_tokens is not None:
+        payload["kv_transfer_params"]["original_max_tokens"] = original_max_tokens
     payload["stream"] = False
     payload["max_tokens"] = 1
     payload["min_tokens"] = 1
@@ -911,6 +920,14 @@ def build_prefill_request(req_data: dict) -> dict:
         payload["max_completion_tokens"] = 1
     payload.pop("stream_options", None)
     return payload
+
+
+def upstream_error_response(response: httpx.Response) -> Response:
+    # Keep non-JSON error bodies and their content type intact as well. Do not
+    # forward transport headers (e.g. Content-Length/Content-Encoding): httpx
+    # may already have decompressed the body.
+    headers = {name: response.headers[name] for name in ("content-type", "retry-after") if name in response.headers}
+    return Response(content=response.content, status_code=response.status_code, headers=headers)
 
 
 async def send_request_to_service(
@@ -1130,6 +1147,8 @@ async def handle_completions_impl(api: str, request: Request):
         else:
             origin_prompt = ""
         origin_max_tokens = req_data.get("max_tokens", 16)
+        if chat_flag and req_data.get("max_completion_tokens") is not None:
+            origin_max_tokens = req_data["max_completion_tokens"]
 
         # Pre-open the decode response BEFORE committing the ASGI 200 head so an
         # initial decode 4xx/5xx/connection failure can be returned with the real
@@ -1157,9 +1176,7 @@ async def handle_completions_impl(api: str, request: Request):
         except httpx.HTTPStatusError as exc:
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
-            return Response(
-                content=exc.response.content, status_code=exc.response.status_code, media_type="application/json"
-            )
+            return upstream_error_response(exc.response)
         except httpx.RequestError as exc:
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
@@ -1265,6 +1282,8 @@ async def handle_completions_impl(api: str, request: Request):
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            if chat_flag and req_data.get("max_completion_tokens") is not None:
+                                req_data["max_completion_tokens"] = req_data["max_tokens"]
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await reassign_instances(
                                 api,
@@ -1315,11 +1334,7 @@ async def handle_completions_impl(api: str, request: Request):
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
         if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
-            try:
-                err_body = e.response.json()
-            except Exception:
-                err_body = {"error": {"message": e.response.text or "upstream error"}}
-            return JSONResponse(err_body, status_code=e.response.status_code)
+            return upstream_error_response(e.response)
         raise
 
 
