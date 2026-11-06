@@ -250,6 +250,9 @@ class _CountingSource(WeightSource):
     def metadata(self):
         return [ParamMeta(n, torch.float32, (16,)) for names in self._groups for n in names]
 
+    def __iter__(self):
+        return self.iter_full()
+
     def iter_full(self):
         for names in self._groups:
             for n in names:

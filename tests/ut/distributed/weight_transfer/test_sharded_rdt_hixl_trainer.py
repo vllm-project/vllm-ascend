@@ -68,6 +68,9 @@ class _ListSource(WeightSource):
     def metadata(self):
         return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
+    def __iter__(self):
+        return self.iter_full()
+
     def iter_full(self):
         yield from self._pairs
 
