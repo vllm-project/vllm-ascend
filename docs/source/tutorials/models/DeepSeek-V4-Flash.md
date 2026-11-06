@@ -2588,25 +2588,16 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The short-sequence configuration follows the A3 deployment examples in [Chapter 5](#5-online-service-deployment). The long-context configuration uses the same A3 deployment templates with the parallelism, batch settings, and context limits in the tables below; it is a reference configuration, not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment.
+> **Note**: The short-sequence configuration follows the A3 deployment examples in [Chapter 5](#5-online-service-deployment). The long-context configuration uses the same A3 deployment templates with the parallelism, batch settings, and context limits in the table below; it is a reference configuration, not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment.
 
-#### Table 1: Scenario Overview
+#### Table 1: Detailed Node Configuration
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes.
-
-| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
-| --- | --- | --- | --- | --- |
-| Short Sequence | PD separation or KV Cache Pool deployment (1 Prefill + 1 Decode A3 node) | 32 (A3) | DeepSeek-V4-Flash-0731-w8a8 | Prefill uses DP2/TP1/PCP8 with 16 sequences, while Decode uses DP16/TP1/PCP1 with 60 sequences and 480 batched tokens. Enable Fused MC2 on Prefill. |
-| Long Context (~1M Input, Reference) | PD separation or KV Cache Pool deployment (1 Prefill + 1 Decode A3 node) | 32 (A3) | DeepSeek-V4-Flash-0731-w8a8 | Prefill uses DP2/TP8/PCP1 with 16 sequences and 4096 batched tokens, while Decode uses DP16/TP1/PCP1 with 60 sequences and 480 batched tokens. Enable Fused MC2 on Prefill and set the maximum model length to 1048576 on both sides. |
-
-#### Table 2: Detailed Node Configuration
-
-| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | DSpark Speculation Num | Fused MC2 | EP Switch | FC | PCP |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Short Sequence | Prefill Pool | 16 (1 A3 node) | 1 | 2 | 16 | 16384 | 512000 | 5 | On | On | Off | PCP=8 |
-| Short Sequence | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 512000 | 5 | Off | On | Off | PCP=1 |
-| Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | 5 | On | On | Off | PCP=1 |
-| Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | 5 | Off | On | Off | PCP=1 |
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | PCP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Short Sequence | Prefill Pool | 16 (1 A3 node) | 1 | 2 | 16 | 16384 | 512000 | PCP=8 |
+| Short Sequence | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 512000 | PCP=1 |
+| Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | PCP=1 |
+| Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | PCP=1 |
 
 ### 9.2 Tuning Guidelines
 
