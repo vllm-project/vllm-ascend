@@ -236,6 +236,7 @@ nav:
         - tutorials/models/DeepSeek-V4.1-Flash.md
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
+        - tutorials/models/DeepSeek-R1-Distill-310P-validation.md
         - tutorials/models/DeepSeekOCR2.md
         - tutorials/models/Gemma4.md
         - tutorials/models/GLM4.x.md

@@ -85,6 +85,75 @@ class TestAscendAttentionBackendImpl310(TestBase):
             kv_sharing_target_layer_name=None,
         )
 
+    def _make_impl(self, model_type="qwen2", dtype=torch.float16, quant_config=None):
+        self.mock_vllm_config.quant_config = quant_config
+        self.mock_vllm_config.model_config.dtype = dtype
+        self.mock_vllm_config.model_config.hf_text_config.model_type = model_type
+        return AscendAttentionBackendImpl310(
+            num_heads=1,
+            head_size=4,
+            scale=0.125,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
+    def test_qwen_fp16_prescale_prevents_intermediate_overflow(self):
+        impl = self._make_impl()
+        query = torch.full((2, 4), 200.0, dtype=torch.float16)
+        key = torch.tensor([[400.0] * 4, [200.0] * 4], dtype=torch.float16)
+        value = torch.tensor([[1.0] * 4, [3.0] * 4], dtype=torch.float16)
+        originals = [tensor.clone() for tensor in (query, key, value)]
+        output = torch.empty_like(query)
+        self.attn_metadata.attn_state = AscendAttentionState.PrefillNoCache
+        self.assertTrue(torch.isinf(query @ key.T).any())
+        expected = torch.softmax((query.float() @ key.float().T) * 0.125, dim=-1) @ value.float()
+
+        def half_intermediate(q, k, v, metadata, out):
+            scores = (q @ k.T) * impl.scale
+            self.assertTrue(torch.isfinite(scores).all())
+            out.copy_(torch.softmax(scores.float(), dim=-1).to(v.dtype) @ v)
+            return out
+
+        with patch.object(impl, "forward_prefill_310", side_effect=half_intermediate):
+            result = impl.forward_impl(query, key, value, None, self.attn_metadata, output)
+        torch.testing.assert_close(result.float(), expected)
+        for tensor, original in zip((query, key, value), originals):
+            torch.testing.assert_close(tensor, original)
+
+    def test_query_prescale_scope(self):
+        for model_type, dtype, quant_config in (
+            ("llama", torch.float16, None),
+            ("qwen2", torch.bfloat16, None),
+            ("qwen2", torch.float32, None),
+            ("qwen2", torch.float16, MagicMock()),
+        ):
+            with self.subTest(model_type=model_type, dtype=dtype, quant_config=quant_config):
+                impl = self._make_impl(model_type, dtype, quant_config)
+                self.assertEqual(impl._query_pre_scale, 1.0)
+                self.assertEqual(impl.scale, 0.125)
+
+    def test_query_prescale_all_attention_states(self):
+        impl = self._make_impl()
+        query = torch.full((2, 4), 100.0, dtype=torch.float16)
+        output = torch.empty_like(query)
+        for state, method in (
+            (AscendAttentionState.DecodeOnly, "forward_paged_attention"),
+            (AscendAttentionState.ChunkedPrefill, "forward_chunked_prefill_310"),
+            (AscendAttentionState.PrefillCacheHit, "forward_chunked_prefill_310"),
+            (AscendAttentionState.SpecDecoding, "forward_chunked_prefill_310"),
+        ):
+            with self.subTest(state=state), patch.object(impl, method, return_value=output) as kernel:
+                self.attn_metadata.attn_state = state
+                impl.forward_impl(query, None, None, None, self.attn_metadata, output)
+                scaled_query = kernel.call_args.args[0]
+                torch.testing.assert_close(scaled_query.float() * impl.scale, query.float() * 0.125)
+                self.assertEqual(query[0, 0], 100.0)
+
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_flash_attention")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
