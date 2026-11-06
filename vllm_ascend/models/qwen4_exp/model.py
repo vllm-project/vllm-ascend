@@ -95,6 +95,8 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
 class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4ExpProcessingInfo):
     """Preserve Qwen4Exp config handling while emitting raw image payloads."""
 
+    pass
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     AscendQwen3_5VLProcessor,
