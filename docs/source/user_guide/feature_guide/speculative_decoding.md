@@ -566,6 +566,63 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
 
 Adaptive verification takes effect only with model runner V2.
 
+#### Hybrid Gated DeltaNet targets
+
+The Model Runner V2 GDN path supports variable verification lengths, including
+steps that admit no draft tokens. Zero-draft decode requests retain the previous
+step's accepted-token offset so convolution and recurrent attention resume from
+the correct state. ACL Graph capture uses the same speculative path for one-token
+rows, and padding requests have zero-length GDN queries.
+
+Adaptive GDN verification directly reuses vLLM's Triton recurrent implementation
+with a two-dimensional state table. Its row stride is independent of the current
+query length, so a one-token query can restore the state from an earlier step
+that accepted multiple tokens. The fixed-length path keeps the native recurrent
+operator. This adaptive path requires triton-ascend and is not supported by the
+310P recurrent backend.
+
+Ascend declares the device/host query-length mismatch capability and the bounded
+variable-length decode graph capability in its own backend and metadata builder.
+It does not depend on inheriting those declarations from upstream GDN classes.
+The variable-length graph bound is `1 + num_speculative_tokens` with adaptive
+verification enabled; the 310P backend explicitly rejects this capability.
+
+Use a matching vLLM revision with the strided recurrent API and adaptive-verification
+initialization hooks and the convolution kernel interface used by the paired
+vLLM checkout, together with a DSpark checkpoint
+trained for the target model. For Qwen hybrid targets, including
+Qwen3.8-27B, set `num_speculative_tokens` to the draft checkpoint's supported
+length and enable `enable_adaptive_verification` as above. Keep full decode graphs
+enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
+to use vLLM's model-state implementation and the compacted device query boundaries.
+
+Ascend reuses vLLM's confidence estimates, cost profiling, budget allocator, and
+rejection sampler. Newer vLLM Triton budget allocators are used directly; the
+Ascend `index_fill_` workaround applies only to the older torch allocator.
+No change to sampling probabilities or model weights is required.
+
+Validate each target/draft pair on the intended NPU and CANN version. Compare
+plain decoding, fixed-length DSpark, and adaptive DSpark with the same precision,
+TP size, concurrency, prompt/output lengths, and cache settings, after warmup.
+Check output quality and actual admitted draft counts as well as throughput.
+Adaptive GDN uses strided Triton convolution and recurrent updates with device
+query boundaries. This supports FULL-graph padding and a previously accepted
+block followed by a shorter verification query without copying the state cache.
+On A2, fixed verification queries of at least nine tokens also use the strided
+recurrent update as a workaround for native NaNs observed with BF16 and eight
+draft tokens. This threshold records the observed failing configuration, not a
+general hardware limit. A3 and A5 retain their native fixed-verification path;
+adaptive verification uses the strided path independently of this workaround.
+The fixed-path workaround can be removed after the replacement native operator
+stack passes the recurrent numerical and state-update regression tests on A2.
+
+The FIA path copies admitted query boundaries back to the host for partial draft
+budgets. Full and zero budgets already have exact host boundaries and skip that
+synchronization; include the remaining synchronization cost in profiling.
+The upstream recurrent kernel may also have different performance from the native
+operator on each NPU generation; measure the complete target step, rather than
+inferring a speedup from the reduced verification token count alone.
+
 > **Performance note (Ascend):** The benefits of adaptive verification depend on
 > the workload.
 >
@@ -580,6 +637,15 @@ Adaptive verification takes effect only with model runner V2.
 >
 > - **In high-throughput scenarios**, performance gains from adaptive verification may sometimes fall short of expectations.
 >   In such cases, start by investigating the cause at the actual serving concurrency.
+
+For DSpark on Ascend, DEBUG logs report scheduled and admitted draft counts,
+confidence estimates, and the profiled verification costs. The Ascend runtime
+configuration can reset worker logging to INFO; set
+`runtime_config.ascend_log.modules.vllm.logger` to `DEBUG` in
+`--additional-config` for a diagnostic run. Remove that override for performance
+measurements. If the confidence head produces non-finite estimates, they are
+treated as 1 for budget selection; compare adaptive outputs with fixed and
+non-speculative outputs on NPU before relying on performance results.
 
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
