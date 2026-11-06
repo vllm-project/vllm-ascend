@@ -351,41 +351,12 @@ class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
                     self._quant_queue.put((chunk.quant, ready))
 
     def _run_quant(self, layers: "list[Any]", ready: "torch.Event") -> None:
-        """Quant/kernel-copy/reset the given COMPLETED leaf modules, exactly as
-        _layerwise_process. Runs on the quant thread's own stream, ordered after
-        the modules' scatters via ``ready``; touches only the scattered params
-        (never a receive slot), so it can overlap subsequent chunks' RDMA and
-        scatters. ``info.reset()`` is what makes finalize skip the layer —
-        drain_pending joins the quant queue before finalize runs."""
-        from vllm.model_executor.layers.quantization.base_config import (
-            QuantizeMethodBase,
-        )
-        from vllm.model_executor.model_loader.reload.layerwise import (
-            LAYERWISE_INFO,
-            _copy_and_restore_kernel_tensors,
-        )
+        from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-        stream = self._quant_stream or self._proc_stream
-        assert stream is not None  # created in _ensure_proc_worker before use
-        with (
-            torch.accelerator.device_index(self.device.index),
-            torch.npu.stream(stream),
-            torch.device(self.device),
-        ):
-            stream.wait_event(ready)
-            for layer in layers:
-                info = LAYERWISE_INFO.get(layer)
-                assert info is not None  # completed leaf module is set up for reload
-                quant_method = getattr(layer, "quant_method", None)
-                if isinstance(quant_method, QuantizeMethodBase):
-                    if hasattr(layer, "_already_called_process_weights_after_loading"):
-                        delattr(layer, "_already_called_process_weights_after_loading")
-                    quant_method.process_weights_after_loading(layer)
-                # Copy into persistent kernel storage (preserves cudagraph refs).
-                if info.kernel_tensors is not None:
-                    _copy_and_restore_kernel_tensors(layer, info)
-                # Reset so finalize_layerwise_reload skips this (loaded) layer.
-                info.reset()
+        # The shared wrapper installs process-wide CUDA-to-NPU mappings.
+        # Upstream owns stream ordering, quantization, kernel copy and reset.
+        with torch_cuda_wrapper():
+            super()._run_quant(layers, ready)
 
     def shutdown(self) -> None:
         # Propagate drain failures and retain live storage instead of dropping
