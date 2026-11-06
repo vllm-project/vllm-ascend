@@ -1,12 +1,158 @@
 import math
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.device_op import (
+    A5DeviceAdaptor,
+    Ascend310PDeviceAdaptor,
+    BaseDeviceAdaptor,
+    get_device_adaptor,
+)
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_hardware_profile
+
+
+@pytest.mark.parametrize(
+    "device,adaptor",
+    [
+        (AscendDeviceType.A2, BaseDeviceAdaptor),
+        (AscendDeviceType.A3, BaseDeviceAdaptor),
+        (AscendDeviceType.A5, A5DeviceAdaptor),
+        (AscendDeviceType._310P, Ascend310PDeviceAdaptor),
+    ],
+)
+def test_sparse_adaptor_selection_is_device_scoped(device, adaptor):
+    profile = get_hardware_profile(device)
+    if device == AscendDeviceType.A3:
+        # A3 retains both the release profile and standard Base adaptor.
+        profile = replace(profile, device_adaptor_family=DeviceAdaptorFamily.STANDARD)
+    with mock.patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile):
+        assert get_device_adaptor() is adaptor
+
+
+@pytest.mark.parametrize("group_size", [12, 64, 65, 96, 128])
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+@pytest.mark.parametrize("return_lse", [False, True])
+@pytest.mark.parametrize("use_rope", [False, True])
+def test_sparse_attention_query_group_padding_preserves_outputs(group_size, num_kv_heads, return_lse, use_rope):
+    tokens, kv_tokens, head_dim = 2, 3, 4
+    query = torch.randn(tokens, num_kv_heads * group_size, head_dim)
+    query_rope = torch.randn(tokens, num_kv_heads * group_size, 2) if use_rope else None
+    key = torch.randn(1, kv_tokens, num_kv_heads, head_dim)
+    key_rope = torch.randn(1, kv_tokens, num_kv_heads, 2) if use_rope else None
+    block_table = torch.zeros(1, 1, dtype=torch.int32)
+    topk = torch.arange(kv_tokens, dtype=torch.int32).view(1, 1, -1).expand(tokens, 1, -1)
+    lengths = torch.tensor([tokens], dtype=torch.int32)
+    scale = 0.5
+
+    def reference(q, q_rope):
+        grouped = q.unflatten(1, (num_kv_heads, -1))
+        scores = torch.einsum("tkhd,skd->tkhs", grouped, key[0])
+        if q_rope is not None:
+            scores += torch.einsum("tkhd,skd->tkhs", q_rope.unflatten(1, (num_kv_heads, -1)), key_rope[0])
+        scores *= scale
+        maximum = scores.amax(dim=-1)
+        total = torch.exp(scores - maximum.unsqueeze(-1)).sum(dim=-1)
+        output = torch.einsum("tkhs,skd->tkhd", scores.softmax(dim=-1), key[0]).flatten(1, 2)
+        return output, maximum.permute(1, 0, 2).contiguous(), total.permute(1, 0, 2).contiguous()
+
+    def native_op(**kwargs):
+        groups = kwargs["query"].shape[1] // num_kv_heads
+        assert groups <= 64 or groups == 128
+        assert kwargs["key"] is key and kwargs["value"] is key
+        assert kwargs["key_rope"] is key_rope and kwargs["sparse_indices"] is topk
+        output, maximum, total = reference(kwargs["query"], kwargs["query_rope"])
+        return (output, maximum, total) if kwargs["return_softmax_lse"] else (output, torch.empty(0), torch.empty(0))
+
+    expected = reference(query, query_rope)
+    with mock.patch.object(torch.ops._C_ascend, "npu_sparse_flash_attention", create=True, side_effect=native_op) as op:
+        actual = BaseDeviceAdaptor.execute_sparse_flash_attention_process(
+            SimpleNamespace(scale=scale, qk_rope_head_dim=2 if use_rope else 0),
+            query,
+            query_rope,
+            (key, key_rope),
+            topk,
+            SimpleNamespace(block_table=block_table),
+            lengths,
+            torch.tensor([kv_tokens], dtype=torch.int32),
+            return_lse=return_lse,
+        )
+    op.assert_called_once()
+    if return_lse:
+        for output, reference_output in zip(actual, expected):
+            torch.testing.assert_close(output, reference_output)
+            assert output.is_contiguous()
+    else:
+        torch.testing.assert_close(actual, expected[0])
+        assert actual.is_contiguous()
+
+
+@pytest.mark.parametrize("group_size", [8, 12, 48, 64, 96, 128])
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+@pytest.mark.parametrize("return_lse,native_tensor", [(False, False), (False, True), (True, False)])
+@pytest.mark.parametrize("rope_dim", [0, 2])
+def test_fp8_sparse_attention_native_heads_preserve_attention_and_lse(
+    group_size, num_kv_heads, return_lse, native_tensor, rope_dim
+):
+    generator = torch.Generator().manual_seed(42)
+    tokens, kv_tokens, dim = 2, 3, 4
+    query = torch.randn(tokens, num_kv_heads * group_size, dim, generator=generator)
+    query_rope = torch.randn(tokens, num_kv_heads * group_size, rope_dim, generator=generator)
+    key = torch.randn(1, kv_tokens, num_kv_heads, dim, generator=generator).to(torch.float8_e4m3fn)
+    key_rope = torch.randn(kv_tokens, num_kv_heads, rope_dim, generator=generator)
+    topk = torch.arange(kv_tokens, dtype=torch.int32).view(1, 1, -1).expand(tokens, 1, -1)
+    table = torch.zeros(1, 1, dtype=torch.int32)
+
+    def reference(q, q_rope):
+        grouped = q.unflatten(1, (num_kv_heads, -1))
+        scores = torch.einsum("tkhd,skd->tkhs", grouped, key[0].float())
+        scores += torch.einsum("tkhd,skd->tkhs", q_rope.unflatten(1, (num_kv_heads, -1)), key_rope)
+        scores *= 0.5
+        maximum = scores.amax(-1)
+        total = torch.exp(scores - maximum.unsqueeze(-1)).sum(-1)
+        output = torch.einsum("tkhs,skd->tkhd", scores.softmax(-1), key[0].float()).flatten(1, 2)
+        return output, maximum.permute(1, 0, 2).contiguous(), total.permute(1, 0, 2).contiguous()
+
+    def native_op(**kwargs):
+        q = kwargs["query"]
+        assert q.is_contiguous()
+        assert q.shape[1] // num_kv_heads == group_size
+        assert kwargs["return_softmax_lse"]
+        assert kwargs["key"] is key and kwargs["block_table"] is table and kwargs["sparse_indices"] is topk
+        output, maximum, total = reference(q[..., :dim], q[..., dim:])
+        if native_tensor:
+            return output
+        return (output, maximum, total) if return_lse else (output, torch.empty(0), torch.empty(0))
+
+    expected = reference(query, query_rope)
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend, "npu_kv_quant_sparse_flash_attention_vllm", create=True, side_effect=native_op
+        ),
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
+            create=True,
+            side_effect=AssertionError("QSFA must use the custom operator"),
+        ),
+    ):
+        actual = BaseDeviceAdaptor.execute_sparse_flash_attention_process(
+            SimpleNamespace(scale=0.5, is_kimi_k31=True),
+            query,
+            query_rope,
+            (key,),
+            topk,
+            SimpleNamespace(block_table=table),
+            torch.tensor([tokens]),
+            torch.tensor([kv_tokens]),
+            return_lse=return_lse,
+        )
+    for output, reference_output in zip(actual if return_lse else (actual,), expected):
+        torch.testing.assert_close(output, reference_output)
+        assert output.is_contiguous()
 
 
 @pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])

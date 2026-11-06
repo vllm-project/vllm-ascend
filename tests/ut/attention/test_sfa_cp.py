@@ -1747,6 +1747,7 @@ def _make_sfa_split_builder(use_pcp: bool, threshold: int = 1) -> AscendSFAMetad
     builder.is_pcp_decode_sharded = False
     builder.decode_threshold = threshold
     builder.nope = False
+    builder.use_rope = True
     builder.kernel_block_size = 128
     builder.metadata_cls = AscendSFAMetadata
     builder.model_config = SimpleNamespace(get_head_size=lambda: 64)
