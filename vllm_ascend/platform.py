@@ -1186,6 +1186,7 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
 
     _validate_kv_load_failure_policy(vllm_config)
+    _validate_mooncake_connector_v1_role(vllm_config)
 
     # short_request_first_config requires FCFS and excludes batch-job and
     # kv-consumer paths. When profiling-chunk is also enabled, the profiling
@@ -1296,6 +1297,37 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     if getattr(kv_transfer_config, "kv_load_failure_policy", "fail") == "recompute":
         if getattr(vllm_config.model_config, "is_hybrid", False):
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
+
+
+def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
+    """MooncakeConnectorV1 does not support kv_role='kv_both'.
+
+    Its worker branches on exact role strings, so kv_both silently starts only
+    the receive thread and prefill-to-decode KV transfer never happens
+    (issue #20628). Fail fast instead of degrading silently.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return
+
+    # MultiConnector children carry their own kv_role; the top-level role is
+    # not passed down, so inspect children as well (mirrors
+    # AscendKVPPConfig.validate).
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+    else:
+        connectors = [{"kv_connector": kv_transfer_config.kv_connector,
+                       "kv_role": kv_transfer_config.kv_role}]
+    for connector in connectors:
+        if connector.get("kv_connector") == "MooncakeConnectorV1" and \
+                connector.get("kv_role") == "kv_both":
+            raise ValueError(
+                "MooncakeConnectorV1 does not support kv_role='kv_both' "
+                "(issue #20628): only the receive thread would be started and "
+                "prefill-to-decode KV transfer would silently never happen. "
+                "Use kv_role='kv_producer' on prefill engines and "
+                "kv_role='kv_consumer' on decode engines."
+            )
 
 
 def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
