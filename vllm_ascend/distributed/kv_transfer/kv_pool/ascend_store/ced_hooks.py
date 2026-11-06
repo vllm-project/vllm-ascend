@@ -2,7 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Forward CED attention hooks through composite KV connectors."""
 
+from collections.abc import Mapping
 from typing import Any
+
+
+def supports_ced_layer_hooks(forward_context: Mapping[str, Any], num_layers: int) -> bool:
+    """Require a registered consumer gate on every configured backbone layer."""
+    if not isinstance(forward_context, Mapping) or type(num_layers) is not int or num_layers <= 0:
+        return False
+    layers = {
+        layer.layer_idx
+        for layer in forward_context.values()
+        if getattr(layer, "supports_ced_transfer_hooks", False) is True
+        and type(getattr(layer, "layer_idx", None)) is int
+        and 0 <= layer.layer_idx < num_layers
+    }
+    return layers == set(range(num_layers))
 
 
 def dispatch_ced_hook(connector: Any, method_name: str, layer_idx: int) -> None:

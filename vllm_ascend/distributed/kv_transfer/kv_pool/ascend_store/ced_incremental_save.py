@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import supports_ced_layer_hooks
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -40,13 +41,6 @@ _SSD_HIT_GVA = (1 << 64) - 1
 CED_GATE_POLL_INTERVAL_S = 0.1
 CED_LEASE_SAFETY_MARGIN_S = 1.0
 
-_CED_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV41ForCausalLM",
-        "DeepseekV41ForConditionalGeneration",
-    }
-)
-
 _LAYER_INDEX_PATTERN = re.compile(r"\.layers\.(\d+)\.")
 
 
@@ -64,9 +58,20 @@ def _is_draft_member(layer_name: str) -> bool:
 
 
 def is_ced_model(vllm_config: VllmConfig) -> bool:
+    """Recognize a source-sharing topology independently of its model name."""
+    return bool(_kv_source_layer_ids(_ced_text_config(vllm_config)))
+
+
+def _config_value(config: Any, name: str, default: Any = None) -> Any:
+    return config.get(name, default) if isinstance(config, Mapping) else getattr(config, name, default)
+
+
+def _ced_text_config(vllm_config: VllmConfig) -> Any:
     model_config = getattr(vllm_config, "model_config", None)
-    architectures = getattr(model_config, "architectures", None) or ()
-    return any(architecture in _CED_ARCHITECTURES for architecture in architectures)
+    config = getattr(model_config, "hf_text_config", None)
+    if config is None:
+        config = getattr(model_config, "hf_config", None)
+    return _config_value(config, "text_config", None) or config
 
 
 def resolve_ced_layerwise(vllm_config: VllmConfig) -> bool:
@@ -74,8 +79,9 @@ def resolve_ced_layerwise(vllm_config: VllmConfig) -> bool:
 
     Enables the CED (DeepSeek-V4.1) per-source-slice session save and the
     dependency-unit pipelined load on top of the non-layerwise bulk path.
-    The switch is rejected together with ``use_layerwise`` and silently
-    ignored on non-V4.1 models so existing deployments keep their behavior.
+    The switch is rejected together with ``use_layerwise``. A valid source
+    topology selects the worker; registration must also verify cache layouts
+    and consumer hooks before asynchronous transfers can be enabled.
     """
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     if not extra_config.get(CED_LAYERWISE_CONFIG_KEY, False):
@@ -86,10 +92,7 @@ def resolve_ced_layerwise(vllm_config: VllmConfig) -> bool:
             "is a bulk (non-layerwise) pool extension. Set use_layerwise=false."
         )
     if not is_ced_model(vllm_config):
-        logger.warning(
-            "CED_layerwise only supports DeepSeek-V4.1 architectures %s; ignoring the switch.",
-            sorted(_CED_ARCHITECTURES),
-        )
+        logger.warning("CED_layerwise requires valid num_hidden_layers and kv_source_layer_ids; ignoring the switch.")
         return False
     return True
 
@@ -157,8 +160,8 @@ def build_ced_trigger_map(
             if not (is_swa or is_mla):
                 continue
             if is_mla:
-                if set(kv_source_layer_ids) - layers.keys():
-                    logger.warning("CED group %d has no members for all KV sources; using bulk.", group_id)
+                if kv_source_layer_ids and set(kv_source_layer_ids) != layers.keys():
+                    logger.warning("CED group %d does not match the configured KV sources; using bulk.", group_id)
                     continue
                 if any(
                     not any(name.endswith(".long_kv_cache") for name in members)
@@ -198,8 +201,15 @@ def build_ced_trigger_map(
 
 
 def _kv_source_layer_ids(hf_config) -> tuple[int, ...]:
-    source_ids = getattr(hf_config, "kv_source_layer_ids", None)
-    return tuple(int(source_id) for source_id in source_ids) if source_ids else ()
+    num_layers = _config_value(hf_config, "num_hidden_layers")
+    source_ids = _config_value(hf_config, "kv_source_layer_ids")
+    if type(num_layers) is not int or num_layers <= 0 or not isinstance(source_ids, (list, tuple)):
+        return ()
+    if not source_ids or any(type(source) is not int or not 0 <= source < num_layers for source in source_ids):
+        return ()
+    if any(left >= right for left, right in zip(source_ids, source_ids[1:])):
+        return ()
+    return tuple(source_ids)
 
 
 def chunk_member_transfer(
@@ -787,13 +797,22 @@ class CEDSaveWorker(KVPoolWorker):
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
+        source_ids = _kv_source_layer_ids(self.hf_config)
         self.ced_trigger_map = build_ced_trigger_map(
             self._cacheable_group_layer_names(),
-            _kv_source_layer_ids(self.hf_config),
+            source_ids,
             self.group_layer_cache_entry_offsets,
         )
         self.ced_trigger_layers = self.ced_trigger_map.trigger_layers()
-        mapped = self._ced_runtime_supported and bool(self.ced_trigger_layers)
+        hooks_supported = supports_ced_layer_hooks(
+            getattr(self.vllm_config.compilation_config, "static_forward_context", {}),
+            _config_value(self.hf_config, "num_hidden_layers", 0),
+        )
+        mapped = self._ced_runtime_supported and bool(source_ids) and bool(self.ced_trigger_layers) and hooks_supported
+        if self._ced_runtime_supported and not hooks_supported:
+            logger.warning(
+                "CED_layerwise requires CED transfer hooks on every backbone layer; retaining bulk transfers."
+            )
         self._ced_save_capable = (
             mapped
             and not self.enable_kv_events

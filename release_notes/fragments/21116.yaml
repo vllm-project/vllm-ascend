@@ -6,3 +6,8 @@ entries:
       KV pool loads. Memcache 1.3 retains atomic bulk saves because incremental
       saves require exclusive allocation.
     model: deepseek-v4.1
+  - category: config
+    text: >-
+      CED_layerwise derives source layers from model parameters and validates
+      registered consumer hooks, allowing compatible source-sharing models to
+      reuse the path without a model-name allowlist or fixed layer numbers.

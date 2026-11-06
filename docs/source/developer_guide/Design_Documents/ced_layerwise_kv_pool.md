@@ -1,8 +1,41 @@
-# DeepSeek-V4.1 CED KV pool transfers
+# CED source-sharing KV pool transfers
 
 CED overlaps pooled KV transfers with model execution while retaining the
 existing bulk keys and object layout. The public opt-in is
 `kv_connector_extra_config.CED_layerwise`; it is disabled by default.
+
+## Model topology and SWA retention
+
+The source layers come from the text model's `kv_source_layer_ids`, validated
+against `num_hidden_layers`. There is no model-name allowlist, fixed source
+count, layer interval, or dependency on layers 2/8/14/20. Flat configs and
+nested text configs use the same resolver. For example, a compatible 16-layer
+model with sources `[1, 5, 9]` gets three source units and a cut at layer 9.
+Registered bulk descriptors determine each unit's actual byte range.
+
+Compatible model implementations expose `supports_ced_transfer_hooks=true`
+on every backbone attention layer registered in `static_forward_context`.
+This means both ordinary forward and cache-only writes enforce the CED load
+gate before accessing caches. Models that reuse the existing attention class
+inherit the capability. A new attention implementation must implement that
+hook contract; a similar config alone cannot make asynchronous loads safe.
+Missing hooks or incompatible cache layouts retain bulk transfers.
+
+SWA storage follows the existing coordinator's block masks:
+
+- With `swa_bounded_replay=true`, target SWA is not prefix-cacheable and is
+  excluded from pool saves and loads. Replay reconstructs the needed window.
+- With bounded replay off, saves retain the SWA blocks needed at reusable
+  prefix boundaries. The window comes from `sliding_window`; 128 is not a
+  hardcoded transfer limit. Copies still use complete registered blocks.
+- With default retention, tails are retained at every transfer-aligned
+  boundary. For a 128-token window, 128-token SWA blocks and 128-token
+  alignment, every block is eligible: pool coverage can span the full saved
+  prefix, rather than just its last 128 tokens. Saved offsets, existing hits,
+  and the current step's valid blocks still determine actual writes.
+- Sparse retention can keep fewer boundary windows, including the required
+  replay checkpoint. Keeping only the final request window would discard
+  shorter reusable prefixes and requires coordinated lookup/load changes.
 
 ## Producer and consumer scheduling
 

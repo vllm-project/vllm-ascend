@@ -23,7 +23,10 @@ from unittest.mock import MagicMock, patch
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import dispatch_ced_hook
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import (
+    dispatch_ced_hook,
+    supports_ced_layer_hooks,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import (
     CED_LAYERWISE_CONFIG_KEY,
     CEDLoadTask,
@@ -73,10 +76,13 @@ class TestCEDHookDispatch(unittest.TestCase):
         child_save.assert_not_called()
 
 
-def _vllm_config(extra, architectures=("DeepseekV41ForCausalLM",)):
+def _vllm_config(extra, architectures=("DeepseekV41ForCausalLM",), text_config=None):
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra),
-        model_config=SimpleNamespace(architectures=list(architectures)),
+        model_config=SimpleNamespace(
+            architectures=list(architectures),
+            hf_text_config=text_config or SimpleNamespace(num_hidden_layers=40, kv_source_layer_ids=list(V41_SOURCES)),
+        ),
     )
 
 
@@ -122,14 +128,69 @@ class TestResolveCEDLayerwise(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_ced_layerwise(config)
 
-    def test_ignored_on_non_v41_model(self):
-        config = _vllm_config({CED_LAYERWISE_CONFIG_KEY: True}, architectures=("Qwen3ForCausalLM",))
+    def test_ignored_without_source_parameters(self):
+        config = _vllm_config(
+            {CED_LAYERWISE_CONFIG_KEY: True},
+            architectures=("Qwen3ForCausalLM",),
+            text_config=SimpleNamespace(num_hidden_layers=40),
+        )
         self.assertFalse(resolve_ced_layerwise(config))
 
-    def test_is_ced_model_architectures(self):
+    def test_is_ced_model_uses_parameters_instead_of_architecture(self):
         self.assertTrue(is_ced_model(_vllm_config({}, architectures=("DeepseekV41ForCausalLM",))))
         self.assertTrue(is_ced_model(_vllm_config({}, architectures=("DeepseekV41ForConditionalGeneration",))))
-        self.assertFalse(is_ced_model(_vllm_config({}, architectures=("DeepseekV3ForCausalLM",))))
+        future = _vllm_config(
+            {CED_LAYERWISE_CONFIG_KEY: True},
+            architectures=("FutureSharedKVForCausalLM",),
+            text_config=SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9]),
+        )
+        self.assertTrue(resolve_ced_layerwise(future))
+        # A familiar model name alone does not establish a valid topology.
+        self.assertFalse(is_ced_model(_vllm_config({}, text_config=SimpleNamespace(num_hidden_layers=40))))
+
+    def test_nested_raw_text_config(self):
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config={"text_config": {"num_hidden_layers": 16, "kv_source_layer_ids": [1, 9]}}
+            )
+        )
+        self.assertTrue(is_ced_model(config))
+        config.model_config.hf_text_config = {"num_hidden_layers": 16, "kv_source_layer_ids": []}
+        self.assertFalse(is_ced_model(config))
+
+    def test_invalid_sources_are_not_enabled(self):
+        for sources in ([], [1, 1], [5, 1], [-1, 5], [1, 16], [True, 5], ["1", 5], "1,5"):
+            with self.subTest(sources=sources):
+                config = _vllm_config({}, text_config={"num_hidden_layers": 16, "kv_source_layer_ids": sources})
+                self.assertFalse(is_ced_model(config))
+
+    def test_every_backbone_consumer_requires_hooks(self):
+        context = {
+            str(layer): SimpleNamespace(layer_idx=layer, supports_ced_transfer_hooks=True) for layer in range(16)
+        }
+        self.assertTrue(supports_ced_layer_hooks(context, 16))
+        context["8"].supports_ced_transfer_hooks = False
+        self.assertFalse(supports_ced_layer_hooks(context, 16))
+        context["8"].supports_ced_transfer_hooks = True
+        del context["9"]
+        self.assertFalse(supports_ced_layer_hooks(context, 16))
+
+    def test_changed_source_count_and_positions_derive_matching_units(self):
+        sources = (1, 5, 9)
+        groups = _v41_layout(num_layers=16, sources=sources)
+        offsets = {0: [0, 2, 4, 6], **{group: [0, 1, 2, 3, 4] for group in range(2, 6)}}
+        plan = build_ced_trigger_map(groups, sources, offsets)
+        self.assertEqual([part.trigger_layer for part in plan.slices_by_group[0]], list(sources))
+        self.assertEqual(plan.publish_layers[0], 9)
+        worker = _plan_worker(_mla_database(), plan)
+        worker.kv_cache_config.kv_cache_groups[0].layer_names = groups[0]
+        self.assertEqual([unit.gate_layer for unit in worker._build_ced_load_units({0})], list(sources))
+        worker.hf_config = SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=list(sources))
+        worker._ced_save_capable = worker._ced_step_active = True
+        worker.on_ced_save_trigger(9)
+        worker.kv_send_thread.enqueue_slice_tasks.assert_not_called()
+        worker.on_ced_save_trigger(5)
+        self.assertEqual(worker.kv_send_thread.enqueue_slice_tasks.call_args.args[0], 5)
 
 
 class TestBuildCEDTriggerMap(unittest.TestCase):
@@ -194,7 +255,7 @@ class TestBuildCEDTriggerMap(unittest.TestCase):
         with self.assertLogs(level="WARNING") as captured:
             trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
         self.assertNotIn(0, trigger_map.slices_by_group)
-        self.assertIn("no members", "; ".join(captured.output))
+        self.assertIn("configured KV sources", "; ".join(captured.output))
 
 
 def _mla_database() -> ChunkedTokenDatabase:
@@ -558,7 +619,7 @@ def _plan_worker(database, trigger_map, *, store=None):
     worker.m_store = store
     worker.kv_send_thread = MagicMock(spec=CEDSessionSendThread)
     worker.kv_recv_thread = MagicMock(spec=CEDPipelinedRecvingThread)
-    worker.hf_config = SimpleNamespace(kv_source_layer_ids=[2, 8])
+    worker.hf_config = SimpleNamespace(num_hidden_layers=12, kv_source_layer_ids=[2, 8])
     worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
     return worker
 
@@ -904,13 +965,20 @@ class TestCEDWorkerCapabilities(unittest.TestCase):
         store.supports_exclusive_allocation = False
         names = _v41_layout(sources=(2, 8), num_layers=8)[0]
         config = SimpleNamespace(
-            compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(name="NONE")),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=SimpleNamespace(name="NONE"),
+                static_forward_context={
+                    str(layer): SimpleNamespace(layer_idx=layer, supports_ced_transfer_hooks=True)
+                    for layer in range(12)
+                },
+            ),
             model_config=SimpleNamespace(enforce_eager=True),
             parallel_config=SimpleNamespace(use_ubatching=False, use_sequence_parallel_moe=False),
             speculative_config=None,
         )
 
         def initialize(worker, *_args):
+            worker.vllm_config = config
             worker._extra_config = {"backend": "memcache"}
             worker.pp_size = worker.pcp_size = worker.dcp_size = worker.tp_size = 1
             worker.tp_rank = 0
@@ -922,7 +990,7 @@ class TestCEDWorkerCapabilities(unittest.TestCase):
             worker.group_layer_cache_entry_offsets = {0: [0, 2, 4]}
             worker.cacheable_group_ids = [0]
             worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=names)])
-            worker.hf_config = SimpleNamespace(kv_source_layer_ids=[2, 8])
+            worker.hf_config = SimpleNamespace(num_hidden_layers=12, kv_source_layer_ids=[2, 8])
             worker.m_store = store
             worker._invalid_block_ids = set()
             worker._invalid_block_ids_lock = threading.Lock()
@@ -943,6 +1011,19 @@ class TestCEDWorkerCapabilities(unittest.TestCase):
         self.assertFalse(worker._ced_save_capable)
         start_bulk.assert_called_once_with(worker)
         self.assertFalse(store.alloc_base)
+
+        del config.compilation_config.static_forward_context["8"]
+        with (
+            patch.object(KVPoolWorker, "__init__", autospec=True, side_effect=initialize),
+            patch.object(KVPoolWorker, "_start_kv_transfer_threads", autospec=True) as start_bulk,
+            patch(module + ".CEDPipelinedRecvingThread") as create_receiver,
+        ):
+            worker = CEDSaveWorker(config, False)
+            worker._start_kv_transfer_threads()
+        self.assertFalse(worker._ced_load_capable)
+        self.assertFalse(worker._ced_save_capable)
+        start_bulk.assert_called_once_with(worker)
+        create_receiver.assert_not_called()
 
 
 if __name__ == "__main__":

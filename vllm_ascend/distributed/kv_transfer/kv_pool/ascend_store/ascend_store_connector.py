@@ -146,7 +146,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         # CED (DeepSeek-V4.1) per-source-slice session save + dependency-unit
         # load on the bulk path; rejected with use_layerwise, ignored on
-        # non-V4.1 models.
+        # models without a source-sharing topology.
         self.ced_layerwise = resolve_ced_layerwise(vllm_config)
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False

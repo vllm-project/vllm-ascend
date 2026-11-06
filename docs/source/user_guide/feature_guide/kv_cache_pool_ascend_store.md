@@ -957,6 +957,19 @@ Expected output: MetaService starts successfully with no errors.
     bounded replay disabled, each SWA layer also waits for its window data.
     Pool keys and bulk object layouts remain compatible with existing saves.
 
+    KV source layers are derived from the text-model parameters
+    `kv_source_layer_ids` and `num_hidden_layers`, without fixed source layer
+    numbers or a model-name allowlist. Compatible models that reuse the CED
+    attention hooks and cache layout can use the same path. A model without
+    a registered CED consumer hook on every backbone layer retains bulk
+    transfers.
+
+    With `swa_bounded_replay=true`, target SWA is reconstructed by replay and
+    is excluded from pool storage. Otherwise SWA saves follow the existing
+    window/block retention masks at reusable prefix boundaries, rather than
+    keeping only the final 128 tokens of the request. The configured window,
+    block size, and retention interval determine how many blocks are saved.
+
     Memcache release/1.3 returns shared GVAs for duplicate allocations, so
     **saves remain on the existing atomic bulk path**. Incremental session
     saves require a backend that explicitly guarantees exclusive allocation;
