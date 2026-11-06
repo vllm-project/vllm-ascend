@@ -82,14 +82,14 @@ def test_binding_retains_tuple_layout_across_tracker_lifecycle(monkeypatch, lega
     layer = _TensorOnlyAttentionLayer()
     allocated = (torch.zeros(2, 16, 1, 8), torch.zeros(2, 16, 1, 8))
     context = {name: layer}
-    groups = []
+    groups: list[object] = []
     hook = Mock()
     if legacy_hook:
         monkeypatch.setattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", hook, raising=False)
     else:
         monkeypatch.delattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", raising=False)
 
-    runner_caches = []
+    runner_caches: list[object] = []
     if runner_binding:
         patch_bind_kv_cache.bind_kv_cache({name: allocated}, context, runner_caches, kv_cache_groups=groups)
         assert runner_caches[0] is allocated
@@ -110,7 +110,7 @@ def test_binding_keeps_scheduler_storage_separate_from_kernel_view(monkeypatch):
     storage = torch.arange(32).reshape(4, 8)
     kernel_view = storage.reshape(8, 4)
     layer = _TensorOnlyAttentionLayer()
-    runner_caches = []
+    runner_caches: list[torch.Tensor] = []
 
     patch_bind_kv_cache.bind_kv_cache(
         {name: storage}, {name: layer}, runner_caches, layer_kv_caches={name: kernel_view}
@@ -118,8 +118,9 @@ def test_binding_keeps_scheduler_storage_separate_from_kernel_view(monkeypatch):
 
     assert runner_caches[0] is storage
     assert layer.kv_cache is kernel_view
+    bound_cache = cast(torch.Tensor, layer.kv_cache)
     assert runner_caches[0].shape == (4, 8)
-    assert layer.kv_cache.shape == (8, 4)
-    assert layer.kv_cache.data_ptr() == storage.data_ptr()
+    assert bound_cache.shape == (8, 4)
+    assert bound_cache.data_ptr() == storage.data_ptr()
     storage[0, 0] = 99
-    assert layer.kv_cache[0, 0] == 99
+    assert bound_cache[0, 0] == 99
