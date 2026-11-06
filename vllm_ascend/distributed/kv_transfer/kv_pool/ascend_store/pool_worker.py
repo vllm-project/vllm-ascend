@@ -17,14 +17,17 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
+from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -48,6 +51,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_physical_layer_index,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mamba_state_sharding import (
+    resolve_mamba_state_sharding,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -65,6 +71,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import (
+    collect_pp_group_owners,
+    get_group_pp_ranks,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -87,8 +97,10 @@ class KVPoolWorker:
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
+        self.use_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False) is True
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config
+        self.mamba_state_sharding: dict[int, MambaStateSharding] = {}
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
         self.hf_config = hf_text_config or hf_config
@@ -101,7 +113,15 @@ class KVPoolWorker:
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        pp_cpu_group = getattr(get_pp_group(), "cpu_group", None) if self.pp_size > 1 else None
+        self._pp_group_owners = collect_pp_group_owners(
+            self.kv_cache_config,
+            self.pp_size,
+            self.num_kv_cache_groups,
+            pp_cpu_group,
+        )
         self._init_key_head_config(model_config, parallel_config)
+        self._init_mamba_state_sharding()
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
@@ -283,6 +303,14 @@ class KVPoolWorker:
             self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
             self.num_sub_keys = tp_mismatch_info.num_sub_keys
 
+    def _init_mamba_state_sharding(self) -> None:
+        """Resolve optional model declarations before building state cache keys."""
+        if not self.use_mamba:
+            return
+        self.mamba_state_sharding = resolve_mamba_state_sharding(
+            self.vllm_config, self.kv_cache_config, self.tp_rank, self.pcp_rank
+        )
+
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
         if self.kv_role == "kv_consumer" and self.can_put:
@@ -311,6 +339,9 @@ class KVPoolWorker:
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            sharding = self.mamba_state_sharding.get(group_id)
+            if sharding is not None:
+                group_tp_rank = sharding.shard_rank
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
@@ -436,6 +467,7 @@ class KVPoolWorker:
                 self.group_uses_align_state,
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
+                group_state_sharding=self.mamba_state_sharding,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -720,7 +752,37 @@ class KVPoolWorker:
     def _register_dspark_prefix_cache(self, draft_caches: dict[str, torch.Tensor]) -> None:
         """Register draft caches when the layerwise worker enables prefix reuse."""
 
+    def _recoverssm_store_caches(self, kv_caches):
+        """Export the model's copyable state prefix, leaving verification records local."""
+        if self.kv_cache_config is None:
+            raise ValueError("RecoverSSM pooling requires KV cache specs")
+        result = dict(kv_caches)
+        copy_funcs = None
+        for group in self.kv_cache_config.kv_cache_groups:
+            specs = group.kv_cache_spec
+            for name in group.layer_names:
+                spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
+                if not isinstance(spec, MambaSpec):
+                    continue
+                if spec.num_speculative_blocks != 0:
+                    raise ValueError("RecoverSSM pooling requires zero speculative state blocks")
+                if copy_funcs is None:
+                    mamba_groups = get_mamba_groups(self.kv_cache_config)
+                    model_cls = get_model_cls(self.vllm_config.model_config)
+                    copy_funcs = model_cls.get_mamba_state_copy_funcs({s.mamba_type for s in mamba_groups})
+                caches = self._as_cache_tuple(kv_caches[name])
+                num_states = len(copy_funcs[spec.mamba_type])
+                if len(caches) < num_states:
+                    raise ValueError(
+                        f"RecoverSSM pooling layer {name!r} requires at least {num_states} persistent state tensors, "
+                        f"got {len(caches)}"
+                    )
+                result[name] = caches[:num_states]
+        return result
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if self.use_recoverssm:
+            kv_caches = self._recoverssm_store_caches(kv_caches)
         draft_names = getattr(self, "_dspark_draft_layer_names", ())
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         if draft_names:
@@ -909,6 +971,23 @@ class KVPoolWorker:
             block_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
             for group_id in load_group_ids:
+                layer_counts = self.token_database.group_num_layers.get("kv", {})
+                if group_id in layer_counts:
+                    local_group_layers = layer_counts[group_id]
+                else:
+                    # Older/custom databases may not publish layer counts.
+                    # Preserve descriptor-backed groups while treating groups
+                    # with no local buffers as empty on this PP stage.
+                    group_addrs = self.token_database.group_kv_caches_base_addr.get(group_id, [])
+                    group_sizes = self.token_database.group_block_len.get(group_id, [])
+                    local_group_layers = 1 if group_addrs and group_sizes else 0
+                if local_group_layers <= 0:
+                    logger.debug(
+                        "Skipping KV pool get for PP-local empty group: request=%s group=%d",
+                        request.req_id,
+                        group_id,
+                    )
+                    continue
                 if group_id >= len(request.block_ids_by_group):
                     continue
                 block_ids = request.block_ids_by_group[group_id]
@@ -941,6 +1020,14 @@ class KVPoolWorker:
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
+                    if not addr or not size or len(addr) != len(size):
+                        logger.warning(
+                            "Skipping KV pool get key without valid local descriptors: request=%s group=%d key=%s",
+                            request.req_id,
+                            group_id,
+                            key,
+                        )
+                        continue
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
@@ -1515,6 +1602,9 @@ class KVPoolWorker:
             return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
+        sharding = self.mamba_state_sharding.get(kv_cache_group_id)
+        if sharding is not None:
+            return sharding.shard_count
         if self.group_uses_align_state[kv_cache_group_id]:
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
@@ -1532,12 +1622,13 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # PCP replicas share keys; expand only the physical KV partitions.
+        # Expand head partitions; replicas of the same partition share a key.
         expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        for pp_rank in range(self.pp_size):
+        owners = getattr(self, "_pp_group_owners", None)
+        for pp_rank in get_group_pp_ranks(owners, group_id, self.pp_size):
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:

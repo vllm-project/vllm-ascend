@@ -1915,9 +1915,10 @@
 #       Reduce ViT mRoPE setup UB pressure on Ascend A5.
 #    How:
 #       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
-#       to 16, using the same value for the launch grid divisor. Keep the
-#       upstream kernel unchanged. Rebind the MiniMax vision tower alias if
-#       it is already loaded; subsequent imports use the patched wrapper.
+#       to 16, matching the launch grid divisor. Keep the upstream kernel
+#       unchanged. Rebind both the standard MiniMax vision tower alias and the
+#       Ascend shadow-module alias if already loaded; subsequent imports
+#       use the patched wrapper.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/58526
 #       https://github.com/vllm-project/vllm/pull/58673
@@ -1925,3 +1926,19 @@
 #       Remove once upstream supports a backend-specific setup block size
 #       suitable for Ascend UB capacity.
 #
+
+# ** File: platform/patch_shm_notify.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.__init__`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#    Why:
+#       Sustained SHM fast-path reads bypass notification polling. CONFLATE
+#       limits payloads but internal activate_read commands can accumulate.
+#    How:
+#       Backport upstream initialization and poll/recv behavior, servicing the
+#       notification socket every two seconds during successful reads.
+#       SHM and cancellation logic are unchanged.
+#    Related PR (if no, explain why):
+#       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
+#    Future Plan:
+#       Remove once the supported vLLM version includes upstream PR #63165.

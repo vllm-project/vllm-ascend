@@ -29,6 +29,7 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
@@ -37,20 +38,32 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 
-class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
-    @classmethod
-    def supports_pcp(cls) -> bool:
-        # The GLM KDA layer gathers PCP prefill tokens before its head-sharded
-        # recurrent update and restores the PCP-local output afterward.
-        return True
-
-
 def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
     """Use PCP head sharding only when tensor parallelism is disabled."""
     # TODO: Support joint TP * PCP head partitioning for projections and state.
     if parallel_config.tensor_parallel_size == 1:
         return parallel_config.prefill_context_parallel_size
     return parallel_config.tensor_parallel_size
+
+
+def get_kda_state_sharding(parallel_config: ParallelConfig, tp_rank: int, pcp_rank: int) -> MambaStateSharding:
+    shard_count = get_kda_parallel_size(parallel_config)
+    if parallel_config.tensor_parallel_size == 1:
+        return MambaStateSharding(shard_rank=pcp_rank, shard_count=shard_count)
+    return MambaStateSharding(
+        shard_rank=tp_rank,
+        shard_count=shard_count,
+        replica_rank=pcp_rank,
+        replica_count=parallel_config.prefill_context_parallel_size,
+    )
+
+
+class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        # The GLM KDA layer gathers PCP prefill tokens before its head-sharded
+        # recurrent update and restores the PCP-local output afterward.
+        return True
 
 
 class PCPColumnParallelLinear(ColumnParallelLinear):

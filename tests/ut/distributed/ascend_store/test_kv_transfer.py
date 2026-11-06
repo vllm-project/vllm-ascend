@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 # isort: on
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -555,6 +556,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         kv_role="kv_producer",
         enable_kv_event=False,
         block_size=16,
+        group_state_sharding=None,
     ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
         db = FakeTokenDatabase(block_size=block_size)
@@ -569,8 +571,61 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             ready_event=threading.Event(),
             group_uses_align_state=[False],
             enable_kv_event=enable_kv_event,
+            group_state_sharding=group_state_sharding,
         )
         return t, store
+
+    def test_pp_hybrid_producer_skips_groups_without_local_descriptors(self):
+        layouts = (
+            (0, {0: [1000, 2000], 1: []}, {0: [16, 16], 1: []}, {0: 2, 1: 0}, 0),
+            (1, {0: [], 1: [3000]}, {0: [], 1: [16]}, {0: 0, 1: 1}, 1),
+        )
+        for pp_rank, addrs, sizes, layer_counts, expected_group in layouts:
+            with self.subTest(pp_rank=pp_rank):
+                store = FakeStore([0, 0])
+                database = ChunkedTokenDatabase(
+                    [
+                        KeyMetadata("m", 0, 0, pp_rank, 0),
+                        KeyMetadata("m", 0, 0, pp_rank, 1),
+                    ],
+                    [16, 16],
+                    None,
+                )
+                database.set_group_buffers(
+                    addrs,
+                    sizes,
+                    {group_id: [16] * len(group_addrs) for group_id, group_addrs in addrs.items()},
+                    group_num_layers=layer_counts,
+                )
+                thread = KVCacheStoreSendingThread(
+                    m_store=store,
+                    token_database=database,
+                    block_size=[16, 16],
+                    tp_rank=0,
+                    dcp_size=1,
+                    put_step=1,
+                    kv_role="kv_producer",
+                    ready_event=threading.Event(),
+                    group_uses_align_state=[False, False],
+                )
+                request = ReqMeta(
+                    req_id=f"pp{pp_rank}",
+                    token_len_chunk=16,
+                    block_ids_by_group=[[1], [1]],
+                    block_hashes=["h0"],
+                    kv_cache_group_ids=[0, 1],
+                )
+                thread.add_stored_request(request)
+                thread.request_queue.put(request)
+
+                thread._handle_request(request)
+
+                self.assertEqual(len(store.put_calls), 1)
+                keys, stored_addrs, stored_sizes = store.put_calls[0]
+                self.assertTrue(all(f"@group:{expected_group}@" in key for key in keys))
+                self.assertTrue(all(stored_addrs))
+                self.assertTrue(all(stored_sizes))
+                self.assertEqual(thread.get_saved_offset(request.req_id), 16)
 
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
@@ -597,6 +652,24 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
             [["h1"], ["h0", "h2"]],
         )
+
+    def test_model_state_replica_order_overrides_physical_rank_order(self):
+        hashes = [f"h{i}" for i in range(4)]
+        for pcp_rank in range(2):
+            replica_rank = 1 - pcp_rank
+            thread, store = self._make_thread(
+                group_state_sharding={
+                    0: MambaStateSharding(shard_rank=0, shard_count=1, replica_rank=replica_rank, replica_count=2)
+                }
+            )
+            thread.pcp_rank, thread.pcp_size = pcp_rank, 2
+            thread.group_uses_align_state = [True]
+            req = ReqMeta(req_id="r1", token_len_chunk=64, block_ids=[1, 2, 3, 4], block_hashes=hashes)
+            thread.add_stored_request(req)
+            thread.request_queue.put(req)
+            thread._handle_request(req)
+            keys = [key for call in store.put_calls for key in call[0]]
+            self.assertEqual([key.rsplit("@", 1)[1] for key in keys], hashes[replica_rank::2])
 
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
@@ -1165,6 +1238,44 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertEqual(t._invalid_block_ids, set())
+
+    def test_handle_request_skips_pp_local_empty_group(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        db.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [16], 1: []},
+            {0: [1], 1: []},
+            group_num_layers={0: 1, 1: 0},
+        )
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
+        req = ReqMeta(
+            req_id="r-pp",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+            kv_cache_group_ids=[0, 1],
+        )
+
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        self.assertEqual(len(store.get_calls), 1)
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(len(addrs), 1)
+        self.assertEqual(len(sizes), 1)
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
