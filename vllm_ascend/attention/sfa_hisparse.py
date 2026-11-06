@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
+from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, SparseMLAIndexGroupBuilder
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -138,6 +140,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
+        self._direct_prolog_slots: torch.Tensor | None = None
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
             raise ValueError("Ascend HiSparse SFA requires top-k to be divisible by 128")
@@ -232,6 +235,20 @@ class AscendHiSparseImpl(AscendSFAImpl):
             ("ascend_hisparse_c8_prolog", self._kv_staging_capacity, self.c8_cache_dtype), allocate
         )
 
+    def _resident_prolog_slots_i64(self, mapping):
+        context = get_forward_context()
+        scope = getattr(context, "_ascend_hisparse_resident_i64", None)
+        if scope is None:
+            scope = context._ascend_hisparse_resident_i64 = {}
+        # Exact slot aliases across layers share one cast. The captured cast
+        # reads current slots again on replay, even when the address is stable.
+        key = (mapping.data_ptr(), mapping.numel(), mapping.device, torch.npu.current_stream().npu_stream)
+        cached = scope.get(key)
+        if cached is None:
+            cached = (mapping.untyped_storage(), mapping.to(torch.int64))
+            scope[key] = cached
+        return cached[1]
+
     def _sfa_preprocess_prolog_v3(self, hidden_states, kv_cache, cos, sin, slot_mapping, *, attn_metadata=None):
         from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
         from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
@@ -241,16 +258,53 @@ class AscendHiSparseImpl(AscendSFAImpl):
         rows = hidden_states.shape[0]
         if rows > self._kv_staging_capacity:
             raise ValueError("HiSparse Prolog exceeds its profiled token capacity")
-        staging, local_slots = self._c8_prolog_workspace()
-        result = super()._sfa_preprocess_prolog_v3(
-            hidden_states, (staging,), cos, sin, local_slots[:rows], attn_metadata=attn_metadata
+        cache = self.hisparse_cache
+        destination, mapping, count = cache.write_target(rows, slot_mapping.numel())
+        resident_slots = self._direct_prolog_slots
+        direct = (
+            resident_slots is not None
+            and not cache.draft_layer
+            and attn_metadata.hisparse_for_capture
+            and attn_metadata.num_prefills == 0
+            and 0 < count == rows
+            and mapping.shape == (rows,)
+            and mapping.stride(0) == 1
+            and mapping.dtype == torch.int32
+            and mapping.device == resident_slots.device == destination.device == hidden_states.device
+            and mapping.data_ptr() == resident_slots.data_ptr()
+            and destination.ndim == 3
+            and destination.shape[1:] == (128, C8_ROW_BYTES)
+            and destination.dtype == torch.float8_e4m3fn
+            and destination.storage_offset() % C8_ROW_BYTES == 0
+            and destination.stride()[1:] == (C8_ROW_BYTES, 1)
+            and destination.stride(0) >= 128 * C8_ROW_BYTES
+            and destination.stride(0) % (128 * C8_ROW_BYTES) == 0
         )
-        destination, mapping, count = self.hisparse_cache.write_target(rows, slot_mapping.numel())
-        packed = staging.view(-1, C8_ROW_BYTES)[:count].view(torch.uint8)
-        scatter_packed_kv(
-            packed, packed[:, :0], destination.view(torch.uint8), mapping, attn_metadata.query_start_loc[-1:]
-        )
-        finish_hisparse_kv_update(self.hisparse_cache, attn_metadata)
+        if direct:
+            logger.info_once(
+                "HiSparse Target direct Prolog capture: rows=%d stride_bytes=%d",
+                rows,
+                destination.stride(0),
+                scope="process",
+            )
+            result = super()._sfa_preprocess_prolog_v3(
+                hidden_states,
+                (destination.unsqueeze(2),),
+                cos,
+                sin,
+                self._resident_prolog_slots_i64(mapping),
+                attn_metadata=attn_metadata,
+            )
+        else:
+            staging, local_slots = self._c8_prolog_workspace()
+            result = super()._sfa_preprocess_prolog_v3(
+                hidden_states, (staging,), cos, sin, local_slots[:rows], attn_metadata=attn_metadata
+            )
+            packed = staging.view(-1, C8_ROW_BYTES)[:count].view(torch.uint8)
+            scatter_packed_kv(
+                packed, packed[:, :0], destination.view(torch.uint8), mapping, attn_metadata.query_start_loc[-1:]
+            )
+        finish_hisparse_kv_update(cache, attn_metadata)
         return result
 
     def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
