@@ -2,7 +2,7 @@
 """Production-plan copy correctness adapted from PR #17301 at 5bcbad36fdc3.
 
 Retain the original 17 parameterized cases and exact assertions. A test-local
-set of worker-owned plans is prepared on disposable scratch during setup,
+set of worker-owned plans is warmed through the registry during setup,
 sealed, then exercised while compiler entry points are forbidden.
 """
 
@@ -11,16 +11,13 @@ import importlib
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops import kda_state_copy_plan as production
 
-# Triton Ascend KDA state-copy launcher arguments are incompatible.
-KDA_LAUNCHER_SKIP = pytest.mark.skip(reason="Triton Ascend KDA state-copy launcher arguments are incompatible")
 
-
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -66,7 +63,6 @@ def test_kda_state_copy_preserves_gaps_offsets_and_invalid_rows(dtype, index_dty
     torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -94,7 +90,6 @@ def test_kda_state_copy_graph_replay_changed_indices_and_flags():
     assert torch.all(backing[0::3] == -23) and torch.all(backing[2::3] == -23)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -123,7 +118,6 @@ def test_kda_state_copy_address_beyond_four_gib():
     assert torch.all(backing[:offset] == -23) and torch.all(backing[-32:] == -23)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -139,7 +133,6 @@ def test_kda_state_copy_empty_selection_and_inner_stride_rejection():
         _copy_state(state.transpose(-1, -2), torch.empty((0, 2, 4, 3), device="npu"), indices, None, False)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -191,6 +184,10 @@ def prepared_state_copy():
                 raise AssertionError("Unprepared production cache layout")
             plan = production.KDAStateCopyPlan.prepare(state, 129)
             plan.seal()
+            registry = JitWarmupRegistry(None)
+            with registry.activate():
+                plan.register_warmup()
+            registry.warmup()
             plan._layer_name = "standalone_test"
             plans[signature] = plan
         if to_cache:
@@ -217,7 +214,6 @@ def prepared_state_copy():
         # Every plan was sealed before its first use, as production requires.
         assert all(plan._sealed for plan in plans.values())
         preparing = False
-        patch.setattr(production._kda_state_copy_kernel, "run", forbid_compile)
         for name in ("triton", "triton.compiler", "triton.compiler.compiler", "triton.runtime.jit"):
             backend = importlib.import_module(name)
             if callable(getattr(backend, "compile", None)):
@@ -226,7 +222,6 @@ def prepared_state_copy():
         torch.npu.synchronize()
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )

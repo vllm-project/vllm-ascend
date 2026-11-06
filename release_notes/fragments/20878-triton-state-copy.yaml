@@ -1,0 +1,6 @@
+pr: 20878
+entries:
+  - category: bugfix
+    text: Fixed Kimi KDA state-copy launches across Triton launcher signatures by using the shared JIT warmup registry. Startup now compiles state-copy variants without executing copies on temporary NPU buffers.
+    model: kimi-k3.1
+    hardware: [A3, A5]
