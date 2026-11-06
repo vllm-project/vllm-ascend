@@ -24,6 +24,11 @@ a continuously adjustable reasoning effort from 1 to 100.
 
 This guide covers single-node, multi-node, Prefill-Decode (PD) disaggregated,
 and KV Cache Pool deployment on A2 and A3 servers and 950DT products.
+
+A2 and A3 support W4A8 and W8A8 weights; W4A8 is recommended for
+performance and used in the examples below. The 950DT examples use the
+official MXFP checkpoint.
+
 DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**.
 The examples below follow vLLM Ascend `main`. For source builds, use the
 upstream vLLM revision recorded in `.github/vllm-main-verified.commit`
