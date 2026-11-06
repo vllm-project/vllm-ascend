@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from tools.bisect import git_ops, report
-from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
+from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager, BuildTransitionError
 from tools.bisect.config import (
     DEFAULT_COORD_DIR,
     DEFAULT_GOOD_TABLE,
@@ -51,7 +51,6 @@ from tools.bisect.good_table import GoodTable, valid_soc
 from tools.bisect.runner import BisectFatalError
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
-from tools.bisect.version_compat import ALL_PACKAGES, VersionPolicy, expected_versions, policy_with_environment_drift
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("auto_bisect")
@@ -109,6 +108,10 @@ class Bisector:
                 log_path=str(log_path),
                 note=note,
             )
+        except BuildTransitionError as exc:
+            raise BisectFatalError(
+                f"Environment transition failed at {candidate.short}; log: {log_path}\n{exc}"
+            ) from exc
         except DEPLOY_ERRORS as exc:
             logger.error("Candidate %s deployment failed: %s", candidate.short, exc)
             result = TrialResult(
@@ -243,35 +246,6 @@ class Bisector:
                 "No regression conclusion will be reported.",
                 self._mock_bad_index,
             )
-        good_versions = expected_versions(self.repo, good.commit, self.inp.soc)
-        bad_versions = expected_versions(self.repo, bad.commit, self.inp.soc)
-        version_policy, drift = policy_with_environment_drift(good_versions, bad_versions, self.opt.vllm_dir)
-        if self.inp.soc:
-            # Endpoint pins can agree while an intermediate candidate changes
-            # them. The compiled recipe belongs to each candidate, so inspect
-            # both switchable packages on every prepared commit.
-            version_policy = VersionPolicy(checked_packages=ALL_PACKAGES, good=good_versions, bad=bad_versions)
-        endpoint_changed = tuple(
-            package
-            for package in version_policy.checked_packages
-            if good_versions.get(package) != bad_versions.get(package)
-        )
-        if endpoint_changed:
-            logger.info(
-                "Version adaptation enabled for %s; endpoint versions differ",
-                ", ".join(endpoint_changed),
-            )
-        if drift:
-            logger.info(
-                "Version adaptation enabled for %s; installed version differs from the endpoints' common pin",
-                ", ".join(drift),
-            )
-        if not version_policy.enabled:
-            logger.info("Version adaptation disabled; endpoint pins match and the installed environment matches them")
-        elif self.inp.soc and not endpoint_changed and not drift:
-            logger.info("Version adaptation checks every candidate; intermediate pins may differ from the endpoints")
-        self.runner.configure_version_policy(version_policy)
-
         state = (
             None if self.opt.mock_tests else BisectState.load(self.state_path, good=good.commit, bad=bad.commit)
         ) or BisectState(good=good.commit, bad=bad.commit, hi=len(candidates) - 1)
@@ -416,7 +390,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--mock-tests",
         action="store_true",
-        help="prepare each tested candidate's real environment, but simulate PASS/FAIL without running pytest (single-node only)",
+        help=(
+            "prepare each tested candidate's real environment, but simulate PASS/FAIL "
+            "without running pytest (single-node only)"
+        ),
     )
     p.add_argument("--trial-timeout-s", type=float, default=7200.0)
     p.add_argument(

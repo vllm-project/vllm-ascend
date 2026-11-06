@@ -212,12 +212,7 @@ def environment_drift(expected: PackageVersions, vllm_dir: Path | None = None) -
             continue  # nothing declared -> adaptation has no target anyway
         if not _matches_expected(package, pin, installed.get(package)):
             drift.append(package)
-    if (
-        expected.vllm
-        and vllm_dir is not None
-        and (vllm_dir / ".git").exists()
-        and VLLM_PACKAGE not in drift
-    ):
+    if expected.vllm and vllm_dir is not None and (vllm_dir / ".git").exists() and VLLM_PACKAGE not in drift:
         try:
             if git_ops.current_commit(vllm_dir) != git_ops.resolve_commit(vllm_dir, expected.vllm):
                 drift.append(VLLM_PACKAGE)
@@ -256,6 +251,26 @@ class VersionAdapter:
 
     def targets_at(self, repo: Path, commit: str, policy: VersionPolicy) -> dict[str, str]:
         return expected_versions(repo, commit, self.opt.soc).as_dict(policy.checked_packages)
+
+    def verify_targets(
+        self,
+        targets: dict[str, str],
+        checked_packages: tuple[str, ...] | list[str],
+    ) -> None:
+        """Check the versions installed by the build-chain transition."""
+        for package in checked_packages:
+            expected = targets.get(package)
+            if not expected:
+                continue
+            installed = self._installed_version(package)
+            source_matches = package != VLLM_PACKAGE or self._vllm_source_matches(expected)
+            version_matches = _matches_expected(package, expected, installed)
+            if package == VLLM_PACKAGE and re.fullmatch(r"[0-9a-f]{40}", expected):
+                version_matches = source_matches
+            if not version_matches or not source_matches:
+                raise VersionAdaptationError(
+                    f"build-chain transition did not install {package}: expected={expected}, installed={installed}"
+                )
 
     def ensure_at_commit(
         self,

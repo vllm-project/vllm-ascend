@@ -37,7 +37,6 @@ import psutil  # type: ignore[import-untyped]
 
 from tools.bisect import git_ops
 from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
-from tools.bisect.build_recipe import recipe_at_commit
 from tools.bisect.config import (
     MULTI_NODE_RUN_SH,
     SCENE_SINGLE,
@@ -47,14 +46,10 @@ from tools.bisect.config import (
     Candidate,
 )
 from tools.bisect.coordinator import Coordinator
-from tools.bisect.pairing import pairing_details
 from tools.bisect.verdict import RunOutcome
 from tools.bisect.version_compat import (
     TORCH_NPU_PIP_INDEX_URL,
     VersionAdaptationError,
-    VersionAdapter,
-    VersionPolicy,
-    expected_versions,
     installed_torch_npu_version,
     installed_vllm_version,
 )
@@ -143,42 +138,41 @@ class BaseRunner:
         self.opt = opt
         self.builder = builder
         self.repo = opt.repo_dir
-        self.version_adapter = VersionAdapter(opt)
-        self.version_policy = VersionPolicy()
-
-    def configure_version_policy(self, policy: VersionPolicy) -> None:
-        self.version_policy = policy
-
-    def _ensure_versions(self, commit: str, log_path: Path) -> None:
-        if not self.version_policy.enabled:
-            return
-        self.version_adapter.ensure_at_commit(self.repo, commit, self.version_policy, log_path)
 
     def _log_pairing(self, commit: str, log_path: Path, phase: str) -> None:
-        """Record the requested build recipe and actual installed pairing."""
+        """Record analyzed build inputs and observed installed versions."""
         if not self.opt.soc:
             return
-        recipe = recipe_at_commit(self.repo, commit, self.opt.soc)
-        versions = expected_versions(self.repo, commit, self.opt.soc)
+        analysis = self.builder._analysis_at(commit)
+        root_source, nightly_source = tuple(dict.fromkeys(instruction.source for instruction in analysis.instructions))
+        arguments = {
+            name: value
+            for operation in analysis.operations
+            if operation.source == root_source and operation.kind == "arg"
+            for name, _, value in (operation.value.partition("="),)
+        }
+        base_image = next((op.value for op in analysis.operations if op.kind == "from"), "unspecified")
         try:
             vllm_source = git_ops.current_commit(self.opt.vllm_dir)[:12]
         except (OSError, git_ops.GitError):
             vllm_source = "unavailable"
+        expected_vllm = arguments.get("VLLM_COMMIT") or arguments.get("VLLM_TAG") or "unspecified"
         lines = [
-            f"[pairing:{phase}] vllm-ascend={commit[:12]} SoC={recipe.soc} "
-            f"base={recipe.root_dockerfile} nightly={recipe.nightly_dockerfile}",
-            f"[pairing:{phase}] expected vLLM={recipe.vllm_ref} "
-            f"torch-npu={versions.torch_npu or 'unspecified'} CANN-image={recipe.cann_image} "
-            f"AISBench={recipe.ais_bench_tag or 'unspecified'}",
+            f"[pairing:{phase}] vllm-ascend={commit[:12]} SoC={self.opt.soc} "
+            f"base={root_source} nightly={nightly_source}",
+            f"[pairing:{phase}] expected vLLM={expected_vllm} CANN-image={base_image}",
             f"[pairing:{phase}] installed vLLM={installed_vllm_version() or 'missing'} "
             f"source={vllm_source} torch-npu={installed_torch_npu_version() or 'missing'}",
             f"[pairing:{phase}] indexes primary={os.getenv('PIP_INDEX_URL', TORCH_NPU_PIP_INDEX_URL)} "
-            f"PyTorch={recipe.pytorch_index_url or 'default'} "
-            f"Ascend={recipe.ascend_index_url or 'default'} "
-            f"nightly={recipe.nightly_index_url or 'default'}",
+            f"PyTorch={arguments.get('PYTORCH_INDEX_URL') or 'default'} "
+            f"Ascend={arguments.get('ASCEND_INDEX_URL') or 'default'}",
         ]
         if phase == "after":
-            lines.extend(pairing_details(self.repo, commit, recipe))
+            lines.extend(
+                f"[pairing:effect] {effect.source}:{effect.line} {effect.name} {effect.action} {effect.specification}"
+                for effect in analysis.package_effects
+            )
+            lines.extend(f"[pairing:unresolved] {message}" for message in analysis.diagnostics)
         with open(log_path, "a", encoding="utf-8") as out:
             out.write("\n".join(lines) + "\n")
         for line in lines[:2]:
@@ -225,8 +219,11 @@ class SingleNodeRunner(BaseRunner):
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         self._log_pairing(candidate.commit, log_path, "before")
         self.builder.decide(candidate.commit)  # fail before changing dependencies when the image cannot match
-        self._ensure_versions(candidate.commit, log_path)
-        decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+        try:
+            decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+        except DEPLOY_ERRORS:
+            self.builder.invalidate_baseline()
+            raise
         self._log_pairing(candidate.commit, log_path, "after")
 
         if self.opt.mock_tests:
@@ -289,7 +286,6 @@ class MultiNodeRunner(BaseRunner):
         # a SKIP command so both sides stay in lockstep instead.
         try:
             decision = self.builder.decide(candidate.commit)
-            version_targets = self.version_adapter.targets_at(self.repo, candidate.commit, self.version_policy)
         except DEPLOY_ERRORS:
             self.coord.publish_command(round_idx, candidate.commit, rebuild=False, action="SKIP")
             self._abort_round(round_idx)
@@ -299,19 +295,12 @@ class MultiNodeRunner(BaseRunner):
             candidate.commit,
             decision.rebuild,
             action="RUN",
-            version_targets=version_targets,
-            version_checks=self.version_policy.checked_packages,
         )
         try:
-            self.version_adapter.ensure_targets(
-                version_targets,
-                self.version_policy.checked_packages,
-                log_path,
-                candidate.commit,
-            )
             self.builder.prepare(candidate.commit, log_path)
             self._log_pairing(candidate.commit, log_path, "after")
         except DEPLOY_ERRORS:
+            self.builder.invalidate_baseline()
             self._abort_round(round_idx)
             raise
 
@@ -321,6 +310,11 @@ class MultiNodeRunner(BaseRunner):
             self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
         except (TimeoutError, RuntimeError) as exc:
             self._abort_round(round_idx)
+            if "worker-deploy-failed" in str(exc):
+                raise BisectFatalError(
+                    f"Worker environment transition failed on round {round_idx}; "
+                    f"inspect worker_logs for the failed node: {exc}"
+                ) from exc
             # No worker EVER signalled ready (any round): they are gone or never
             # joined. SKIP-scanning the remaining range would burn the full
             # barrier timeout per round for nothing -> abort the whole search.

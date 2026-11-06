@@ -187,16 +187,6 @@ class BisectOptions:
             ".",
         ]
     )
-    pip_requirements_cmd: list[str] = field(
-        default_factory=lambda: [
-            "python3",
-            "-m",
-            "pip",
-            "install",
-            "-r",
-            "requirements-nightly.txt",
-        ]
-    )
     # The nightly container is already built+installed at its current HEAD (the
     # bad commit that just failed). Treating HEAD as the established build
     # baseline makes the bad endpoint a checkout-only (no rebuild / no slow

@@ -14,8 +14,8 @@
 # This file is a part of the vllm-ascend project.
 """Read the two Docker build layers used by a nightly bisect candidate."""
 
-import re
 import platform
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -189,12 +189,16 @@ def recipe_at_commit(repo: Path, commit: str, soc: str, os_variant: str | None =
         ais_bench_tag=nightly_args.get("AIS_BENCH_TAG", ""),
         requirements=_read(repo, commit, "requirements.txt"),
         pyproject=_read(repo, commit, "pyproject.toml"),
-        requirements_nightly=_read(repo, commit, "requirements-nightly.txt"),
+        requirements_nightly=git_ops.file_at_commit(repo, commit, "requirements-nightly.txt") or "",
         root_build_steps=_build_steps(
             root,
             (
-                "VLLM_TAG", "VLLM_COMMIT", "PYTORCH_INDEX_URL", "ASCEND_INDEX_URL",
-                "MOONCAKE_OBS_PREFIX", "FLA_VERSION",
+                "VLLM_TAG",
+                "VLLM_COMMIT",
+                "PYTORCH_INDEX_URL",
+                "ASCEND_INDEX_URL",
+                "MOONCAKE_OBS_PREFIX",
+                "FLA_VERSION",
             ),
         ),
         nightly_build_steps=_build_steps(
