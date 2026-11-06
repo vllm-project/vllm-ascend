@@ -2588,7 +2588,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The short-sequence configuration follows the A3 deployment examples in [Chapter 5](#5-online-service-deployment). The long-context configuration is a reference starting point adapted from the [DeepSeek-V4-Pro A3 configuration](DeepSeek-V4-Pro.md#91-recommended-configurations), not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment.
+> **Note**: The short-sequence configuration uses the A3 deployment templates in [Chapter 5](#5-online-service-deployment) with the parallelism and batch settings in the tables below. The long-context configuration is a reference starting point adapted from the [DeepSeek-V4-Pro A3 configuration](DeepSeek-V4-Pro.md#91-recommended-configurations), not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment.
 
 #### Table 1: Scenario Overview
 
@@ -2596,21 +2596,21 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 | --- | --- | --- | --- | --- |
-| Short Sequence | PD separation or KV Cache Pool deployment (1 Prefill + 1 Decode A3 node) | 32 (A3) | DeepSeek-V4-Flash-0731-w8a8 | Prefill uses DP2/TP1/PCP8 with 16 sequences, while Decode uses DP16/TP1/PCP1 with 60 sequences and 480 batched tokens. Enable Fused MC2 on Prefill. |
-| Long Context (~1M Input, Reference) | PD separation or KV Cache Pool deployment (1 Prefill + 1 Decode A3 node) | 32 (A3) | DeepSeek-V4-Flash-0731-w8a8 | Use DP2/TP8/PCP1 on both sides, reduce both sides to 2 sequences, and reduce the Prefill and Decode batched tokens to 4096 and 16 respectively to reserve memory for a 1M-token context. |
+| Short Sequence | PD separation or KV Cache Pool deployment (1 Prefill + 1 Decode A3 node) | 32 (A3) | DeepSeek-V4-Flash-0731-w8a8 | Prefill uses DP2/TP8/PCP1 with 16 sequences and 4096 batched tokens, while Decode uses DP16/TP1/PCP1 with 60 sequences and 480 batched tokens. Enable Fused MC2 on Prefill. |
+| Long Context (~1M Input, Reference) | PD separation or KV Cache Pool deployment (1 Prefill + 1 Decode A3 node) | 32 (A3) | DeepSeek-V4-Flash-0731-w8a8 | Use DP2/TP8/PCP1 on both sides, reduce both sides to 2 sequences, and use 4096 Prefill batched tokens and 16 Decode batched tokens to reserve memory for a 1M-token context. |
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | DSpark Speculation Num | Fused MC2 | EP Switch | FC | DSA-CP (MRv1) / PCP (MRv2) |
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | DSpark Speculation Num | Fused MC2 | EP Switch | FC | PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Short Sequence | Prefill Pool | 16 (1 A3 node) | 1 | 2 | 16 | 16384 | 512000 | 5 | On | On | Off | PCP=8 |
+| Short Sequence | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 512000 | 5 | On | On | Off | PCP=1 |
 | Short Sequence | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 512000 | 5 | Off | On | Off | PCP=1 |
 | Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 2 | 4096 | 1048576 | 5 | Off | On | On | PCP=1 |
 | Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 8 | 2 | 2 | 16 | 1048576 | 5 | Off | On | Off | PCP=1 |
 
 > `FC` reports FlashComm1. Enable it on Prefill for the long-context reference with `enable_flashcomm1: true` in `--additional-config`.
 >
-> These A3 configurations use MRv2. `PCP=8` means eight-way context parallelism; `PCP=1` means no context parallelism. Keep `enable_dsa_cp` disabled on MRv2. When switching configurations, update the launcher arguments and the Prefill/Decode topology in `--kv-transfer-config` together, including the nested transport connector for KV Cache Pool deployment.
+> These A3 configurations use MRv2. `PCP=1` means no context parallelism. Keep `enable_dsa_cp` disabled on MRv2. When switching configurations, update the launcher arguments and the Prefill/Decode topology in `--kv-transfer-config` together, including the nested transport connector for KV Cache Pool deployment.
 >
 > Disable Fused MC2 on Prefill for the long-context reference with `enable_fused_mc2: 0` to reduce memory usage. Both roles must use `--max-model-len 1048576` for this reference; the value is the total budget for prompt and generated tokens. Reduce concurrency or the actual input length if memory is insufficient.
 >
