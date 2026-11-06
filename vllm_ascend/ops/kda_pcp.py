@@ -8,14 +8,11 @@ import torch
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 
 
 class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
-    consumes_pcp_context = True
-
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size > 1:
@@ -27,9 +24,6 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
             if capture_size is not None:
                 vllm_config.compilation_config.max_cudagraph_capture_size = capture_size * pcp_size
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        sequence_capacity = max(vllm_config.scheduler_config.max_num_seqs, self.decode_cudagraph_max_bs)
-        self._spec_conv_indices = torch.empty(sequence_capacity, dtype=torch.int32, device=device)
-        self._non_spec_conv_indices = torch.empty_like(self._spec_conv_indices)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         capacity = max(vllm_config.scheduler_config.max_num_batched_tokens, self.decode_cudagraph_max_bs)
@@ -39,10 +33,6 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         self._pcp_local_mask = torch.zeros(capacity, dtype=torch.bool, device=device)
 
     def _attach_pcp(self, metadata, context):
-        if context is None:
-            # Current runners carry PCP through CommonAttentionMetadata;
-            # the GDN builder forwards it to the returned metadata object.
-            context = getattr(metadata, "pcp_context", None)
         if context is None:
             return metadata
         local_tokens = context.local_num_tokens
@@ -76,37 +66,9 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         metadata.pcp_local_mask = local_mask
         return metadata
 
-    @staticmethod
-    def _prepare_conv_indices(indices, buffer):
-        # Convolution needs the first state slot; recurrent KDA still needs
-        # all speculative slots. Materialize once per group, not per layer.
-        indices = indices[:, 0] if indices.ndim == 2 else indices
-        if indices.is_contiguous():
-            return indices
-        prepared = buffer[: indices.shape[0]]
-        prepared.copy_(indices, non_blocking=True)
-        return prepared
-
-    def _reset_spec_decode_graph_inputs(self, graph_batch_size):
-        super()._reset_spec_decode_graph_inputs(graph_batch_size)
-        # A retained speculative graph also holds the prepared conv pointer.
-        self._spec_conv_indices[:graph_batch_size].fill_(PAD_SLOT_ID)
-
-    def build(self, *args, pcp_context=None, pcp_cache_group_idx=None, **kwargs):
+    def build(self, *args, **kwargs):
         metadata = super().build(*args, **kwargs)
-        spec = metadata.spec_decode_metadata
-        if spec is not None:
-            conv = spec.spec_causal_conv1d
-            conv.cache_indices = self._prepare_conv_indices(conv.cache_indices, self._spec_conv_indices)
-        non_spec = metadata.non_spec_prefill_metadata or metadata.non_spec_decode_metadata
-        if non_spec is not None:
-            conv = non_spec.causal_conv1d
-            conv.cache_indices = self._prepare_conv_indices(conv.cache_indices, self._non_spec_conv_indices)
-        return self._attach_pcp(metadata, pcp_context)
-
-    def build_for_cudagraph_capture(self, common_attn_metadata, *, pcp_context=None, pcp_cache_group_idx=None):
-        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
-        return self._attach_pcp(metadata, pcp_context)
+        return self._attach_pcp(metadata, metadata.pcp_context)
 
 
 class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):

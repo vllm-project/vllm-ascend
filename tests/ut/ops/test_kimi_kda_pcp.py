@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,6 +11,45 @@ import torch
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.ops import kda_parallel, kda_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+
+
+@contextmanager
+def parallel_groups(tp, pcp):
+    with (
+        patch.object(kda_parallel, "get_tp_group", return_value=tp),
+        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp.rank_in_group),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp.world_size),
+    ):
+        yield
+
+
+@pytest.mark.parametrize("pcp", [1, 2, 4])
+@pytest.mark.parametrize(
+    ("model", "upstream"),
+    [
+        (kimi_k3.AscendKimiLinearForCausalLM, kimi_k3.UpstreamKimiLinearForCausalLM),
+        (kimi_k3.AscendKimiK3ForConditionalGeneration, kimi_k3.UpstreamKimiK3ForConditionalGeneration),
+    ],
+)
+def test_kda_state_shapes_delegate_to_upstream_without_mutating_config(pcp, model, upstream):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=pcp),
+        model_config=object(),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        cache_config=SimpleNamespace(use_kda_recoverssm=True),
+    )
+    shapes = object()
+    with patch.object(upstream, "get_mamba_state_shape_from_config", return_value=shapes) as get_shape:
+        assert model.get_mamba_state_shape_from_config(config) is shapes
+    get_shape.assert_called_once()
+    effective = get_shape.call_args.args[0]
+    assert effective.parallel_config.tensor_parallel_size == 2 * pcp
+    assert effective.model_config is config.model_config
+    assert effective.speculative_config is config.speculative_config
+    assert effective.cache_config is config.cache_config
+    assert config.parallel_config.tensor_parallel_size == 2
+    assert (effective is config) == (pcp == 1)
 
 
 @pytest.mark.parametrize(("tp", "pcp"), [(1, 2), (2, 2), (2, 4)])
@@ -23,12 +63,7 @@ def test_kda_projections_cover_global_heads_once(tp, pcp):
         tp_rank, pcp_rank = divmod(rank, pcp)
         tp_group = SimpleNamespace(world_size=tp, rank_in_group=tp_rank, all_reduce=lambda x: x)
         pcp_group = SimpleNamespace(world_size=pcp, rank_in_group=pcp_rank, all_reduce=lambda x: x)
-        with (
-            patch.object(kda_parallel, "get_tp_group", return_value=tp_group),
-            patch.object(kda_parallel, "get_pcp_group", return_value=pcp_group),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp_rank),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp),
-        ):
+        with parallel_groups(tp_group, pcp_group):
             projection = kda_parallel.KDAInputParallelLinear(hidden, [width] * 4 + [4, 16], size, bias=False)
             out = kda_parallel.KDARowParallelLinear(width, hidden, bias=False)
         for sid, weight in enumerate(weights):
@@ -45,6 +80,26 @@ def test_kda_projections_cover_global_heads_once(tp, pcp):
     torch.testing.assert_close(sum(contributions), torch.arange(2 * width).view(2, width).float() @ output_weight.T)
 
 
+@pytest.mark.parametrize("loader", ["weight_loader", "weight_loader_v2"])
+@pytest.mark.parametrize("padding", [0, 3])
+def test_kda_input_projection_preserves_upstream_padding_and_replication(loader, padding):
+    tp = SimpleNamespace(world_size=2, rank_in_group=1)
+    pcp = SimpleNamespace(world_size=2, rank_in_group=1)
+    output_sizes = [32] * 4 + [4, 8]
+    if padding:
+        output_sizes.append(padding * 4)
+    with parallel_groups(tp, pcp):
+        projection = kda_parallel.KDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
+    projection.weight.data.fill_(9)
+    weight = torch.arange(32).float().view(4, 8)
+    getattr(projection, loader)(projection.weight, weight, 4)
+    torch.testing.assert_close(projection.weight[32:36], weight)
+    assert projection.tp_rank == projection.weight.tp_rank == 3
+    if padding:
+        assert projection.weight.weight_loader_numel == projection.weight[:-padding].numel()
+        torch.testing.assert_close(projection.weight[-padding:], torch.zeros(padding, 8))
+
+
 @pytest.mark.parametrize("reduce_results", [False, True])
 def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_results):
     calls = []
@@ -59,12 +114,7 @@ def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_resu
 
     tp = SimpleNamespace(world_size=4, rank_in_group=0, all_reduce=reduce_tp)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0, all_reduce=reduce_pcp)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
-    ):
+    with parallel_groups(tp, pcp):
         projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False, reduce_results=reduce_results)
     projection.weight.data.fill_(1)
     output = projection(torch.ones(3, 8))[0]
@@ -75,12 +125,7 @@ def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_resu
 def test_pcp_kda_output_projection_does_not_enter_tp_only_fusion(monkeypatch):
     tp = SimpleNamespace(world_size=4, rank_in_group=0)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
-    ):
+    with parallel_groups(tp, pcp):
         projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False)
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     torch.nn.Module.__init__(layer)
@@ -124,14 +169,11 @@ def test_pcp_causal_order_decode_sharding_and_padding(rank_inputs, restore, loca
         )
         metadata = builder._attach_pcp(SimpleNamespace(), context)
         group = SimpleNamespace(all_gather=lambda x, dim: gathered)
-        with (
-            patch.object(kda_pcp, "get_pcp_group", return_value=group),
-            patch.object(
-                kda_pcp,
-                "get_forward_context",
-                return_value=SimpleNamespace(
-                    attn_metadata={"kda": metadata}, no_compile_layers={"kda": SimpleNamespace(pcp_group=group)}
-                ),
+        with patch.object(
+            kda_pcp,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={"kda": metadata}, no_compile_layers={"kda": SimpleNamespace(pcp_group=group)}
             ),
         ):
             restored = kda_pcp.kda_pcp_gather(gathered[:count], 2, "kda")
@@ -163,6 +205,32 @@ def test_pcp_metadata_refresh_preserves_captured_addresses():
     assert first.pcp_restore_mask.tolist() == [True, True, False, False]
     assert first.pcp_local_idx.tolist() == [1, 0]
     assert first.pcp_local_mask.tolist() == [True, False]
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_pcp_builder_consumes_common_metadata_context(for_capture):
+    builder = make_builder(0)
+    context = SimpleNamespace(
+        local_num_tokens=2, hidden_restore_idx=torch.tensor([0, 2, 1]), local_token_indices=torch.tensor([0, 2])
+    )
+    common = SimpleNamespace(pcp_context=context)
+
+    def build_base(self, common_prefix_len, common_attn_metadata, *args, **kwargs):
+        return SimpleNamespace(pcp_context=common_attn_metadata.pcp_context)
+
+    def capture_base(self, common_attn_metadata):
+        return self.build(0, common_attn_metadata)
+
+    with (
+        patch.object(kda_pcp.AscendGDNHostMetadataBuilder, "build", build_base),
+        patch.object(kda_pcp.AscendGDNHostMetadataBuilder, "build_for_cudagraph_capture", capture_base),
+    ):
+        if for_capture:
+            result = builder.build_for_cudagraph_capture(common)
+        else:
+            result = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert result.pcp_restore_idx.tolist() == [0, 2, 1, 0]
+    assert result.pcp_local_idx.tolist() == [0, 2]
 
 
 def test_pcp_fake_ops_keep_shapes_traceable():
@@ -204,12 +272,7 @@ def test_kimi_head_parameters_and_conv_load_the_same_combined_rank(rank):
     config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=2))
     tp = SimpleNamespace(world_size=2, rank_in_group=rank // 2)
     pcp = SimpleNamespace(world_size=2, rank_in_group=rank % 2)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=rank // 2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=2),
-    ):
+    with parallel_groups(tp, pcp):
         attention._init_pcp_projections(config, "kda")
     attention.A_log.weight_loader(attention.A_log, torch.arange(8).view(1, 1, 8, 1))
     attention.dt_bias.weight_loader(attention.dt_bias, torch.arange(32))
