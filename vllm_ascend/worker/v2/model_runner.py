@@ -149,6 +149,10 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
 
+    # Class-level default so __new__-constructed test doubles (which skip
+    # __init__) read the SP-off layout instead of raising AttributeError.
+    _dense_sp: bool = False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Cache the dense-SP decision: the predicate walks ~13 structural
         # gates (and resolves the model registry for VL checkpoints), which is

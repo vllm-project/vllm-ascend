@@ -149,6 +149,14 @@ class TestEnableDenseSpPredicate:
         config = _make_vllm_config(speculative_config=SimpleNamespace(method="mtp"))
         assert not enable_dense_sp(config)
 
+    def test_v1_runner_is_gated_off(self, monkeypatch):
+        # Dense SP's seams (exit gather, capture wrapper, dummy-run rounding)
+        # live in the V2 runner only; the V1 runner keeps the SP-off layout.
+        import vllm_ascend.mrv2_utils as mrv2_module
+
+        monkeypatch.setattr(mrv2_module, "use_v2_model_runner", lambda vllm_config: False)
+        assert not enable_dense_sp(_make_vllm_config())
+
     def test_vl_gate_is_structural_not_registry_based(self):
         # Dense Qwen3.5-family checkpoints: multimodal-registered
         # architecture name, but hf_config is hf_text_config (pure text).
@@ -635,7 +643,10 @@ class TestDenseSpBlockEquivalence:
         weight = torch.randn(6, 4, dtype=torch.float64)
         op = _make_row_op(weight, "model.layers.0.self_attn.o_proj")
         good = torch.randn(8, 4, dtype=torch.float64)
-        self.sim.rs_stage = [good, good]
+        # The staged partials are what each rank feeds the reduce-scatter:
+        # the post-GEMM output, not the row op's input.
+        partial = good @ weight.t()
+        self.sim.rs_stage = [partial, partial]
         out, _ = op.apply(good)
         assert out.shape[0] == 4
 
@@ -730,25 +741,8 @@ class TestMtpDraftFullTokenLayout:
             norm=lambda h, r: (h, r),
         )
 
-    def _run(self, monkeypatch):
-        from vllm_ascend.patch.worker import patch_qwen3_5
-
-        monkeypatch.setattr(patch_qwen3_5, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
-        layer = _FakeMtpLayer()
-        predictor = self._make_predictor(layer)
-        hidden_states = torch.arange(5 * 2, dtype=torch.float64).reshape(5, 2) + 10
-        out = patch_qwen3_5.qwen3_5_mtp_forward(
-            predictor,
-            input_ids=torch.zeros(5, dtype=torch.int64),
-            positions=torch.arange(5, dtype=torch.int64),
-            hidden_states=hidden_states,
-            inputs_embeds=None,
-            spec_step_idx=0,
-        )
-        return out, layer, predictor
-
     def _install(self, monkeypatch, dense_sp_entry):
-        from vllm_ascend.worker.v2.spec_decode import target_dependent_ar as spec_module
+        from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import speculator as spec_module
 
         def fake_gather(x):
             # TP=2 simulation: duplicate rows; the rows beyond the true count
@@ -778,7 +772,7 @@ class TestMtpDraftFullTokenLayout:
         assert draft.embed_input_ids(input_ids).shape[0] == 3
 
     def test_no_wrap_without_core_model(self, monkeypatch):
-        from vllm_ascend.worker.v2.spec_decode import target_dependent_ar as spec_module
+        from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import speculator as spec_module
 
         spec_module._install_full_token_draft_embedding(SimpleNamespace())  # no .model
 
@@ -786,7 +780,24 @@ class TestMtpDraftFullTokenLayout:
         # With the wrap installed on the core's embed_input_ids, the patched
         # forward consumes its output unchanged: no gather inside the forward.
         self._install(monkeypatch, dense_sp_entry=True)
-        out, layer, predictor = self._run(monkeypatch)
+        from vllm_ascend.patch.worker import patch_qwen3_5
+        from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import speculator as spec_module
+
+        monkeypatch.setattr(patch_qwen3_5, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
+        layer = _FakeMtpLayer()
+        predictor = self._make_predictor(layer)
+        # Install on the predictor the forward actually runs with, the same
+        # way the speculator installs it on the loaded draft head.
+        spec_module._install_full_token_draft_embedding(SimpleNamespace(model=predictor))
+        hidden_states = torch.arange(5 * 2, dtype=torch.float64).reshape(5, 2) + 10
+        out = patch_qwen3_5.qwen3_5_mtp_forward(
+            predictor,
+            input_ids=torch.zeros(5, dtype=torch.int64),
+            positions=torch.arange(5, dtype=torch.int64),
+            hidden_states=hidden_states,
+            inputs_embeds=None,
+            spec_step_idx=0,
+        )
         assert layer.rows_seen == [5]
         assert out.shape[0] == 5
 
@@ -802,6 +813,11 @@ class TestModelStateInputEmbedsShard:
         from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
         state = AscendModelState.__new__(AscendModelState)
+        # The state caches the dense-SP verdict in __init__ (class default
+        # False); a __new__-constructed double must pin it explicitly, and
+        # prepare_inputs_embeds reads self.model for the mm length hook.
+        state._dense_sp = dense_sp
+        state.model = SimpleNamespace()
         state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
         return state
 
@@ -812,7 +828,6 @@ class TestModelStateInputEmbedsShard:
             return x.chunk(2, dim=0)[0]
 
         monkeypatch.setattr(state_module, "sp_shard", fake_shard)
-        monkeypatch.setattr(state_module, "enable_dense_sp", lambda vllm_config=None: dense_sp)
         state = self._make_state(dense_sp)
         embeds = torch.zeros(8, 2, dtype=torch.float64)
         if method == "super_prepare_inputs":
@@ -913,7 +928,11 @@ class TestCaptureWrapperGather:
 
         from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 
-        original = SimpleNamespace(forward=lambda *a, **k: torch.arange(3 * 2, dtype=torch.float64).reshape(3, 2))
+        # ModelWithContext calls original_model(...) directly, so the double
+        # must be callable itself, not merely expose a .forward.
+        def original(*args, **kwargs):
+            return torch.arange(3 * 2, dtype=torch.float64).reshape(3, 2)
+
         wrapper = ModelWithContext.__new__(ModelWithContext)
         wrapper.original_model = original
         wrapper.is_draft_model = is_draft_model

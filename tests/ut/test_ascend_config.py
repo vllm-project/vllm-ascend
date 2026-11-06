@@ -54,7 +54,7 @@ from vllm_ascend.ascend_config import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
+from vllm_ascend.utils import clear_enable_sp, enable_dense_sp, enable_sp, shared_expert_dp_enabled
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
@@ -816,6 +816,42 @@ class TestAscendConfig(TestBase):
                 self.assertEqual(enable_sp(test_vllm_config), use_sequence_parallel_moe)
                 self.assertEqual(ascend_config.enable_shared_expert_dp, enable_shared_expert_dp)
                 self.assertEqual(shared_expert_dp_enabled(), enable_shared_expert_dp)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dense_sp_rounds_max_num_batched_tokens_to_tp_multiple(self, mock_check_and_update_config):
+        # Dense SP executes every step (real, dummy and profile runs) at a
+        # TP-aligned token count while the input buffers are sized to
+        # max_num_batched_tokens, so the scheduler budget itself must be
+        # rounded up to the TP multiple at config time.
+        clear_ascend_config()
+        clear_enable_sp()
+        test_vllm_config = VllmConfig()
+        text_config = SimpleNamespace(model_type="llama", to_dict=lambda: {})
+        test_vllm_config.model_config.hf_config = text_config
+        test_vllm_config.model_config.hf_text_config = text_config
+        test_vllm_config.parallel_config.tensor_parallel_size = 2
+        test_vllm_config.scheduler_config.max_num_batched_tokens = 4097
+        test_vllm_config.additional_config = {"enable_flashcomm1": True}
+
+        init_ascend_config(test_vllm_config)
+
+        self.assertTrue(enable_dense_sp(test_vllm_config))
+        self.assertEqual(test_vllm_config.scheduler_config.max_num_batched_tokens, 4098)
+
+        # Without the FlashComm switch the budget keeps the user's value.
+        clear_ascend_config()
+        clear_enable_sp()
+        control_config = VllmConfig()
+        control_config.model_config.hf_config = text_config
+        control_config.model_config.hf_text_config = text_config
+        control_config.parallel_config.tensor_parallel_size = 2
+        control_config.scheduler_config.max_num_batched_tokens = 4097
+
+        init_ascend_config(control_config)
+
+        self.assertFalse(enable_dense_sp(control_config))
+        self.assertEqual(control_config.scheduler_config.max_num_batched_tokens, 4097)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

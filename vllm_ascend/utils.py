@@ -1137,7 +1137,10 @@ def enable_dense_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return dense_sp_unavailable_reason(vllm_config) is None and _flashcomm_switch_enabled(vllm_config)
+    # Switch first: the structural verdict is only meaningful for opted-in
+    # deployments, and probe configs (e.g. unittest mocks of the current
+    # vllm config) must stay comparable without every gate being mock-safe.
+    return _flashcomm_switch_enabled(vllm_config) and dense_sp_unavailable_reason(vllm_config) is None
 
 
 def enable_sp(vllm_config=None) -> bool:

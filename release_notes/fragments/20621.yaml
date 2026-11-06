@@ -1,0 +1,17 @@
+pr: 20621
+entries:
+  - category: feature
+    text: >-
+      The `enable_flashcomm1` switch now enables dense sequence parallelism for
+      every dense decoder family (Llama, Qwen2/Qwen3 dense, GLM dense, the
+      dense Qwen3.5 family with GDN linear-attention layers, and others)
+      instead of only the Qwen3.5 family. Hidden states and the residual stay
+      token-sharded across the decoder stack through generic projection
+      gather/scatter wiring, with no per-model switches. Requires the V2 model
+      runner, `tensor_parallel_size > 1` and `pipeline_parallel_size == 1`; the
+      runner pads each step's token count to the TP multiple (and rounds
+      `max_num_batched_tokens` up to the TP multiple) so padding rows flow like
+      graph-bucket padding, and ACL graph capture, replay and eager dispatch
+      share one layout. MTP speculative decoding (`qwen3_5_mtp`) coexists with
+      dense SP. Numerics are equivalent to the all-reduce layout.
+    hardware: [A3, A5]

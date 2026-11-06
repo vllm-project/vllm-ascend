@@ -155,6 +155,10 @@ class AscendModelState(DefaultModelState):
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
 
+    # Class-level default so __new__-constructed test doubles (which skip
+    # __init__) read the SP-off layout instead of raising AttributeError.
+    _dense_sp: bool = False
+
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
         if self.device_metadata is not None:

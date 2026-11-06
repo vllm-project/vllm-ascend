@@ -773,8 +773,14 @@ class AscendConfig:
         else:
             logger.info_once("FlashComm1 is enabled.")
 
-        # Sequence-parallel max_num_batched_tokens divisibility writeback
-        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
+        # Sequence-parallel max_num_batched_tokens divisibility writeback.
+        # Every SP layout rounds a step's executed token count up to the
+        # (TP[, PCP]) multiple — dense SP in the V2 runner's input preparation
+        # and dummy/profile runs, SP MoE in V1's _pad_for_sequence_parallelism —
+        # and the runner's input buffers are sized to max_num_batched_tokens,
+        # so the scheduler budget itself must be aligned or full-budget
+        # batches overflow them.
+        if enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
             if vc.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
                 vc.scheduler_config.max_num_batched_tokens = (
