@@ -79,6 +79,7 @@ def test_move_whole_cache_to_identical_checkout(tmp_path):
                 cache_root=root / "build_cache",
                 domain="custom_operator",
                 unit="test_unit",
+                soc="ascend910b",
                 output_dir=output,
                 environment_profile="ascendc",
                 prepared_inputs=[root / "prepared", opp / "op_impl/ai_core/tbe/config/ascend910b"],
