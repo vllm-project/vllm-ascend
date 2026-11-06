@@ -10,9 +10,9 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This tutorial covers model preparation, installation, colocated and prefill/decode (PD) deployment, functional verification, and evaluation on A2 series, A3 series, and Ascend 950 DT. Section 5.4 describes basic PD deployment with a MemCache three-tier KV cache pool on A2 series, A3 series, and Ascend 950 DT.
+This tutorial covers preparation, deployment, verification, and evaluation on A2 series, A3 series, and Ascend 950 DT, including colocated, PD separation, and MemCache three-tier pooling deployment.
 
-Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`. The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT) and additional performance settings; they require separate runtime and accuracy validation. For the best performance, it is recommended to use **vLLM-Ascend v0.32.0rc** (`releases/v0.32.0rc`).
+Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`. The examples use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT). For the best performance, it is recommended to use **vLLM-Ascend v0.32.0rc** (`releases/v0.32.0rc`).
 
 !!! warning
 
@@ -20,9 +20,7 @@ Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
-
-Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+See [supported features](../../user_guide/support_matrix/supported_features.md) for feature availability and the [Feature Guide](../../user_guide/feature_guide/index.md) for configuration details.
 
 ## 3 Prerequisites
 
@@ -46,7 +44,7 @@ Select the image for your target hardware.
 
 !!! note
 
-    Run Docker on the host: `IMAGE` selects the image, and `NAME` sets the container name used by `docker exec`. The documentation build supplies the image version; when copying the Markdown source, replace the version template with the release version of the documentation you are using.
+    Run Docker on the host. `IMAGE` selects the image; `NAME` is the container name used by `docker exec`. Image versions follow the documentation release; replace the version template when copying raw Markdown.
 
 === "A2 series"
 
@@ -174,11 +172,11 @@ Initialize the CANN and ATB environments in the serving shell as described in th
 
 ### 4.3 Docker for Three-Tier PD Pooling
 
-Use the following containers for the A2 series, A3 series, and Ascend 950 DT basic PD pooling configuration in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). For colocated, ordinary PD, and image-and-text 10K deployment, use Section 4.1. The commands below retain `--privileged=true` from the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks); this tutorial has not validated a configuration with reduced container privileges.
+Use these containers for [MemCache three-tier PD pooling](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Other deployment modes use Section 4.1. Container privileges follow the [MemCache Docker example](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-1-prerequisite-checks).
 
-The examples below use one container per host for MetaService, the P/D engines with their embedded LocalServices, and the proxy. Run the following preparation on the **host**, then choose the matching hardware tab; Section 5.4 starts the services inside that container.
+Prepare storage on the **host**, then create one container per host using the matching hardware tab. Start the services inside the containers as described in Section 5.4.
 
-For A2, repeat the host preparation and create one container on each of the two hosts from Section 5.2. Each host uses its own SSD and personal configuration directory. Run Prefill, MetaService, and Proxy on the prefill host, and Decode on the decode host; both hosts connect to the same MetaService and ConfigStore.
+For A2, prepare a separate SSD and configuration directory on each host. Run Prefill, MetaService, and Proxy on the prefill host, and Decode on the decode host, using shared MetaService and ConfigStore endpoints.
 
 !!! note "A2 host HDK requirement"
 
@@ -203,11 +201,11 @@ sudo fallocate -l "${LOOP_BACKING_SIZE}" "${LOOP_BACKING_FILE}"
 sudo losetup --find --show --direct-io=on "${LOOP_BACKING_FILE}"
 ```
 
-Record the device returned by `losetup` and use that device path for `SSD_DEVICE_PATH` below; `LOOP_BACKING_FILE` is the host backing file, not the device path. A loop device is a testing alternative, not an additional requirement for a deployment with a dedicated disk.
+Set `SSD_DEVICE_PATH` to the device returned by `losetup`, not the backing-file path. Skip loop-device creation when using a dedicated disk.
 
 **Prepare the personal configuration directory and device mapping:**
 
-Set `MEMCACHE_CONFIG_DIR` to your chosen absolute host directory for personal configuration copies, separate from the image's package-template directory, and `SSD_DEVICE_PATH` to the actual dedicated or loop device. Run these commands in the same host terminal used for `docker run`:
+In the host terminal used for `docker run`, set `MEMCACHE_CONFIG_DIR` to your personal configuration directory and `SSD_DEVICE_PATH` to the dedicated or loop device:
 
 ```bash
 export MEMCACHE_CONFIG_DIR="<ABSOLUTE_PERSONAL_CONFIG_DIR>"
@@ -226,9 +224,9 @@ Proceed only after confirming that the selected device has no filesystem signatu
 
 !!! note
 
-    Set `MEMCACHE_CONFIG_DIR` with the host-side `export` above before running Docker: `-e MEMCACHE_CONFIG_DIR` passes its value into the container, while `-v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}"` mounts the actual directory at the same path. Inside the container, Section 5.4 uses this variable to prepare the personal configuration files and set `MMC_META_CONFIG_PATH` and `MMC_LOCAL_CONFIG_PATH`; the image's original templates remain unchanged.
+    Set `MEMCACHE_CONFIG_DIR` before starting Docker. `-e` passes its value into the container, and `-v` mounts the directory at the same path. Section 5.4 copies image templates into this directory and uses those personal files.
 
-`SSD_DEVICE_PATH` is expanded by the host shell in `--device`; it is not passed into the container as an environment variable. In Section 5.4, set `MEMCACHE_SSD_PATHS` to the same mapped paths for the selected hardware platform.
+In Section 5.4, set `MEMCACHE_SSD_PATHS` to the device paths mapped by `--device`.
 
 Verify that all host device and file paths exist before running Docker. The 950 DT example retains the device, driver, and communication-tool mounts from the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
@@ -356,15 +354,13 @@ Verify that all host device and file paths exist before running Docker. The 950 
       -it $IMAGE bash
     ```
 
-Keep this container running. Use Section 5.4 to prepare the configurations and start MetaService, P/D, and Proxy in order. To open another shell in the same container, run the following from a new **host** terminal:
+Keep the container running. Open additional service terminals from the host with:
 
 ```bash
 docker exec -it vllm-ascend-qwen38-pool bash
 ```
 
-The container inherits `MEMCACHE_CONFIG_DIR`, including in new `docker exec` shells, but exports made inside one shell are not shared with other shells. Repeat the library and service-specific exports from Section 5.4 in each service terminal; if you change `NAME` when creating the container, use that name in the `docker exec` command above.
-
-Keep `MEMCACHE_CONFIG_DIR` set to the path passed at container creation; changing the host variable later does not update the running container's environment or mounts. Files written to this mounted directory from inside the container are the same personal copies visible on the host.
+Use the container name set by `NAME`. New shells inherit `MEMCACHE_CONFIG_DIR`; repeat the Section 5.4 library and service exports in each shell. Keep the directory path consistent with the container's environment and mount.
 
 After entering the container, check that the model and storage dependencies are available:
 
@@ -372,7 +368,7 @@ After entering the container, check that the model and storage dependencies are 
 python -c "import vllm, vllm_ascend, mooncake, memcache_hybrid, memfabric_hybrid; print('Model and pool dependencies are available')"
 ```
 
-An import check does not validate version compatibility; complete the MemCache dependency checks in Section 5.4. `--shm-size` controls the container's `/dev/shm` limit and does not allocate the MemCache DRAM pool or the UBS IO buffers.
+Check MemCache dependency versions in Section 5.4. Budget pool DRAM and UBS IO memory separately from the container's `/dev/shm` limit (`--shm-size`).
 
 !!! note "950 DT pooling runtime"
 
@@ -386,7 +382,7 @@ An import check does not validate version compatibility; complete the MemCache d
     export LD_LIBRARY_PATH="${MODEL_RUNTIME_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     ```
 
-    Resolve the model-library directories from the active environment's installed Mooncake, Torch, and torch_npu packages. Section 5.4 supplies the separate MemCache/MemFabric library paths and retains the reference process limits (`ulimit -l unlimited`, `ulimit -s 65536`).
+    Use the active environment's Mooncake, Torch, and torch_npu library directories. MemCache/MemFabric library paths are set in Section 5.4.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -398,6 +394,14 @@ Before starting:
 
 - Ensure the serving environment can access ModelScope to download the checkpoint.
 - Verify available NPU memory before changing context length, concurrency, or memory utilization.
+
+**Common settings:**
+
+- All three examples enable Model Runner V2, async scheduling, expert parallelism, prefix caching, decode graph capture (`FULL_DECODE_ONLY`), and three-token MTP.
+- `cpu_offload=true` places Engram embedding tables in host memory; `dp_shared_memory=false` disables sharing for DP1. Use a checkpoint with supported n-gram layers and sufficient host memory.
+- CPU binding, FlashComm1, shared expert DP, and shared expert overlap are enabled. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2; norm/quantization fusion is disabled.
+- `--mamba-cache-mode align` aligns GDN and PLE state checkpoints for prefix caching. Tool calling and reasoning parsing are covered in [Section 6](#6-functional-verification).
+- Multimodal requests require a vision encoder; add `--language-model-only` for text-only serving.
 
 === "A2 series"
 
@@ -436,14 +440,7 @@ Before starting:
 
     **Key parameters:**
 
-    - `--quantization ascend` loads the W4A8 checkpoint; TP8 × DP1 runs one model instance across eight devices.
-    - Model Runner V2, async scheduling, and expert parallelism are enabled. `FULL_DECODE_ONLY` captures decode graphs, and MTP drafts three tokens per step.
-    - `--mamba-cache-mode align` aligns GDN and PLE state checkpoints for prefix caching.
-    - `cpu_offload=true` offloads Engram embedding tables to host memory; `dp_shared_memory=false` disables sharing for this DP1 configuration. Use a checkpoint with supported n-gram layers and provide sufficient host memory.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert overlap. Shared expert DP requires expert parallelism and TP > 1; `enable_fused_mc2=0` disables fused MC2 and is compatible with overlap. Norm/quantization fusion is disabled.
-    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables function calling; `--reasoning-parser qwen3` separates reasoning from the final answer.
-    - Multimodal requests require a checkpoint with a vision encoder. For text-only serving, add `--language-model-only` to skip loading it.
-    - `enable_npugraph_ex=true` enables NPU graph extension; static kernels and super kernels remain disabled.
+    - TP8 × DP1 uses eight devices. NPU graph extension is enabled; static kernels and super kernels are disabled.
 
 === "A3 series"
 
@@ -482,14 +479,7 @@ Before starting:
 
     **Key parameters:**
 
-    - `--quantization ascend` loads the W4A8 checkpoint; TP8 × DP1 runs one model instance across eight devices.
-    - Model Runner V2, async scheduling, and expert parallelism are enabled. `FULL_DECODE_ONLY` captures decode graphs, and MTP drafts three tokens per step.
-    - `--mamba-cache-mode align` aligns GDN and PLE state checkpoints for prefix caching.
-    - `cpu_offload=true` offloads Engram embedding tables to host memory; `dp_shared_memory=false` disables sharing for this DP1 configuration. Use a checkpoint with supported n-gram layers and provide sufficient host memory.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert overlap. Shared expert DP requires expert parallelism and TP > 1; `enable_fused_mc2=0` disables fused MC2 and is compatible with overlap. Norm/quantization fusion is disabled.
-    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables function calling; `--reasoning-parser qwen3` separates reasoning from the final answer.
-    - Multimodal requests require a checkpoint with a vision encoder. For text-only serving, add `--language-model-only` to skip loading it.
-    - `enable_npugraph_ex=true` and `enable_static_kernel=true` enable NPU graph extension and static kernels; super kernels remain disabled.
+    - TP8 × DP1 uses eight devices. NPU graph extension and static kernels are enabled; super kernels are disabled.
 
 === "Ascend 950 DT"
 
@@ -535,16 +525,8 @@ Before starting:
 
     **Key parameters:**
 
-    - `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` selects the four devices for TP4.
-    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2.
-    - `--quantization ascend` loads the Ascend-compatible W4A8-MXFP checkpoint.
-    - `--max-model-len 141312` and `--max-num-seqs 32` set context and concurrency limits; verify memory capacity before increasing them.
-    - `--async-scheduling` enables asynchronous scheduling; `--enable-expert-parallel` enables expert parallelism for MoE layers.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
-    - NPU graph extension and static kernels are enabled; super kernels and norm/quantization fusion are disabled.
-    - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration uses three draft tokens.
-    - Prefix caching is enabled. The current runtime automatically selects `mamba_cache_mode=align` when prefix caching is enabled and the mode is left at its default `none`; the A2 series and A3 series examples set the same mode explicitly. This is not a hardware-specific difference.
-    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables Function Calling; `--reasoning-parser qwen3` separates reasoning from the final answer.
+    - TP4 × DP1 uses devices 0–3 and a W4A8-MXFP checkpoint. NPU graph extension and static kernels are enabled; super kernels are disabled.
+    - Prefix caching automatically selects Mamba cache mode `align` from the default `none`; A2/A3 set `align` explicitly.
 
 **Service Verification:**
 
@@ -558,11 +540,20 @@ The response should list the configured model name. After startup, use [Section 
 
 ### 5.2 Basic PD Separation Deployment
 
-Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Replace the IP-address and network-interface placeholders with the actual values for each host before running the commands. Keep the host addresses consistent across terminals; `nic_name` must identify the interface that owns `local_ip`. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
+Prepare the runtime from Section 4 and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Run P/D commands in separate terminals, then start the proxy after their APIs are ready.
 
 !!! note
 
-    Set `PREFILL_HOST`, `DECODE_HOST`, `local_ip`, and `nic_name` where shown in each command block; these are shell variables, and a new terminal does not inherit values assigned in another terminal. The `VLLM_HOST_IP`/`HCCL_IF_IP` and socket-interface exports use those values for communication, while `no_proxy`/`NO_PROXY` bypass HTTP proxies for the listed service addresses.
+    Set the IP and interface variables in each terminal; `nic_name` must own `local_ip`. The communication exports use these values, and `no_proxy`/`NO_PROXY` bypass HTTP proxies for the service addresses.
+
+**A2/A3 key parameters:**
+
+- Prefill uses TP4 × PP2 × DP1 in eager mode, with `enable_prefill_mc2=true` and fused MC2 disabled. Check MC2 token limits before increasing the batch budget.
+- Decode uses TP2 × DP4, `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling; super kernels are disabled.
+- Both roles use three MTP draft tokens, with `enforce_eager=true` on P and `false` on D. Batch tokens are 8192; P/D HCCL buffers are 8192/512.
+- Engram CPU offload requires supported n-gram layers and sufficient host memory. P uses `dp_shared_memory=false`; D uses `true`. Shared-memory DP replicas must share a host and shared-memory namespace; elastic EP is unsupported.
+- Both roles set prefix caching, Mamba cache mode `align`, and Mamba state dtype `bfloat16`. Keep Mooncake TP/PP/DP declarations consistent with the model commands; clear `VLLM_PP_LAYER_PARTITION` to use the default partition.
+- `enable_fused_mc2=0` is compatible with shared expert overlap; D uses the runtime default of zero. For tool calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify requests through the proxy.
 
 === "A2 series"
 
@@ -570,7 +561,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     Before starting:
 
-    - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the IP and network-interface placeholders at the start of each command block. Set `local_ip` to the current host address and `nic_name` to its network interface.
+    - Expose the required devices, mount `/etc/hccn.conf`, and use `--shm-size=128g`. Provide sufficient host memory for Engram CPU offload and DP shared memory.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
     **Prefill:**
@@ -704,9 +695,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     curl --fail "http://${DECODE_HOST}:25569/v1/models"
     ```
 
-    After both checks succeed, run the Proxy command in a separate terminal.
-
-    Once the proxy is listening, verify the complete PD path:
+    After both checks succeed, start Proxy in a separate terminal and verify the complete PD path:
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
@@ -721,24 +710,13 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     Inspect the prefill, decode, and proxy terminal output if the request fails.
 
-    **Key parameters:**
-
-    - Both roles enable prefix caching and explicitly set `--mamba-cache-mode align` and `--mamba-ssm-cache-dtype bfloat16`.
-    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. Prefill uses DP1 and sets `dp_shared_memory=false`; Decode uses DP4 and sets it to `true`. Elastic EP is not supported with shared memory.
-    - Prefill distributes the model across two pipeline stages, with TP4 in each stage. It runs in eager mode (`--enforce-eager`), enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP4 × PP2 × DP1 before increasing the batch token budget.
-    - Decode uses four TP2 replicas without pipeline parallelism. It enables `FULL_DECODE_ONLY`, NPU graph extension, `enable_static_kernel=true`, and recompute scheduling. Static kernels are enabled for Decode; Prefill retains eager execution. Super kernels remain disabled.
-    - Both roles use three MTP draft tokens; Prefill sets MTP `enforce_eager=true` and Decode sets it to `false`. Both roles use `--max-num-batched-tokens 8192`; Prefill retains `HCCL_BUFFSIZE=8192` and Decode retains `HCCL_BUFFSIZE=512`.
-    - `enable_fused_mc2=0` disables fused MC2, so it does not conflict with `multistream_overlap_shared_expert=true`. The decode command relies on the runtime's default value of zero.
-    - Keep the Mooncake declarations synchronized on both roles: Prefill uses DP1 / TP4 / PP2, and Decode uses DP4 / TP2. No custom layer partition is specified; clear `VLLM_PP_LAYER_PARTITION` in both terminals to use the runtime's default partition.
-    - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
-
 === "A3 series"
 
     This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP4 × PP2 × DP1 on devices 0–7; Decode uses TP2 × DP4 on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
 
     Before starting:
 
-    - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the IP and network-interface placeholders at the start of each command block. Set `local_ip` to the current host address and `nic_name` to its network interface.
+    - Expose the required devices, mount `/etc/hccn.conf`, and use `--shm-size=128g`. Provide sufficient host memory for Engram CPU offload and DP shared memory.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
     **Prefill:**
@@ -864,9 +842,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     curl --fail "http://127.0.0.1:25569/v1/models"
     ```
 
-    After both checks succeed, run the Proxy command in a separate terminal.
-
-    Once the proxy is listening, verify the complete PD path:
+    After both checks succeed, start Proxy in a separate terminal and verify the complete PD path:
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
@@ -880,17 +856,6 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     ```
 
     Inspect the prefill, decode, and proxy terminal output if the request fails.
-
-    **Key parameters:**
-
-    - Both roles enable prefix caching and explicitly set `--mamba-cache-mode align` and `--mamba-ssm-cache-dtype bfloat16`.
-    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. Prefill uses DP1 and sets `dp_shared_memory=false`; Decode uses DP4 and sets it to `true`. Elastic EP is not supported with shared memory.
-    - Prefill distributes the model across two pipeline stages, with TP4 in each stage. It runs in eager mode (`--enforce-eager`), enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP4 × PP2 × DP1 before increasing the batch token budget.
-    - Decode uses four TP2 replicas without pipeline parallelism. It enables `FULL_DECODE_ONLY`, NPU graph extension, `enable_static_kernel=true`, and recompute scheduling. Static kernels are enabled for Decode; Prefill retains eager execution. Super kernels remain disabled.
-    - Both roles use three MTP draft tokens; Prefill sets MTP `enforce_eager=true` and Decode sets it to `false`. Both roles use `--max-num-batched-tokens 8192`; Prefill retains `HCCL_BUFFSIZE=8192` and Decode retains `HCCL_BUFFSIZE=512`.
-    - `enable_fused_mc2=0` disables fused MC2, so it does not conflict with `multistream_overlap_shared_expert=true`. The decode command relies on the runtime's default value of zero.
-    - Keep the Mooncake declarations synchronized on both roles: Prefill uses DP1 / TP4 / PP2, and Decode uses DP4 / TP2. No custom layer partition is specified; clear `VLLM_PP_LAYER_PARTITION` in both terminals to use the runtime's default partition.
-    - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
 
 === "Ascend 950 DT"
 
@@ -1169,13 +1134,13 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Key parameters:**
 
     - Each command starts one DP rank with TP2. Keep each role's DP address, RPC port, and model settings consistent across its two ranks.
-    - Both roles enable Model Runner V2, async scheduling, and expert parallelism (EP). EP is distinct from expert parallel load balancing (EPLB); these commands do not enable EPLB.
-    - `cpu_offload=true` keeps Engram embedding tables in host memory; `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas. Both options are booleans. DP replicas must share the same host and shared-memory namespace; this DP2 configuration satisfies the DP > 1 requirement and does not enable elastic EP.
+    - Model Runner V2, async scheduling, and expert parallelism are enabled; EPLB is not enabled.
+    - Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace; elastic EP is not enabled.
     - Prefill enables prefix caching, which automatically selects Mamba cache mode `align` from the default `none`, and uses `cudagraph_mode=NONE`; static kernels are disabled.
     - Decode enables prefix caching, `FULL_DECODE_ONLY`, static kernels, and recompute scheduling.
     - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
     - Both roles use three MTP draft tokens.
-    - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy. `kv_port` is a base port shared by ranks of the same role: the connector adds the DP serving index × TP × PP × PCP, then the local device index. With TP2 and PP = PCP = 1, prefill rank 0 uses ports 30000–30001 and rank 1 uses 30002–30003; decode uses 30100–30103. Do not increment the configured base port for rank 1.
+    - Keep Mooncake DP2/TP2 declarations consistent with the services and include both ranks in the proxy. `kv_port` is a shared base port; rank offsets are added automatically. Prefill uses 30000–30003 and Decode uses 30100–30103. Do not increment the configured base port for rank 1.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to all four model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
 ### 5.3 Image-and-Text 10K PD Separation Deployment
@@ -1183,8 +1148,6 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 This case uses the same eight-device Ascend 950 DT host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Both roles enable prefix caching; decode also enables static kernels.
 
 The 10K target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
-
-The complete Prefill, Decode, and proxy commands are provided below.
 
 === "Ascend 950 DT"
 
@@ -1279,7 +1242,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
     **Service Verification:**
 
-    Wait until both model APIs are ready, then start the proxy as described above. Check that prefill uses TP2/PP2/DP1, decode uses TP2/DP2 with static kernels enabled, and both roles report `max_model_len=143360`. Send a 10K image-and-text sample through the proxy using the request below. Replace `<IMAGE_URL>` with the sample image URL and `<TEXT_PROMPT>` with its text; the image must be accessible from the serving environment.
+    Check P TP2/PP2/DP1, D TP2/DP2 with static kernels, and `max_model_len=143360` in the startup logs. Send a 10K sample through the proxy, replacing `<IMAGE_URL>` and `<TEXT_PROMPT>` with an accessible image and its text:
 
     ```bash
     curl --fail "http://127.0.0.1:8247/v1/models"
@@ -1289,7 +1252,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
 
-    Expected result: HTTP 200 with a response that addresses both the image and text. Check `usage.prompt_tokens` against the 10K validation target and confirm that the request completes without image-processing, KV-transfer, or out-of-memory errors. Supply the actual validation sample before using this request as a 10K test.
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1297,7 +1260,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
     - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and set `VLLM_ENGINE_READY_TIMEOUT_S=4800` to allow sufficient engine initialization time. Provide sufficient host memory for the checkpoint and the decode DP replicas.
-    - This case retains `VLLM_ASCEND_PLE_BACKEND=torch` from the supplied scripts. It only selects a backend in runtimes that implement this variable; an unknown-variable warning means it has no effect.
+    - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
 
 ### 5.4 PD Separation with MemCache Three-Tier KV Cache Pool
 
@@ -1305,7 +1268,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
 **Before starting:**
 
-Start the matching container from [Section 4.3](#43-docker-for-three-tier-pd-pooling), with its dedicated SSD mapping and `MEMCACHE_CONFIG_DIR`. Run the following steps inside the container. A2 requires HDK ≥ 25.5.1 on both hosts; A3 HCCS requires LingQu Computing Network 1.5 or later. Follow the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for compatible runtime dependencies.
+Prepare the container, SSD mapping, configuration directory, and A2 HDK requirement in [Section 4.3](#43-docker-for-three-tier-pd-pooling). Run the following inside the container. A3 HCCS also requires LingQu Computing Network 1.5 or later; see the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for runtime dependencies.
 
 ```bash
 free -h
@@ -1376,7 +1339,7 @@ export MEMCACHE_DEVICE_COUNT="<DRAM_ENABLED_LOCAL_SERVICE_COUNT_ON_THIS_HOST>"
 export MEMCACHE_FORCE_NEW_DISK="<true_OR_false_FOR_THIS_DEPLOYMENT>"
 ```
 
-`dram.size` and `ubsio.mem.size_in_gb` apply per DRAM-enabled LocalService. Budget their host-wide total alongside Engram, vLLM, and operating-system memory. `world_size` is pool capacity; `device_count` is the host's DRAM-enabled LocalService count, not the SSD count. The file-writing commands expand these variables into literal configuration values.
+`dram.size` and `ubsio.mem.size_in_gb` apply per DRAM-enabled LocalService; budget their total alongside Engram, vLLM, and operating-system memory. `world_size` is pool capacity; `device_count` counts the host's DRAM-enabled LocalServices, not SSDs. LocalServices run inside P/D workers; the `ubsio.standalone.*` keys do not require a separate process.
 
 In every A2/A3 P/D terminal, apply the library exports above and these common exports before the hardware-specific settings:
 
@@ -1408,8 +1371,6 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
     EOF
     ```
-
-    The `ubsio.standalone.*` key names do not require a separate standalone service.
 
     Export the following in the Prefill and Decode terminals. Section 5.2 sets each host's IP and socket interfaces; clear incompatible HCCS/UB settings inherited from another experiment:
 
@@ -1463,8 +1424,6 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
     EOF
     ```
-
-    The `ubsio.standalone.*` key names do not require a separate standalone service.
 
     Export the following in the Prefill and Decode terminals. Clear incompatible RoCE/UB settings inherited from another experiment:
 
@@ -1687,7 +1646,7 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
     ```
 
-    Prefill uses synchronous external cache lookup/loading and writes. Decode receives KV/state through Mooncake; its external-cache loading and saving options remain disabled. Both roles retain the explicit connector flags shown above.
+    `load_async=false` keeps external cache loading synchronous. Decode-side pool loading and saving remain disabled.
 
 **Verify three-tier cache reuse:**
 
@@ -1704,7 +1663,7 @@ Use the MemCache, MemFabric, and UBS IO logs or available metrics to check these
 
 ## 6 Functional Verification
 
-Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Use the API address and served model name for your deployment. Replace the host, port, and model name in the requests below as needed:
+Verify generation through `/v1/chat/completions`, using the API address and model name for your deployment:
 
 | Deployment | API address | Model name |
 | --- | --- | --- |
@@ -1717,7 +1676,7 @@ Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Use t
 | Ascend 950 DT image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 | Ascend 950 DT three-tier pooling PD proxy | `http://127.0.0.1:8249` | `qwen38-megamoe-sp-pd` |
 
-For PD, complete the proxy check in [Section 5.2](#52-basic-pd-separation-deployment), or [Section 5.3](#53-image-and-text-10k-pd-separation-deployment) for the image-and-text 10K case. For three-tier pooling, use the startup and proxy checks for the matching hardware in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool), then complete its SSD eviction and restore checks.
+For PD, first complete the matching startup and proxy checks in Sections [5.2](#52-basic-pd-separation-deployment), [5.3](#53-image-and-text-10k-pd-separation-deployment), or [5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Pooling also requires the SSD eviction/restore checks in Section 5.4.
 
 ### 6.1 Basic Chat Completion
 
@@ -1875,9 +1834,7 @@ curl "http://127.0.0.1:8088/v1/chat/completions" \
 
 ### 7.1 Using AISBench
 
-Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage. The result below is for reference only.
-
-The result below is from the original A3 series W8A8 TP8 × DP1 deployment. Evaluate the W4A8 and W4A8-MXFP configurations separately.
+Follow [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation. The reference result below is from A3 W8A8 TP8 × DP1; evaluate the W4A8 and W4A8-MXFP configurations separately.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
@@ -1917,7 +1874,7 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | Ascend 950 DT | Prefill (three-tier pooling) | 0–3 | 2 × 1 × 2 | 262144 | 64 | 4096 |
 | Ascend 950 DT | Decode (three-tier pooling) | 4–7 | 2 × 1 × 2 | 262144 | 64 | 4096 |
 
-For A2 series and A3 series PD deployment, use the Prefill and Decode rows together: each role occupies eight devices, for 16 devices in total. A2 uses two eight-device hosts; A3 uses one 16-device host. Prefill uses eager execution with TP4 × PP2 × DP1; Decode enables static kernels with TP2 × DP4.
+Pair the P/D rows for your hardware. A2 uses two eight-device hosts; A3 uses one 16-device host. P runs eagerly; D enables static kernels.
 
 For A2/A3 MemCache three-tier pooling, retain the basic PD token budgets above. For 950 DT, use the dedicated three-tier pooling rows and the complete commands in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool); both roles use `HCCL_BUFFSIZE=512`. Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
 
@@ -1933,15 +1890,7 @@ For instructions, see [Optix-for-PD-disaggregation](https://gitcode.com/Ascend/m
 
 ### 9.3 Model Runner V2 Decode Submission
 
-For supported Qwen3.8-Flash-Next attention implementations, Model Runner V2 reduces CPU synchronization during decode by keeping exact token counts on the device and using estimated upper bounds on the CPU. This optimization is enabled automatically and requires no configuration switch. The resolved target architecture must be `Qwen4ExpForCausalLM` or `Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
-
-After KV cache initialization, the model checks whether the target and MTP draft attention implementations support this optimization. If supported, it skips copying corrected token counts from the device to the host and the CPU wait for that copy. Exact positions, accepted token counts, KV cache slots, and recurrent state continue to use device-side values. KV-transfer connector behavior is unchanged.
-
-This optimization also applies to text and ordinary non-realtime multimodal requests.
-
-Unknown target/draft consumers, context parallelism, sparse KV offload and realtime media retain exact CPU synchronization. The runner's existing PP exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off, prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement. Underlying model/runtime restrictions still apply.
-
-The decision is fixed for the model state's initialized lifetime so production and consumption cannot switch independently between batches. Changes to runtime configuration or attention consumers require model-state reinitialization. Initialization drains the old copy stream once before enabling the exemption.
+Model Runner V2 automatically reduces CPU synchronization during decode when the target and MTP attention implementations support it; no extra configuration switch is required. Exact token counts and state remain on the device. Unsupported configurations retain exact CPU synchronization; runtime compatibility checks select the behavior.
 
 ## 10 FAQ
 
