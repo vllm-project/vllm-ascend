@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 
 class TestMooncakePipeline(unittest.TestCase):
@@ -70,7 +70,7 @@ class TestMooncakePipeline(unittest.TestCase):
             groups[1].layer_names = ["model.layers.4.c4", "model.layers.5.c4"]
             groups[2].layer_names = ["model.layers.6.state"]
         config = SimpleNamespace(num_blocks=10, kv_cache_groups=groups)
-        with patch.object(KVPoolWorker, "_build_cache_coordinator", return_value=None):
+        with patch.object(BaseKVPoolWorker, "_build_cache_coordinator", return_value=None):
             worker = make_worker(
                 self,
                 num_layers=(3, 4)[stage],
@@ -160,7 +160,10 @@ class TestMooncakePipeline(unittest.TestCase):
         # does; do not hand-copy the worker's layout ID into the scheduler.
         with (
             patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                "MooncakeBackend.create_scheduler_client"
+            ),
         ):
             scheduler = create_kv_pool_scheduler(
                 worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config
@@ -259,7 +262,10 @@ class TestMooncakePipeline(unittest.TestCase):
         config.cache_config.block_size = 16
         with (
             patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                "MooncakeBackend.create_scheduler_client"
+            ),
         ):
             scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
         scheduler.store_scheduler = store
