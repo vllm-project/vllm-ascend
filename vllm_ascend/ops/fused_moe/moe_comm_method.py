@@ -66,6 +66,14 @@ def get_moe_comm_method(
 
 
 def setup_moe_comm_method(moe_config):
+    if get_ascend_config().enable_deepep:
+        # Import only when selected: DeepEP is an optional runtime dependency.
+        from vllm_ascend.ops.fused_moe.deepep_comm import DeepEPCommImpl
+
+        key = _moe_config_key(MoECommType.DEEPEP, moe_config)
+        if key not in _MoECommMethods:
+            _MoECommMethods[key] = DeepEPCommImpl(moe_config)
+        return
     if moe_config.ep_size > 1:
         _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)

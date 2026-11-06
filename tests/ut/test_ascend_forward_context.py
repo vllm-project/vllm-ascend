@@ -20,7 +20,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, enable_deepep=False),
     )
 
 
@@ -87,6 +87,7 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    enable_deepep: bool = False,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
@@ -96,8 +97,14 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_deepep=enable_deepep),
     )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4096])
+def test_select_moe_comm_method_explicit_deepep(monkeypatch, num_tokens):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A5, enable_deepep=True)
+    assert afc.select_moe_comm_method(num_tokens, _make_vllm_config()) == MoECommType.DEEPEP
 
 
 def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):

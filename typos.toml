@@ -42,6 +42,8 @@ DepthWiseSeperableConv1d = "DepthWiseSeperableConv1d"
 depthwise_seperable_CNN = "depthwise_seperable_CNN"
 
 [default.extend-words]
+# Clos network topology names used by DeepEP backends.
+clos = "clos"
 mata = "mata"
 iy = "iy"
 tendencias = "tendencias"

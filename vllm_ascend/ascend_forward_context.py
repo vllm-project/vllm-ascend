@@ -43,6 +43,7 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+    DEEPEP = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -410,6 +411,9 @@ def select_moe_comm_method(
     """
     if not is_moe_model(vllm_config):
         return None
+
+    if get_ascend_config().enable_deepep:
+        return MoECommType.DEEPEP
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
