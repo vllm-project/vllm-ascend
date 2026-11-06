@@ -1726,9 +1726,6 @@ def _get_v41_role_builder(role: str):
             "FoldedIndex": AscendDSAV41FoldedIndexMetadataBuilder,
         }[role]
 
-    if builder_cls is not dsa_v41_cp.AscendDSAV41PCPMetadataBuilder:
-        return builder_cls
-
     return {
         "State": dsa_v41_cp.AscendDSAV41PCPStateMetadataBuilder,
         "SWA": dsa_v41_cp.AscendDSAV41PCPSWAMetadataBuilder,
