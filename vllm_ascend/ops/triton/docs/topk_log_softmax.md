@@ -63,3 +63,15 @@ The reference is `torch.nn.functional.log_softmax` in fp32 followed by `torch.ga
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_token_logprobs.py
 ```
+
+### Selected-token ranks
+
+`selected_token_ranks` counts real vocabulary entries whose logits are greater
+than or equal to the selected logit. A unique maximum ranks 1; both members of a
+two-way top tie rank 2. NaN comparisons follow `>=` semantics.
+
+The last vocabulary tile is padded with negative infinity. When the selected
+logit is negative infinity, the kernel subtracts the padding count after the
+reduction. This avoids an extra vector predicate that exceeds the A2/A3 UB
+budget with Triton-Ascend 3.2.2 and preserves the count of real entries even
+when a row contains NaN.
