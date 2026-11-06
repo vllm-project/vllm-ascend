@@ -148,6 +148,7 @@ class NPUModelRunner(GPUModelRunner):
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
     max_num_reqs: int
+    max_num_tokens: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -741,10 +742,12 @@ class NPUModelRunner(GPUModelRunner):
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        global_tokens = self.max_num_tokens
+        profile_tokens = self._get_pcp_profile_num_tokens()
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and self.max_num_tokens > mc2_tokens_capacity
+                and profile_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
@@ -757,7 +760,11 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            super().profile_run(**profile_kwargs)
+            self.max_num_tokens = profile_tokens
+            try:
+                super().profile_run(**profile_kwargs)
+            finally:
+                self.max_num_tokens = global_tokens
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -1197,6 +1204,27 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.profile_cpp = previous_profile_cpp
             self.speculator = previous_speculator
             self.max_num_reqs = previous_max_num_reqs
+
+    def _get_pcp_profile_num_tokens(self) -> int:
+        """Keep replicated draft requests when profiling PCP-local prefill.
+
+        Initial memory profiling precedes KV/PCP-manager initialization.
+        Block drafters retain the global budget: their context-KV precompute
+        processes all target hidden states, independently of short queries.
+        """
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size <= 1:
+            return self.max_num_tokens
+        query_per_req = 1
+        spec = self.speculative_config
+        if spec is not None:
+            # Use shared config, not the last PP rank's speculator instance:
+            # every pipeline stage must profile the same target token shape.
+            if spec.method not in ("mtp", "eagle", "eagle3"):
+                return self.max_num_tokens
+            query_per_req = 1 + spec.num_speculative_tokens
+        local_tokens = (self.max_num_tokens + pcp_size - 1) // pcp_size
+        return min(self.max_num_tokens, max(local_tokens, self.max_num_reqs * query_per_req))
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
