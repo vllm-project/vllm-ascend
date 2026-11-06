@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY: validate all A2 tests and A3 smoke tests on FED runners. Do not merge.
+# TEMPORARY: validate A2/A3/A5 infrastructure smoke tests on FED runners. Do not merge.
 name: E2E
 
 on:
@@ -40,7 +40,13 @@ jobs:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
-      test_groups: ${{ steps.scope.outputs.test_groups }}
+      a2_b1: ${{ steps.scope.outputs.a2_b1 }}
+      a2_b1b3: ${{ steps.scope.outputs.a2_b1b3 }}
+      a2_b3: ${{ steps.scope.outputs.a2_b3 }}
+      a2_b4: ${{ steps.scope.outputs.a2_b4 }}
+      a3: ${{ steps.scope.outputs.a3 }}
+      a3_single: ${{ steps.scope.outputs.a3_single }}
+      a5_single: ${{ steps.scope.outputs.a5_single }}
       csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
     steps:
@@ -92,7 +98,7 @@ jobs:
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
-      - name: Select all A2 tests and A3 smoke tests for FED runners
+      - name: Select model smoke tests for FED runners
         id: scope
         run: |
           pip install regex pyyaml
@@ -108,33 +114,58 @@ jobs:
               for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
           )
           all_groups = json.loads(outputs["test_groups"])
-          groups = [group for group in all_groups if group["npu_type"] == "a2"]
-          if not groups:
-              raise SystemExit("No A2 tests selected")
-          for group in groups:
-              group["runner"] = f"linux-aarch64-a2-fed-{group['num_npus']}"
-
-          smoke_tests = {
+          a2_template = next(group for group in all_groups if group["npu_type"] == "a2")
+          a3_template = next(
+              group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2
+          )
+          a5_template = next(group for group in all_groups if group["npu_type"] == "a5")
+          a2_tests = [
+              "tests/e2e/pull_request/one_card/test_minicpm.py",
+              "tests/e2e/pull_request/two_card/test_prefix_caching.py",
+          ]
+          a3_tests = [
               "tests/e2e/pull_request/two_card/test_activation.py",
               "tests/e2e/pull_request/two_card/test_prefix_caching.py",
               "tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py",
-          }
-          a3_groups = [group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2]
-          available = {test for group in a3_groups for test in group["tests"].split()}
-          if missing := smoke_tests - available:
-              raise SystemExit(f"A3 smoke tests missing or skipped: {sorted(missing)}")
-          groups.append(dict(
-              a3_groups[0],
-              runner="linux-aarch64-a3-800t-vllm-ascend-fed-2",
+          ]
+          single_card_test = (
+              "tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py"
+              "::test_qwen3_dense_eager_mode"
+          )
+          available = {test for group in all_groups for test in group["tests"].split()}
+          if missing := set(a2_tests + a3_tests + [single_card_test.split("::")[0]]) - available:
+              raise SystemExit(f"Smoke tests missing or skipped: {sorted(missing)}")
+          groups = {}
+          for chip in ("b1", "b1b3", "b3", "b4"):
+              groups[f"a2_{chip}"] = dict(
+                  a2_template,
+                  runner=f"linux-aarch64-a2{chip}-fed-2",
+                  num_npus=2,
+                  partition_name=f"a2{chip}-smoke",
+                  partition=f"{chip}-1-1",
+                  tests=" ".join(a2_tests),
+              )
+          groups["a3"] = dict(
+              a3_template,
+              runner="linux-aarch64-a3-vllm-ascend-fed-2",
               partition_name="a3-smoke",
               partition="1-1",
-              tests=" ".join(sorted(smoke_tests)),
-          ))
-          for group in groups:
-              print(f"{group['runner']} / {group['partition']}: {group['tests']}")
-          target_ids = sorted({group["csrc_cache_target"] for group in groups})
+              tests=" ".join(a3_tests),
+          )
+          for chip, template in (("a3", a3_template), ("a5", a5_template)):
+              groups[f"{chip}_single"] = dict(
+                  template,
+                  runner=f"linux-aarch64-{chip}-1",
+                  num_npus=1,
+                  partition_name=f"{chip}-single-smoke",
+                  partition="1-1",
+                  tests=single_card_test,
+              )
+          target_ids = sorted({group["csrc_cache_target"] for group in groups.values()})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print("test_groups=" + json.dumps(groups, separators=(",", ":")), file=output)
+              for name, group in groups.items():
+                  print(f"{group['runner']}: {group['tests']}")
+                  print(name + "=" + json.dumps([group], separators=(",", ":")), file=output)
               print("csrc_cache_target_ids=" + json.dumps(target_ids), file=output)
           PY
 
@@ -147,7 +178,7 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
-  run-selected-tests:
+  run-a2-b1:
     needs: [select-tests, prepare-csrc-cache]
     uses: ./.github/workflows/_selected_tests.yaml
     with:
@@ -155,4 +186,70 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      test_groups: ${{ needs.select-tests.outputs.a2_b1 }}
+
+  run-a2-b1b3:
+    # Continue with the next runner after failure, but stop on cancellation.
+    needs: [select-tests, prepare-csrc-cache, run-a2-b1]
+    if: ${{ !cancelled() && needs.select-tests.result == 'success' && needs.prepare-csrc-cache.result == 'success' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.a2_b1b3 }}
+
+  run-a2-b3:
+    # Continue with the next runner after failure, but stop on cancellation.
+    needs: [select-tests, prepare-csrc-cache, run-a2-b1b3]
+    if: ${{ !cancelled() && needs.select-tests.result == 'success' && needs.prepare-csrc-cache.result == 'success' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.a2_b3 }}
+
+  run-a2-b4:
+    # Continue with the next runner after failure, but stop on cancellation.
+    needs: [select-tests, prepare-csrc-cache, run-a2-b3]
+    if: ${{ !cancelled() && needs.select-tests.result == 'success' && needs.prepare-csrc-cache.result == 'success' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.a2_b4 }}
+
+  run-a3:
+    needs: [select-tests, prepare-csrc-cache]
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.a3 }}
+
+  run-a3-single:
+    needs: [select-tests, prepare-csrc-cache]
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.a3_single }}
+
+  run-a5-single:
+    needs: [select-tests, prepare-csrc-cache]
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.a5_single }}
