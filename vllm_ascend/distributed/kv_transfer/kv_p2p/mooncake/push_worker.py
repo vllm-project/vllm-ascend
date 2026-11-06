@@ -297,18 +297,21 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._process_sending_requests()
 
         else:
-            for request_id, request in metadata.push_requests.items():
-                if request.request_id in self._finished_requests or request.request_id in self._reqs_recv_state:
+            for request_id, recv_request in metadata.push_requests.items():
+                if (
+                    recv_request.request_id in self._finished_requests
+                    or recv_request.request_id in self._reqs_recv_state
+                ):
                     continue
-                self._reqs_recv_state[request.request_id] = _ReceiveState(request_id, time.monotonic())
-                for completion in self._pending_completions.pop(request.request_id, {}).values():
-                    self._result_queue.put(("done", request.request_id, completion))
+                self._reqs_recv_state[recv_request.request_id] = _ReceiveState(request_id, time.monotonic())
+                for completion in self._pending_completions.pop(recv_request.request_id, {}).values():
+                    self._result_queue.put(("done", recv_request.request_id, completion))
             for request_id, not_dispatched in metadata.push_failed_requests.items():
-                state = self._reqs_recv_state.get(request_id)
-                if state is None:
+                recv_state = self._reqs_recv_state.get(request_id)
+                if recv_state is None:
                     # Already finished, or no external KV was needed.
                     continue
-                state.failed = True
+                recv_state.failed = True
                 if not_dispatched:
                     self._result_queue.put(("failed", request_id, None))
                 # Otherwise wait for all P ranks or the receive timeout.
@@ -388,6 +391,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             # Retry discovery for new requests after a transient D failure.
             future = None
         if future is None:
+            assert self._sender_executor is not None
             future = self._sender_executor.submit(self._get_remote_metadata, params)
             self._remote_metadata[key] = future
         state.consumer_engine_id = request.remote_engine_id
@@ -462,12 +466,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self, request_id: str, state: SendReqInfo, destination: RemoteReqInfo, layer_name: str
     ) -> tuple[LayerTransferRequest, Any] | None:
         meta = state.metadata
+        assert meta is not None
         params = destination.transfer_params
         available, event = state.available_layers[layer_name]
         end = min(available, params["num_computed_tokens"] + params["num_external_tokens"])
         start = destination.sent_tokens.get(layer_name, params["num_computed_tokens"])
         if start >= end:
             return None
+        assert destination.metadata_future is not None
         remote = destination.metadata_future.result()
         pp = remote.metadata_by_pp_rank[params["consumer_rank"][0]]
         local_index = self._layer_indices[layer_name]
@@ -483,9 +489,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return None
         local_blocks = meta.local_block_ids[self.transfer_metadata.group_indices[local_index]]
         remote_blocks = params["block_ids"][pp.group_indices[remote_index]]
+        local_ids: list[int]
+        remote_ids: list[int]
         if isinstance(spec, MambaSpec):
-            local_ids = (local_blocks[-1],)
-            remote_ids = (remote_blocks[-1],)
+            local_ids = [local_blocks[-1]]
+            remote_ids = [remote_blocks[-1]]
             if not local_ids[0] or not remote_ids[0]:
                 raise ValueError("Required Mamba state block is not resident")
         elif is_circular_kv_cache_spec(spec):
@@ -495,8 +503,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             remote_scale = pp.block_size_scales[remote_index][0]
             if local_scale != remote_scale:
                 raise ValueError("Circular Push requires equal P/D physical block counts")
-            local_ids = tuple(local_blocks[0] * local_scale + i for i in range(local_scale))
-            remote_ids = tuple(remote_blocks[0] * remote_scale + i for i in range(remote_scale))
+            local_ids = [local_blocks[0] * local_scale + i for i in range(local_scale)]
+            remote_ids = [remote_blocks[0] * remote_scale + i for i in range(remote_scale)]
         else:
             local_scale = self.transfer_metadata.block_size_scales[local_index][0]
             remote_scale = pp.block_size_scales[remote_index][0]
@@ -527,7 +535,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         # Backend contract: synchronous WRITE returns only after host/device
         # accesses finish, including on failure. The connector waits for this
         # return before notifying D or allowing source blocks to be reused.
-        src_list, dst_list, length_list = [], [], []
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
         try:
             local_index = self._layer_indices[batch.layer_name]
             remote = batch.remote_metadata
@@ -553,9 +563,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     length_list,
                 )
             else:
-                local_offset, remote_offset, heads = self._get_transfer_partition(
-                    batch.layer_name, remote, batch.remote_rank
-                )
+                partition = self._get_transfer_partition(batch.layer_name, remote, batch.remote_rank)
+                assert partition is not None
+                local_offset, remote_offset, heads = partition
                 whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
                 local = self.transfer_metadata
                 for cache_index, (local_addr, remote_addr) in enumerate(
@@ -616,11 +626,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     destination.sent_tokens[batch.layer_name] = req.end_token
         self._pending_sends = pending
         self._sending_futures = {
-            engine_id: active
+            engine_id: unfinished
             for engine_id, futures in self._sending_futures.items()
-            if (active := [future for future in futures if not future.done()])
+            if (unfinished := [future for future in futures if not future.done()])
         }
-        batches = {}
+        batches: dict[
+            tuple[str, WorkerRank, str, int],
+            tuple[MooncakeTransferMetadataGroups, Any, list[LayerTransferRequest]],
+        ] = {}
         # A free engine flushes every ready layer accumulated while it was busy.
         # The last layer and the step boundary bypass this submission gate.
         request_ids = self._prefilling_request_ids if layer_hook else self._reqs_send_state
@@ -632,10 +645,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.error = "Push transfer timed out"
             if state.error or state.metadata is None:
                 continue
+            assert state.consumer_engine_id is not None
             if not (wait or force) and state.consumer_engine_id in self._sending_futures:
                 continue
             for rank, destination in state.destinations.items():
-                if state.error or destination.completion is not None or not destination.metadata_future.done():
+                if state.error or destination.completion is not None:
+                    continue
+                assert destination.metadata_future is not None
+                if not destination.metadata_future.done():
                     continue
                 try:
                     remote = destination.metadata_future.result()
@@ -679,6 +696,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     state.destinations[rank].pending_layers.remove(layer_name)
             if active:
                 batch = LayerTransferBatch(layer_name, rank, remote, tuple(active), event)
+                assert self._sender_executor is not None
                 future = self._sender_executor.submit(self._execute_layer_transfer, batch)
                 self._pending_sends.append((batch, future))
                 self._sending_futures.setdefault(engine_id, []).append(future)
@@ -719,6 +737,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     for layer in destination.required_layers
                 )
                 if state.error or complete:
+                    assert self._sender_executor is not None
                     destination.completion = self._sender_executor.submit(
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
@@ -737,6 +756,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             state = self._reqs_send_state[request_id]
             if state.error:
                 continue
+            assert state.metadata is not None
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for cache_name in layer_names:
                 if state.available_layers.get(cache_name, (-1, None))[0] < end:
@@ -765,6 +785,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             state = self._reqs_send_state[request_id]
             if state.error:
                 continue
+            assert state.metadata is not None
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
                 if state.available_layers.get(layer_name, (-1, None))[0] < end:
@@ -780,7 +801,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 for state in self._reqs_send_state.values()
                 if state.error is None
                 for dest in state.destinations.values()
-                if dest.completion is None
+                if dest.completion is None and dest.metadata_future is not None
             }
         )
         self._process_sending_requests(wait=True)
@@ -806,12 +827,12 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self.maybe_raise_thread_error()
         results = KVConnectorTransferResults()
         if self.kv_transfer_config.is_kv_producer:
-            for request_id, state in list(self._reqs_send_state.items()):
-                if state.inference_finished and all(
+            for request_id, send_state in list(self._reqs_send_state.items()):
+                if send_state.inference_finished and all(
                     not dest.pending_layers and dest.completion is not None and dest.completion.done()
-                    for dest in state.destinations.values()
+                    for dest in send_state.destinations.values()
                 ):
-                    results.finished_sending.add(state.local_request_id)
+                    results.finished_sending.add(send_state.local_request_id)
                     del self._reqs_send_state[request_id]
         else:
             while True:
@@ -826,13 +847,13 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     # Proxy may dispatch P before D's allocation metadata reaches
                     # this worker. Preserve early DONE, deduplicated by source.
                     pending = self._pending_completions.setdefault(request_id, {})
-                    source = (
+                    source_key = (
                         payload["producer_engine_id"],
                         tuple(payload["producer_sizes"]),
                         tuple(payload["producer_rank"]),
                         payload["status"],
                     )
-                    pending[source] = payload
+                    pending[source_key] = payload
                     continue
                 if kind == "failed":
                     results.finished_recving.add(state.request_id)

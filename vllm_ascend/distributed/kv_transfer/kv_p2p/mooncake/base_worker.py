@@ -107,6 +107,17 @@ def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tenso
 class MooncakeTransferAddressMixin:
     """Direction-independent local/remote address calculation."""
 
+    # Supplied by the worker and its registered cache descriptors.
+    tp_rank: int
+    tp_size: int
+    pcp_rank: int
+    pcp_size: int
+    layer_names: list[str]
+    kv_caches_base_addr: list[list[int]]
+    block_shapes: list[list[tuple[int, ...]]]
+    block_strides: list[list[int]]
+    block_lens: list[list[int]]
+
     def _append_mamba_transfer_addresses(
         self,
         spec: MambaSpec,

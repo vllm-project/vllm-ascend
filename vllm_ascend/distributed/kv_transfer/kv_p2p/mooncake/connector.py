@@ -287,6 +287,7 @@ class MooncakePushConnector(MooncakeBaseConnector):
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
+            assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
             self.connector_worker.shutdown()
         super().shutdown()
 
