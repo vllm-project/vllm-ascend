@@ -34,22 +34,6 @@ def test_empty_remap_preserves_input(shape, dtype):
     assert remap_sparse_indices_triton(indices, 8, 0, 128) is indices
 
 
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("rank", [0, 2])
-def test_non_power_of_two_layout_keeps_exact_integer_boundaries(dtype, rank):
-    values = [-1, 0, 126, 127, 381, 2**24 - 1, 2**24, 2**24 + 1, 2**31 - 1]
-    if dtype == torch.int64:
-        values += [2**31, 2**40, 2**62 - 1]
-    source = torch.tensor([values, values[::-1]], dtype=dtype)
-    result = remap_sparse_indices_triton(source, 3, rank, 127)
-    expected = torch.full_like(source, -1)
-    for row, target in zip(source.tolist(), expected):
-        owned = [x // 381 * 127 + x % 127 for x in row if x >= 0 and x // 127 % 3 == rank]
-        target[: len(owned)] = torch.tensor(owned, dtype=dtype)
-    assert torch.equal(result, expected)
-    assert result.dtype == dtype
-
-
 @pytest.mark.parametrize("world,rank,interleave", [(0, 0, 128), (2, 2, 128), (2, 0, 0)])
 def test_invalid_remap_geometry_is_rejected(world, rank, interleave):
     with pytest.raises(ValueError, match="DCP size/interleave"):

@@ -122,22 +122,71 @@ def test_local_lengths_empty_requests(rows):
     assert (visible.cpu() == 0).all()
 
 
-@pytest.mark.parametrize("topk", [1, 31, 4096, 4097])
-def test_remap_preserves_large_integer_payloads(topk):
+@pytest.mark.parametrize(
+    "rows,topk,world,rank,interleave,dtype",
+    [
+        (1, 2048, 16, 15, 768, torch.int32),
+        (65, 2048, 8, 7, 1536, torch.int32),
+        (6, 31, 3, 2, 127, torch.int32),
+        (1, 1, 3, 0, 768, torch.int64),
+        (6, 2048, 16, 15, 768, torch.int64),
+        (6, 2048, 8, 7, 1536, torch.int64),
+        (1, 4097, 8, 7, 1536, torch.int32),
+        (1, 2049, 3, 2, 127, torch.int64),
+        (2, 4096, 8, 7, 1, torch.int32),
+        (2, 2048, 8, 7, 128, torch.int64),
+        (2, 31, 1, 0, 768, torch.int64),
+        (2, 31, 5, 4, 1, torch.int64),
+        (3, 31, 17, 16, 769, torch.int32),
+        (1, 127, 3, 2, 2**32 + 15, torch.int64),
+        (2, 31, 8, 0, 2**30, torch.int32),
+        (2, 31, 3, 0, 2**31 + 1, torch.int32),
+    ],
+)
+def test_remap_exact_integer_boundaries_and_graph_replay(rows, topk, world, rank, interleave, dtype):
     torch.manual_seed(41)
-    # Local indices exceed the exact FP32 integer range. Sort position keys,
-    # but preserve payload bits through the UB gather.
-    source = torch.randint(1 << 29, (1 << 30) + 10000, (9, 1, topk), dtype=torch.int64)
-    source[0] = -1
-    expected = torch.full_like(source, -1)
-    for row in range(9):
-        ids = source[row, 0]
-        own = (ids >= 0) & (ids % 8 == 7)
-        local = ids[own] // 8
-        expected[row, 0, : local.numel()] = local
+    maximum = torch.iinfo(dtype).max
+    boundaries = [0, 1, 2**24, 2**31 - 1, maximum, interleave, interleave * world]
+    if dtype == torch.int64:
+        boundaries += [2**40, 2**62]
+    # Cross this rank's ownership boundaries at large integer magnitudes.
+    for anchor in boundaries.copy():
+        start = (anchor // (world * interleave) * world + rank) * interleave
+        boundaries += [start, start + interleave]
+    values = [-1, -2] + [x + delta for x in boundaries for delta in (-1, 0, 1) if 0 <= x + delta <= maximum]
+    source = torch.randint(0, maximum, (rows, 1, topk), dtype=dtype)
+    edge_values = torch.tensor(values, dtype=dtype)
+    source.flatten()[: min(source.numel(), edge_values.numel())] = edge_values[: source.numel()]
+    if topk == 1:
+        source.fill_(rank * interleave)
+    original = source
     data = torch.stack((source, source), -1).npu()[..., 1]
-    actual = remap_sparse_indices_triton(data, 8, 7, 1)
-    assert torch.equal(actual.cpu(), expected)
+
+    def expected():
+        result = torch.full_like(source, -1)
+        for ids, target in zip(source.reshape(rows, topk).tolist(), result.reshape(rows, topk)):
+            owned = [
+                x // (world * interleave) * interleave + x % interleave
+                for x in ids
+                if x >= 0 and x // interleave % world == rank
+            ]
+            target[: len(owned)] = torch.tensor(owned, dtype=dtype)
+        return result
+
+    for _ in range(3):
+        actual = remap_sparse_indices_triton(data, world, rank, interleave)
+    assert torch.equal(actual.cpu(), expected())
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = remap_sparse_indices_triton(data, world, rank, interleave)
+    for invalid in (False, True, False):
+        source = original.flip(-1) if not invalid else torch.full_like(original, -1)
+        data.copy_(source)
+        graph.replay()
+        assert torch.equal(actual.cpu(), expected())
+        assert torch.equal(data.cpu(), source)
+        assert actual.dtype == dtype
+    graph.reset()
 
 
 @pytest.mark.parametrize("tokens,world,heads", [(1, 1, 12), (17, 2, 6), (129, 8, 12), (512, 8, 12)])

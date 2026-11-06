@@ -5,4 +5,5 @@ entries:
     text: >-
       Use shared DCP query, index-remapping and output-packing implementations
       on A3 and A5, preserving exact indices and FP32 softmax statistics across
-      attention output exchange paths.
+      attention output exchange paths. Keep non-power-of-two DCP/interleave
+      sparse-index remapping on device, including interleave sizes 768 and 1536.
