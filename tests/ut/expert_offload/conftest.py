@@ -25,13 +25,21 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def load_hook_class():
-    def load(path, class_name, methods, parent, namespace):
+    def load(path, class_name, methods, parent, namespace, *, helpers=()):
         tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
-        selected = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in methods]
-        assert len(selected) == len(methods)
+        selected = [
+            node
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef) and (node.name in methods or node.name in helpers)
+        ]
+        assert methods <= {method.name for method in selected}
         for method in selected:
-            method.decorator_list = []
+            method.decorator_list = [
+                decorator
+                for decorator in method.decorator_list
+                if isinstance(decorator, ast.Name) and decorator.id in {"staticmethod", "classmethod"}
+            ]
         fields = [node for node in cls.body if isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Constant)]
         module = ast.parse(f"from __future__ import annotations\nclass {class_name}(Parent):\n    pass\n")
         hook_class = module.body[1]
@@ -72,6 +80,7 @@ def expert_factory(load_hook_class):
                     scale.transpose(1, 2).contiguous(),
                 ),
             },
+            helpers={"_process_batched_weights"},
         )()
         scheme.group_size = 32
         scheme.quant_type = QuantType.W8A8MXFP if is_fp8 else QuantType.W4A8MXFP

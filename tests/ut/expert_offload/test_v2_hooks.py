@@ -179,6 +179,7 @@ def quant_methods(monkeypatch, load_hook_class, request):
             "w2_weight_scale": torch.empty(6, 4, 3),
         },
         process_weights_after_loading=Mock(),
+        validate_weight_shapes=Mock(),
     )
     native_cls = load_hook_class(
         "vllm_ascend/quantization/method_adapters.py",
