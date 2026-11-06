@@ -72,6 +72,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import (
+    collect_pp_group_owners,
+    get_group_pp_ranks,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -109,6 +113,13 @@ class KVPoolWorker:
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        pp_cpu_group = getattr(get_pp_group(), "cpu_group", None) if self.pp_size > 1 else None
+        self._pp_group_owners = collect_pp_group_owners(
+            self.kv_cache_config,
+            self.pp_size,
+            self.num_kv_cache_groups,
+            pp_cpu_group,
+        )
         self._init_key_head_config(model_config, parallel_config)
         self._init_mamba_state_sharding()
         self._init_metadata(model_config, vllm_config, extra_config)
@@ -960,6 +971,23 @@ class KVPoolWorker:
             block_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
             for group_id in load_group_ids:
+                layer_counts = self.token_database.group_num_layers.get("kv", {})
+                if group_id in layer_counts:
+                    local_group_layers = layer_counts[group_id]
+                else:
+                    # Older/custom databases may not publish layer counts.
+                    # Preserve descriptor-backed groups while treating groups
+                    # with no local buffers as empty on this PP stage.
+                    group_addrs = self.token_database.group_kv_caches_base_addr.get(group_id, [])
+                    group_sizes = self.token_database.group_block_len.get(group_id, [])
+                    local_group_layers = 1 if group_addrs and group_sizes else 0
+                if local_group_layers <= 0:
+                    logger.debug(
+                        "Skipping KV pool get for PP-local empty group: request=%s group=%d",
+                        request.req_id,
+                        group_id,
+                    )
+                    continue
                 if group_id >= len(request.block_ids_by_group):
                     continue
                 block_ids = request.block_ids_by_group[group_id]
@@ -992,6 +1020,14 @@ class KVPoolWorker:
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
+                    if not addr or not size or len(addr) != len(size):
+                        logger.warning(
+                            "Skipping KV pool get key without valid local descriptors: request=%s group=%d key=%s",
+                            request.req_id,
+                            group_id,
+                            key,
+                        )
+                        continue
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
@@ -1591,7 +1627,8 @@ class KVPoolWorker:
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        for pp_rank in range(self.pp_size):
+        owners = getattr(self, "_pp_group_owners", None)
+        for pp_rank in get_group_pp_ranks(owners, group_id, self.pp_size):
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:
