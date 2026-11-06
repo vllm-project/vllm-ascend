@@ -1018,6 +1018,27 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         self._mega_tracker = None
         self._mega_first_verify = torch.zeros_like(self.spec_sequence_indices, dtype=torch.int32)
 
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        # Capture omits scheduler draft tokens, which would make _plan_mega_kda
+        # select the fallback KDA path and bake it into the graph. Synthesize
+        # the equivalent pure-Verify metadata; replay rewrites every buffer.
+        is_prefilling = getattr(common_attn_metadata, "is_prefilling", None)
+        if (
+            self.num_spec > 0
+            and common_attn_metadata.num_reqs > 0
+            and (is_prefilling is None or not bool(torch.any(is_prefilling)))
+        ):
+            num_reqs = common_attn_metadata.num_reqs
+            device = common_attn_metadata.query_start_loc.device
+            kwargs.setdefault("num_accepted_tokens", torch.ones(num_reqs, dtype=torch.int32, device=device))
+            kwargs.setdefault("num_decode_draft_tokens_cpu", torch.full((num_reqs,), self.num_spec, dtype=torch.int32))
+            kwargs.setdefault("mega_first_verify", torch.zeros(num_reqs, dtype=torch.int32, device=device))
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
+        )
+
     def _ensure_mega_tracker(self):
         # MambaSpec describes page shapes, not capacity. Read the actual bound
         # state cache after allocation, also for workers without initialize_cache.
