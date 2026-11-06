@@ -1948,9 +1948,18 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        # enable_sparse_sfa_c8 is derived from cache_dtype (see
-        # init_ascend_config): cache_dtype "fp8" makes it active.
         vc.cache_config.cache_dtype = "fp8"
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_sfa_c8)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mistral_fp8_ds_mla_uses_sparse_c8(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.cache_config.cache_dtype = "fp8_ds_mla"
 
         config = init_ascend_config(vc)
 

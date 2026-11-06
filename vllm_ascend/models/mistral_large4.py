@@ -44,22 +44,40 @@ vLLM-Ascend already ships. Backend selection needs no patch: a config with
 ``index_topk`` and no ``compress_ratios`` resolves to ``AscendSFABackend``.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import logger
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.mla import MLAModules
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.mistral.amd.attention import MistralMLAAttention
+from vllm.models.mistral.amd.indexer import MistralIndexer
+from vllm.models.mistral.amd.ssmax import SSMaxScaling
 from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
 )
+from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+from vllm_ascend.ops.rotary_embedding import (
+    _record_cos_and_sin_cache_interleaved,
+    _record_cos_sin_cache,
+)
 
 __all__ = [
     "AscendMistralIndexerBackend",
+    "AscendMistralIndexer",
     "AscendMistralLarge4ForCausalLM",
     "AscendMistralMLAAttention",
     "adopt_ascend_modules",
@@ -71,6 +89,18 @@ __all__ = [
 
 
 _SHARED_KV_SKIP_MARKER = "_ascend_shared_kv_skip"
+
+
+def _produces_topk_for_shared_layers(config: Any, spec: Any) -> bool:
+    """Whether this indexer layer feeds a following shared-index layer."""
+    index_sharing = getattr(config, "index_sharing", None)
+    next_layer = spec.layer_idx + 1
+    return bool(
+        spec.has_indexer
+        and index_sharing is not None
+        and next_layer < len(index_sharing)
+        and index_sharing[next_layer] == "shared"
+    )
 
 
 def has_shared_kv_skip(impl: Any) -> bool:
@@ -116,7 +146,10 @@ def adopt_shared_kv_skip(attn: nn.Module) -> None:
     finds it before the class attribute and does not bind it, so it receives
     the single argument the call site passes.
     """
-    impl = getattr(getattr(attn, "attn", None), "impl", None)
+    inner = getattr(attn, "attn", None)
+    impl = getattr(inner, "impl", None)
+    if impl is None:
+        impl = getattr(getattr(inner, "mla_attn", None), "impl", None)
     if impl is None:
         raise ValueError(
             "KV-sharing layer has no attention impl to install the write skip on; "
@@ -152,6 +185,140 @@ class AscendMistralMLAAttention(MistralMLAAttention):
     in both places would run the k path and the cache write twice per step.
     """
 
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        config: Any,
+        spec: Any,
+        prefix: str,
+        topk_indices_buffer: torch.Tensor | None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None,
+        zero_kv_inputs: tuple[torch.Tensor, torch.Tensor],
+        quant_config: QuantizationConfig | None = None,
+        non_causal: bool = False,
+        sliding_window: int | None = None,
+        reduce_results: bool = True,
+    ) -> None:
+        # Do not call MistralMLAAttention.__init__: it constructs the inner
+        # generic MLAAttention before this adapter can supply the outer MLA
+        # modules required by AscendMLAImpl/AscendSFAImpl.
+        nn.Module.__init__(self)
+        if quant_config is None:
+            quant_config = vllm_config.quant_config
+        tp_size = get_tensor_model_parallel_world_size()
+        assert config.num_attention_heads % tp_size == 0
+        assert config.q_lora_rank is None, "q-LoRA is not supported"
+
+        self.spec = spec
+        self.num_local_heads = config.num_attention_heads // tp_size
+        self.kv_lora_rank = config.kv_lora_rank
+        self.qk_rope_head_dim = config.qk_rope_head_dim
+        self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
+        self.qk_nope_head_dim = config.qk_nope_head_dim if spec.use_rope else self.qk_head_dim
+        self.v_head_dim = config.v_head_dim
+        self.zero_kv_c, self.zero_k_pe = zero_kv_inputs
+
+        self.q_proj = ColumnParallelLinear(
+            config.hidden_size,
+            config.num_attention_heads * self.qk_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+        if not spec.shares_kv:
+            self.kv_a_proj_with_mqa = ReplicatedLinear(
+                config.hidden_size,
+                self.kv_lora_rank + (self.qk_rope_head_dim if spec.use_rope else 0),
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            )
+            self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
+        self.kv_b_proj = ColumnParallelLinear(
+            self.kv_lora_rank,
+            config.num_attention_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.kv_b_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            config.num_attention_heads * self.v_head_dim,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=f"{prefix}.o_proj",
+        )
+        self.ssmax = (
+            SSMaxScaling(self.num_local_heads, tp_sharded=True) if getattr(config, "ssmax_scaling", False) else None
+        )
+        self.fuse_rope_ssmax = False
+        self.indexer = (
+            AscendMistralIndexer(
+                vllm_config,
+                config,
+                spec,
+                cast(torch.Tensor, topk_indices_buffer),
+                prefix=f"{prefix}.indexer",
+            )
+            if spec.has_indexer
+            else None
+        )
+        self.indexer_stream = None
+        self.indexer_events = []
+
+        kv_sharing_target_layer_name = None
+        if spec.shares_kv:
+            layers_prefix = prefix.rsplit(".", 2)[0]
+            kv_sharing_target_layer_name = f"{layers_prefix}.{spec.kv_source_layer}.self_attn.attn"
+
+        mla_modules = MLAModules(
+            kv_a_layernorm=getattr(self, "kv_a_layernorm", None),
+            kv_b_proj=self.kv_b_proj,
+            rotary_emb=None,
+            o_proj=self.o_proj,
+            fused_qkv_a_proj=None,
+            kv_a_proj_with_mqa=getattr(self, "kv_a_proj_with_mqa", None),
+            q_a_layernorm=None,
+            q_b_proj=None,
+            q_proj=self.q_proj,
+            indexer=self.indexer,
+            is_sparse=spec.use_sparse,
+            topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
+        )
+        self.attn = AscendMultiHeadLatentAttention(
+            hidden_size=config.hidden_size,
+            num_heads=self.num_local_heads,
+            scale=self.qk_head_dim**-0.5,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=self.kv_lora_rank,
+            mla_modules=mla_modules,
+            cache_config=vllm_config.cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            skip_topk=spec.use_sparse and not spec.has_indexer,
+            non_causal_multi_token_decode=non_causal,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            sliding_window=sliding_window,
+        )
+        impl = self.attn.mla_attn.impl
+        impl.mistral_ssmax = self.ssmax
+        impl.mistral_use_rope = spec.use_rope
+        impl.mistral_shares_kv = spec.shares_kv
+        if _produces_topk_for_shared_layers(config, spec):
+            if topk_indices_buffer is None:
+                raise ValueError(
+                    f"Mistral shared-index layers require topk_indices_buffer from producer layer {spec.layer_idx}."
+                )
+            # Ascend's indexer returns its TopK tensor directly. Persist only
+            # the producer whose next layer reuses it; otherwise the shared
+            # model-wide buffer remains uninitialized when skip_topk reads it.
+            impl.use_index_cache = True
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -159,29 +326,30 @@ class AscendMistralMLAAttention(MistralMLAAttention):
         log_positions: torch.Tensor,
         rotary_emb: Any,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.shape[0]
-        # The Ascend SFA impl runs the indexer itself, from inside self.attn,
-        # and its signature carries no log positions. This is the last place
-        # that holds them, so hand them to the backend here.
-        backend = getattr(getattr(self.attn.impl, "indexer", None), "impl", None)
+        del rotary_emb
+        impl = self.attn.mla_attn.impl
+        # The Ascend SFA impl runs the indexer itself and its generic contract
+        # carries no log positions. Hand both SSMax users the current step's
+        # values before entering the custom op.
+        impl.mistral_log_positions = log_positions
+        backend = getattr(getattr(impl, "indexer", None), "impl", None)
         if isinstance(backend, AscendMistralIndexerBackend):
             backend.log_positions = log_positions
-        q, kv_c_normed, k_pe = self._project_qkv(positions, hidden_states, log_positions, rotary_emb)
-        if self.spec.use_sparse:
-            # Upstream's MLA impls use this to order the top-k read against the
-            # indexer's stream. Serial execution already guarantees that, and
-            # the Ascend SFA impl does not define it.
-            record = getattr(self.attn.impl, "record_logical_topk_ready", None)
-            if record is not None:
-                record()
+        return self.attn(positions, hidden_states)
 
-        attn_out = self.attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(num_tokens, self.num_local_heads * self.v_head_dim),
-        )
-        return self.o_proj(attn_out)[0]
+
+class AscendMistralIndexer(MistralIndexer):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        prepare_indexer_for_ascend(self, args[1] if len(args) > 1 else kwargs["config"])
+
+        def _get_attn_backend():
+            return AscendSFAIndexerBackend
+
+        self.k_cache.get_attn_backend = _get_attn_backend
+
+    def get_ascend_indexer_backend_cls(self):
+        return AscendMistralIndexerBackend
 
 
 class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
@@ -235,6 +403,16 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
                 "unscaled and long-context attention would flatten."
             )
         return self.ssmax(q, self.log_positions)
+
+    def project_query(
+        self,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        del q_c
+        return self.apply_query_rope(self.mistral_q(hidden_states), cos, sin)
 
 
 def prepare_indexer_for_ascend(indexer: nn.Module, config: Any) -> nn.Module:
@@ -364,7 +542,19 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         _reject_unsupported(vllm_config)
         validate_moe_parallelism(vllm_config)
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # Upstream currently hard-codes MistralMLAAttention in the AMD decoder
+        # layer and provides no class hook. Replace only that module-global
+        # constructor for the duration of this model build; every created
+        # layer is already the Ascend class when its inner attention backend
+        # is selected, so construction cannot fail before the adapter runs.
+        from vllm.models.mistral.mistral_large4.amd import model as upstream_model
+
+        original_attention_cls = upstream_model.MistralMLAAttention
+        upstream_model.MistralMLAAttention = AscendMistralMLAAttention
+        try:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        finally:
+            upstream_model.MistralMLAAttention = original_attention_cls
         # Upstream fails fast when an unsupported deployment asks for the
         # specialized decode; on Ascend it is never built, since its runtime is
         # HIP IPC and peer memory.
@@ -379,3 +569,14 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
                 f"the config declares {expected}. Refusing to run: a missed "
                 f"layer would overwrite the latent cache it borrows."
             )
+
+    def load_weights(self, weights):
+        loaded = super().load_weights(weights)
+        # Mistral owns a shared MistralRotaryEmbedding rather than one of the
+        # classes replaced by vLLM-Ascend's RoPE registry. Publish its final
+        # LeRoPE-adjusted cache only after weight loading has rebuilt it;
+        # attention metadata is constructed before the first model forward.
+        rotary_emb = self.model.rotary_emb
+        _record_cos_sin_cache(rotary_emb.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
+        return loaded

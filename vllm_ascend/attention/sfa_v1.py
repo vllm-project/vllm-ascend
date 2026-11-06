@@ -865,8 +865,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.enable_sparse_sfa_c8:
-            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
-                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+            cache_dtype = self.vllm_config.cache_config.cache_dtype
+            self.c8_cache_dtype = (
+                torch.float8_e4m3fn
+                if cache_dtype == "fp8_ds_mla"
+                else kv_cache_dtype_str_to_dtype(cache_dtype, self.vllm_config.model_config)
             )
 
         if self.enable_sparse_sfa_turboquant:
@@ -1331,6 +1334,48 @@ class AscendSFAImpl(MLAAttentionImpl):
             ql_nope = torch.bmm(q_nope, self.W_UK_T)
             # Convert from (N, B, L) to (B, N, L)
             ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
+
+    def _mistral_q_proj_and_k_up_proj(self, hidden_states: torch.Tensor):
+        """Mistral Large 4 query path for the no-q-LoRA SFA contract.
+
+        Mistral projects Q directly from hidden states and applies SSMax before
+        NoPE absorption.  NoPE layers project only the fixed 192-wide query
+        and append the model's zero RoPE lane; RoPE layers project both lanes.
+        SSMax is a per-token/per-head scalar, so applying it before absorption
+        is numerically identical to scaling the absorbed NoPE lane afterwards.
+        """
+        use_rope = bool(getattr(self, "mistral_use_rope", True))
+        projected_head_dim = self.qk_head_dim if use_rope else self.qk_nope_head_dim
+        q = self.q_proj(hidden_states)[0].view(-1, self.local_num_heads, projected_head_dim)
+
+        ssmax = getattr(self, "mistral_ssmax", None)
+        if ssmax is not None:
+            log_positions = getattr(self, "mistral_log_positions", None)
+            if log_positions is None:
+                raise RuntimeError("Mistral Large 4 SFA query is missing log positions for SSMax.")
+            if use_rope:
+                q = ssmax(q, log_positions)
+            else:
+                q = ssmax(q, log_positions, out_head_dim=self.qk_head_dim)
+        elif not use_rope:
+            q = torch.nn.functional.pad(q, (0, self.qk_rope_head_dim))
+
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        if (
+            q_nope.dtype in [torch.float16, torch.bfloat16]
+            and hasattr(torch_npu, "npu_transpose_batchmatmul")
+            and q_nope.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+        ):
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
@@ -1926,14 +1971,24 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
         # native
         else:
-            assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_no_split = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
-            q_c = self.q_a_layernorm(q_c)
+            mistral_no_q_lora = self.q_lora_rank is None and hasattr(self, "mistral_use_rope")
+            if mistral_no_q_lora:
+                q_c = hidden_states
+                shares_kv = bool(getattr(self, "mistral_shares_kv", False))
+                if not shares_kv:
+                    assert self.kv_a_proj_with_mqa is not None
+                    kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
+                    if not self.mistral_use_rope:
+                        kv_no_split = torch.nn.functional.pad(kv_no_split, (0, self.qk_rope_head_dim))
+            else:
+                assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
+                qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+                q_c, kv_no_split = qkv_lora.split(
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1,
+                )
+                assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
+                q_c = self.q_a_layernorm(q_c)
 
             # The prepared hidden states feed the indexer's k path (same stage
             # as the weights path input).
@@ -1945,36 +2000,46 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            kv_outputs = self.exec_kv(
-                kv_no_split,
-                cos,
-                sin,
-                kv_cache,
-                parallel_context.kv_slot_mapping,
-                attn_metadata,
-            )
-            k_pe, k_nope = kv_outputs[:2]
-            knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            if self.qk_rope_head_dim:
-                q_pe = self.rope_single(q_pe, cos, sin)
+            if mistral_no_q_lora and shares_kv:
+                k_pe = k_nope = knope_scale = None
+            else:
+                kv_outputs = self.exec_kv(
+                    kv_no_split,
+                    cos,
+                    sin,
+                    kv_cache,
+                    parallel_context.kv_slot_mapping,
+                    attn_metadata,
+                )
+                k_pe, k_nope = kv_outputs[:2]
+                knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
+
+            if mistral_no_q_lora:
+                ql_nope, q_pe = self._mistral_q_proj_and_k_up_proj(hidden_states)
+                if self.mistral_use_rope:
+                    q_pe = self.rope_single(q_pe, cos, sin)
+            else:
+                ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+                if self.qk_rope_head_dim:
+                    q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(
                 ql_nope,
                 q_pe,
                 attn_metadata,
             )
 
-            (
-                k_pe,
-                k_nope,
-            ) = self._store_parallel_kv(
-                k_pe,
-                k_nope,
-                knope_scale,
-                kv_cache,
-                self._get_sfa_kv_slot_mapping(attn_metadata),
-                attn_metadata,
-            )
+            if not (mistral_no_q_lora and shares_kv):
+                (
+                    k_pe,
+                    k_nope,
+                ) = self._store_parallel_kv(
+                    k_pe,
+                    k_nope,
+                    knope_scale,
+                    kv_cache,
+                    self._get_sfa_kv_slot_mapping(attn_metadata),
+                    attn_metadata,
+                )
 
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
