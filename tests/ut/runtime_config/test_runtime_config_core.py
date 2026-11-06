@@ -42,7 +42,7 @@ def test_defaults_dump_and_detectors_off(tmp_path: Path):
     )
     assert cfg.hot_reload_enabled is False
     assert cfg.dump_enabled() is False
-    assert cfg.dump_max_times() == 0
+    assert cfg.auto_dump_max_times() == 0
     assert cfg.detectors_enabled_in(cfg._data) is False
 
 
@@ -128,7 +128,7 @@ def test_dump_auto_and_manual_exclusive_or_derived(tmp_path: Path):
     _write(cfg_path, {"dump": {"auto_max_times": 3, "manual_dump": False}})
     time.sleep(0.01)
     cfg.reload(force=True)
-    assert cfg.dump_max_times() == 3
+    assert cfg.auto_dump_max_times() == 3
     assert cfg.dump_enabled() is True
 
 
