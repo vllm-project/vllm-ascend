@@ -8,8 +8,8 @@ dp_load_balancing: external
 routing:
   type: disaggregated_prefill
   groups:
-    prefiller: [0, 1, 2, 3]
-    decoder: [4, 5, 6, 7]
+    prefiller: [ 0, 1, 2, 3 ]
+    decoder: [ 4, 5, 6, 7 ]
 
 config:
   - node_index: 0
@@ -348,9 +348,8 @@ benchmarks:
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 65536
+    max_out_len: 81920
     batch_size: 32
-    # Initial gate follows the existing Kimi PD AIME2025 case; validate on K3.
     baseline: 93.33
     threshold: 10
     temperature: 1.0
@@ -377,6 +376,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 4
     request_rate: 0
-    # Establish the eight-node PD throughput baseline on A3 before gating performance.
     baseline: 0
     threshold: 0.95
