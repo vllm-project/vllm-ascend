@@ -102,7 +102,9 @@ def _try_enqueue(worker, geometry, layer_indices, ready_event) -> bool:
     np.multiply(destinations, row_bytes, out=dst)
     dst += geometry.destination_addresses[layers]
     descriptors.sizes_np[:count].reshape(shape)[:] = row_counts * row_bytes
-    worker._submit_dma_descriptors(descriptors, count, ready_event=ready_event)
+    snapshot = getattr(worker, "_ascend_target_snapshot", None)
+    if snapshot is None or not snapshot.try_submit(worker, descriptors, count, layer_indices, ready_event):
+        worker._submit_dma_descriptors(descriptors, count, ready_event=ready_event)
     return True
 
 

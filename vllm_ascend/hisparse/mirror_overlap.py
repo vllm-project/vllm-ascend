@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Private decode experiment for Core 24420b7's sampling boundary."""
+"""Private decode experiment for Core 24420b7's sampling and draft boundaries."""
 
 from __future__ import annotations
 
@@ -10,17 +10,21 @@ import torch
 class SamplingMirrorOverlapConnector:
     """Let Target logits and sampling run before joining the Host mirror."""
 
-    def __init__(self, connector, worker, output_copy_stream, logger, rank):
+    def __init__(self, connector, worker, output_copy_stream, logger, rank, snapshot=None):
         self._connector = connector
         self._worker = worker
         self._output_copy_stream = output_copy_stream
         self._logger = logger
         self._rank = rank
+        self._snapshot = snapshot
+        self._overlap_draft = False
         self._pending_event = None
         self._allow_step = False
         self._eligible_forward = False
         self._batch_size = 0
         self._logged_batch_sizes: set[int] = set()
+        self._logged_snapshot_sizes: set[int] = set()
+        self._logged_direct_sizes: set[int] = set()
 
     def __getattr__(self, name):
         return getattr(self._connector, name)
@@ -29,6 +33,7 @@ class SamplingMirrorOverlapConnector:
         if self._pending_event is not None:
             torch.accelerator.current_stream().wait_event(self._pending_event)
             self._pending_event = None
+        self._overlap_draft = False
 
     def begin_execution(self, allow_step: bool) -> None:
         # The runner calls this before preemption or any scheduler state writes.
@@ -39,6 +44,7 @@ class SamplingMirrorOverlapConnector:
     def pre_forward(self, scheduler_output, input_batch=None, attn_metadata=None):
         self._eligible_forward = (
             self._allow_step
+            and scheduler_output.has_sync_kv_loads
             and input_batch is not None
             and attn_metadata is not None
             and not input_batch.has_prefill
@@ -57,12 +63,45 @@ class SamplingMirrorOverlapConnector:
         worker = self._worker
         compute_stream = torch.accelerator.current_stream()
         worker._forward_ready_event.record(compute_stream)
-        worker._finish_mirror_phase(worker._forward_ready_event)
+        snapshot = self._snapshot
+        pending_before = 0
+        if snapshot is not None:
+            pending_before = len(worker._pending_dma_descriptors)
+            snapshot.submitted_completion = None
+            snapshot.armed = (
+                not worker._dma_submitted and not worker._per_layer_mirrored and not worker._submitted_mirror_layers
+            )
+        try:
+            worker._finish_mirror_phase(worker._forward_ready_event)
+        except BaseException:
+            # The runner's failure boundary joins an already-recorded copy.
+            if worker._dma_submitted:
+                self._pending_event = worker.host_write_event
+            raise
+        finally:
+            if snapshot is not None:
+                snapshot.armed = False
         if worker._dma_submitted:
             self._pending_event = worker.host_write_event
             # Preserve the Host durability fence on AsyncOutput's copy stream.
             self._output_copy_stream.wait_event(self._pending_event)
             worker._dma_submitted = False
+            if snapshot is not None and snapshot.submitted_completion is not None:
+                pending = worker._pending_dma_descriptors
+                # Direct fallback or an extra transfer keeps the sampling-only fence.
+                self._overlap_draft = (
+                    len(pending) == pending_before + 1 and pending[-1][0] is snapshot.submitted_completion
+                )
+                if self._overlap_draft and self._batch_size not in self._logged_snapshot_sizes:
+                    self._logged_snapshot_sizes.add(self._batch_size)
+                    self._logger.info(
+                        "HiSparse Target snapshot used: rank=%d requests=%d", self._rank, self._batch_size
+                    )
+            if snapshot is not None and not self._overlap_draft and self._batch_size not in self._logged_direct_sizes:
+                self._logged_direct_sizes.add(self._batch_size)
+                self._logger.info(
+                    "HiSparse Target snapshot fallback: rank=%d requests=%d", self._rank, self._batch_size
+                )
             if self._batch_size not in self._logged_batch_sizes:
                 self._logged_batch_sizes.add(self._batch_size)
                 self._logger.info("HiSparse MTP mirror overlap used: rank=%d requests=%d", self._rank, self._batch_size)
@@ -71,10 +110,13 @@ class SamplingMirrorOverlapConnector:
         worker._release_completed_dma_descriptors()
 
     def post_forward(self, finished_req_ids, defer_finalize=False):
-        # In the audited runner, sampling and output-copy submission precede
-        # this call. Draft preparation and all draft KV access follow it.
-        self.join_pending()
+        if not defer_finalize or not self._overlap_draft:
+            self.join_pending()
         return self._connector.post_forward(finished_req_ids, defer_finalize=defer_finalize)
+
+    def finalize_step(self):
+        self.join_pending()
+        return self._connector.finalize_step()
 
     def no_forward(self, scheduler_output):
         self.begin_execution(False)
@@ -97,6 +139,7 @@ def overlap_mtp_host_mirror(runner):
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+    from vllm_ascend.hisparse.target_snapshot import TargetMirrorSnapshot
 
     connector = runner.kv_connector
     config = runner.vllm_config.parallel_config
@@ -134,5 +177,9 @@ def overlap_mtp_host_mirror(runner):
         return connector
     logger = init_logger(__name__)
     rank = get_tensor_model_parallel_rank()
-    logger.info("HiSparse MTP mirror overlap enabled: rank=%d sampling only; join before draft", rank)
-    return SamplingMirrorOverlapConnector(connector, worker, output_stream, logger, rank)
+    snapshot = TargetMirrorSnapshot.bind(worker, runner.speculator)
+    worker._ascend_target_snapshot = snapshot
+    logger.info("HiSparse MTP mirror overlap enabled: rank=%d", rank)
+    if snapshot is not None:
+        logger.info("HiSparse Target snapshot enabled: rank=%d", rank)
+    return SamplingMirrorOverlapConnector(connector, worker, output_stream, logger, rank, snapshot)
