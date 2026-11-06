@@ -700,6 +700,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --max-num-batched-tokens 8192 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
         --trust-remote-code \
         --quantization ascend \
         --gpu-memory-utilization 0.92 \
@@ -772,6 +773,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --enable-expert-parallel \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
         --seed 1024 \
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
@@ -1242,6 +1244,7 @@ Key Parameter Descriptions:
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
 
+- `--disable-hybrid-kv-cache-manager` (A3 DSpark PD, both roles): Uses non-hybrid KV-cache allocation and Mooncake memory registration in Sections 5.3.1 and 5.3.2. This is a KV-transfer compatibility setting for these examples, not a general DSpark requirement.
 - `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
 - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
 - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT products `30000`/`26900`.
@@ -1496,6 +1499,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --max-num-batched-tokens 8192 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
         --trust-remote-code \
         --quantization ascend \
         --gpu-memory-utilization 0.92 \
@@ -1595,6 +1599,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --enable-expert-parallel \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
         --seed 1024 \
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
