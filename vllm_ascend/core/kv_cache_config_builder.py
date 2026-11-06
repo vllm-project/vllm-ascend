@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import uses_large_page_allocator
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
@@ -66,6 +67,13 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         Precedence: GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
         the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
         """
+        if uses_large_page_allocator(vllm_config.cache_config):
+            # Every layout below assumes one scheduler block ID spans several
+            # layers whose specs differ, or pads their pages to a shared slot.
+            # The large-page allocator forms one group per spec and lets pages
+            # change owners at run time, so the plan has to come from vLLM.
+            return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
@@ -100,6 +108,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         single device backing size, which the DSV4 shared-tuple, the TurboQuant
         packed, the DSV4.1, and the GLM-Next layouts all violate.
         """
+        if uses_large_page_allocator(vllm_config.cache_config):
+            # The large-page pool is accounted in whole pages of `large_page_bytes`,
+            # not in per-group block bytes.
+            return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
         if is_deepseek_v41_cache(kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
