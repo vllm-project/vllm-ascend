@@ -747,8 +747,12 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
 {
     if ASCEND_IS_AIV {
         uint32_t aivCoreNum = GetBlockNum() * 2; // 2 means c:v = 1:2
-        uint64_t totalOutputSize =
-            constInfo.batchSize * constInfo.qSeqSize * constInfo.kHeadNum * constInfo.sparseCount;
+        // TND s1Size already counts every query row in the batch.
+        uint64_t totalOutputSize = static_cast<uint64_t>(constInfo.qSeqSize) *
+                                   constInfo.kHeadNum * constInfo.sparseCount;
+        if constexpr (Q_LAYOUT_T != LI_LAYOUT::TND) {
+            totalOutputSize *= constInfo.batchSize;
+        }
         uint64_t singleCoreSize =
             QLIV2Common::Align((totalOutputSize + aivCoreNum - 1) / aivCoreNum, GM_ALIGN_BYTES / sizeof(OUT_T));
         uint64_t baseSize = tmpBlockIdx * singleCoreSize;
@@ -759,6 +763,8 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
             AscendC::InitGlobalMemory(output, dealSize, constInfo.INVALID_IDX);
             // return_value: sparse_values 同步填 FP32 -inf (无效槽, 位型 0xFF800000)
             if (constInfo.useLocalVisibleLengths || constInfo.returnValue != 0U) {
+                // The second fill reuses UB; finish the index DMA first.
+                SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
                 GlobalTensor<uint32_t> valueOutput;
                 valueOutput.SetGlobalBuffer((__gm__ uint32_t *)sparseValuesPtr + baseSize);
                 AscendC::InitGlobalMemory(valueOutput, dealSize,

@@ -364,7 +364,10 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
             }
         }
         if (constInfo.returnSoftmaxLse) {
-            uint64_t totalReturnSoftmaxSize = constInfo.batchSize * constInfo.kvHeadNum * constInfo.qSeqSize * constInfo.gSize;
+            uint64_t totalReturnSoftmaxSize = static_cast<uint64_t>(constInfo.kvHeadNum) * constInfo.qSeqSize * constInfo.gSize;
+            if constexpr (LAYOUT_T != QSFA_LAYOUT::TND) {
+                totalReturnSoftmaxSize *= constInfo.batchSize;
+            }
             uint64_t singleCoreReturnSoftmaxSize = (totalReturnSoftmaxSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
             uint64_t tailReturnSoftmaxSize = totalReturnSoftmaxSize - tmpBlockIdx * singleCoreReturnSoftmaxSize;
             uint64_t singleInitReturnSoftmaxSize = tailReturnSoftmaxSize < singleCoreReturnSoftmaxSize ?
