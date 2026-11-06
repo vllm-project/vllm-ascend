@@ -1,9 +1,9 @@
 pr: 21109
 entries:
-  - category: config
+  - category: feature
     text: >-
       AscendStore now reports async-loadable requests through the connector
       `may_load_async` hook, so the upstream `--max-num-inflight-kv-loads` cap
       applies to KV-pool async loads: hit requests can start loading while the
       running batch is full, and the number of loads holding KV blocks is
-      bounded.
+      bounded. Requires a vLLM build containing vllm-project/vllm#65319.
