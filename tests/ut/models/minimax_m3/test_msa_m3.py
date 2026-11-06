@@ -65,6 +65,22 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTI
 from vllm_ascend.utils import AscendDeviceType
 
 
+@pytest.mark.parametrize(
+    ("device_type", "kv_dtype", "expected_precision"),
+    [
+        (AscendDeviceType.A3, torch.bfloat16, 0),
+        (AscendDeviceType.A5, torch.bfloat16, 1),
+        (AscendDeviceType.A3, torch.float8_e4m3fn, 1),
+        (AscendDeviceType.A5, torch.float8_e4m3fn, 1),
+        (AscendDeviceType.A3, torch.float16, 0),
+        (AscendDeviceType.A5, torch.float16, 0),
+    ],
+)
+def test_gbsa_softmax_precision_dtype_scope(device_type, kv_dtype, expected_precision, monkeypatch):
+    monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    assert msa_m3_npu_module._gbsa_softmax_precision(kv_dtype) == expected_precision
+
+
 @pytest.fixture
 def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     gbsa_metadata_op = MagicMock()
