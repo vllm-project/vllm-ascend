@@ -316,6 +316,8 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
         layer.self_attn = Attention()
         layer.mlp = BaseMLP() if layer.is_moe_layer else namespace["AscendKimiMLP"]()
         layer.mlp.use_sequence_parallel = sp
+        layer.mlp._fuse_situ_mx_quant = False
+        layer.mlp._fuse_situ_int8_quant = False
         # Distinct TP partial results exercise the real inner MLP AG/RS.
         layer.mlp.weight_fraction = (
             (context.rank + 1) / (context.tp * (context.tp + 1) / 2) if sp and not layer.is_moe_layer else 1.0
