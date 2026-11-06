@@ -10,7 +10,7 @@ queries are substituted; row selection and DP coordination execute unchanged.
 import ast
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -76,7 +76,9 @@ def _runner(*, rank=0, dp_size=DP_SIZE, query_lens=(), prefills=(), logprobs=())
         return {"kept_lens": kept_lens.tolist()}
 
     runner._build_decoder_replay_metadata = Mock(side_effect=metadata)
-    runner.prepare = namespace["_prepare_decoder_replay"].__get__(runner)
+    prepare = namespace["_prepare_decoder_replay"]
+    assert isinstance(prepare, FunctionType)
+    runner.prepare = prepare.__get__(runner)
     return runner, context, collective, skip_allreduce, stream_capture
 
 
