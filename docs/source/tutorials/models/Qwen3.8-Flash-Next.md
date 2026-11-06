@@ -1710,7 +1710,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
     export VLLM_USE_MODELSCOPE=True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export HCCL_BUFFSIZE=512
     ulimit -l unlimited
     ulimit -s 65536
