@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.fia_kv_layout import fia_kv_cache_views
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -236,6 +237,14 @@ class AscendMetadata:
     pcp_local_num_input_tokens: int | None = None
     # Resolved by the builder; execution must not infer layout from tensor sizes.
     uses_pcp_sharded_layout: bool = False
+    fia_block_tables: dict[int, torch.Tensor] = field(default_factory=dict)
+
+    def get_fia_block_tables(self, block_stride: int) -> torch.Tensor:
+        if block_stride == 1:
+            return self.block_tables
+        if block_stride not in self.fia_block_tables:
+            self.fia_block_tables[block_stride] = self.block_tables * block_stride
+        return self.fia_block_tables[block_stride]
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -521,15 +530,16 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    block_stride: int = 1
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
 
-        if self.is_draft_model or not self.sliding_window:
+        if self.is_draft_model or not self.sliding_window or self.block_stride != 1:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
+                "block_table": None if self.is_non_pa else metadata.get_fia_block_tables(self.block_stride),
             }
         else:
             return {
@@ -541,13 +551,17 @@ class FIAParamProvider:
 @dataclass(frozen=True, slots=True)
 class FIAV2ParamProvider:
     layer_name: str | None
+    block_stride: int = 1
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
-        return {
+        params = {
             "actual_seq_qlen": metadata.actual_seq_lengths_q,
             "actual_seq_kvlen": metadata.seq_lens_list,
         }
+        if self.block_stride != 1:
+            params["block_table"] = metadata.get_fia_block_tables(self.block_stride)
+        return params
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,6 +617,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self._fia_block_stride = 1
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
@@ -768,6 +783,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                block_stride=self._fia_block_stride,
             ),
         )
         return output, num_tokens
@@ -835,7 +851,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "workspace": workspace,
                 "out": [output_view, softmax_lse],
             },
-            FIAV2ParamProvider(self._layer_name),
+            FIAV2ParamProvider(self._layer_name, self._fia_block_stride),
         )
         return output, num_tokens
 
@@ -927,6 +943,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        self._fia_block_stride = 1
+        # Draft graph replay supplies shared parameters directly rather than
+        # resolving FIAParamProvider; keep its existing table/layout contract.
+        if (
+            block_table is not None
+            and not self.enable_c8_quant
+            and not self.use_bnsd_kv_cache
+            and not _EXTRA_CTX.is_draft_model
+        ):
+            key, value, self._fia_block_stride = fia_kv_cache_views(key, value)
+            if self._fia_block_stride != 1:
+                block_table = attn_metadata.get_fia_block_tables(self._fia_block_stride)[: block_table.shape[0]]
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(
