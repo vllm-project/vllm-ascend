@@ -78,7 +78,8 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     docker run --rm \
     --name $NAME \
     --net=host \
-    --shm-size=1g \
+    --shm-size=512g \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -118,7 +119,8 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     docker run --rm \
     --name $NAME \
     --net=host \
-    --shm-size=100g \
+    --shm-size=512g \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
