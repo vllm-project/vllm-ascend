@@ -58,7 +58,7 @@ def _dflash_local_slot(
     CP_INTERLEAVE: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
 ):
-    # DCP ownership uses physical KV blocks; the table may use smaller kernel blocks.
+    # DCP ownership uses physical KV blocks; block_size is the supplied table's unit.
     if CP_SIZE == 1:
         local_positions = positions
         is_local = True
@@ -333,7 +333,8 @@ def prepare_dflash_inputs_triton(
     """Prepare DFlash inputs and KV slot mappings for a draft step.
 
     Args:
-        block_size: Attention kernel block size used to index ``block_table``.
+        block_size: Block-table addressing unit. Ascend V2 supplies manager
+            block IDs and their matching manager block size.
         kv_cache_block_size: KV cache block size used to determine DCP rank
             ownership and convert global positions to rank-local positions.
             One physical block may span multiple kernel blocks; its size must

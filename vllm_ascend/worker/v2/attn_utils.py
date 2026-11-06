@@ -58,7 +58,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_c8_mxfp import (
@@ -670,7 +670,10 @@ def build_attn_metadata(
                 )
             # Map manager block IDs to this AttentionGroup's kernel blocks
             # before building metadata for either execution or graph capture.
+            group_pcp_context = pcp_context.for_attention_group(attn_group) if pcp_context is not None else None
             for variant_names, variant_common in metadata_variants:
+                if group_pcp_context is not pcp_context:
+                    variant_common = replace(variant_common, pcp_context=group_pcp_context)
                 if for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
                         attn_group._with_kernel_block_table(variant_common),
@@ -1648,12 +1651,24 @@ def allocate_kv_cache_main(
             backend = layer.get_attn_backend()
             key = (backend.full_cls_name(), layer_spec, getattr(layer, "num_heads", 0))
             if key not in group_map:
-                group_map[key] = AttentionGroup(
+                attn_group = AttentionGroup(
                     backend=backend,
                     layer_names=[layer_name],
                     kv_cache_spec=layer_spec,
                     kv_cache_group_id=group_id,
                 )
+                if (
+                    isinstance(layer_spec, AttentionSpec)
+                    and layer_spec.has_layer_views
+                    and group_id < len(kernel_block_sizes)
+                ):
+                    # Match create_metadata_builders() without rebuilding its
+                    # metadata buffers. Each backend can use smaller pages than
+                    # the common view size of its KV cache group.
+                    kernel_block_size = select_common_block_size(kernel_block_sizes[group_id], [backend], [layer_spec])
+                    if kernel_block_size != layer_spec.block_size:
+                        attn_group.kernel_block_size = kernel_block_size
+                group_map[key] = attn_group
                 group_order.append(key)
             else:
                 group_map[key].layer_names.append(layer_name)
@@ -1734,17 +1749,22 @@ def _reshape_kv_cache_v2(
             continue
 
         group_spec = group.kv_cache_spec
+        selected_kernel_block_size = (
+            group.kernel_block_size
+            if group.kernel_block_size is not None
+            else kernel_block_sizes[group.kv_cache_group_id]
+        )
         group_storage_block_size = get_storage_block_size(group_spec)
         kernel_block_size = (
             group_storage_block_size
             if group_storage_block_size != group_spec.block_size
-            else kernel_block_sizes[group.kv_cache_group_id]
+            else selected_kernel_block_size
         )
         if group_storage_block_size != group_spec.block_size and getattr(
             group_spec, "indexes_kv_by_block_stride", False
         ):
             compression_ratio = get_kv_cache_compression_ratio(group_spec)
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id] // compression_ratio
+            kernel_block_size = selected_kernel_block_size // compression_ratio
 
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:

@@ -18,7 +18,7 @@
 #
 
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import torch
@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
@@ -53,12 +54,60 @@ class AscendPCPAttentionContext:
     hidden_restore_idx: torch.Tensor
     padded_gather_idx: torch.Tensor | None = None
     gathered_kv_write_mask: torch.Tensor | None = None
-    # Device snapshot of allocated kernel-block counts in global request order.
+    # Device snapshot of allocated manager-block counts in global request order.
     global_block_table_num_blocks: torch.Tensor | None = None
     # Original batch row for each local request, in upstream segment order.
     local_to_global_req_indices: tuple[int, ...] | None = None
     # Actual local tokens in the unpartitioned batch, excluding padding.
     local_token_indices: torch.Tensor | None = None
+
+    # Shared across steps, with storage isolated from the local Group mapping.
+    _kernel_block_table_groups: dict[int, tuple[AttentionGroup, torch.Tensor | None]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+
+    def for_attention_group(self, attn_group: AttentionGroup) -> "AscendPCPAttentionContext":
+        """Expose global tables in the same units as this Group's local table."""
+        if attn_group.kernel_block_size is None:
+            return self
+        assert attn_group.kernel_block_table is not None
+        group_id = attn_group.kv_cache_group_id
+        block_table = self.global_block_tables[group_id]
+        blocks_per_manager = attn_group.kv_cache_spec.block_size // attn_group.kernel_block_size
+        cached = self._kernel_block_table_groups.get(id(attn_group))
+        if cached is None:
+            global_group = replace(attn_group, kernel_block_table=torch.empty_like(attn_group.kernel_block_table))
+            counts_buffer = None
+        else:
+            global_group, counts_buffer = cached
+        # Cache binding can set a stride after metadata builders are created.
+        global_group.kernel_block_stride = attn_group.kernel_block_stride
+        assert global_group.kernel_block_table is not None
+        if (
+            block_table.shape[0] > global_group.kernel_block_table.shape[1]
+            or block_table.shape[1] * blocks_per_manager > global_group.kernel_block_table.shape[2]
+        ):
+            raise RuntimeError("PCP global block table exceeds the AttentionGroup mapping capacity.")
+        global_tables = list(self.global_block_tables)
+        global_tables[group_id] = global_group.map_to_kernel_block_table(block_table)
+        global_counts = self.global_block_table_num_blocks
+        if global_counts is not None:
+            if counts_buffer is None:
+                counts_buffer = torch.empty(
+                    (global_counts.shape[0], global_group.kernel_block_table.shape[1]),
+                    dtype=global_counts.dtype,
+                    device=global_counts.device,
+                )
+            counts = counts_buffer[:, : global_counts.shape[1]]
+            counts.copy_(global_counts)
+            counts[group_id].mul_(blocks_per_manager)
+            global_counts = counts
+        self._kernel_block_table_groups[id(attn_group)] = (global_group, counts_buffer)
+        return replace(
+            self,
+            global_block_tables=tuple(global_tables),
+            global_block_table_num_blocks=global_counts,
+        )
 
 
 class AscendPCPManager(PCPManager):
@@ -104,6 +153,7 @@ class AscendPCPManager(PCPManager):
             cp_interleave=cp_interleave,
             **({} if vllm_version_is("0.32.0") else {"moe_gathers_tokens": moe_gathers_tokens}),
         )
+        self._kernel_block_table_groups: dict[int, tuple[AttentionGroup, torch.Tensor | None]] = {}
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
         if block_tables is not None:
@@ -685,6 +735,7 @@ class AscendPCPManager(PCPManager):
         update_cos_sin(input_batch.positions)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            _kernel_block_table_groups=self._kernel_block_table_groups,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
             hidden_restore_idx=torch.arange(num_tokens, device=self.device),
@@ -709,6 +760,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                _kernel_block_table_groups=self._kernel_block_table_groups,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
                 global_slot_mappings=slot_mappings.view(slot_mappings.shape[0], self.pcp_world_size, num_tokens)[
@@ -740,6 +792,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            _kernel_block_table_groups=self._kernel_block_table_groups,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(
