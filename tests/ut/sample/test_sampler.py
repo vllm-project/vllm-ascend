@@ -27,11 +27,24 @@ def _cpu_safe_npu_sample():
 
 
 class TestAscendSampler(TestBase):
-    def test_init_with_raw_logprobs(self):
-        sampler = AscendSampler(logprobs_mode="raw_logprobs")
-        self.assertEqual(sampler.logprobs_mode, "raw_logprobs")
-        self.assertTrue(hasattr(sampler, "topk_topp_sampler"))
-        self.assertIsInstance(sampler.topk_topp_sampler, AscendTopKTopPSampler)
+    def test_constructor_forwards_logprobs_mode_to_topk_topp_sampler(self):
+        """Every mode must reach the Ascend top-k/top-p backend.
+
+        Regression guard: rebuilding `topk_topp_sampler` with default
+        arguments silently downgraded `processed_logits` and
+        `processed_logprobs` requests to the default mode.
+        """
+        for mode in (
+            "raw_logits",
+            "raw_logprobs",
+            "processed_logits",
+            "processed_logprobs",
+        ):
+            with self.subTest(mode=mode):
+                sampler = AscendSampler(logprobs_mode=mode)
+                self.assertEqual(sampler.logprobs_mode, mode)
+                self.assertIsInstance(sampler.topk_topp_sampler, AscendTopKTopPSampler)
+                self.assertEqual(sampler.topk_topp_sampler.logprobs_mode, mode)
 
 
 def test_penalties_greedy_prepare_and_random_sample():
@@ -96,14 +109,23 @@ def test_topk_topp_forward_and_apply_helpers():
 
     sampler.apply_top_k_top_p = identity_apply
     with _cpu_safe_npu_sample():
-        for mode in ("processed_logits", "processed_logprobs", "raw_logprobs"):
-            sampler.logprobs_mode = mode
-            tokens, processed = sampler.forward_native(logits, {}, k, p)
+        for mode in (
+            "raw_logits",
+            "raw_logprobs",
+            "processed_logits",
+            "processed_logprobs",
+        ):
+            # Build per mode so the assertion covers construction, not just the
+            # attribute the previous iteration left behind.
+            mode_sampler = AscendTopKTopPSampler(logprobs_mode=mode)
+            mode_sampler.apply_top_k_top_p = identity_apply
+            tokens, processed = mode_sampler.forward_native(logits, {}, k, p)
             assert tokens.shape == (2,)
-            if mode == "raw_logprobs":
-                assert processed is None
-            else:
+            if mode.startswith("processed"):
                 assert processed.shape == logits.shape
+            else:
+                # Raw modes are returned by the upstream sampler, not here.
+                assert processed is None
 
     unchanged = _apply_top_k_top_p_pytorch(logits.clone(), None, None)
     assert unchanged.shape == logits.shape
