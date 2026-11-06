@@ -523,6 +523,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         checkpoint = getattr(attn_metadata, "ascend_checkpoint", None)
         raw_prefill_qkv = None
         if checkpoint is not None:
+            assert mixed_qkv_non_spec is not None
             # Preserve the pre-convolution history used by the exporter.
             raw_prefill_qkv = mixed_qkv_non_spec[attn_metadata.num_decode_tokens :].clone()
 
