@@ -1,4 +1,4 @@
-﻿#
+#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY: validate A2/A3 infrastructure smoke tests on FED runners. Do not merge.
+# TEMPORARY: validate A2 smoke tests on offline FED runners only. Do not merge.
 name: E2E
 
 on:
@@ -44,7 +44,6 @@ jobs:
       a2_b1b3: ${{ steps.scope.outputs.a2_b1b3 }}
       a2_b3: ${{ steps.scope.outputs.a2_b3 }}
       a2_b4: ${{ steps.scope.outputs.a2_b4 }}
-      a3: ${{ steps.scope.outputs.a3 }}
       csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
     steps:
@@ -113,20 +112,12 @@ jobs:
           )
           all_groups = json.loads(outputs["test_groups"])
           a2_template = next(group for group in all_groups if group["npu_type"] == "a2")
-          a3_template = next(
-              group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2
-          )
           a2_tests = [
               "tests/e2e/pull_request/one_card/test_minicpm.py",
               "tests/e2e/pull_request/two_card/test_prefix_caching.py",
           ]
-          a3_tests = [
-              "tests/e2e/pull_request/two_card/test_activation.py",
-              "tests/e2e/pull_request/two_card/test_prefix_caching.py",
-              "tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py",
-          ]
           available = {test for group in all_groups for test in group["tests"].split()}
-          if missing := set(a2_tests + a3_tests) - available:
+          if missing := set(a2_tests) - available:
               raise SystemExit(f"Smoke tests missing or skipped: {sorted(missing)}")
           groups = {}
           for chip in ("b1", "b1b3", "b3", "b4"):
@@ -138,13 +129,6 @@ jobs:
                   partition=f"{chip}-1-1",
                   tests=" ".join(a2_tests),
               )
-          groups["a3"] = dict(
-              a3_template,
-              runner="linux-aarch64-a3-vllm-ascend-fed-2",
-              partition_name="a3-smoke",
-              partition="1-1",
-              tests=" ".join(a3_tests),
-          )
           target_ids = sorted({group["csrc_cache_target"] for group in groups.values()})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               for name, group in groups.items():
@@ -207,14 +191,4 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.a2_b4 }}
-
-  run-a3:
-    needs: [select-tests, prepare-csrc-cache]
-    uses: ./.github/workflows/_selected_tests.yaml
-    with:
-      vllm: ${{ needs.select-tests.outputs.main_commit }}
-      ref: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.a3 }}
 
