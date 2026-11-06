@@ -1,0 +1,67 @@
+# Ascend 310P overlay for Qwen/Qwen3.5-4B.
+# Provenance: vllm-ascend-recipes PR #131 + 310P3 gsm8k on v0.30.0rc1-310p.
+meta:
+  hardware:
+    ascend_310p: verified
+
+variants:
+  ascend_310p_fp16:
+    label: "FP16 (Ascend 310P)"
+    precision: fp16
+    vram_minimum_gb: 12
+    description: "FP16 on Ascend 310P. Measured floor on ~21GB / v0.30.0rc1-310p: MTP + max-model-len=8192 + max-num-seqs=16 (16384/32 failed on v0.30). gsm8k 93.56."
+    supported_hardware: [ascend_310p]
+    tp: 1
+    min_vllm_version: "0.23.0"
+    extra_args:
+      - "--dtype"
+      - "float16"
+      - "--mamba-ssm-cache-dtype"
+      - "float16"
+      - "--served-model-name"
+      - "qwen3.5"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--speculative-config"
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":1}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,16]}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: "True"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    hardware_overrides:
+      ascend_310p:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0rc1-310p"
+        install:
+          pip: false
+
+hardware_notes:
+  ascend_310p:
+    title: Ascend 310P measured lane (4B)
+    body: |
+      Image: `quay.io/ascend/vllm-ascend:v0.30.0rc1-310p`.
+      Community recipe: https://github.com/vllm-ascend/vllm-ascend-recipes/pull/131
+      
+      ```bash
+      export VLLM_USE_MODELSCOPE=True
+      export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+      vllm serve your_model_path \
+        --host 127.0.0.1 --port 8080 \
+        --tensor-parallel-size 1 \
+        --served-model-name qwen3.5 \
+        --max-num-seqs 16 --max-model-len 8192 \
+        --trust-remote-code --gpu-memory-utilization 0.90 \
+        --mamba-ssm-cache-dtype float16 --dtype float16 \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,16]}' \
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+      ```
+      
+      AISBench gsm8k (2026-10-29 Asia/Shanghai): **93.56** (FAIL=0; tutorial ref 93.18).
+      On v0.30 keep 8192/16 — 16384/32 OOM on this SKU. textvqa / perf not measured.
