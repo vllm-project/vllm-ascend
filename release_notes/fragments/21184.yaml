@@ -1,0 +1,4 @@
+pr: 21184
+entries:
+  - category: bugfix
+    text: Fixed incorrect token generation when asynchronous pipeline parallelism processes overlapping prefill chunks on Model Runner V1.
