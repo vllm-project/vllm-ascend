@@ -211,6 +211,19 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
+#   3. `vllm.model_executor.model_loader.reload.meta` skip sets
+#    Why:
+#       Ascend generates expert_ids_per_ep_rank locally. Counting this buffer
+#       as an incoming weight prevents completed MoE modules from releasing
+#       received tensors, and replacing it with meta loses the routing map.
+#    How:
+#       Add only expert_ids_per_ep_rank to SKIP_LOAD_TENSORS and SKIP_TENSORS.
+#       Keep its non-persistent buffer registration for sleep/wake restoration.
+#    Related PR (if no, explain why):
+#       No vLLM PR linked; this integrates an Ascend-generated routing buffer.
+#    Future Plan:
+#       Use an upstream per-buffer reload policy when one is available.
+#
 # ** File: platform/patch_glm53_reasoning.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`

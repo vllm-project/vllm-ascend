@@ -6,6 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.model_loader.reload.layerwise import (
+    get_layerwise_info,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -225,3 +230,45 @@ def test_factory_composes_custom_routed_experts_with_ascend_contract():
     assert kwargs["routed_experts_args"]["n_shared_experts"] == 2
     assert patch_fused_moe._adapt_routed_experts_cls(_CustomRoutedExperts) is adapted_cls
     assert patch_fused_moe._adapt_routed_experts_cls(AscendRoutedExperts) is AscendRoutedExperts
+
+
+def test_reload_releases_completed_module_without_receiving_expert_map():
+    """A runtime map must neither become meta nor retain incoming weights."""
+    model = torch.nn.ModuleList([torch.nn.Module() for _ in range(2)])
+    mappings = []
+    pointers = []
+    for layer in model:
+        layer.register_parameter("w1", torch.nn.Parameter(torch.zeros(4, 4)))
+        layer.register_parameter("w2", torch.nn.Parameter(torch.zeros(4, 4)))
+        mapping = torch.arange(352, dtype=torch.int32) % 88
+        layer.register_buffer("expert_ids_per_ep_rank", mapping, persistent=False)
+        mappings.append(mapping)
+        pointers.append((layer.w1.data_ptr(), layer.w2.data_ptr()))
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+
+    with torch.no_grad():
+        for index, layer in enumerate(model):
+            assert layer.expert_ids_per_ep_rank is mappings[index]
+            first = torch.full((4, 4), float(index + 1))
+            second = torch.full((4, 4), float(index + 2))
+            info = get_layerwise_info(layer)
+            layer.w1.weight_loader(layer.w1, first)
+            assert layer.w1.is_meta
+            assert len(info.loaded_weights) == 1
+
+            layer.w2.weight_loader(layer.w2, second)
+            # Completion is per module, before another module or global finish.
+            assert not layer.w1.is_meta
+            assert not layer.w2.is_meta
+            torch.testing.assert_close(layer.w1, first)
+            torch.testing.assert_close(layer.w2, second)
+            assert (layer.w1.data_ptr(), layer.w2.data_ptr()) == pointers[index]
+            assert layer.expert_ids_per_ep_rank is mappings[index]
+            torch.testing.assert_close(layer.expert_ids_per_ep_rank, torch.arange(352, dtype=torch.int32) % 88)
+            assert "expert_ids_per_ep_rank" not in layer.state_dict()
+            assert info.loaded_weights == []
+            if index == 0:
+                assert model[1].w1.is_meta
+                assert model[1].w2.is_meta
