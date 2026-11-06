@@ -431,6 +431,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # v0.32.0 lacks the upstream unused-draft scheduling contract.
+        drafts_needed = not getattr(self, "can_skip_drafts", False)
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
 
@@ -613,6 +615,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+            drafts_needed = drafts_needed or not self._drafts_unused(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -1018,6 +1023,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                drafts_needed = drafts_needed or not self._drafts_unused(request, num_computed_tokens, num_new_tokens)
                 if pad_spec_decode:
                     scheduled_spec_decode_tokens[request_id] = [-1] * self.num_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
@@ -1176,6 +1182,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             if callable(get_manager_metadata):
                 scheduler_output_kwargs["ec_manager_metadata"] = get_manager_metadata()
         scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
+
+        if hasattr(scheduler_output, "skip_drafts"):
+            scheduler_output.skip_drafts = not drafts_needed
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
