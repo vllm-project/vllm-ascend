@@ -263,7 +263,7 @@ Decode is the remaining double-digit lever; speculative decoding is the next can
 `update_async_output_token_ids()`. With `--async-scheduling`, custom logits processors
 therefore received placeholder token ids and could truncate correct outputs (the fix used
 here was `async_scheduling=false`). Current main calls `update_async_output_token_ids()`;
-see [#21049](https://github.com/vllm-project/vllm-ascend/pull/21049) for the equivalent
+see [#21219](https://github.com/vllm-project/vllm-ascend/pull/21219) for the equivalent
 fix in the speculative-decoding branch.
 
 **Use the config EOS id, not the tokenizer's.** The model vocabulary has 151,936 entries,
