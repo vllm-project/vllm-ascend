@@ -152,6 +152,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.paired_sfa_cache import is_paired_sfa_cache
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -5343,6 +5344,26 @@ class NPUModelRunner(GPUModelRunner):
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
+        if is_paired_sfa_cache(kv_cache_config.kv_cache_groups):
+            # One allocation per physical slot: MLA and Mamba names in the
+            # descriptor intentionally alias it; the indexer owns a slot.
+            self.hybrid_with_attn_and_mamba = True
+            for descriptor in kv_cache_config.kv_cache_tensors:
+                names = get_kv_cache_tensor_layers(descriptor)
+                backing = self._allocate_int8_cache_tensor(descriptor.size, alignment)
+                for name in names:
+                    spec = layer_kv_cache_spec[name]
+                    if isinstance(spec, AscendSFAIndexerCacheSpec):
+                        k_bytes = (
+                            kv_cache_config.num_blocks * spec.sfa_dcp_replicated_indexer_size
+                            * spec.block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+                        )
+                        kv_cache_raw_tensors[name] = (
+                            (backing[:k_bytes], backing[k_bytes:]) if spec.scale_dim else (backing,)
+                        )
+                    else:
+                        kv_cache_raw_tensors[name] = backing
+            return kv_cache_raw_tensors
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = any(
             getattr(spec, "model_version", None) == "deepseek_v4"
@@ -5567,7 +5588,23 @@ class NPUModelRunner(GPUModelRunner):
                             cache_size_aligned = layer_size + alignment
                             tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                             tensor = self._align_memory(tensor, alignment)[: layer_size]
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                        spec = layer_kv_cache_spec[layer_name_inner]
+                        if isinstance(spec, AscendSFAIndexerCacheSpec):
+                            # Hybrid allocation uses one backing per layer; the
+                            # SFA reshape contract expects K/scale byte regions.
+                            k_bytes = (
+                                kv_cache_config.num_blocks
+                                * spec.sfa_dcp_replicated_indexer_size
+                                * spec.block_size
+                                * spec.num_kv_heads
+                                * spec.head_size
+                                * get_dtype_size(spec.dtype)
+                            )
+                            kv_cache_raw_tensors[layer_name_inner] = (
+                                (tensor[:k_bytes], tensor[k_bytes:]) if spec.scale_dim else (tensor,)
+                            )
+                        else:
+                            kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif use_compressed_cache and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
@@ -5778,7 +5815,8 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
+        is_paired_sfa = is_paired_sfa_cache(kv_cache_config.kv_cache_groups)
+        uses_padded_page_layout = is_paired_sfa or requires_padded_page_layout(layer_kv_cache_spec.values())
         layer_tuple_strides = {}
         if is_deepseek_v41_cache(layer_kv_cache_spec):
             layer_tuple_strides = {
@@ -5865,6 +5903,46 @@ class NPUModelRunner(GPUModelRunner):
                     if views is not None:
                         kv_caches[layer_name] = views
                         continue
+
+                if (
+                    is_paired_sfa
+                    and isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                    and not getattr(current_kv_cache_spec, "is_dspark_draft", False)
+                ):
+                    # MLA and recurrent state overlay the same physical slots.
+                    # Place both MLA components inside each kernel page so
+                    # scheduler block IDs select the same page for both views.
+                    raw = kv_cache_raw_tensors[layer_name]
+                    assert isinstance(raw, torch.Tensor)
+                    assert current_kv_cache_spec.block_size % kernel_block_size == 0
+                    kernel_per_page = current_kv_cache_spec.block_size // kernel_block_size
+                    page_bytes = current_kv_cache_spec.page_size_bytes
+                    assert page_bytes % kernel_per_page == 0
+                    slot_bytes = page_bytes // kernel_per_page
+                    shape = attn_backend.get_kv_cache_shape(
+                        kv_cache_config.num_blocks * kernel_per_page,
+                        kernel_block_size,
+                        current_kv_cache_spec.num_kv_heads,
+                        current_kv_cache_spec.head_size,
+                    )
+                    if kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec):
+                        kv_caches[layer_name] = (
+                            make_page_strided_cache_view(raw, shape, current_kv_cache_spec.dtype, slot_bytes),
+                        )
+                    else:
+                        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                        k_shape, v_shape = (*shape[:-1], k_dim), (*shape[:-1], v_dim)
+                        k_cache = make_page_strided_cache_view(
+                            raw, k_shape, current_kv_cache_spec.dtype, slot_bytes
+                        )
+                        k_bytes = kernel_block_size * current_kv_cache_spec.num_kv_heads * k_dim * get_dtype_size(
+                            current_kv_cache_spec.dtype
+                        )
+                        v_cache = make_page_strided_cache_view(
+                            raw, v_shape, current_kv_cache_spec.dtype, slot_bytes, offset_bytes=k_bytes
+                        )
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                    continue
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue

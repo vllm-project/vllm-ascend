@@ -260,6 +260,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
                 spec.indexes_kv_by_block_stride,
+                spec.is_dspark_draft,
             )
             for spec in specs
         }
@@ -282,6 +283,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            is_dspark_draft=first_spec.is_dspark_draft,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
