@@ -125,6 +125,49 @@ def prepare_dflash_inputs_factory(
     return prepare_with_block_size
 
 
+def _realign_fia_padding_fields(metadata, num_reqs_padded):
+    """Realign batch-indexed fields after a padded query-length rebuild.
+
+    The dense Ascend builder pads ``seq_lens``/``seq_lens_list`` and
+    ``block_tables`` with a synthetic request whenever it appends the FIA TND
+    tail to ``actual_seq_lengths_q``, which happens while the real batch is
+    smaller than the padded FULL-graph batch (speculative draft paths report
+    ``is_prefilling`` as all-False, so the tail is always appended). Rebuilding
+    ``actual_seq_lengths_q`` to the padded request count drops that tail again,
+    leaving the padded fields one entry longer than the captured batch. The
+    updatable graph validates their lengths against the captured batch size
+    while updating the FIA task and fails with error 561002
+    (actual_seq_lengths_kv vs batchSize) when they disagree.
+    """
+    seq_lens_list = getattr(metadata, "seq_lens_list", None)
+    if seq_lens_list is None:
+        return
+    num_entries = len(seq_lens_list)
+    if num_entries > num_reqs_padded:
+        metadata.seq_lens_list = seq_lens_list[:num_reqs_padded]
+    elif num_entries < num_reqs_padded:
+        metadata.seq_lens_list = seq_lens_list + [1] * (num_reqs_padded - num_entries)
+    else:
+        return
+    for field in ("seq_lens", "seq_lens_cpu"):
+        tensor = getattr(metadata, field, None)
+        shape = getattr(tensor, "shape", None)
+        if shape is None or shape[0] == num_reqs_padded:
+            continue
+        if shape[0] > num_reqs_padded:
+            setattr(metadata, field, tensor[:num_reqs_padded])
+        else:
+            setattr(metadata, field, torch.cat([tensor, tensor.new_ones(num_reqs_padded - shape[0])]))
+    block_tables = getattr(metadata, "block_tables", None)
+    shape = getattr(block_tables, "shape", None)
+    if shape is not None:
+        if shape[0] > num_reqs_padded:
+            metadata.block_tables = block_tables[:num_reqs_padded]
+        elif shape[0] < num_reqs_padded:
+            pad_rows = block_tables.new_zeros((num_reqs_padded - shape[0],) + tuple(shape[1:]))
+            metadata.block_tables = torch.cat([block_tables, pad_rows], dim=0)
+
+
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     if not vllm_version_is("0.32.0"):
 
@@ -183,6 +226,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
             metadata.actual_seq_lengths_q = query_lens_list
+            _realign_fia_padding_fields(metadata, num_reqs_padded)
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)

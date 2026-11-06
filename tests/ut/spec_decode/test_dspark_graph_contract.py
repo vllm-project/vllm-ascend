@@ -160,6 +160,76 @@ def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, n
         assert value.seq_lens is seq_lens[name]
 
 
+def test_update_draft_metadata_realigns_fia_padding_fields():
+    """The dense builder pads seq_lens/seq_lens_list/block_tables when it appends
+    the synthetic FIA TND-tail request (real batch smaller than the padded
+    FULL-graph batch). Rebuilding actual_seq_lengths_q must realign them, or
+    the updatable graph rejects the FIA update (actual_seq_lengths_kv length
+    vs captured batchSize, error 561002)."""
+    speculator = _speculator(num_query_per_req=8)
+    metadata = SimpleNamespace(
+        actual_seq_lengths_q=[8, 8, 16],
+        seq_lens_list=[82, 1, 1],
+        seq_lens=torch.tensor([82, 1, 1], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([82, 1, 1], dtype=torch.int32),
+        block_tables=torch.zeros(3, 4, dtype=torch.int32),
+    )
+
+    speculator._update_draft_attn_metadata({"draft.0": metadata}, 2)
+
+    assert metadata.actual_seq_lengths_q == [8, 16]
+    assert metadata.seq_lens_list == [82, 1]
+    assert metadata.seq_lens.tolist() == [82, 1]
+    assert metadata.seq_lens_cpu.tolist() == [82, 1]
+    assert metadata.block_tables.shape == (2, 4)
+
+
+def test_update_draft_metadata_extends_short_seq_lens_list():
+    speculator = _speculator(num_query_per_req=8)
+    metadata = SimpleNamespace(
+        actual_seq_lengths_q=[8],
+        seq_lens_list=[82],
+        seq_lens=torch.tensor([82], dtype=torch.int32),
+        block_tables=torch.zeros(1, 4, dtype=torch.int32),
+    )
+
+    speculator._update_draft_attn_metadata({"draft.0": metadata}, 2)
+
+    assert metadata.actual_seq_lengths_q == [8, 16]
+    assert metadata.seq_lens_list == [82, 1]
+    assert metadata.seq_lens.tolist() == [82, 1]
+    assert metadata.block_tables.shape == (2, 4)
+
+
+def test_update_draft_metadata_realigns_mla_decode_metadata():
+    """MLA nests the decode metadata; the FIA padding realign must apply to
+    the nested object, which is what the updatable graph providers read."""
+    speculator = _speculator(num_query_per_req=7, attn_architecture="MLA")
+    decode = SimpleNamespace(
+        actual_seq_lengths_q=[7, 7, 8],
+        seq_lens_list=[82, 1, 1],
+        seq_lens=torch.tensor([82, 1, 1], dtype=torch.int32),
+        block_tables=torch.zeros(3, 4, dtype=torch.int32),
+    )
+    metadata = SimpleNamespace(decode=decode, actual_seq_lengths_q=[7, 7, 8], seq_lens_list=[82, 1, 1])
+
+    speculator._update_draft_attn_metadata({"draft.0": metadata}, 2)
+
+    assert decode.actual_seq_lengths_q == [7, 14]
+    assert decode.seq_lens_list == [82, 1]
+    assert decode.seq_lens.tolist() == [82, 1]
+    assert decode.block_tables.shape == (2, 4)
+
+
+def test_update_draft_metadata_skips_external_flashmla():
+    metadata = SimpleNamespace(external_flashmla=object(), actual_seq_lengths_q=[8, 8, 16])
+    speculator = _speculator(num_query_per_req=8, attn_architecture="GQA")
+
+    speculator._update_draft_metadata({"draft.0": metadata}, 2)
+
+    assert metadata.actual_seq_lengths_q == [8, 8, 16]
+
+
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
     class _ContextProxy:
         active = False

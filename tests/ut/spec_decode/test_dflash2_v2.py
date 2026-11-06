@@ -549,6 +549,37 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
         assert layer.actual_seq_lengths_q == list(range(3, num_reqs_padded * 3 + 1, 3))
 
 
+@pytest.mark.parametrize("num_reqs_padded", [2, 4])
+def test_dflash_update_draft_metadata_realigns_fia_padding_fields(num_reqs_padded):
+    """The dense builder pads seq_lens/seq_lens_list/block_tables when it appends
+    the synthetic FIA TND-tail request (real batch smaller than the padded
+    FULL-graph batch). Rebuilding actual_seq_lengths_q must realign them, or
+    the updatable graph rejects the FIA update (actual_seq_lengths_kv length
+    vs captured batchSize, error 561002)."""
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.num_query_per_req = 3
+    extra = num_reqs_padded + 1
+    metadata = {
+        name: SimpleNamespace(
+            actual_seq_lengths_q=[3] * num_reqs_padded + [num_reqs_padded * 3],
+            seq_lens_list=[82] + [1] * (extra - 1),
+            seq_lens=torch.tensor([82] + [1] * (extra - 1), dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([82] + [1] * (extra - 1), dtype=torch.int32),
+            block_tables=torch.zeros(extra, 4, dtype=torch.int32),
+        )
+        for name in ("draft.0", "draft.1")
+    }
+
+    speculator._update_draft_attn_metadata(metadata, num_reqs_padded)
+
+    for layer in metadata.values():
+        assert layer.actual_seq_lengths_q == list(range(3, num_reqs_padded * 3 + 1, 3))
+        assert layer.seq_lens_list == [82] + [1] * (num_reqs_padded - 1)
+        assert layer.seq_lens.tolist() == [82] + [1] * (num_reqs_padded - 1)
+        assert layer.seq_lens_cpu.tolist() == [82] + [1] * (num_reqs_padded - 1)
+        assert layer.block_tables.shape == (num_reqs_padded, 4)
+
+
 @pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
 def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)

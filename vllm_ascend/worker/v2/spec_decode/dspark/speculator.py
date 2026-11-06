@@ -47,7 +47,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    _realign_fia_padding_fields,
+    prepare_dflash_inputs_factory,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -390,6 +393,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            # The dense builder pads seq_lens/seq_lens_list/block_tables with a
+            # synthetic FIA TND-tail request when the real batch is smaller than
+            # the padded FULL-graph batch (dspark reports is_prefilling as
+            # all-False, so the tail is always appended). The rebuild above
+            # drops the tail, so realign the padded fields to the padded
+            # request count or the updatable graph rejects the FIA update
+            # (actual_seq_lengths_kv vs batchSize, error 561002).
+            _realign_fia_padding_fields(decode_metadata, num_reqs_padded)
         return attn_metadata
 
     @torch.inference_mode()
