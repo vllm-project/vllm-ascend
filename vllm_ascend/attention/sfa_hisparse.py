@@ -14,6 +14,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import PreprocessType
 from vllm_ascend.hisparse.prefill import AscendHiSparsePrefillStagingPlan, build_hisparse_prefill_staging_plan
+from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -57,8 +58,15 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
 
-    def _build(self, common_attn_metadata, draft_index=None, pcp_context=None):
-        metadata = super()._build(common_attn_metadata, draft_index, pcp_context)
+    def _build(
+        self,
+        common_attn_metadata,
+        draft_index=None,
+        pcp_context=None,
+        *,
+        shared_mla_rope: MLARopeMetadataCache | None = None,
+    ):
+        metadata = super()._build(common_attn_metadata, draft_index, pcp_context, shared_mla_rope=shared_mla_rope)
         metadata.num_reqs = common_attn_metadata.num_reqs
         if draft_index not in self._request_row_buffers:
             self._request_row_buffers[draft_index] = torch.empty(

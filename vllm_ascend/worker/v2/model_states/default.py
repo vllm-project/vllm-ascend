@@ -567,6 +567,15 @@ class AscendModelState(DefaultModelState):
             )
             if self.decoder_replay is not None or (xlite_cfg is not None and xlite_cfg.enabled)
             else None,
+            reuse_hisparse_mla_rope=(
+                self.vllm_config.attention_config.hisparse_config is not None
+                and cudagraph_mode == CUDAGraphMode.FULL
+                and not for_capture
+                and not input_batch.is_dummy
+                # MTP verification can be classified as ChunkedPrefill even
+                # with no requests actually in prefill.
+                and not input_batch.is_prefilling_np[:num_actual_reqs].any()
+            ),
         )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
         if restore_copy_sfa_tails:
