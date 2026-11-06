@@ -7,6 +7,7 @@ import pytest
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
@@ -18,6 +19,7 @@ from vllm.v1.request import RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
 import vllm_ascend.core.dyntra_lb_scheduler as dyntra_lb_scheduler_module
+from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from tests.ut.kv_offload.utils import (
     create_model_runner_output,
     create_request,
@@ -1592,3 +1594,65 @@ def test_dyntra_resumable_output_preserves_session(scheduler_cls, buffered_input
     assert not scheduler._lb_paused_req_ids
     assert scheduler.num_waiting_for_streaming_input == 0
     assert not any(scheduler.kv_cache_manager.get_block_ids(request.request_id))
+
+
+@pytest.mark.parametrize("stall_reason", ["encoder-budget", "encoder-cache"])
+@pytest.mark.parametrize("queue_state", ["waiting", "kv-holder", "all-stalled"])
+def test_waiting_encoder_stall_allows_later_request(stall_reason, queue_state, monkeypatch):
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = False
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=DyntraLBScheduler)
+    scheduler.encoder_cache_manager = EncoderCacheManager(1 if stall_reason == "encoder-cache" else 256)
+    scheduler.max_num_encoder_input_tokens = 0 if stall_reason == "encoder-budget" else 256
+
+    original = scheduler._try_schedule_encoder_inputs
+
+    def schedule_encoder_inputs(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # Isolate the legacy four-item caller from the upstream API change.
+        assert len(result) == 4 or result[4] == []
+        return result[:4]
+
+    monkeypatch.setattr(scheduler, "_try_schedule_encoder_inputs", schedule_encoder_inputs)
+    stalled = make_mm_request("stalled", [("image", [True] * 50)])
+    if queue_state == "kv-holder":
+        assert scheduler.kv_cache_manager.allocate_slots(stalled, 10) is not None
+        stalled.num_computed_tokens = 10
+    held_blocks = scheduler.kv_cache_manager.get_block_ids(stalled.request_id)
+    scheduler.add_request(stalled)
+    if queue_state == "all-stalled":
+        second_stalled = make_mm_request("second-stalled", [("second-image", [True] * 50)])
+        scheduler.add_request(second_stalled)
+    else:
+        ready = create_request(request_id=1)
+        scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    if queue_state == "all-stalled":
+        assert not output.num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        assert scheduler.deferred_waiting == {stalled, second_stalled}
+        # Repeated stalls must neither drop requests nor enqueue them twice.
+        assert not scheduler.schedule().num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        scheduler.encoder_cache_manager = EncoderCacheManager(256)
+        scheduler.max_num_encoder_input_tokens = 256
+        resumed = scheduler.schedule()
+        assert stalled.request_id in resumed.num_scheduled_tokens
+        assert second_stalled.request_id in resumed.num_scheduled_tokens
+        assert stalled not in scheduler.deferred_waiting
+        assert second_stalled not in scheduler.deferred_waiting
+        return
+
+    assert output.num_scheduled_tokens[ready.request_id] > 0
+    assert stalled.request_id not in output.num_scheduled_tokens
+    assert stalled in scheduler.deferred_waiting
+    if queue_state == "kv-holder":
+        assert list(scheduler.kv_holding_waiting) == [stalled]
+        assert stalled not in scheduler.waiting
+        assert scheduler.kv_cache_manager.get_block_ids(stalled.request_id) == held_blocks
+    else:
+        assert list(scheduler.waiting) == [stalled]
+        assert stalled not in scheduler.kv_holding_waiting

@@ -60,6 +60,7 @@ import torch
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
 from vllm.model_executor.models import ModelRegistry
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
@@ -70,6 +71,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
@@ -682,7 +684,7 @@ def _make_output(scheduler):
     )
 
 
-def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_blocks=10000):
+def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_blocks=10000, enable_prefix_caching=True):
     from contextlib import ExitStack
     from unittest.mock import PropertyMock
 
@@ -740,7 +742,12 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         scheduler_config.max_num_encoder_input_tokens = 10000
         scheduler_config.encoder_cache_size = 10000
         scheduler_config.chunked_prefill_enabled = True
-        cache_config = CacheConfig(block_size=_BLOCK_SIZE, gpu_memory_utilization=0.9, cache_dtype="auto")
+        cache_config = CacheConfig(
+            block_size=_BLOCK_SIZE,
+            gpu_memory_utilization=0.9,
+            cache_dtype="auto",
+            enable_prefix_caching=enable_prefix_caching,
+        )
         vllm_config = VllmConfig(
             scheduler_config=scheduler_config,
             model_config=model_config,
@@ -1220,3 +1227,63 @@ def test_balance_schedule_forwards_uses_mrope_to_new_request_data():
 
     spy.assert_called_once()
     assert spy.call_args.kwargs["uses_mrope"] is True
+
+
+@pytest.mark.parametrize("stall_reason", ["encoder-budget", "encoder-cache"])
+@pytest.mark.parametrize("queue_state", ["waiting", "kv-holder", "all-stalled"])
+def test_waiting_encoder_stall_allows_later_request(stall_reason, queue_state, monkeypatch):
+    scheduler = _make_balance_scheduler(enable_prefix_caching=False)
+    assert scheduler._balance_enabled
+    scheduler.encoder_cache_manager = EncoderCacheManager(1 if stall_reason == "encoder-cache" else 256)
+    scheduler.max_num_encoder_input_tokens = 0 if stall_reason == "encoder-budget" else 256
+
+    original = scheduler._try_schedule_encoder_inputs
+
+    def schedule_encoder_inputs(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # Isolate the legacy four-item caller from the upstream API change.
+        assert len(result) == 4 or result[4] == []
+        return result[:4]
+
+    monkeypatch.setattr(scheduler, "_try_schedule_encoder_inputs", schedule_encoder_inputs)
+    stalled = make_mm_request("stalled", [("image", [True] * 50)])
+    if queue_state == "kv-holder":
+        assert scheduler.kv_cache_manager.allocate_slots(stalled, 10) is not None
+        stalled.num_computed_tokens = 10
+    held_blocks = scheduler.kv_cache_manager.get_block_ids(stalled.request_id)
+    scheduler.add_request(stalled)
+    if queue_state == "all-stalled":
+        second_stalled = make_mm_request("second-stalled", [("second-image", [True] * 50)])
+        scheduler.add_request(second_stalled)
+    else:
+        ready = create_request(request_id=1)
+        scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    if queue_state == "all-stalled":
+        assert not output.num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        assert scheduler.deferred_waiting == {stalled, second_stalled}
+        # Repeated stalls must neither drop requests nor enqueue them twice.
+        assert not scheduler.schedule().num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        scheduler.encoder_cache_manager = EncoderCacheManager(256)
+        scheduler.max_num_encoder_input_tokens = 256
+        resumed = scheduler.schedule()
+        assert stalled.request_id in resumed.num_scheduled_tokens
+        assert second_stalled.request_id in resumed.num_scheduled_tokens
+        assert stalled not in scheduler.deferred_waiting
+        assert second_stalled not in scheduler.deferred_waiting
+        return
+
+    assert output.num_scheduled_tokens[ready.request_id] > 0
+    assert stalled.request_id not in output.num_scheduled_tokens
+    assert stalled in scheduler.deferred_waiting
+    if queue_state == "kv-holder":
+        assert list(scheduler.kv_holding_waiting) == [stalled]
+        assert stalled not in scheduler.waiting
+        assert scheduler.kv_cache_manager.get_block_ids(stalled.request_id) == held_blocks
+    else:
+        assert list(scheduler.waiting) == [stalled]
+        assert stalled not in scheduler.kv_holding_waiting
