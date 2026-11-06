@@ -278,7 +278,9 @@ def _patch_scheduler_update_from_output() -> None:
         if use_pp_ipc_runtime_patch:
             for req_id in scheduler_output.num_scheduled_tokens:
                 request = self.requests.get(req_id)
-                if request is not None:
+                # An earlier prefill can finish while a later batch still
+                # owns the decode fence.
+                if request is not None and request.num_in_flight_tokens == 0:
                     request.next_decode_eligible_step = 0
 
         if not use_pp_mtp_runtime_patch:
