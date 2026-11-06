@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -131,17 +130,20 @@ def test_init_forwards_single_group_slot_mapping_enabled():
     assert seen["kwargs"]["slot_mapping_enabled"] == [True]
 
 
-def test_init_forwards_sliding_window_reach_when_supported():
+def _init_with_sliding_window_reach(declared: bool) -> tuple[dict[str, Any], list[int]]:
     seen: dict[str, Any] = {}
+    reach = [0, 32]
 
     def recording_init(self, *args, **kwargs):
-        seen["args"] = args
         seen["kwargs"] = kwargs
         _parent_init(self, *args, **kwargs)
 
-    reach = [0, 32]
+    def fake_declared_kwarg(_owner, name, value):
+        return {name: value} if declared else {}
+
     with (
         patch.object(BlockTables, "__init__", recording_init),
+        patch("vllm_ascend.worker.v2.block_table.declared_kwarg", fake_declared_kwarg),
         patch(
             "vllm_ascend.worker.v2.block_table.triton.next_power_of_2",
             return_value=16,
@@ -157,11 +159,17 @@ def test_init_forwards_sliding_window_reach_when_supported():
             dcp_sharded=[True, True],
             sliding_window_reach=reach,
         )
-    supported = "sliding_window_reach" in inspect.signature(BlockTables).parameters
-    if supported:
-        assert seen["kwargs"]["sliding_window_reach"] is reach
-    else:
-        assert "sliding_window_reach" not in seen["kwargs"]
+    return seen, reach
+
+
+def test_init_forwards_sliding_window_reach_when_supported():
+    seen, reach = _init_with_sliding_window_reach(declared=True)
+    assert seen["kwargs"]["sliding_window_reach"] is reach
+
+
+def test_init_omits_sliding_window_reach_when_unsupported():
+    seen, _ = _init_with_sliding_window_reach(declared=False)
+    assert "sliding_window_reach" not in seen["kwargs"]
 
 
 def _make_uninitialized_tables():
