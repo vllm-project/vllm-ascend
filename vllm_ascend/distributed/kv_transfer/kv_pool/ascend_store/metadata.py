@@ -121,7 +121,7 @@ class KeyMetadata:
     """name of the LLM model"""
 
     model_name: str
-    """ worker id when running under a distributed setting """
+    """ Cache-key partition rank: head/TP rank or a model-defined state shard rank """
     head_or_tp_rank: int
     """ Initialize the current decode context model parallel rank """
     dcp_rank: int

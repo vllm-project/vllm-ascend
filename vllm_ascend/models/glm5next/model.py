@@ -78,11 +78,13 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.utils import pad_sequence_parallel_tokens, vllm_version_is
 
 from .attention import Glm5NextMLAAttention
-from .kda import Glm5NextLinearAttention, get_kda_parallel_size
+from .kda import Glm5NextLinearAttention, get_kda_parallel_size, get_kda_state_sharding
 from .multimodal import (
     Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
@@ -979,6 +981,12 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
+    @classmethod
+    def get_mamba_state_sharding(
+        cls, parallel_config: ParallelConfig, tp_rank: int, pcp_rank: int
+    ) -> dict[MambaAttentionBackendEnum, MambaStateSharding]:
+        return {MambaAttentionBackendEnum.GDN_ATTN: get_kda_state_sharding(parallel_config, tp_rank, pcp_rank)}
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1048,6 +1056,12 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         from .model import Glm5NextForCausalLM
 
         return Glm5NextForCausalLM.get_mamba_state_copy_func()
+
+    @classmethod
+    def get_mamba_state_sharding(
+        cls, parallel_config: ParallelConfig, tp_rank: int, pcp_rank: int
+    ) -> dict[MambaAttentionBackendEnum, MambaStateSharding]:
+        return Glm5NextForCausalLM.get_mamba_state_sharding(parallel_config, tp_rank, pcp_rank)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Glm4vForConditionalGeneration, self).__init__()
