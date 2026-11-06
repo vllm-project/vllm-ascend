@@ -2301,31 +2301,38 @@ class TestNPUPlatform(TestBase):
             "vllm_ascend.xlite.xlite_worker.XliteWorker",
         )
 
-    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-        return_value=get_hardware_profile(AscendDeviceType._310P),
-    )
-    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_310p_no_custom_ops(
-        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
-    ):
-        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+    def test_check_and_update_config_310p_no_custom_ops(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
         vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
-        mock_init_recompute.return_value = MagicMock()
-
         vllm_config.scheduler_config = MagicMock()
+
         from vllm_ascend import platform
 
-        importlib.reload(platform)
+        with (
+            patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization"),
+            patch("vllm_ascend.ascend_config.init_ascend_config") as mock_init_ascend,
+            patch(
+                "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
+            patch(
+                "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
+            ) as mock_init_recompute,
+        ):
+            mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+            mock_init_recompute.return_value = MagicMock()
+            importlib.reload(platform)
 
-        self.platform.check_and_update_config(vllm_config)
-        self.assertEqual(vllm_config.compilation_config.custom_ops, [])
+            self.platform.check_and_update_config(vllm_config)
+            self.assertEqual(vllm_config.compilation_config.custom_ops, [])
+        # The reload above rebound platform's by-value imports to the mocks.
+        # Reload once more with the patches unwound so later tests in this
+        # worker see the real functions again (otherwise e.g. the 310P
+        # hardware profile leaks into get_attn_backend_cls selections).
+        importlib.reload(platform)
 
     @patch("vllm_ascend.platform.get_ascend_config")
     def test_get_attn_backend_cls_use_v1_and_mla(self, mock_get_ascend_config):

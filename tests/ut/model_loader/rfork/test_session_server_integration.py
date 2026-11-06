@@ -33,7 +33,12 @@ def live_session(runtime, monkeypatch):
         runtime.config,
         seed_bind_host="127.0.0.1",
         seed_advertise_host="127.0.0.1",
-        seed_timeout_sec=3.0,
+        # The seed server runs as an in-process uvicorn thread; under xdist
+        # parallel load (24 workers + subprocesses) startup can exceed a few
+        # seconds, and a health-check timeout also closes the listening
+        # socket mid-startup (EBADF in the server thread). Give it the same
+        # budget as the production default.
+        seed_timeout_sec=30.0,
         request_timeout_sec=1.0,
     )
     session = runtime.session.RForkSession(cfg, runtime.identity)

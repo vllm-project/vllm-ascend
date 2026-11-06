@@ -6,6 +6,13 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
+# Cap pytest-xdist parallelism for the slipcover path. "-n auto" spawns one
+# worker per CPU (192 on the NPU runners), and every e2e worker initializes
+# torch_npu/vLLM engine subprocesses, starving the host and triggering
+# worker-crash storms (xdist "maximum crashed workers reached", CI run
+# 111649013424). A fixed small cap keeps the shared runners stable.
+pytest_xdist_workers="${PYTEST_XDIST_WORKERS:-16}"
+
 # Set to true temporarily to run all selected targets before reporting failure.
 continue_on_error=false
 
@@ -188,7 +195,7 @@ run_pytest_target() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${target}"
   fi
   local status=$?
   set -e
@@ -239,7 +246,7 @@ run_pytest_batch() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${batch_targets[@]}"
   fi
   local status=$?
   set -e

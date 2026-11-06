@@ -23,8 +23,10 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     for i in range(0, size, BLOCK_SIZE):
         mask = (i + offsets) < size
 
-        curr_src_ptr = src_ptr + i + offsets
-        curr_dst_ptr = dst_ptr + i + offsets
+        curr_src_ptr = src_ptr + i
+        curr_src_ptr += offsets
+        curr_dst_ptr = dst_ptr + i
+        curr_dst_ptr += offsets
 
         # cache_modifier=".cg" bypasses L1 cache for streaming data.
         data = tl.load(curr_src_ptr, mask=mask, cache_modifier=".cg")

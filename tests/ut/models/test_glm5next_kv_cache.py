@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.attention.indexer_kpool as backend_module
@@ -74,6 +75,10 @@ def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capac
 
 @pytest.mark.parametrize("capacity", [4, 12])
 def test_tail_uses_one_full_precision_page(capacity):
+    # Register built-in specs first; register_ascend_kv_cache_specs() alone
+    # leaves the global registry partially populated, which breaks later
+    # lookups of built-in specs on fresh xdist workers.
+    register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     spec = AscendIndexerKPoolTailSpec(
         block_size=capacity,
