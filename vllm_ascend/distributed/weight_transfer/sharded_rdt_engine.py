@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
-    RdtRouter,
     buffer_alloc_bytes,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
@@ -34,10 +33,12 @@ if TYPE_CHECKING:
     import queue
     import threading
 
+    from vllm.distributed.weight_transfer.sharded_rdt_common import RdtRouter
     from vllm.distributed.weight_transfer.sharded_rdt_engine import _CallPlan
 
 
 class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
+    _router: "RdtRouter | None"
     # Initialized by the upstream constructor. Declare the types here because
     # CI skips imported implementations and cannot infer their instance state.
     _cached_plan: "_CallPlan | None"
@@ -105,78 +106,15 @@ class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
         super()._bake(init_info)
 
     def _resolve_producers(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
-        """Work out this worker's consumer identity, build the router, and bind
-        EVERY producer actor.
+        import ray
 
-        Pull routing is M:N: each chunk goes to ONE producer holding every name
-        in it (see ``RdtRouter``), so one producer serves a whole pull. All
-        producers are bound regardless, because the per-group ``free_group``
-        signal fans out to every owner of a group, including producers this
-        worker never pulls from.
-        """
-        try:
-            import ray
-        except ImportError as e:
-            raise RuntimeError(
-                "Ray is required for the 'sharded_rdt' weight transfer "
-                "backend. Install Ray and run workers as Ray actors "
-                "(distributed_executor_backend='ray')."
-            ) from e
-
-        producer_names = list(init_info.trainer_actor_names)
-        if not producer_names:
-            raise RuntimeError("Sharded RDT engine requires a trainer producer: set init_info.trainer_actor_names.")
-
-        consumer_id = self._resolve_consumer_id(init_info)
-        name_owner_class = list(init_info.name_owner_class or [])
-        if name_owner_class and len(name_owner_class) != len(init_info.names):
-            raise RuntimeError(
-                f"Sharded RDT engine: {len(name_owner_class)} owner-class entries for {len(init_info.names)} names."
-            )
-        router = RdtRouter(
-            len(producer_names),
-            self._num_consumers(),
-            list(init_info.owner_sets) or None,
-            name_owner_class or None,
-            list(init_info.names),
-            list(init_info.group_lens),
-            # Carve the block per deployment so every replica's worker w pulls
-            # each name from the same producer, which is what lets that producer
-            # serve all of them from one slot.
-            workers_per_replica=self._workers_per_replica(init_info),
-        )
-        router.validate()
-
-        # A fresh router per init, never appended to: every owner index is a
-        # position in these lists, so a rejoining engine's second
-        # init_transfer_engine must not shift them.
-        actors: list[Any] = []
-        methods: list[Any] = []
-
-        for chosen_name in producer_names:
-            try:
-                actor = ray.get_actor(
-                    chosen_name,
-                    namespace=init_info.trainer_actor_namespace,
-                )
-            except ValueError as e:
-                raise RuntimeError(
-                    f"Sharded RDT engine could not find trainer actor "
-                    f"{chosen_name!r} (namespace="
-                    f"{init_info.trainer_actor_namespace!r})."
-                ) from e
+        super()._resolve_producers(init_info)
+        assert self._router is not None
+        for actor in self._router._actors:
+            # Upstream enables Ray tensor transport on name-resolved handles.
+            # HIXL returns descriptors through the ordinary Ray control plane.
+            actor._ray_enable_tensor_transport = False
             ray.get(actor.hixl_add_consumer.remote(self._hixl.endpoint), timeout=300)
-            actors.append(actor)
-            methods.append(getattr(actor, init_info.produce_method_name))
-        router.bind(actors, methods, consumer_id)
-        self._router = router
-        logger.info(
-            "Sharded RDT engine (consumer %d) bound to all %d producers (batched method %r, %d owner class(es))",
-            consumer_id,
-            len(producer_names),
-            init_info.produce_method_name,
-            len(init_info.owner_sets) or 1,
-        )
 
     def _preregister_at_init(self) -> None:
         """Register every HIXL buffer this worker will use at init, before any
