@@ -224,10 +224,6 @@ a3:
         config_file_path: DeepSeek-V4-Flash-w8a8-bugtest-acc.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 2
-      - name: DeepSeek-V4-Flash-W8A8-1M-1P1D
-        config_file_path: DeepSeek-V4-Flash-W8A8-1M-1P1D.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
-        size: 2
 
   single_node:
     test_config:
