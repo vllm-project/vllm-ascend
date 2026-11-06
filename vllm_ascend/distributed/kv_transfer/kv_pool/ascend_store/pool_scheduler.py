@@ -1,4 +1,3 @@
-import math
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -29,12 +28,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     RequestTracker,
-    infer_cache_transfer_granularity,
-    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    resolve_pool_cache_geometry,
     uses_hybrid_kv_cache,
 )
 
@@ -102,23 +100,15 @@ class BaseKVPoolScheduler(ABC):
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
-        for group_id in self.cacheable_group_ids:
-            group_block_size = self.grouped_block_size[group_id]
-            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
-        self._block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
+        self.pool_cache_geometry = resolve_pool_cache_geometry(
+            vllm_config, kv_cache_config, use_layerwise=use_layerwise
         )
+        self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
+        self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
+        self.hash_block_size = self.pool_cache_geometry.hash_block_size
+        self._block_size = self.grouped_block_size[0]
+        self.lcm_block_size = self.pool_cache_geometry.transfer_granularity
+        self.cache_transfer_granularity = self.pool_cache_geometry.transfer_granularity
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
@@ -251,6 +241,23 @@ class BaseKVPoolScheduler(ABC):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
+        exact_local_hit = getattr(request, "local_prefix_cache_hit_tokens", None)
+        if (
+            self.pool_cache_geometry.block_only
+            and self.pool_cache_geometry.core_hit_alignment < self.cache_transfer_granularity
+            and exact_local_hit is None
+        ):
+            # Older Core schedulers can round down before calling the connector.
+            # Without the exact hit, even a reported zero may hide a live tail.
+            logger.debug("AscendStore skips whole-page load without the exact local APC hit")
+            return 0, False
+        local_hit = max(num_computed_tokens, exact_local_hit) if isinstance(exact_local_hit, int) else num_computed_tokens
+        if self.pool_cache_geometry.block_only and local_hit % self.cache_transfer_granularity:
+            # An HBM prefix may end inside an externally stored page. A whole-page
+            # load could overwrite that live tail, so leave it entirely to Core.
+            logger.debug("AscendStore skips whole-page load after local hit %d", local_hit)
+            return 0, False
+
         num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)
         if not num_external_hit_tokens:
             return 0, False
@@ -279,7 +286,7 @@ class BaseKVPoolScheduler(ABC):
                 )
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
-        if len(self.cacheable_group_ids) != len(self.original_block_size):
+        if self.pool_cache_geometry.block_only or len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt locally. Recompute the last
             # whole token page rather than resume inside a compressed block.
             num_external_hit_tokens = self._floor_to_cache_transfer_granularity(num_external_hit_tokens)

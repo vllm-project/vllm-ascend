@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import math
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -56,11 +55,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     get_block_hashes,
     get_group_cache_family,
-    infer_cache_transfer_granularity,
-    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    resolve_pool_cache_geometry,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -181,26 +179,18 @@ class KVPoolWorker:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
-        for group_id in self.cacheable_group_ids:
-            group_block_size = self.grouped_block_size[group_id]
-            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        self.pool_cache_geometry = resolve_pool_cache_geometry(
+            vllm_config, kv_cache_config, use_layerwise=use_layerwise
+        )
+        self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
+        self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
+        self.hash_block_size = self.pool_cache_geometry.hash_block_size
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
+        self.lcm_block_size = self.pool_cache_geometry.transfer_granularity
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
-        self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
-        )
+        self.cache_transfer_granularity = self.pool_cache_geometry.transfer_granularity
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
 
         logger.info(

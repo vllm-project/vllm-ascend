@@ -180,6 +180,25 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_block_only_uses_core_hash_and_keeps_whole_pages(self):
+        spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
+        core_config = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+            hash_block_size=32,
+            cache_hit_alignment_tokens=32,
+        )
+        worker = make_worker(
+            self,
+            cache_block_size=640,
+            prefix_match_unit=16,
+            kv_cache_config=core_config,
+            extra_config={"pool_prefix_mode": "block_only"},
+        )
+        self.assertEqual(worker.hash_block_size, 32)
+        self.assertEqual(worker.grouped_block_size, [640])
+        self.assertEqual(worker.cache_transfer_granularity, 640)
+        self.assertTrue(worker.pool_cache_geometry.block_only)
+
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
         draft_names = [f"draft.layers.{index}.attn" for index in range(4, 6)]
@@ -979,6 +998,8 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = block_size
+        config.cache_config.prefix_match_unit = None
+        config.parallel_config.decode_context_parallel_size = 1
         config.kv_events_config = None
         return config
 
@@ -1230,6 +1251,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = block_size
+        config.cache_config.prefix_match_unit = None
+        config.parallel_config.decode_context_parallel_size = 1
         config.kv_events_config = None
         return config
 
@@ -3010,6 +3033,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = 16
+        config.cache_config.prefix_match_unit = None
+        config.parallel_config.decode_context_parallel_size = 1
         config.kv_events_config = None
         return config
 

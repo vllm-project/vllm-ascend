@@ -178,6 +178,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
                 num_new_local_computed_tokens,
                 request.shared_prefix_boundary,
             ) = self.kv_cache_manager.get_computed_blocks(request)
+            request.local_prefix_cache_hit_tokens = num_new_local_computed_tokens
             ext_tokens, load_async = self.connector.get_num_new_matched_tokens(
                 request,
                 num_new_local_computed_tokens,
@@ -750,6 +751,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
                         partial_tail = num_new_local_computed_tokens % self.block_size if supports_partial_tail else 0
+                        request.local_prefix_cache_hit_tokens = num_new_local_computed_tokens
                         block_aligned_local = num_new_local_computed_tokens - partial_tail
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
