@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -77,6 +78,9 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_text_config
         self.config = config
+        self.prefill_query_pruning_enabled = (
+            vllm_config.model_config.enforce_eager or vllm_config.speculative_config.enforce_eager
+        )
         quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -134,8 +138,26 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         # Fuse the residual add and final RMSNorm. Glm5NextMoE already performs
         # its all-reduce, so no collective is needed here. The post-norm result
         # feeds both draft logits and the next recycled hidden state.
-        hidden_states, residual, _, _ = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
+        draft_input = hidden_states
+        draft_rows = None
+        if self.prefill_query_pruning_enabled and is_forward_context_available():
+            attn_metadata = get_forward_context().attn_metadata
+            if isinstance(attn_metadata, dict):
+                attention = self.mtp_block.self_attn
+                assert isinstance(attention, Glm5NextMLAAttention)
+                layer_name = attention.mla_attn.mla_attn.layer_name
+                draft_rows = getattr(attn_metadata.get(layer_name), "draft_prefill_query_indices", None)
+        if draft_rows is None:
+            hidden_states, residual, _, _ = self.mtp_block(positions=positions, hidden_states=hidden_states)
+        else:
+            hidden_states, residual, _, _ = self.mtp_block(
+                positions=positions, hidden_states=hidden_states, draft_prefill_query_indices=draft_rows
+            )
+            if not draft_rows.numel():
+                return draft_input, draft_input
         hidden_states, _ = self.shared_head.norm(hidden_states, residual=residual)
+        if draft_rows is not None:
+            hidden_states = draft_input.index_copy_(0, draft_rows, hidden_states)
         return hidden_states, hidden_states
 
 

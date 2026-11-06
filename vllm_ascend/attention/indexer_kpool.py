@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from importlib import import_module
 from typing import Any
@@ -231,6 +231,7 @@ class AscendIndexerKPoolMetadata:
     pcp_local_token_count: int = 0
     # Per-rank contiguous scoring slice, or None for the replicated path.
     indexer_row_shard: AscendIndexerKPoolRowShard | None = None
+    draft_prefill_query_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -911,8 +912,30 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             row_start, row_stop = 0, num_tokens
             if row_shard is not None:
                 row_start, row_stop = row_shard.start, row_shard.stop
-            q_values = self.wq_b(q_c[row_start:row_stop])[0].view(row_stop - row_start, self.n_head, self.head_dim)
-            weights = F.linear(hidden[row_start:row_stop].float(), self._head_weight_f32).to(q_values.dtype)
+            draft_rows = indexer_metadata.draft_prefill_query_indices
+            if draft_rows is None:
+                q_input = q_c[row_start:row_stop]
+                weight_input = hidden[row_start:row_stop]
+            else:
+                assert draft_rows.numel() == 1
+                positions = indexer_metadata.positions.index_select(0, draft_rows)
+                visible = positions + 1
+                query_lens = indexer_metadata.cum_query_lens
+                assert query_lens is not None
+                indexer_metadata = replace(
+                    indexer_metadata,
+                    write_metadata=indexer_metadata.write_metadata or indexer_metadata,
+                    positions=positions,
+                    cum_query_lens=torch.ones_like(query_lens),
+                    seq_lens=visible // self.index_kpool,
+                    pool_tail=visible % self.index_kpool,
+                    num_actual_tokens=1,
+                    indexer_row_shard=None,
+                )
+                q_input = q_c.index_select(0, draft_rows)
+                weight_input = hidden.index_select(0, draft_rows)
+            q_values = self.wq_b(q_input)[0].view(q_input.shape[0], self.n_head, self.head_dim)
+            weights = F.linear(weight_input.float(), self._head_weight_f32).to(q_values.dtype)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)

@@ -420,6 +420,7 @@ class Glm5NextDecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         post: torch.Tensor | None = None,
         comb: torch.Tensor | None = None,
+        draft_prefill_query_indices: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -435,6 +436,12 @@ class Glm5NextDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 positions=positions,
             )
+            if draft_prefill_query_indices is not None:
+                num_queries = draft_prefill_query_indices.numel()
+                if num_queries == 0:
+                    return residual[:0], residual[:0], None, None
+                attn_output = attn_output[:num_queries]
+                residual = residual.index_select(0, draft_prefill_query_indices)
             hidden_states, residual = self.post_attention_layernorm(attn_output, residual=residual)
             hidden_states = self.mlp(hidden_states)
             if self.is_mtp_layer:

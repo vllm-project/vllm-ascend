@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
@@ -16,8 +17,9 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
@@ -397,6 +399,37 @@ def test_build_attn_metadata_delegates_offload_kwargs_once():
 
     build_kwargs.assert_called_once_with(speculator.input_batch, speculator.model_state, 2, batch_desc, query_start, 1)
     assert calls == ["offload", "factory", "parent"]
+
+
+@pytest.mark.parametrize("skip_sample", [False, True])
+def test_glm_draft_prefill_keeps_all_cache_rows(skip_sample):
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    parallel = SimpleNamespace(data_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1)
+    model = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="glm5_next", qk_rope_head_dim=0), enforce_eager=True
+    )
+    speculator.draft_vllm_config = SimpleNamespace(
+        parallel_config=parallel, model_config=model, cache_config=SimpleNamespace(cache_dtype="int8")
+    )
+    speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([True]))
+    speculator.last_token_indices = torch.tensor([4095])
+    slots = torch.arange(4096)
+    block_table = torch.empty((1, 32), dtype=torch.int32)
+    lengths = torch.tensor([4096], dtype=torch.int32)
+    sfa = AscendSFAMetadata(4096, slots, lengths, None, lengths, block_table, None, None)
+    indexer = AscendIndexerKPoolMetadata(block_table, slots, lengths // 4, slots, 128, 4, num_actual_tokens=4096)
+    original = {"sfa": sfa, "indexer": indexer, "tail": object()}
+
+    metadata = speculator._with_glm_draft_prefill_queries(original, 1, 4096, CUDAGraphMode.NONE, skip_sample)
+    expected = speculator.last_token_indices[: 0 if skip_sample else 1]
+    for name in ("sfa", "indexer"):
+        torch.testing.assert_close(metadata[name].draft_prefill_query_indices, expected)
+        assert metadata[name].slot_mapping is slots
+        assert original[name].draft_prefill_query_indices is None
+    assert metadata["tail"] is original["tail"]
+    assert speculator._with_glm_draft_prefill_queries(original, 1, 4096, CUDAGraphMode.FULL, skip_sample) is original
+    parallel.prefill_context_parallel_size = 2
+    assert speculator._with_glm_draft_prefill_queries(original, 1, 4096, CUDAGraphMode.NONE, skip_sample) is original
 
 
 def test_build_draft_attn_metadatas_prefill():
