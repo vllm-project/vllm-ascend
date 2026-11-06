@@ -5,6 +5,7 @@ from pathlib import Path
 
 _path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/gdn_checkpoint_plan.py"
 _spec = importlib.util.spec_from_file_location("gdn_checkpoint_plan", _path)
+assert _spec is not None and _spec.loader is not None
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
 validate_checkpoint_plan = _module.validate_checkpoint_plan

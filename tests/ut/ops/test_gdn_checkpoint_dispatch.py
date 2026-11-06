@@ -241,7 +241,8 @@ class CheckpointDispatchTest(unittest.TestCase):
                     _build_fused_metadata=Mock(return_value=sentinel),
                 )
                 module = ModuleType("vllm_ascend.ops.gdn_checkpoint")
-                module.build_gdn_checkpoints = Mock(return_value=checkpoint)
+                build_checkpoints = Mock(return_value=checkpoint)
+                module.__dict__["build_gdn_checkpoints"] = build_checkpoints
                 build = function_from_source(
                     ROOT / "vllm_ascend/ops/gdn_attn_builder.py",
                     "build",
@@ -262,7 +263,7 @@ class CheckpointDispatchTest(unittest.TestCase):
                     result = build(builder, 0, SimpleNamespace(num_reqs=1), num_actual_reqs=1)
                 self.assertEqual(builder._build_fused_metadata.call_count, expected_calls)
                 self.assertIs(result, sentinel if expected_calls else None)
-                self.assertEqual(module.build_gdn_checkpoints.call_count, int(enabled and bool(num_prefills)))
+                self.assertEqual(build_checkpoints.call_count, int(enabled and bool(num_prefills)))
 
     def test_cold_and_cache_hit_prefill_share_backend_and_cache_dtype(self):
         class Tensor:
@@ -301,11 +302,13 @@ class CheckpointDispatchTest(unittest.TestCase):
                 self.assertEqual(result, (output, final))
                 self.assertEqual(backend.call_args.kwargs["checkpoint_state_dtype"], "bf16")
                 self.assertIs(backend.call_args.args[8], workspace if creates_checkpoint else None)
-                self.assertIs(backend.call_args.args[9], checkpoint.checkpoint_offsets if creates_checkpoint else None)
+                self.assertIs(
+                    backend.call_args.args[9], checkpoint.checkpoint_offsets if checkpoint is not None else None
+                )
                 self.assertEqual(exporter.export.call_count, int(creates_checkpoint))
 
     def test_checkpoint_workspace_is_shared_only_for_matching_device_and_shape(self):
-        context = {}
+        context: dict[str, SimpleNamespace] = {}
         config = SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=32),
             compilation_config=SimpleNamespace(static_forward_context=context),

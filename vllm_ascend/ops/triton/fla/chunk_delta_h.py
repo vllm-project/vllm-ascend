@@ -209,7 +209,7 @@ def chunk_gated_delta_rule_fwd_h(
     checkpoint_output: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
     checkpoint_state_dtype: torch.dtype = torch.float32,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
     if checkpoint_state_dtype not in (torch.float32, torch.bfloat16, torch.float16):

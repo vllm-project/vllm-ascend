@@ -37,6 +37,7 @@ def test_internal_state_matches_cache_roundtrip(cache_dtype):
         initial,
         True,
     )
+    assert full_final is not None and truncated is not None
     assert states.dtype == torch.float32
     torch.testing.assert_close(states.transpose(-1, -2), truncated.to(cache_dtype).float(), rtol=0, atol=0)
     _, _, resumed_final = chunk_gated_delta_rule_fwd_h(
