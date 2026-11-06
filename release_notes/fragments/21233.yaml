@@ -1,0 +1,4 @@
+pr: 21233
+entries:
+  - category: bugfix
+    text: Fixed corrupted continuations for stateful models when Model Runner V1 reuses a prefix with one prompt token remaining and speculative verifier padding.
