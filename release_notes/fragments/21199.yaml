@@ -1,0 +1,7 @@
+pr: 21199
+entries:
+  - category: bugfix
+    text: >-
+      DyntraLB, Recompute, and ProfilingChunk schedulers now propagate unused-draft
+      skipping decisions on compatible vLLM Model Runner V2 paths, including their
+      async and combined variants. Older vLLM releases retain their existing behavior.
