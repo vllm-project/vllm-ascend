@@ -1,5 +1,8 @@
 # Layerwise and Sparse KV Cache Offloading Design
 
+The experimental Qwen4Exp hybrid-cache allocation contract is described in
+[Qwen4Exp model-aware layerwise cache plan](qwen4_layerwise_kv_offload.md).
+
 This document explains why Prefill and Decode use different KV cache offload
 strategies, how the two strategies work, and how they preserve correctness when
 used together.

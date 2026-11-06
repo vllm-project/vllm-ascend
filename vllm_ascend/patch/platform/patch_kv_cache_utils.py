@@ -27,6 +27,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     is_prefix_cacheable,
 )
+from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout, serialize_layerwise_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -660,7 +664,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
-    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
     if qwen_bytes is not None:
         return qwen_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -678,6 +682,7 @@ def _has_ascend_multi_allocation_kv_cache_layout(
         tq_cache.uses_turboquant_groups(kv_cache_groups)
         or is_deepseek_v41_cache(kv_cache_groups)
         or _get_glm5_next_cache_layout(kv_cache_groups) is not None
+        or get_qwen4_exp_pool_bytes_per_block(kv_cache_groups) is not None
         or _is_deepseek_v4_groups(kv_cache_groups)
     )
 
@@ -787,12 +792,16 @@ def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
+    reuse_names = frozenset(name for name, spec in kv_cache_spec.items() if getattr(spec, "reuse", False))
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
-        return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
-    if groups is not None:
-        return groups
-    return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+        groups = get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
+    else:
+        groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
+        if groups is None:
+            groups = _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    for group in groups:
+        group.reuse_layer_names = reuse_names.intersection(group.layer_names)
+    return groups
 
 
 def _ascend_get_kv_cache_config_from_groups(
@@ -835,6 +844,11 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    # Model placement may already have applied the common planner. Only plan
+    # unconverted configurations; the planner itself handles disabled reuse.
+    if get_layerwise_layout(kv_cache_config) is None:
+        apply_layerwise_kv_cache_plan(kv_cache_config, vllm_config)
+    kv_cache_config = serialize_layerwise_config(kv_cache_config)
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":

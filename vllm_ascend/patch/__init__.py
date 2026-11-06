@@ -315,6 +315,20 @@
 #    Future Plan:
 #       Move this override into an Ascend KVCacheConfigBuilder, or remove it
 #       once upstream provides a platform hook for multi-allocation accounting.
+#   3. Qwen4 layerwise placement in existing cache configuration hooks
+#    Why:
+#       Group spec simplification loses per-name reuse intent, and the connector
+#       must receive the same slots used for allocation and physical accounting.
+#    How:
+#       Preserve declared reuse names when grouping, infer slots from the
+#       original backing and carry placement/dependencies through dataclass IPC.
+#       Existing Qwen4 cost and config hooks consume the same slot inference.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/20949
+#    Future Plan:
+#       Remove the bridge when upstream has equivalent plugin placement and
+#       serialized connector metadata hooks. The companion upstream interface
+#       change supplies KVCacheSpec.reuse and per-name group intent.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -8,6 +8,7 @@
 
 """Regression tests for PP stage-local layer numbering."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,22 +17,28 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import cache
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
     LayerwiseKVPoolWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
 
 
-def test_reuse_layout_remap_to_stage_local():
-    stage_globals = list(range(38, 79))
+@pytest.mark.parametrize("pp_rank", [0, 1])
+def test_reuse_layout_remap_to_stage_local(pp_rank):
+    worker, offset = _make_pp_layer_count_worker(pp_rank, num_groups=1)
+    group = worker.kv_cache_config.kv_cache_groups[0]
+    specs = {name: replace(group.kv_cache_spec, reuse=i > 0) for i, name in enumerate(group.layer_names)}
+    worker.kv_cache_config = cache(specs, n=2)
+    worker.use_layerwise_transfer = True
+    worker._extra_config = {"layerwise_num_shared_buffers": 1, "layerwise_independent_layers": [0]}
+    worker._init_layerwise_config()
 
-    local_map, local_independent = LayerwiseKVPoolWorker._remap_layout_to_stage_local(
-        {42: 39, 43: 40, 44: 41, 45: 42}, [38], stage_globals
-    )
-
-    assert local_map == {4: 1, 5: 2, 6: 3, 7: 4}
-    assert local_independent == [0]
-    assert LayerwiseKVPoolWorker._remap_layout_to_stage_local({3: 0, 4: 1}, [0], list(range(38))) == ({3: 0, 4: 1}, [0])
+    assert worker._global_to_local_layer == {offset + i: i for i in range(4)}
+    assert worker.prefetch_layer_map == {2: 1, 3: 2}
+    assert worker._reuse_predecessors == {2: (1,), 3: (2,)}
+    assert worker.independent_layers == [0]
+    assert worker.layerwise_offload
 
 
 def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_layerwise_transfer=False, num_groups=2):

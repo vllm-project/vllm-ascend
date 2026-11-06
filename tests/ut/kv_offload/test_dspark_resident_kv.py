@@ -255,6 +255,7 @@ def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_c
     worker._get_layerwise_kv_cache_memory_info = Mock(return_value=(1, 1, 1.0))
     with (
         patch.object(module, "get_layerwise_reuse_config", return_value={}),
+        patch.object(module, "get_kv_cache_groups", return_value=[]),
         patch.object(module.KVPPConfig, "from_vllm_config", return_value=SimpleNamespace(size=1)),
         patch.object(
             module,
@@ -263,6 +264,8 @@ def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_c
         ),
     ):
         assert worker.get_kv_cache_spec() is specs
+        worker._get_layerwise_kv_cache_memory_info.assert_not_called()
+        assert worker._scale_kv_cache_memory_for_multi_group(1024) == 1024
     excluded = {"draft.attn"} if method == "dspark" else set()
     worker._get_layerwise_kv_cache_memory_info.assert_called_once_with(specs, {}, excluded_layer_names=excluded)
 
@@ -505,7 +508,9 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
     layer_bytes = 3 * spec.page_size_bytes
     config = KVCacheConfig(
         num_blocks=3,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec, reuse_layer_names=frozenset(target_names[1:]))
+        ],
         kv_cache_tensors=[
             KVCacheTensor(
                 size=len(names) * layer_bytes,

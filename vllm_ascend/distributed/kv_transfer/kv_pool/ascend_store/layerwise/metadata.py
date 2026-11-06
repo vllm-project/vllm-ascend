@@ -178,6 +178,13 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    wait_for_save_layers: tuple[int, ...] = ()
+    generation: int | None = None
+
+    @property
+    def predecessors(self) -> tuple[int, ...]:
+        legacy = () if self.wait_for_save_layer is None else (self.wait_for_save_layer,)
+        return tuple(sorted(set((*legacy, *self.wait_for_save_layers))))
 
 
 @dataclass(init=False)
