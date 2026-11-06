@@ -40,6 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.adaptive import glm_mtp_adaptive_query_len
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -255,6 +256,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
     """Build pool-level addressing for the compressed indexer cache."""
 
     @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec) -> int | None:
+        return glm_mtp_adaptive_query_len(vllm_config)
+
+    @classmethod
     def get_cudagraph_support(
         cls,
         vllm_config: VllmConfig,
@@ -338,6 +343,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         a slice boundary reports the last covered row's visible length, and
         CANN's causal masking derives the remaining rows from it.
         """
+        # Adaptive draft allocation can change individual request boundaries
+        # and visible lengths on device, invalidating host-planned row slices.
+        if getattr(common_attn_metadata, "has_adaptive_draft_tokens", False):
+            return None
         num_rows = int(common_attn_metadata.num_actual_tokens)
         if not self._indexer_row_sharding_supported(num_rows, graph_capture):
             return None
@@ -425,6 +434,12 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
     def _get_state_table(self, common: CommonAttentionMetadata, graph_capture: bool, step: int) -> torch.Tensor:
         # Capture owns each table; eager shapes reuse one growing allocation.
         width = getattr(common, "max_query_len", common.num_input_tokens)
+        # Capture and replay must select the same state-table width even when
+        # the CPU partition understates the device's longest verification.
+        adaptive_width = glm_mtp_adaptive_query_len(self.vllm_config)
+        if adaptive_width is not None:
+            # Prefill may exceed the verification bound; retain its full width.
+            width = max(width, adaptive_width)
         cols = 1 + (width + self.compress_ratio - 1) // self.compress_ratio
         shape = (common.num_reqs, cols)
         key = (step, *shape)
@@ -623,6 +638,10 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
     """Build independent metadata for the GLM-Next compressor tail."""
 
     @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec) -> int | None:
+        return glm_mtp_adaptive_query_len(vllm_config)
+
+    @classmethod
     def get_cudagraph_support(
         cls,
         vllm_config: VllmConfig,
@@ -687,9 +706,11 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
                     for name in ("writes", "state", "retained")
                 },
             }
-        retained_width = (
-            min(self.block_size, getattr(write_common, "max_query_len", self.block_size)) if self._lookahead else 0
-        )
+        max_query_len = getattr(write_common, "max_query_len", self.block_size)
+        adaptive_width = glm_mtp_adaptive_query_len(self.vllm_config)
+        if adaptive_width is not None:
+            max_query_len = max(max_query_len, adaptive_width)
+        retained_width = min(self.block_size, max_query_len) if self._lookahead else 0
         cann_inputs = build_tail_inputs(
             write_common,
             self._pool_size,

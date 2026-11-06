@@ -37,6 +37,10 @@ Decode keeps PCP1.
 The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use Prefill Context
 Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
+For the experimental current-main Model Runner V2 MTP adaptive-verification
+path and its validation requirements, see
+[GLM-5.3-Flash MTP adaptive verification](../../user_guide/feature_guide/glm53_adaptive_verification.md).
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
