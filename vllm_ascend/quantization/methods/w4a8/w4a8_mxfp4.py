@@ -211,6 +211,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        backend = getattr(layer, "_deepgemm_v41", None)
+        if backend is not None:
+            return backend.apply(layer, x, topk_weights, topk_ids)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -286,6 +289,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
         Expert-list weights are intentionally not reversible for RL reload.
         """
+        if get_ascend_config().deepgemm_mega_moe:
+            from vllm_ascend.ops.fused_moe.deepgemm_v41 import DeepGemmV41Experts
+
+            if not hasattr(layer, "_deepgemm_v41"):
+                layer._deepgemm_v41 = DeepGemmV41Experts(layer)
+            return
         if getattr(layer, "_mxfp4_transformed", False):
             return
         # MegaMoe and EPLB share one canonical, non-transposed NZ list.

@@ -29,6 +29,13 @@ RUN apt-get update -y && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
+# Native DeepGEMM-Ascend follows DeepInfer's GCC >= 13 requirement.
+# The builder selects this compiler only for the dependency; do not change the
+# default framework compiler or add serving-time library-path overrides.
+COPY tools/deepgemm/install_build_deps.sh /tmp/install-deepgemm-build-deps.sh
+RUN bash /tmp/install-deepgemm-build-deps.sh && \
+    rm -f /tmp/install-deepgemm-build-deps.sh && rm -rf /var/lib/apt/lists/*
+
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
