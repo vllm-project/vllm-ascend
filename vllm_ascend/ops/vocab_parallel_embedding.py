@@ -52,6 +52,7 @@ from vllm_ascend.utils import (
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
     lmhead_tp_enable,
+    maybe_trans_nz,
 )
 
 
@@ -135,10 +136,15 @@ def _resolve_vocab_parallel_plan(
 
     if is_lm_head and lmhead_tp_enable():
         group = get_lmhead_tp_group()
+        tp_group = get_tp_group()
+        # A DP x TP head partitions replicated token rows across TP before
+        # exchanging them. The same TP group restores the original row order.
+        spans_tp = len(set(group.ranks).intersection(tp_group.ranks)) > 1
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
             group.rank_in_group,
             group.world_size,
+            output_reduce_group=tp_group if spans_tp else None,
         )
 
     if is_token_embedding and embedding_tp_enable():
@@ -456,6 +462,20 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return torch.ops.vllm.all_reduce(output_parallel, reduce_group.unique_name)
 
 
+class AscendUnquantizedLMHeadMethod(UnquantizedEmbeddingMethod):
+    """Apply the configured NZ policy to unquantized, untied LM heads."""
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        if not getattr(layer, "skip_weight_nz_conversion", False):
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
+
+    def tie_weights(self, layer: nn.Module, embed_tokens: VocabParallelEmbedding):
+        # Embedding lookup must retain its original storage layout.
+        layer.skip_weight_nz_conversion = True
+        return super().tie_weights(layer, embed_tokens)
+
+
 class AscendParallelLMHead(ParallelLMHead):
     """
     Register ParallelLMHead as a custom op for Ascend."""
@@ -485,6 +505,8 @@ class AscendParallelLMHead(ParallelLMHead):
             disable_tp=disable_tp,
         )
         self.quant_config = quant_config
+        if type(self.quant_method) is UnquantizedEmbeddingMethod:
+            self.quant_method = AscendUnquantizedLMHeadMethod()
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
             set_weight_attrs(
@@ -599,11 +621,23 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        # Gather hidden states from all devices in tensor parallel group
+        num_rows = hidden_states.shape[0]
+        row_group = lm_head.output_reduce_group
+        if row_group is not None:
+            rows_per_rank = (num_rows + row_group.world_size - 1) // row_group.world_size
+            padding = rows_per_rank * row_group.world_size - num_rows
+            if padding:
+                hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, padding))
+            hidden_states = hidden_states.narrow(0, row_group.rank_in_group * rows_per_rank, rows_per_rank)
+        # DP-only groups gather all local rows. DP x TP groups gather distinct
+        # row slices, avoiding duplicated GEMMs for the standard TP replicas.
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+
+        if row_group is not None:
+            logits = row_group.all_gather(logits, dim=0)[:num_rows]
 
         # Remove paddings in vocab (if any)
         if logits is not None:

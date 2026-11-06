@@ -14,6 +14,9 @@ This document covers supported features, environment and model preparation, sing
 
 This document is written based on the vLLM-Ascend v0.30.0 release. This model is supported in this release.
 
+For the vLLM v0.30.0 DP4/TP4 deployment with a 16-way target and EAGLE3 LM head,
+see the [LM-head TP16 validation report](MiniMax-M3-lmhead-tp16-validation.md).
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.

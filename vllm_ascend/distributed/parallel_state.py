@@ -205,7 +205,13 @@ def init_ascend_model_parallel(
     if otp_size > 0:
         _OTP = _create_or_get_group(otp_size, "otp")
     if lmhead_tp_size > 0:
-        _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
+        if lmhead_tp_size > global_dp_size:
+            stage_size = global_dp_size * global_tp_size
+            stage_ranks = all_ranks.transpose(1, 2).reshape(-1, stage_size)
+            group_ranks = stage_ranks.reshape(-1, lmhead_tp_size).tolist()
+            _LMTP = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="lmheadtp")
+        else:
+            _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
     if embedding_tp_size > 0:
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 0:

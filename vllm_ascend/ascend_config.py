@@ -1416,9 +1416,20 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
+        lmhead_spans_tp = self.lmhead_tensor_parallel_size > vc.parallel_config.data_parallel_size
+        if lmhead_spans_tp:
+            if not vc.model_config.is_moe:
+                raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
+            dp_size = vc.parallel_config.data_parallel_size
+            tp_size = vc.parallel_config.tensor_parallel_size
+            head_size = self.lmhead_tensor_parallel_size
+            if head_size % tp_size != 0 or (dp_size * tp_size) % head_size != 0:
+                raise AssertionError("LM-head TP larger than DP must contain complete TP groups and divide DP * TP.")
+            if vc.parallel_config.prefill_context_parallel_size != 1:
+                raise AssertionError("LM-head TP across DP * TP requires prefill_context_parallel_size == 1.")
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
-            self.lmhead_tensor_parallel_size,
+            0 if lmhead_spans_tp else self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
         ]
@@ -1432,7 +1443,7 @@ class FinegrainedTPConfig:
                 raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
             if module_tp_size > 0 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
-        if any(size > 0 for size in module_tp_sizes) and enabled_configs:
+        if (lmhead_spans_tp or any(size > 0 for size in module_tp_sizes)) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
 

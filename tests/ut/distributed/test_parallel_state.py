@@ -79,6 +79,33 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         assert _P_TP is None
 
 
+def test_lmhead_dp_tp_groups_do_not_cross_pipeline_stages(mock_distributed, parallel_config):
+    config = MagicMock()
+    config.kvpp_config.size = 1
+    config.finegrained_tp_config.lmhead_tensor_parallel_size = 8
+    config.finegrained_tp_config.oproj_tensor_parallel_size = 0
+    config.finegrained_tp_config.embedding_tensor_parallel_size = 0
+    config.finegrained_tp_config.mlp_tensor_parallel_size = 0
+    config.pd_tp_ratio = 1
+    config.num_head_replica = 0
+    config.pd_head_ratio = 1
+    config.enable_context_parallel = False
+    with (
+        patch("vllm_ascend.distributed.parallel_state.model_parallel_initialized", return_value=False),
+        patch("vllm_ascend.distributed.parallel_state.init_model_parallel_group") as init_group,
+        patch("vllm_ascend.distributed.parallel_state.get_current_vllm_config", return_value=MagicMock()),
+        patch("vllm_ascend.distributed.parallel_state.get_ascend_config", return_value=config),
+        patch("vllm_ascend.utils.get_ascend_config", return_value=config),
+    ):
+        try:
+            init_ascend_model_parallel(parallel_config)
+            calls = [call for call in init_group.call_args_list if call.kwargs.get("group_name") == "lmheadtp"]
+            assert len(calls) == 1
+            assert calls[0].args[0] == [[0, 1, 2, 3, 8, 9, 10, 11], [4, 5, 6, 7, 12, 13, 14, 15]]
+        finally:
+            destroy_ascend_model_parallel()
+
+
 def _build_parallel_config(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
