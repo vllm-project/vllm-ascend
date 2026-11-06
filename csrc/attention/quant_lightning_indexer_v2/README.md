@@ -163,8 +163,7 @@ Key 和 scale 的 leading-axis stride 分别显式传入 native tiling，支持 
 每个 rank 保留完整本地 K 个候选，框架只交换候选并按比较值和全局 token ID 合并。
 不能将本地 K 除以 R。相同分数采用较小 token ID 优先的边界选择。
 
-回归测试：`tests/ut/ops/test_quant_lightning_indexer_local_candidates.py`，覆盖零 KV、
-因果边界、未来高分、长序列分核合并、并列分数、非连续页、变长请求以及 NPUGraph 重放。
+单算子精度回归：`tests/e2e/nightly/single_node/ops/singlecard_ops/test_quant_lightning_indexer_v2.py`。
 
 ## DCP 本地候选入口（A3 INT8 C8）
 
@@ -182,13 +181,12 @@ A5 的 FP8 和 BF16 派生比较键路径保持原有行为。
 共用一个 16640 字节页。私有模式将 `output_idx_offset` 槽作为可见长度读取，
 不会把该值加到普通输出或 LD 输出的本地索引上。
 
-A3 硬件回归：`tests/ut/ops/test_a3_quant_lightning_indexer_local_candidates.py`。
-覆盖 32/64 个完整 query heads、空前缀、页边界、独立非连续页、共享页、
-FP32 比较值、未来高分、变长请求、图重放、长序列普通累加和十六个 owner 的候选合并。
+A3 硬件精度回归：`tests/e2e/nightly/single_node/ops/singlecard_ops/test_quant_lightning_indexer_v2.py`
+中的 A3 INT8 和 A3 INT8 DCP 参数组，检查分页索引和分数。
 当前 A3 metadata 不启用 LD；私有 LD score 输出仅经过源码审查，尚未硬件验证，
 不计入上述测试的运行路径证明。保留 PR 原有 metadata 行为，不强制启用 LD。
 超过 K 个相同分数时的小 token ID 边界选择是必须通过的硬件验证项；
-单卡模拟十六个 owner 不替代实际 DCP16 通信与端到端验证。
+单卡 DCP 参数组不替代实际多卡通信与端到端验证。
 
 ## A3/A5 兼容边界与框架适配说明
 

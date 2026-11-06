@@ -131,12 +131,8 @@ Torch、ACLNN 和 Tiling 检查 BF16 dtype、形状、stride、epsilon、整数�
 
 - NPU：`tests/e2e/nightly/single_node/ops/singlecard_ops/test_attn_res_fwd.py`
   和同目录 `test_attn_res_fwd_cooperative.py`。
-- CPU：`tests/ut/ops/test_attn_res_fwd_parallel_plan.py`。真实 Host planner 与 kernel
-  控制流检查包括任务覆盖、唯一输出 owner、UB/workspace、实际 score 槽写入和 bank 读取，
-  以及单核 token 模式零次、多核完整行模式一次同步。CPU 替身不证明异步流水或硬件加法树。
 - 上述 `41e163a30` 版本在 A2/A5 各通过153条 NPU 用例；含四条大 H、完整驻留尾块边界、
   可选加法/归一化/materialized、带 stride 的 bank、写回和非法 FP16/FP32/INT32 拒绝。
-  五个 CPU 方法通过，每种架构49条协作和5条旧路径回归。
 
 ## 41e163a30 历史性能记录（本次选路调整前）
 
