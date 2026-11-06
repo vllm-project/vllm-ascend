@@ -25,6 +25,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+For the experimental current-main Model Runner V2 MTP adaptive-verification
+path and its validation requirements, see
+[GLM-5.3-Flash MTP adaptive verification](../../user_guide/feature_guide/glm53_adaptive_verification.md).
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

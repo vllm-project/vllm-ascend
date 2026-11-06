@@ -253,6 +253,10 @@ def _build_keypool_metadata_kernel(
     else:
         pos = tl.load(raw_positions + row * POS_STRIDE, row < source, other=0).to(tl.int64)
         slot = tl.load(raw_slots + row * SLOT_STRIDE, row < source, other=-1).to(tl.int64)
+        # The graph owns more physical rows than the live device partition.
+        # Stale padded positions/slots must never look like cache writes.
+        live_end = tl.load(raw_query + n * QUERY_STRIDE)
+        slot = tl.where(row < tl.minimum(live_end, actual), slot, -1)
         compressed = slot // LOGICAL * (LOGICAL // POOL) + slot % LOGICAL // POOL
         tl.store(positions + row, pos, row < tokens)
         tl.store(slots + row, tl.where((slot >= 0) & ((pos + 1) % POOL == 0), compressed, -1), row < tokens)

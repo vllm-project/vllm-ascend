@@ -1,0 +1,6 @@
+# Replace 0 in the filename and pr field with the assigned Ascend PR number.
+pr: 0
+entries:
+  - category: feature
+    text: Added opt-in GLM-5.3-Flash MTP adaptive verification on Model Runner V2, with device-selected verification lengths and full decode graphs. PCP, DCP and RecoverSSM combinations remain unsupported.
+    model: GLM-5.3-Flash
