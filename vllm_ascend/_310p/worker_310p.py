@@ -36,41 +36,7 @@ else:
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
 
-def _keep_mrv2_runner_selector(vllm_config) -> None:
-    """Keep ``use_v2_model_runner`` readable after upstream deletes it.
-
-    vLLM removes the property with Model Runner V1. ``NPUWorker`` still reads
-    it during init. Install a V2 stand-in only when the attribute is already
-    gone, so current builds keep their own selector until this worker forces V2.
-    """
-    try:
-        _ = vllm_config.use_v2_model_runner
-    except AttributeError:
-        type(vllm_config).use_v2_model_runner = property(lambda self: True)
-
-
 class NPUWorker310(NPUWorker):
-    def __init__(
-        self,
-        vllm_config,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
-        **kwargs,
-    ):
-        _keep_mrv2_runner_selector(vllm_config)
-        super().__init__(
-            vllm_config=vllm_config,
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=distributed_init_method,
-            is_driver_worker=is_driver_worker,
-            **kwargs,
-        )
-        # Inherited worker branches follow this flag. 310P has no V1 runner.
-        self.use_v2_model_runner = True
-
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         kv_cache_spec = self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
@@ -87,12 +53,17 @@ class NPUWorker310(NPUWorker):
         return super()._scale_kv_cache_memory_for_multi_group(available_memory)
 
     def _create_model_runner(self):
-        # Graph mode, W8A8 quantization, and prefix cache stay on MRV2.
-        # The V1 310P runner imports modules removed with Model Runner V1.
-        from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+        if self.use_v2_model_runner:
+            from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
-        model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
-        logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
+            model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
+            logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
+            return model_runner
+
+        from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
+
+        model_runner = NPUModelRunner310(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
         return model_runner
 
     def init_device(self):
