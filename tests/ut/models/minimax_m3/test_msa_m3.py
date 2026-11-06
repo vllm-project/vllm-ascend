@@ -885,7 +885,7 @@ def test_index_score_uses_ascendc_prefill_and_decode_on_all_devices() -> None:
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is can_use_cann_index_score
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is can_use_cann_index_score
     assert "msa_m3_index_topk" in import_branches
-    assert "from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import" in import_branches
+    assert "from vllm_ascend.ops.triton.msa.msa_m3_triton import" in import_branches
     assert "_CANN_INDEX_SCORE_AVAILABLE" in module_source
 
 

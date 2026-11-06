@@ -102,7 +102,7 @@ if get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.F
 
     _TRITON_DECODE_SUPPORTS_SORTED_INDICES = True
 else:
-    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+    from vllm_ascend.ops.triton.msa.msa_m3_triton import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,

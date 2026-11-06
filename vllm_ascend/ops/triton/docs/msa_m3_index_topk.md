@@ -86,3 +86,13 @@ need attribution. This does not validate multi-node communication or throughput.
 Record the tested source hashes and runtime with each result. Reused model
 accuracy scores must identify their source and actual backend; single-operator
 exactness and trace coverage are reported separately.
+
+The full A5 module also has direct producer/attention regression coverage:
+
+```bash
+python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_and_attention.py
+```
+
+These cases use production-shaped TopK16 and 128-wide heads, checking prefill
+and decode selection, valid counts, strided output guards, changed-length graph
+replay, and BF16 sparse attention against a CPU reference across three KV layouts.
