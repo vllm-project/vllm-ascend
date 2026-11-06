@@ -1,0 +1,6 @@
+pr: 21153
+entries:
+  - category: performance
+    text: Reduced the MiniMax-M3 fused sparse preparation kernel latency for packed batches of 128 and 512 tokens on Ascend 950DT. The effect varies with batch size and cache dtype.
+    model: MiniMax-M3
+    hardware: [A5]
