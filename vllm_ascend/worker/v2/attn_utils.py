@@ -47,6 +47,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -667,17 +668,18 @@ def build_attn_metadata(
                     # branches in the graph even for a short dummy sequence.
                     full_graph_mode=full_graph_mode or for_cudagraph_capture,
                 )
-
+            # Map manager block IDs to this AttentionGroup's kernel blocks
+            # before building metadata for either execution or graph capture.
             for variant_names, variant_common in metadata_variants:
                 if for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
-                        variant_common,
+                        attn_group._with_kernel_block_table(variant_common),
                         **attn_metadata_extra_kwargs,
                     )
                 else:
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
-                    metadata = attn_metadata_builder.build(
+                    metadata = attn_group.build_metadata(
                         common_prefix_len=0,
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
@@ -1643,6 +1645,8 @@ def allocate_kv_cache_main(
             layer_spec = kv_cache_group.kv_cache_spec
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
+            if isinstance(layer_spec, EncoderOnlyAttentionSpec):
+                continue
             backend = layer.get_attn_backend()
             key = (backend.full_cls_name(), layer_spec, getattr(layer, "num_heads", 0))
             if key not in group_map:
