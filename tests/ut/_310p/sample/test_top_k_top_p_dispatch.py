@@ -13,12 +13,16 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType._310P, None])
+@pytest.mark.parametrize(
+    "device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5, AscendDeviceType._310P, None]
+)
 def test_top_k_top_p_capability_dispatch(device_type):
     # Load an isolated module to exercise import-time selection without changing
     # the implementation already imported by other samplers in this process.
     shared = importlib.import_module("vllm_ascend.worker.v2.sample.apply_top_k_top_p")
     spec = importlib.util.spec_from_file_location("_top_k_top_p_dispatch_test", shared.__file__)
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     profile = (
         get_hardware_profile(device_type) if device_type is not None else SimpleNamespace(supports=lambda _: False)
