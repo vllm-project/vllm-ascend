@@ -2599,7 +2599,7 @@ For complete startup commands and parameter descriptions, please refer to the de
 | Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | PCP=1 |
 | Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | PCP=1 |
 
-> **Note**: The short-sequence configuration follows the A3 deployment examples in [Chapter 5](#5-online-service-deployment). The long-context configuration uses the same A3 deployment templates with the parallelism, batch settings, and context limits in the table above; it is a reference configuration, not a measured Flash result. Validate it against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment. Except for the differences listed in the table, all other settings remain identical between the short-sequence and long-context configurations.
+> **Note**: Except for the differences listed in the table, all settings remain identical between the short-sequence and long-context configurations. The long-context configuration is provided for reference; no measured Flash results are reported here. Validate it against your input/output lengths, prefix cache hit rate, concurrency, memory usage, and deployment environment.
 
 ### 9.2 Tuning Guidelines
 
