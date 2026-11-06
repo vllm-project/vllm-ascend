@@ -316,6 +316,8 @@ def _select_capacity_and_expert_density_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    if use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
