@@ -256,6 +256,7 @@ def _resolve_window_indices(q, metadata, window_size):
         return build_window_indices_triton(
             metadata.positions[: q.shape[0]],
             window_size,
+            visible_lens=None if lengths is None else lengths[: q.shape[0]],
         )
     return indices[: q.shape[0]], lengths[: q.shape[0]]
 

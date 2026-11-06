@@ -96,11 +96,19 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
-        aux_hidden_state_layers=(1, 3),
+        aux_hidden_state_layers=(),
         shared_attention_state=SimpleNamespace(reset=lambda: None),
         layers=[Layer(i) for i in range(3)],
         norm=lambda hidden: hidden,
     )
+    # Exercise the draft-load conversion and the actual target forward together.
+    # Checkpoint layers 0 and 2 must expose the embedding and the residual after
+    # layers 0/1, rather than the residual one layer earlier or later.
+    target = SimpleNamespace(
+        set_aux_hidden_state_layers=lambda layers: setattr(model, "aux_hidden_state_layers", layers)
+    )
+    draft = SimpleNamespace(model=SimpleNamespace(target_layer_ids=[0, 2]))
+    DSparkDeepseekV41ForCausalLM.configure_target_aux_hidden_capture(draft, target)
     hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     output, aux = DeepseekV41Model.forward(
         model,
@@ -143,6 +151,23 @@ def test_v41_draft_routes_to_v41():
     assert config.compilation_config.static_forward_context[draft.v41_layer_name] is draft
     assert draft.packed_cache_ops is draft_backend
     assert draft.softmax_scale == 512**-0.5
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_v41_draft_normalizes_checkpoint_aux_capture_before_warmup(multimodal):
+    from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
+
+    target = SimpleNamespace(set_aux_hidden_state_layers=MagicMock())
+    target_model = SimpleNamespace(get_language_model=lambda: target) if multimodal else target
+    hf_config = SimpleNamespace(model_type="deepseek_v41", dspark_target_layer_ids=[37, 38, 39])
+    config = SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=hf_config))
+    # Upstream revisions have used both index conventions. The draft hook
+    # always maps checkpoint layer inputs to the Ascend model's idx+1 test.
+    upstream_layers = get_eagle3_aux_layers_from_config(config)
+    assert upstream_layers in ((37, 38, 39), (38, 39, 40))
+    draft = SimpleNamespace(model=SimpleNamespace(target_layer_ids=hf_config.dspark_target_layer_ids))
+    DSparkDeepseekV41ForCausalLM.configure_target_aux_hidden_capture(draft, target_model)
+    target.set_aux_hidden_state_layers.assert_called_once_with((38, 39, 40))
 
 
 def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypatch):

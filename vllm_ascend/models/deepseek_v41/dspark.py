@@ -488,6 +488,17 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
         """Per-position acceptance probability for each drafted token."""
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
+    def configure_target_aux_hidden_capture(self, target_model: torch.nn.Module) -> None:
+        """Translate checkpoint attention-input IDs to Ascend's capture indices.
+
+        The paired vLLM's V4.1 resolver returns the zero-based checkpoint IDs.
+        Ascend captures before a layer when layer_idx + 1 matches the selection,
+        including inside decoder replay. Normalize at the existing draft-load
+        hook, before warmup/capture, without changing other models or MRV1.
+        """
+        target = target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
+        target.set_aux_hidden_state_layers(tuple(index + 1 for index in self.model.target_layer_ids))
+
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return self.model.get_draft_kv_cache_layer_names()
 
