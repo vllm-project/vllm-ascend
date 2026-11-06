@@ -5,12 +5,12 @@
 
 import pytest
 
-from tests.e2e.rlhf.weight_transfer.case import (
+from tests.e2e.common.rlhf.weight_transfer.case import (
     QWEN_CASES,
     WeightUpdateModelCase,
     pytest_model_cases,
 )
-from tests.e2e.rlhf.weight_transfer.hccl import (
+from tests.e2e.common.rlhf.weight_transfer.hccl import (
     run_hccl_weight_transfer_transaction,
 )
 

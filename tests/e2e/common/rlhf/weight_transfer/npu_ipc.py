@@ -19,20 +19,20 @@ import torch.multiprocessing as mp
 import torch_npu  # noqa: F401  # registers the NPU backend
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.rlhf.common import (
+from tests.e2e.common.rlhf.common import (
     CONTROL_TIMEOUT,
     post_control,
     register_engines_once,
     server_visible_devices,
 )
-from tests.e2e.rlhf.weight_transfer.case import WeightUpdateModelCase
-from tests.e2e.rlhf.weight_transfer.reference_check import (
+from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     UPDATE_ROUNDS,
     assert_weight_update_matches_reference,
     generation_signature,
     weight_transfer_servers,
 )
-from tests.e2e.rlhf.weight_transfer.weight_source import (
+from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
     packed_buffer_size_for,
 )

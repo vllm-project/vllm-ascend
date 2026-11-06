@@ -31,7 +31,7 @@ All tests require:
   --additional-config '{"weight_nz_mode": 0}'
 """
 
-from tests.e2e.rlhf.common import (
+from tests.e2e.common.rlhf.common import (
     gen,
     health,
     npu_free_bytes,

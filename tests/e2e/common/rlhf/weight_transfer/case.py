@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from tests.e2e.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
+from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
 
 
 @dataclass(frozen=True)
