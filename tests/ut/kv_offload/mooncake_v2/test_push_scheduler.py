@@ -184,6 +184,7 @@ def test_shared_service_preserves_pull_query_and_completion_protocol():
 @pytest.fixture
 def producer_scheduler(scheduler):
     scheduler.kv_transfer_config.is_kv_producer = True
+    scheduler.dcp_size = 1
     return scheduler
 
 
@@ -248,6 +249,21 @@ def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
     assert third.push_send_requests[request.request_id].num_scheduled_tokens == 16
     assert first.push_send_requests[request.request_id].local_block_ids == ((1,), (11,))
     assert not scheduler.build_connector_meta(step(request, None, computed=48, scheduled=1)).push_send_requests
+
+
+@pytest.mark.parametrize("num_speculative_blocks", [0, 2])
+def test_producer_mamba_excludes_speculative_tail(producer_scheduler, num_speculative_blocks):
+    producer_scheduler.group_unique_specs[1] = [
+        Mock(spec=base_scheduler.MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
+    ]
+    request = prefill_request()
+    blocks = ([1, 2, 3], [10, 11, 12])
+    allocate(producer_scheduler, request, blocks)
+    meta = producer_scheduler.build_connector_meta(step(request, blocks, scheduled=48))
+    state_blocks = meta.push_send_requests[request.request_id].local_block_ids[1]
+    assert state_blocks == ((10,) if num_speculative_blocks else (10, 11, 12))
+    # Preserve the allocator's complete table for subsequent scheduling.
+    assert producer_scheduler._reqs_need_send_layerwise[request.request_id][1] == blocks
 
 
 def test_prefix_hit_publishes_cached_prefix_and_new_token_range(producer_scheduler):
