@@ -31,6 +31,7 @@ if HAS_TRITON:
 # that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
 # worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
 import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
+import vllm_ascend.patch.worker.patch_kv_transfer_engine_id  # noqa
 
 # Apply before model construction on every device, including 310P.
 import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
