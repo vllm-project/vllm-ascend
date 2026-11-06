@@ -69,12 +69,10 @@ class TestMain2MainContracts(unittest.TestCase):
             for i, n in enumerate(kernel.body)
             if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "offsets" for t in n.targets)
         )
-        fragment = ast.FunctionDef(
-            name="before_copy",
-            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-            body=kernel.body[start : end + 1],
-            decorator_list=[],
-        )
+        # Parsing supplies version-specific AST fields, including type_params.
+        fragment = ast.parse("def before_copy(): pass").body[0]
+        assert isinstance(fragment, ast.FunctionDef)
+        fragment.body = kernel.body[start : end + 1]
         module = compile(ast.fix_missing_locations(ast.Module(body=[fragment], type_ignores=[])), str(path), "exec")
         for skip_temporal in (False, True):
             for conv_width in (0, 4):
