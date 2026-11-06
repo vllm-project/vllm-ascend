@@ -6,6 +6,7 @@ import os
 import queue
 import random
 import struct
+import tempfile
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
@@ -1466,6 +1467,32 @@ class MooncakeConnectorScheduler:
         # The scheduler looks up local KV before asking connectors for hits.
         # Truncate first so both lookups use the same prompt length.
         params = request.kv_transfer_params
+        if self.vllm_config.kv_transfer_config.kv_role == "kv_consumer" and not (
+            params and params.get("do_remote_prefill")
+        ):
+            try:
+                payload = msgspec.json.encode(
+                    {
+                        "capture_scope": "engine_request",
+                        "request_id": request.request_id,
+                        "prompt_token_ids": request.prompt_token_ids,
+                        "sampling_params": request.sampling_params,
+                        "kv_transfer_params": params,
+                    }
+                )
+                with tempfile.NamedTemporaryFile(prefix="hybrid-d-missing-kv-", suffix=".json", delete=False) as stream:
+                    stream.write(payload)
+                dump_path = stream.name
+            except Exception as exc:
+                dump_path = f"<dump_failed:{type(exc).__name__}>"
+            logger.warning(
+                "[MooncakeHybrid] D request missing remote-prefill metadata: "
+                "request_id=%s has_kv_params=%s do_remote_prefill=%s dump_path=%s",
+                request.request_id,
+                params is not None,
+                params.get("do_remote_prefill") if params is not None else None,
+                dump_path,
+            )
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
 
