@@ -99,7 +99,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             dtype="auto",
             tensor_parallel_size=4,
             enable_expert_parallel=True,
-            gpu_memory_utilization=0.85,  # was 0.9; leave HBM for the fabric-mem segment
+            gpu_memory_utilization=0.9,
             quantization="ascend",
             tokenizer_mode="deepseek_v4",
             block_size=128,
