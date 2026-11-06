@@ -9,7 +9,7 @@ Two paths share the MixedQuantSparseFlashMla (cann_ops_transformer) operator:
   vllm_ascend/quantization/methods/kv_cache/turboquant.py).
 * DSV4 FP8 (quant_mode=1): ``mixed_quant_sparse_flash_mla_fp8`` /
   ``mixed_quant_sparse_flash_mla_metadata_fp8``, adapted from
-  the former ``npu_kv_quant_sparse_attn_sharedkv`` path.
+  the former KV-quant sparse-attention path.
 """
 
 from collections.abc import Callable

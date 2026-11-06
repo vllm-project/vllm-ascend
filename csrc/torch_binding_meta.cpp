@@ -1172,104 +1172,6 @@ void kv_compress_epilog_v2_meta(at::Tensor &cache, const at::Tensor &x,
     return;
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_meta(
-    const at::Tensor& q,
-    int64_t kv_quant_mode,
-    const c10::optional<at::Tensor>& ori_kv,
-    const c10::optional<at::Tensor>& cmp_kv,
-    const c10::optional<at::Tensor>& ori_sparse_indices,
-    const c10::optional<at::Tensor>& cmp_sparse_indices,
-    const c10::optional<at::Tensor>& ori_block_table,
-    const c10::optional<at::Tensor>& cmp_block_table,
-    const c10::optional<at::Tensor>& cu_seqlens_q,
-    const c10::optional<at::Tensor>& cu_seqlens_ori_kv,
-    const c10::optional<at::Tensor>& cu_seqlens_cmp_kv,
-    const c10::optional<at::Tensor>& seqused_q,
-    const c10::optional<at::Tensor>& seqused_kv,
-    const c10::optional<at::Tensor>& sinks,
-    const c10::optional<at::Tensor>& metadata,
-    int64_t tile_size,
-    int64_t rope_head_dim,
-    double softmax_scale,
-    int64_t cmp_ratio,
-    int64_t ori_mask_mode,
-    int64_t cmp_mask_mode,
-    int64_t ori_win_left,
-    int64_t ori_win_right,
-    c10::string_view layout_q,
-    c10::string_view layout_kv,
-    bool return_softmax_lse)
-{
-    std::string layout_q_str = std::string(layout_q);
-    return construct_output_tensor(q, layout_q_str, return_softmax_lse);
-}
-
-at::Tensor npu_kv_quant_sparse_attn_sharedkv_metadata_meta(
-    int64_t num_heads_q,
-    int64_t num_heads_kv,
-    int64_t head_dim,
-    int64_t kv_quant_mode,
-    const c10::optional<at::Tensor>& cu_seqlens_q,
-    const c10::optional<at::Tensor>& cu_seqlens_ori_kv,
-    const c10::optional<at::Tensor>& cu_seqlens_cmp_kv,
-    const c10::optional<at::Tensor>& seqused_q,
-    const c10::optional<at::Tensor>& seqused_kv,
-    int64_t batch_size,
-    int64_t max_seqlen_q,
-    int64_t max_seqlen_kv,
-    int64_t ori_topk,
-    int64_t cmp_topk,
-    int64_t tile_size,
-    int64_t rope_head_dim,
-    int64_t cmp_ratio,
-    int64_t ori_mask_mode,
-    int64_t cmp_mask_mode,
-    int64_t ori_win_left,
-    int64_t ori_win_right,
-    c10::string_view layout_q,
-    c10::string_view layout_kv,
-    bool has_ori_kv,
-    bool has_cmp_kv,
-    const c10::string_view device)
-{
-    constexpr int64_t OUTPUT_SIZE = 1024;
-    if (cu_seqlens_q.has_value()) {
-        return at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
-    }
-    if (cu_seqlens_ori_kv.has_value()) {
-        return at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
-    }
-    if (cu_seqlens_cmp_kv.has_value()) {
-        return at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
-    }
-    if (seqused_q.has_value()) {
-        return at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(seqused_q.value().device()));
-    }
-    if (seqused_kv.has_value()) {
-        return at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
-    }
-
-    auto device_ori = at::Device(std::string(device));
-    std::string device_str = "meta";
-    if (device_ori.has_index()) {
-        device_str += ":";
-        device_str += std::to_string(device_ori.index());
-    }
-    return at::empty_symint(
-        c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-        torch::dtype(torch::kInt32).device(at::Device(device_str)));
-}
-
 int64_t get_type_code(at::ScalarType dst_type)
 {
     switch (dst_type) {
@@ -1853,9 +1755,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("kv_compress_epilog_v2", &vllm_ascend::meta::kv_compress_epilog_v2_meta);
-    ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
-    ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
-             &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_swiglu_group_quant", &vllm_ascend::meta::npu_swiglu_group_quant_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
