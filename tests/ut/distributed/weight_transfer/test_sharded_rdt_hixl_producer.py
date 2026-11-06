@@ -301,7 +301,7 @@ class TestGatherCredit:
         gather loop runs on CPU: `.npu()` becomes identity, and the storage
         export ships the `(nbytes, ..., device, ...)` tuple the fixture's
         stubbed `rebuild_npu_tensor` expects."""
-        monkeypatch.setattr(torch.Tensor, "npu", lambda self: self)
+        monkeypatch.setattr(torch.Tensor, "npu", lambda self: self, raising=False)
         monkeypatch.setattr(torch.npu, "current_stream", lambda *a: SimpleNamespace(synchronize=lambda: None))
         monkeypatch.setattr(
             trainer_mod,
@@ -855,7 +855,7 @@ class TestExportRingSlotSafety:
 
     @pytest.fixture
     def gather_engine(self, monkeypatch):
-        monkeypatch.setattr(torch.Tensor, "npu", lambda self: self)
+        monkeypatch.setattr(torch.Tensor, "npu", lambda self: self, raising=False)
         monkeypatch.setattr(torch.npu, "current_stream", lambda *a: SimpleNamespace(synchronize=lambda: None))
         monkeypatch.setattr(
             trainer_mod,
@@ -1044,6 +1044,32 @@ class TestSharedServeSlots:
         assert blobs[0].data_ptr() == blobs[1].data_ptr()
         assert len(server._serve_rings) == 1
         assert torch.equal(blobs[0][: expected.numel()], expected)
+
+    def test_pack_is_not_published_before_npu_copies_complete(self, sharing_server, monkeypatch):
+        server = sharing_server(workers_per_replica=2)
+        server.begin_sync(4, [0, 1, 2, 3])
+        _publish(server, GI_A, GROUP_A)
+        copying = threading.Event()
+        complete = threading.Event()
+
+        def synchronize():
+            if not copying.is_set():
+                copying.set()
+                assert complete.wait(timeout=10)
+
+        monkeypatch.setattr(torch.npu, "current_stream", lambda *a: SimpleNamespace(synchronize=synchronize))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(server.rdt_produce_weights_batched, [(GROUP_A[0], ())], c, 0) for c in (0, 2)]
+            try:
+                assert copying.wait(timeout=10)
+                with server._cache_cond:
+                    assert not server._gens[0][0].done
+                assert not any(future.done() for future in futures)
+            finally:
+                complete.set()
+            blobs = [future.result(timeout=10)[0] for future in futures]
+        assert blobs[0].data_ptr() == blobs[1].data_ptr()
+        assert torch.equal(blobs[0], _blob_bytes(server, GROUP_A[0]))
 
     def test_a_sharer_blocks_until_its_peer_arrives(self, sharing_server):
         """Without the wait the packer could repack a slot a peer had not read."""
