@@ -78,6 +78,31 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monkeypatch, rank):
+    state.layers.sequence_parallel = True
+    state.config.parallel_config.tensor_parallel_size = 2
+    monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=rank))
+    state.prepare(inputs(), CUDAGraphMode.NONE)
+    assert state.num_actual_tokens == 5
+    assert state.num_tokens == 6
+    assert state.layers.sp_plan.original_local_tokens == 8
+    assert state.layers.sp_plan.replay_local_tokens == 3
+    assert state.layers.sp_plan.local_rows.tolist() == ([0, 5, 6] if rank == 0 else [3, 4])
+    assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 3, 5]
+
+    previous_plan = state.layers.sp_plan
+
+    # An unchanged or captured batch must not reuse the preceding SP plan.
+    state.keeps_rows[:] = True
+    state.prepare(inputs(), CUDAGraphMode.NONE)
+    assert state.layers.sp_plan is None
+    assert state.layers.rows is None
+    state.layers.sp_plan = previous_plan
+    state.prepare(inputs(), CUDAGraphMode.FULL, for_capture=True)
+    assert state.layers.sp_plan is None
+
+
 @pytest.mark.parametrize(
     ("local_end", "expected_kept"),
     [(4, 0), (8, 2)],
@@ -361,16 +386,26 @@ def test_compacted_pcp_rank_uses_padded_dp_count(synchronized_dp, monkeypatch, a
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
-def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypatch, compact, fail, sequence_parallel):
+@pytest.mark.parametrize("skip_padding", [False, True])
+def test_replay_context_preserves_layout_masks_and_restores_mc2(
+    state, monkeypatch, compact, fail, sequence_parallel, skip_padding
+):
     original_padding = torch.tensor([False, True, False, True])
+    monkeypatch.setattr(replay_mod.envs, "VLLM_MOE_SKIP_PADDING", skip_padding)
+    sharded_padding = sequence_parallel and skip_padding
     state.layers.sequence_parallel = sequence_parallel
-    gather_padding = Mock(side_effect=lambda *args, **kwargs: original_padding.clone())
+    gathered_padding = torch.tensor([False, False, True, True]) if compact else original_padding
+    gather_padding = Mock(side_effect=lambda *args, **kwargs: gathered_padding.clone())
     monkeypatch.setattr(replay_mod, "tensor_model_parallel_all_gather", gather_padding)
-    monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0))
+    monkeypatch.setattr(
+        replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0, device_group=None)
+    )
+    if compact and sharded_padding:
+        state.layers.sp_plan = SimpleNamespace(compact=lambda tensor, group: tensor.new_zeros(2), received_tokens=2)
     outer = SimpleNamespace(
         attn_metadata={"original": object()},
         slot_mapping={"original": torch.arange(4)},
-        is_padding=original_padding[:2] if sequence_parallel else original_padding,
+        is_padding=original_padding[:2] if sharded_padding else original_padding,
         additional_kwargs={"eplb_heat_collection_status": True},
     )
     state.num_tokens = 4
@@ -392,7 +427,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
         assert kwargs["slot_mapping"] is (None if compact else outer.slot_mapping)
         assert kwargs["num_tokens_across_dp"].tolist() == [4, 2]
         expected = [False, False, True, True] if compact else original_padding.tolist()
-        assert kwargs["is_padding"].tolist() == (expected[:2] if sequence_parallel else expected)
+        assert kwargs["is_padding"].tolist() == (expected[:2] if sharded_padding else expected)
         mask.fill_(True)  # Platform hook rewrites the shared MC2 buffer.
         current[0] = inner
         try:
@@ -413,7 +448,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
         assert fail
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
-    assert gather_padding.call_count == int(sequence_parallel)
+    assert gather_padding.call_count == int(sharded_padding)
 
 
 @pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])

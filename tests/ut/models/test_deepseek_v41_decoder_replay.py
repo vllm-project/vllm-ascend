@@ -44,6 +44,42 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     assert model.decoder_replay_start == 1
 
 
+@pytest.mark.parametrize(
+    ("runner_v2", "pcp_size", "adaptive", "enabled"),
+    [(True, 1, False, True), (False, 1, False, False), (True, 2, False, False), (True, 1, True, False)],
+)
+def test_sp_decoder_replay_requires_host_known_mrv2_layout(runner_v2, pcp_size, adaptive, enabled):
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=128, engram_layer_ids=[]),
+        end_layer=3,
+        use_sequence_parallel=True,
+        _run_replay_layers=lambda *states: states,
+        topk_indices_buffer=torch.empty(8, 2),
+        candidate_indices_buffer=torch.empty(8, 2),
+        candidate_lengths_buffer=torch.empty(8),
+        topk_lengths_buffer=torch.empty(8),
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=runner_v2,
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        speculative_config=SimpleNamespace(
+            draft_model_config=None, enable_adaptive_verification=adaptive, use_dspark=lambda: True
+        ),
+        lora_config=None,
+    )
+    replay = replay_mod.make_decoder_replay(model, config)
+    assert (replay is not None) == enabled
+    if enabled:
+        assert replay.sequence_parallel
+
+
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
     model = SimpleNamespace(
@@ -143,6 +179,51 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert replay(hidden, None) == (hidden, None)
     assert entered == [True, False]
     assert torch.equal(buffer, torch.arange(6))
+
+
+def test_compiled_replay_reads_each_forward_plan(monkeypatch):
+    replay = replay_mod.AscendDecoderReplayLayers(
+        2, lambda hidden, mix, positions, ids: (hidden + 10, mix + 3, hidden.mean(dim=1) + 20), []
+    )
+    monkeypatch.setattr(
+        replay_mod, "get_forward_context", lambda: SimpleNamespace(no_compile_layers={"replay": replay})
+    )
+    graphs = []
+
+    def backend(graph, example_inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    def forward(hidden, mix, positions, ids):
+        return torch.ops.vllm.dsv41_sp_decoder_replay(hidden, mix, positions, ids, 1, "replay")
+
+    # Production dispatch is NPU-only; exercise the same implementation on CPU.
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    library.impl("dsv41_sp_decoder_replay", replay_mod.dsv41_sp_decoder_replay)
+    try:
+        compiled = torch.compile(forward, backend=backend, fullgraph=True)
+        hidden = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3)
+        mix = torch.zeros(4, 2)
+        positions = torch.arange(4)
+        # Warmup has no replay; later steps change the retained rows without
+        # recompiling, then decode returns to the ordinary full batch.
+        for rows in (None, torch.tensor([2, 3]), torch.tensor([0, 3]), None):
+            replay.rows = rows
+            replay.num_actual_rows = 0 if rows is None else len(rows)
+            replay.context_factory = None if rows is None else nullcontext
+            outputs = compiled(hidden, mix, positions, positions)
+            expected = [hidden + 10, mix + 3, hidden.mean(dim=1) + 20]
+            if rows is not None:
+                dropped = torch.ones(4, dtype=torch.bool)
+                dropped[rows] = False
+                for value in expected:
+                    value[dropped] = 0
+            for output, reference in zip(outputs, expected):
+                torch.testing.assert_close(output, reference)
+        assert len(graphs) == 1
+    finally:
+        library._destroy()
+        torch._dynamo.reset()
 
 
 def test_model_replays_only_layers_after_kv_sources(monkeypatch):

@@ -265,7 +265,13 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
     - `--swa-bounded-replay` enables SWA bounded replay.
-    - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
+    - `enable_flashcomm1: false` keeps FlashComm disabled in this example.
+      Decoder bounded replay also supports SP/FlashComm1 with model runner V2,
+      PCP size 1, and eager Prefill (`NONE` or `FULL_DECODE_ONLY`). Each SP rank
+      selects its retained rows locally and exchanges only compact states for
+      the layers after the last KV source. Decode rows and requests requiring
+      prompt logprobs retain their full query spans. SP replay does not support
+      adaptive verification, PP, DCP, microbatching, or LoRA.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
@@ -625,7 +631,8 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
         - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
-        - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
+        - `enable_flashcomm1: false` disables FlashComm because combining SP and
+          PCP is not supported by decoder bounded replay.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
 

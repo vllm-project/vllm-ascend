@@ -1094,6 +1094,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         self.decoder_replay_start = self.end_layer
         self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+        if self.decoder_replay_layers is not None and self.use_sequence_parallel:
+            self.decoder_replay_layer_name = f"{prefix}.decoder_replay"
+            vllm_config.compilation_config.static_forward_context[self.decoder_replay_layer_name] = (
+                self.decoder_replay_layers
+            )
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1567,9 +1572,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux_hidden_states = []
         for layer in self.layers:
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
-                hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
-                    hidden_states, pre_mix, positions, input_ids
-                )
+                if use_sequence_parallel:
+                    num_late_aux = sum(
+                        self.decoder_replay_start < layer_idx <= self.end_layer
+                        for layer_idx in self.aux_hidden_state_layers
+                    )
+                    hidden_states, pre_mix, *late_aux = torch.ops.vllm.dsv41_sp_decoder_replay(
+                        hidden_states, pre_mix, positions, input_ids, num_late_aux, self.decoder_replay_layer_name
+                    )
+                else:
+                    hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
+                        hidden_states, pre_mix, positions, input_ids
+                    )
                 aux_hidden_states.extend(late_aux)
                 last_layer = self.layers[self.end_layer - 1]
                 break
