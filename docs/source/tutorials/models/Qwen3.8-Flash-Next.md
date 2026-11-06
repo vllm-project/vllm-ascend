@@ -30,7 +30,7 @@ See [supported features](../../user_guide/support_matrix/supported_features.md) 
 | --- | --- | --- |
 | `Qwen3.8-Flash-Next-w8a8-mtp` (quantized version) | A3 series | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
 | `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | |
-| `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 950DT products | |
+| `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 950DT products | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp) |
 
 The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint.
 
@@ -1177,7 +1177,7 @@ The 10K target is the processed input length, including text and image tokens. B
 
 ### 5.4 PD Separation with MemCache Three-Tier KV Cache Pool
 
-`MultiConnector` combines Mooncake P-to-D transport with MemCache-backed KV caching in HBM, DRAM, and SSD. A2/A3 reuse the model commands from [Section 5.2](#52-basic-pd-separation-deployment); the 950 DT tab contains its complete pooling commands. This section does not cover colocated deployment or the image-and-text 10K case.
+`MultiConnector` combines Mooncake P-to-D transport with MemCache-backed KV caching in HBM, DRAM, and SSD. Each hardware tab contains its complete pooling Prefill and Decode commands. A2/A3 retain the model settings from [Section 5.2](#52-basic-pd-separation-deployment) and add the matching MemCache environment and connector configuration. This section does not cover colocated deployment or the image-and-text 10K case.
 
 **Before starting:**
 
@@ -1254,15 +1254,9 @@ export MEMCACHE_DEVICE_COUNT="<DRAM_ENABLED_LOCAL_SERVICE_COUNT_ON_THIS_HOST>"
 export MEMCACHE_FORCE_NEW_DISK="<true_OR_false_FOR_THIS_DEPLOYMENT>"
 ```
 
+The A3 and 950DT products tabs below provide filled-in values from their respective deployment configurations. For the two-host A2 deployment, set the reachable shared endpoints and each host's storage budget separately; the A3 loopback address and 16-service count do not describe that layout.
+
 `dram.size` and `ubsio.mem.size_in_gb` apply per DRAM-enabled LocalService; budget their total alongside Engram, vLLM, and operating-system memory. `world_size` is pool capacity; `device_count` counts the host's DRAM-enabled LocalServices, not SSDs. LocalServices run inside P/D workers; the `ubsio.standalone.*` keys do not require a separate process.
-
-In every A2/A3 P/D terminal, apply the library exports above and these common exports before the hardware-specific settings:
-
-```bash
-export VLLM_USE_MODELSCOPE=True
-export PYTHONHASHSEED=0
-export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
-```
 
 === "A2 series"
 
@@ -1285,26 +1279,7 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     ubsio.standalone.force_new_disk = <MEMCACHE_FORCE_NEW_DISK>
     ```
 
-    Export the following in the Prefill and Decode terminals. Section 5.2 sets each host's IP and socket interfaces; clear incompatible HCCS/UB settings inherited from another experiment:
-
-    ```bash
-    unset ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
-    export HCCL_INTRA_ROCE_ENABLE=1
-    ```
-
-    **Prefill connector argument:**
-
-    ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
-    ```
-
-    **Decode connector argument:**
-
-    ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
-    ```
-
-    **Start the services:**
+    **Start MetaService:**
 
     Start MetaService on the prefill host with the library exports above, unless the pool is already running:
 
@@ -1313,13 +1288,141 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
 
-    After its configured ports are listening (`ss -lntp`), run the matching Section 5.2 Prefill and Decode commands in separate terminals, replacing only `--kv-transfer-config` with the arguments above. Keep all other model parameters unchanged. Complete the Section 5.2 API checks, start its Proxy, then perform the cache-reuse checks below.
+    After its configured ports are listening (`ss -lntp`), initialize the model runtime from Section 4 and run the complete Prefill and Decode commands below in separate terminals. Set the library directories in each terminal as described above; `MEMCACHE_CONFIG_DIR` is the mounted personal configuration directory from Section 4.3.
+
+    **Prefill:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${PREFILL_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=8192
+
+    export MEMCACHE_LIB_DIR="<MEMCACHE_LIBRARY_DIRECTORY>"
+    export MEMFABRIC_LIB_DIR="<MEMFABRIC_LIBRARY_DIRECTORY>"
+    export PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+    export LD_LIBRARY_PATH="${MEMCACHE_LIB_DIR}:${MEMFABRIC_LIB_DIR}:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    unset ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export HCCL_INTRA_ROCE_ENABLE=1
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${DECODE_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    export MEMCACHE_LIB_DIR="<MEMCACHE_LIBRARY_DIRECTORY>"
+    export MEMFABRIC_LIB_DIR="<MEMFABRIC_LIBRARY_DIRECTORY>"
+    export PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+    export LD_LIBRARY_PATH="${MEMCACHE_LIB_DIR}:${MEMFABRIC_LIB_DIR}:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    unset ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export HCCL_INTRA_ROCE_ENABLE=1
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
+    ```
+
+    Complete the matching Section 5.2 API checks and start its Proxy, then perform the cache-reuse checks below.
 
 === "A3 series"
 
-    Keep the A3 model configuration from Section 5.2. The following resource values come from the A3 deployment configuration, with 16 DRAM-enabled LocalServices and two SSD-backed loop devices:
+    Keep the A3 model configuration from Section 5.2. The following filled-in example comes from the single-host A3 deployment configuration, with MetaService and P/D in the same host network, 16 DRAM-enabled LocalServices, and two SSD-backed loop devices. Use these endpoint and eviction values when editing the shared `mmc-meta.conf` example above and the LocalService file below:
 
     ```bash
+    export MEMCACHE_META_URL="tcp://127.0.0.1:15000"
+    export MEMCACHE_CONFIG_STORE_URL="tcp://127.0.0.1:16000"
+    export MEMCACHE_METRICS_URL="http://127.0.0.1:18000"
+    export MEMCACHE_EVICT_HIGH=70
+    export MEMCACHE_EVICT_LOW=60
     export MEMCACHE_SSD_PATHS="/dev/loop0:/dev/loop1"
     export MEMCACHE_WORLD_SIZE=256
     export MEMCACHE_DRAM_SIZE=10GB
@@ -1348,27 +1451,7 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     ubsio.standalone.force_new_disk = <MEMCACHE_FORCE_NEW_DISK>
     ```
 
-    Export the following in the Prefill and Decode terminals. Clear incompatible RoCE/UB settings inherited from another experiment:
-
-    ```bash
-    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
-    ```
-
-    **Prefill connector argument:**
-
-    ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
-    ```
-
-    **Decode connector argument:**
-
-    ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
-    ```
-
-    **Start the services:**
+    **Start MetaService:**
 
     Start MetaService in the serving container with the library exports above, unless the pool is already running:
 
@@ -1377,9 +1460,128 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
 
-    In each Prefill and Decode terminal, first apply the library exports and A2/A3 common exports from the beginning of Section 5.4, followed by the A3-specific exports above. Exports set in one terminal are not automatically available in another.
+    After its configured ports are listening (`ss -lntp`), initialize the model runtime from Section 4 and run the complete Prefill and Decode commands below in separate terminals. Set the library directories in each terminal as described above; `MEMCACHE_CONFIG_DIR` is the mounted personal configuration directory from Section 4.3.
 
-    After its configured ports are listening (`ss -lntp`), run the matching Section 5.2 Prefill and Decode commands in separate terminals, replacing only `--kv-transfer-config` with the arguments above. Keep all other model parameters unchanged. Complete the Section 5.2 API checks, start its Proxy, then perform the cache-reuse checks below.
+    **Prefill:**
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=8192
+
+    export MEMCACHE_LIB_DIR="<MEMCACHE_LIBRARY_DIRECTORY>"
+    export MEMFABRIC_LIB_DIR="<MEMFABRIC_LIBRARY_DIRECTORY>"
+    export PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+    export LD_LIBRARY_PATH="${MEMCACHE_LIB_DIR}:${MEMFABRIC_LIB_DIR}:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    export MEMCACHE_LIB_DIR="<MEMCACHE_LIBRARY_DIRECTORY>"
+    export MEMFABRIC_LIB_DIR="<MEMFABRIC_LIBRARY_DIRECTORY>"
+    export PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+    export LD_LIBRARY_PATH="${MEMCACHE_LIB_DIR}:${MEMFABRIC_LIB_DIR}:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
+    ```
+
+    Complete the matching Section 5.2 API checks and start its Proxy, then perform the cache-reuse checks below.
 
 === "950DT products"
 
@@ -1387,16 +1589,16 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 
     **Prepare the configuration files:**
 
-    In the configuration-editing terminal, set the actual pool communication IP and mapped SSD paths. The reference uses a dedicated 500 GiB SSD-backed loop device; take its device path from Section 4.3. For an existing pool, retain its MetaService configuration and endpoints and skip MetaService creation/startup.
+    In the configuration-editing terminal, use the following filled-in example from the supplied 102-server configuration. Its pool communication IP is `172.27.24.102`, and its dedicated 500 GiB SSD-backed device is `/dev/loop0`. Replace the address and device with those of the target deployment, keeping the device consistent with Section 4.3. For an existing pool, retain its MetaService configuration and endpoints and skip MetaService creation/startup.
 
     ```bash
-    local_ip="<POOL_COMMUNICATION_IP>"
+    local_ip="172.27.24.102"
     export MEMCACHE_META_URL="tcp://${local_ip}:25250"
     export MEMCACHE_CONFIG_STORE_URL="tcp://${local_ip}:25251"
     export MEMCACHE_METRICS_URL="http://${local_ip}:25252"
     export MEMCACHE_EVICT_HIGH=70
     export MEMCACHE_EVICT_LOW=60
-    export MEMCACHE_SSD_PATHS="<MAPPED_SSD_DEVICE_PATHS_SEPARATED_BY_COLONS>"
+    export MEMCACHE_SSD_PATHS="/dev/loop0"
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf"
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf"
