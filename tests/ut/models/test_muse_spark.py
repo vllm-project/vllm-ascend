@@ -7,7 +7,6 @@ on NPU lives in ``tests/e2e/pull_request/one_card/test_muse_spark.py``.
 """
 
 import abc
-import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -34,6 +33,39 @@ NUM_TOKENS = 5
 NUM_HEADS = 2
 HEAD_DIM = 8
 EPS = 1e-5
+
+
+def _reference_fused_rmsnorm(x, weight, eps, *, out_dtype=None, gain_center=0.0, input_scale=False, **_):
+    """What upstream's fused RMSNorm kernel computes, on CPU.
+
+    Same contract as the kernel: fp32 throughout, ``weight + gain_center`` for
+    the zero-centered gammas, the weight applied before the norm instead of
+    after when ``input_scale`` is set, and one rounding at the end.
+    """
+    out_dtype = out_dtype or x.dtype
+    x32 = x.float()
+    gamma = None if weight is None else weight.float() + gain_center
+    if input_scale and gamma is not None:
+        x32 = x32 * gamma
+        gamma = None
+    x32 = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + eps)
+    if gamma is not None:
+        x32 = x32 * gamma
+    return x32.to(out_dtype)
+
+
+@pytest.fixture(autouse=True)
+def _rmsnorm_on_cpu():
+    """Stand in for the fused RMSNorm kernel for the whole module.
+
+    The norms keep upstream's Triton kernel on Ascend, and these tests run on
+    CPU, so anything calling a norm's ``forward`` -- the attention tests reach
+    ``qk_norm`` through ``_qk_norm_rope_kv_insert`` -- would launch a device
+    kernel with no device under it. Patched rather than switched off by a flag,
+    so the tests exercise the path that ships.
+    """
+    with patch.object(upstream_layers, "fused_rmsnorm_fwd", side_effect=_reference_fused_rmsnorm):
+        yield
 
 
 def _registered_architectures() -> dict[str, str]:
@@ -66,7 +98,7 @@ def test_registration_is_skipped_without_upstream_package():
 
 
 def _post_expert_norm(hidden_size: int) -> nn.Module:
-    norm = muse_spark.AscendMuseSpark1xRMSNormWithInputScale(
+    norm = MuseSpark1xRMSNormWithInputScale(
         hidden_size=hidden_size,
         eps=EPS,
         has_weight=True,
@@ -362,32 +394,29 @@ class _Container(nn.Module):
         self.scaled_norm = MuseSpark1xRMSNormWithInputScale(HEAD_DIM, eps=EPS, has_weight=True)
 
 
-def _adopted_container() -> _Container:
+def _loaded_container() -> _Container:
     container = _Container()
     with torch.no_grad():
         container.norm.weight.normal_()
         container.scaled_norm.weight.normal_()
-    muse_spark.adopt_ascend_modules(container)
     return container
 
 
-def test_adopt_ascend_modules_moves_norms_onto_the_ascend_classes():
-    container = _Container()
-    with torch.no_grad():
-        container.norm.weight.normal_()
-        container.scaled_norm.weight.normal_()
-    weights = (container.norm.weight, container.scaled_norm.weight)
+def test_adopt_ascend_modules_leaves_the_norms_alone():
+    """They keep upstream's fused kernel, so there is no subclass to move to."""
+    container = _loaded_container()
 
     muse_spark.adopt_ascend_modules(container)
 
-    assert type(container.norm) is muse_spark.AscendMuseSpark1xRMSNorm
-    assert type(container.scaled_norm) is muse_spark.AscendMuseSpark1xRMSNormWithInputScale
-    # The subclasses add no state, so the switch keeps the loaded parameters.
-    assert (container.norm.weight, container.scaled_norm.weight) == weights
+    assert type(container.norm) is MuseSpark1xRMSNorm
+    assert type(container.scaled_norm) is MuseSpark1xRMSNormWithInputScale
+    assert MuseSpark1xRMSNorm not in muse_spark.ASCEND_MODULE_CLASSES
+    assert MuseSpark1xRMSNormWithInputScale not in muse_spark.ASCEND_MODULE_CLASSES
 
 
-def test_the_norms_take_the_fused_kernel_by_default():
-    container = _adopted_container()
+def test_the_norms_take_the_fused_kernel():
+    """The kernel is the path that ships; the reference is only this file's stub."""
+    container = _loaded_container()
     x = torch.randn(NUM_TOKENS, HEAD_DIM)
     sentinel = torch.zeros(NUM_TOKENS, HEAD_DIM)
 
@@ -398,26 +427,23 @@ def test_the_norms_take_the_fused_kernel_by_default():
     assert fused.call_count == 2
 
 
-def test_the_env_var_restores_the_reference_path():
-    container = _adopted_container()
+def test_the_fused_kernel_matches_the_reference():
+    """Both ends of the contract, including the weight-first variant.
+
+    If the stub in this file and ``forward_native`` ever disagree, the stub is
+    the one lying about what the kernel does.
+    """
+    container = _loaded_container()
     x = torch.randn(NUM_TOKENS, HEAD_DIM)
 
-    # The env module re-reads os.environ on every attribute access, so this is
-    # patched rather than the module attribute: patching the attribute would
-    # leave a real one behind that shadows the lazy lookup for later tests.
-    with (
-        patch.dict(os.environ, {"VLLM_ASCEND_MUSE_SPARK_FUSED_NORM": "0"}),
-        patch.object(upstream_layers, "fused_rmsnorm_fwd", side_effect=AssertionError("fused kernel called")),
-    ):
-        for norm in (container.norm, container.scaled_norm):
-            assert not norm.supports_fused_kernel(x)
-            torch.testing.assert_close(norm(x), norm.forward_native(x))
+    for norm in (container.norm, container.scaled_norm):
+        torch.testing.assert_close(norm(x), norm.forward_native(x))
 
 
-def test_a_residual_takes_the_reference_path_whatever_the_flag():
+def test_a_residual_takes_the_reference_path():
     # Upstream's forward only reaches for a kernel when residual is None, and
     # the two kernels that fold the residual are gated on Tensor.is_cuda.
-    container = _adopted_container()
+    container = _loaded_container()
     x = torch.randn(NUM_TOKENS, HEAD_DIM)
     residual = torch.randn(NUM_TOKENS, HEAD_DIM)
 
@@ -453,22 +479,46 @@ def test_attention_hands_the_kv_cache_write_back_to_the_backend():
     attention = _attention()
 
     assert type(attention) is muse_spark.AscendMuseSpark1xAttention
-    assert type(attention.qk_norm) is muse_spark.AscendMuseSpark1xRMSNorm
+    # The norms are left on their upstream classes; the fused kernel serves them.
+    assert type(attention.qk_norm) is MuseSpark1xRMSNorm
     assert attention.fused_qk_norm_rope_kv_insert is False
     assert attention.attn.kv_cache_update_bypass is False
 
 
-def test_qk_norm_and_rope_run_in_fp32_and_round_once():
-    rope_inputs: list[torch.Tensor] = []
+class _Rope:
+    """A rotary embedding that records how it was entered.
 
-    def forward_native(positions, query, key):
-        rope_inputs.extend((query, key))
+    ``forward_native`` is here to fail the test if it is ever taken again: the
+    real rotary embedding is an ``AscendRotaryEmbedding``, so the model must
+    call it rather than step around it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+
+    def __call__(self, positions, query, key):
+        self.calls.append(("kernel", query, key))
         return query + 1, key + 1
 
-    attention = _attention(rotary_emb=SimpleNamespace(forward_native=forward_native))
+    def forward_native(self, positions, query, key):
+        self.calls.append(("reference", query, key))
+        return query + 1, key + 1
+
+
+def test_qk_norm_and_rope_run_in_fp32_and_round_once():
+    rope = _Rope()
+    attention = _attention(rotary_emb=rope)
     qkv = torch.randn(NUM_TOKENS, 4 * NUM_HEADS * HEAD_DIM, dtype=torch.bfloat16)
 
     q, k, v, og = attention._qk_norm_rope_kv_insert(qkv, torch.arange(NUM_TOKENS))
+
+    (path, q_rope_in, k_rope_in) = rope.calls[0]
+    assert len(rope.calls) == 1
+    assert path == "kernel"
+    # The Ascend kernel rotates in fp32 whatever it is handed and writes the
+    # input's dtype back, so fp32 in keeps the rounding below the only one.
+    assert q_rope_in.dtype == k_rope_in.dtype == torch.float32
+    rope_inputs = [q_rope_in, k_rope_in]
 
     # The upstream kernel rounds once at the store, so RoPE must see the fp32
     # norm output itself, not a bf16 copy of it.

@@ -7,15 +7,19 @@ vLLM owns the Muse Spark configuration, weight mapping and decoder structure
 the smaller of the two vendor stacks, and replaces each piece that only runs
 on CUDA or ROCm with its PyTorch reference:
 
-* RMSNorm: upstream's fused Triton kernel is kept, because its one
-  CUDA-specific line is behind a ``tl.constexpr`` that is False off CUDA.
-  ``VLLM_ASCEND_MUSE_SPARK_FUSED_NORM=0`` falls back to ``forward_native``.
-  The two kernels that fold the residual as well stay off: upstream gates
-  those on ``Tensor.is_cuda``.
+* RMSNorm: upstream's own fused Triton kernel runs here unchanged, so the
+  norms need no subclass. Its one CUDA-specific line sits behind a
+  ``tl.constexpr`` that its launcher sets from ``current_platform.is_cuda()``,
+  and the rest is plain Triton. The two kernels that fold the residual as well
+  stay out of reach: upstream gates those on ``Tensor.is_cuda``, which is
+  False for an NPU tensor. They fall back to a sequence of single norms, which
+  the kernel above still serves.
 * QK-norm and RoPE: upstream rotates through ``RotaryEmbedding.forward_cuda``
-  and can insert K/V from a ROCm kernel. Here QK-norm and RoPE run in fp32
-  through ``forward_native`` and round once, as the upstream kernel does, and
-  the Ascend attention backend writes the KV cache.
+  and can insert K/V from a compiled kernel that has no Ascend counterpart.
+  Here QK-norm takes the fused RMSNorm kernel with every other norm, and RoPE
+  goes to ``AscendRotaryEmbedding``, which ``REGISTERED_ASCEND_OPS`` has
+  already substituted. Both are handed fp32 and the result rounds once, as the
+  upstream kernel does, and the Ascend attention backend writes the KV cache.
 * Attention output gate: the weightless RMSNorm with a sigmoid gate runs
   through the Ascend ``rms_norm_gated`` kernel, as in GLM-5.3-Flash KDA.
 * MoE: Muse Spark normalizes every expert's output before the weighted top-k
@@ -80,7 +84,6 @@ from vllm.models.muse_spark.common.omni import (
     register_omni_processor,
 )
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -92,50 +95,6 @@ ROUTER_DTYPE = torch.float32
 ROUTER_SCORE_NORMALIZATION = "sigmoid"
 ROUTER_SCORE_DIVISION_EPS = 1e-15
 ATTENTION_OUTPUT_GATE_ACTIVATION = "sigmoid"
-
-
-class _AscendRMSNormMixin:
-    """Let a Muse Spark RMSNorm take the fused kernel, or the reference on demand.
-
-    Upstream's ``forward`` reaches for ``fused_rmsnorm_fwd``, and that kernel
-    already carries the whole contract: fp32 accumulation, ``gain_center`` for
-    the zero-centered gammas, ``input_scale`` for the weight-first variant, and
-    one rounding to ``out_dtype``. Its only CUDA-specific line,
-    ``tl.extra.cuda.gdc_wait()``, sits behind a ``USE_PDL`` ``tl.constexpr``
-    that its launcher sets from ``current_platform.is_cuda()``, so on Ascend
-    the branch never reaches codegen and the rest is plain Triton.
-
-    Nothing else about it is CUDA-only, so the gate is only which one is
-    faster, and that is measured per hardware rather than asserted here:
-    ``VLLM_ASCEND_MUSE_SPARK_FUSED_NORM=0`` restores the reference path without
-    a rebuild. The reference costs roughly nine elementwise kernels per norm,
-    and this model runs six or seven norms in each of 62 layers; a batch-1
-    decode step reads 4.3GiB a card, which the HBM serves in single-digit
-    milliseconds, so at low concurrency the launches are the step, not the
-    bytes.
-
-    Only the single-norm kernel is in reach either way. The two kernels that
-    also fold the residual, ``fused_norm_residual_norm_fwd`` and the
-    ``residual_stream`` form of ``fused_rmsnorm_fwd``, are gated upstream on
-    ``Tensor.is_cuda``, which is False for an NPU tensor whatever this returns.
-    Those two fall back to a sequence that ends in this norm, so the kernel
-    here still serves them; lifting the gate itself is an upstream change.
-    """
-
-    def supports_fused_kernel(self, x: torch.Tensor) -> bool:
-        if not envs_ascend.VLLM_ASCEND_MUSE_SPARK_FUSED_NORM:
-            # Upstream's forward then takes forward_native, as do the fused
-            # residual boundaries that ask this before reaching for a kernel.
-            return False
-        return super().supports_fused_kernel(x)  # type: ignore[misc]
-
-
-class AscendMuseSpark1xRMSNorm(_AscendRMSNormMixin, MuseSpark1xRMSNorm):
-    pass
-
-
-class AscendMuseSpark1xRMSNormWithInputScale(_AscendRMSNormMixin, MuseSpark1xRMSNormWithInputScale):
-    pass
 
 
 class AscendMuseSpark1xAttention(MuseSpark1xAttention):
@@ -160,8 +119,19 @@ class AscendMuseSpark1xAttention(MuseSpark1xAttention):
             q = q * self._get_attn_temperature_scale(positions)
 
         if self.rotary_emb is not None:
-            # fp32 inputs also keep the shared fp32 cos/sin cache in fp32.
-            q, k = self.rotary_emb.forward_native(positions, q.float(), k.float())
+            # Called, not forward_native: REGISTERED_ASCEND_OPS substitutes
+            # AscendRotaryEmbedding for RotaryEmbedding, so this reaches
+            # torch.ops.vllm.npu_rotary_embedding, where the reference is a
+            # dozen elementwise kernels in every one of 62 layers.
+            #
+            # fp32 in, fp32 out, and the rounding below is still the only one.
+            # The Triton kernel underneath loads cos/sin as fp32, casts q and k
+            # to that, and stores back into their own buffers, so it rotates in
+            # fp32 whatever it is handed and the output dtype is the input's.
+            # Handing it bf16 instead would round before the rotation and again
+            # at the store; fp32 here keeps the single rounding, and also keeps
+            # the shared fp32 cos/sin cache in fp32.
+            q, k = self.rotary_emb(positions, q.float(), k.float())
         return q.to(v.dtype), k.to(v.dtype), v, og
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -192,14 +162,16 @@ class AscendMuseSpark1xAttention(MuseSpark1xAttention):
 # switches each instance to the Ascend subclass once construction finishes.
 # The subclasses add no state, so the switch keeps every parameter and buffer.
 ASCEND_MODULE_CLASSES: dict[type[nn.Module], type[nn.Module]] = {
-    MuseSpark1xRMSNorm: AscendMuseSpark1xRMSNorm,
-    MuseSpark1xRMSNormWithInputScale: AscendMuseSpark1xRMSNormWithInputScale,
     MuseSpark1xAttention: AscendMuseSpark1xAttention,
 }
 
 
 def adopt_ascend_modules(model: nn.Module) -> None:
-    """Move every upstream Muse Spark norm and attention onto its Ascend path."""
+    """Move every upstream Muse Spark attention onto its Ascend path.
+
+    The norms are not in the table: upstream's own fused Triton kernel serves
+    them here, so they need no subclass of ours.
+    """
     for module in model.modules():
         ascend_cls = ASCEND_MODULE_CLASSES.get(type(module))
         if ascend_cls is None:
@@ -558,7 +530,7 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
             prefix=f"{prefix}.unpooler",
         )
         self.unpooler.quant_method = MuseSparkTorchLinearMethod()
-        self.pre_expert_norm = AscendMuseSpark1xRMSNorm(
+        self.pre_expert_norm = MuseSpark1xRMSNorm(
             hidden_size=moe_hidden_size,
             eps=config.rms_norm_eps,
             has_weight=True,
@@ -568,7 +540,7 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
             residual_id=2 * layer_idx + 2,
             output_norm_gain_center_type="zero",
         )
-        self.post_expert_norm = AscendMuseSpark1xRMSNormWithInputScale(
+        self.post_expert_norm = MuseSpark1xRMSNormWithInputScale(
             hidden_size=moe_hidden_size,
             eps=config.post_norm_eps,
             has_weight=True,

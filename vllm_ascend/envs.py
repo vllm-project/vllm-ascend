@@ -72,10 +72,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Whether Muse Spark's RMSNorms take upstream's fused Triton kernel.
-    # "0" falls back to the PyTorch reference, which is about nine elementwise
-    # kernels per norm against the fused one's single launch.
-    "VLLM_ASCEND_MUSE_SPARK_FUSED_NORM": lambda: bool(int(os.getenv("VLLM_ASCEND_MUSE_SPARK_FUSED_NORM", "1"))),
 }
 
 # end-env-vars-definition
