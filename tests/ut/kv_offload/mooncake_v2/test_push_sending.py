@@ -162,6 +162,8 @@ def worker(monkeypatch, request):
             if layout == "longcat":
                 config.model_config.hf_text_config.model_type = "longcat_flash"
                 names = ["model.layers.0.attn.0", "model.layers.0.attn.0.indexer", "model.layers.0.attn.1"]
+            elif layout == "three_layers":
+                names = [f"model.layers.{i}.attn" for i in range(3)]
             self.transfer_metadata = replace(
                 self.transfer_metadata,
                 layer_names=names,
@@ -832,20 +834,19 @@ def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
 
 
 @pytest.mark.parametrize("write_fails", [False, True])
-def test_layer_hooks_and_result_polling_never_send_done(worker, write_fails):
+def test_last_layer_notifies_before_wait_and_does_not_notify_twice(worker, write_fails):
     if write_fails:
         worker.engine.batch_transfer_sync_write.return_value = -1
     worker.start_load_kv(source_meta(0, 8))
     state = worker._reqs_send_state["d-request"]
     state.destinations[(0, 0, 0)].metadata_future.result(timeout=3)
     worker.save_kv_layer("model.layers.0.attn")
-    for _, future in worker._pending_sends:
-        future.result(timeout=3)
-    # Even after WRITE returns, neither a duplicate hook nor an output poll
-    # may send DONE before the step's barrier.
+    state.destinations[(0, 0, 0)].completion.result(timeout=3)
+    # The final hook schedules both WRITE and DONE without waiting for step end.
+    worker._send_done.assert_called_once()
+    assert bool(worker._send_done.call_args.args[1]) == write_fails
     worker.save_kv_layer("model.layers.0.attn")
     assert not worker.get_transfer_results().finished_sending
-    worker._send_done.assert_not_called()
     worker.wait_for_save()
     worker._send_done.assert_called_once()
     assert bool(worker._send_done.call_args.args[1]) == write_fails
@@ -871,7 +872,7 @@ def test_idle_unknown_and_duplicate_hooks_do_not_record_events(worker, monkeypat
 
 
 @pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)
-def test_layer_hook_only_plans_current_layer_and_step_end_backfills(worker, monkeypatch):
+def test_last_layer_flushes_backlog_after_metadata_arrives(worker, monkeypatch):
     release = threading.Event()
 
     def metadata_query(params):
@@ -895,11 +896,12 @@ def test_layer_hook_only_plans_current_layer_and_step_end_backfills(worker, monk
     worker.get_transfer_results()
     assert not worker.engine.batch_transfer_sync_write.called
     worker.save_kv_layer(next_layer)
+    assert {batch.layer_name for batch, _ in worker._pending_sends} == {attention, indexer, next_layer}
     for batch, future in worker._pending_sends:
-        assert batch.layer_name == next_layer
         future.result(timeout=3)
-    assert worker.engine.batch_transfer_sync_write.call_count == 1
-    assert worker.engine.batch_transfer_sync_write.call_args.args[1] == [3032, 3064]
+    state.destinations[(0, 0, 0)].completion.result(timeout=3)
+    assert worker.engine.batch_transfer_sync_write.call_count == 3
+    worker._send_done.assert_called_once()
     worker.wait_for_save()
     assert worker.engine.batch_transfer_sync_write.call_count == 3
     assert set(state.destinations[(0, 0, 0)].sent_tokens) == {attention, indexer, next_layer}
@@ -977,3 +979,94 @@ def test_metadata_wait_crossing_deadline_does_not_start_write(worker, monkeypatc
         assert worker._send_done.call_args.args[1] == "Push transfer timed out"
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("worker", ["three_layers"], indirect=True)
+@pytest.mark.parametrize("failure", [None, "negative", "exception"])
+def test_busy_engine_defers_middle_layer_but_last_layer_submits(worker, monkeypatch, failure):
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda params: multi_cache_remote(worker))
+    entered, release, last_written = threading.Event(), threading.Event(), threading.Event()
+
+    def write(session, src, dst, lengths):
+        if src[0] == 1032:
+            entered.set()
+            assert release.wait(3)
+            if failure == "exception":
+                raise RuntimeError("earlier WRITE failed")
+            if failure == "negative":
+                return -1
+        if src[0] == 3032:
+            last_written.set()
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = write
+    message = dict(destination_message(), block_ids=[[20, 21], [10, 11]])
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 0, 8, target_params(message))
+    worker.start_load_kv(meta)
+    destination = worker._reqs_send_state["d-request"].destinations[(0, 0, 0)]
+    destination.metadata_future.result(timeout=3)
+    first, middle, last = worker.transfer_metadata.layer_names
+    try:
+        worker.save_kv_layer(first)
+        assert entered.wait(3)
+        worker.save_kv_layer(middle)
+        assert [batch.layer_name for batch, _ in worker._pending_sends] == [first]
+        assert len(worker._sending_futures["d"]) == 1
+        worker.save_kv_layer(last)
+        assert last_written.wait(3)
+        assert {batch.layer_name for batch, _ in worker._pending_sends} == {first, middle, last}
+        assert destination.completion is not None
+        assert not destination.completion.done()
+        worker._send_done.assert_not_called()
+    finally:
+        release.set()
+    # DONE is emitted by the pool without a wait_for_save or results poll.
+    destination.completion.result(timeout=3)
+    worker._send_done.assert_called_once()
+    assert bool(worker._send_done.call_args.args[1]) == (failure is not None)
+    worker.wait_for_save()
+    assert worker.engine.batch_transfer_sync_write.call_count == 3
+    assert not worker._sending_futures
+    worker._send_done.assert_called_once()
+
+
+@pytest.mark.parametrize("worker", ["three_layers"], indirect=True)
+def test_busy_engine_does_not_block_another_engine(worker, monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "_get_remote_metadata",
+        lambda params: replace(multi_cache_remote(worker), engine_id=params["consumer_engine_id"]),
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def write(session, src, dst, lengths):
+        if src[0] == 1032:
+            entered.set()
+            assert release.wait(3)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = write
+    message = dict(destination_message(), block_ids=[[20, 21], [10, 11]])
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 0, 8, target_params(message))
+    params = dict(target_params(message), remote_engine_id="other", remote_request_id="other-request")
+    meta.add_new_push_send_req("other-p", ([5, 6], [7, 8]), 8, 0, 8, params)
+    worker.start_load_kv(meta)
+    for state in worker._reqs_send_state.values():
+        state.destinations[(0, 0, 0)].metadata_future.result(timeout=3)
+    first, middle, _ = worker.transfer_metadata.layer_names
+    try:
+        worker.save_kv_layer(first)
+        assert entered.wait(3)
+        for future in worker._sending_futures["other"]:
+            future.result(timeout=3)
+        worker.save_kv_layer(middle)
+        for future in worker._sending_futures["other"]:
+            future.result(timeout=3)
+        assert any(call.args[1] == [2224, 2256] for call in worker.engine.batch_transfer_sync_write.call_args_list)
+        assert not any(call.args[1] == [2096, 2128] for call in worker.engine.batch_transfer_sync_write.call_args_list)
+    finally:
+        release.set()
+    worker.wait_for_save()
+    assert worker._send_done.call_count == 2

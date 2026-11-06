@@ -198,6 +198,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     """Coordinate P layer batches and D completion accounting."""
 
     def __init__(self, vllm_config, engine_id, kv_cache_config) -> None:
+        # TODO: add DCP rank/sequence mapping and completion accounting before
+        # accepting DCP > 1; current worker identities contain only PP/PCP/TP.
         if vllm_config.parallel_config.decode_context_parallel_size != 1:
             raise ValueError("Mooncake Push worker currently requires DCP=1")
         super().__init__(vllm_config, engine_id, kv_cache_config)
@@ -210,6 +212,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._reqs_send_state: dict[str, SendReqInfo] = {}
         self._prefilling_request_ids: tuple[str, ...] = ()
         self._pending_sends: list[tuple[LayerTransferBatch, Future]] = []
+        self._sending_futures: dict[str, list[Future]] = {}
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
         self._zmq_context: zmq.Context | None = None
@@ -217,6 +220,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
+            # TODO: map KVPP cache owners and their readiness events for Push.
             if self.ascend_config.kvpp_config.size > 1:
                 raise ValueError("Mooncake Push does not support KVPP yet")
             self._device = torch.npu.current_device()
@@ -229,6 +233,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_names_by_index: dict[int, list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
+            self._last_layer_index = max(self._layer_names_by_index, default=None)
             # Shared Mamba address calculation uses the same registered descriptors as Pull.
             for name in ("layer_names", "kv_caches_base_addr", "block_shapes", "block_strides", "block_lens"):
                 setattr(self, name, getattr(self.transfer_metadata, name))
@@ -503,6 +508,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         # Follow the original layerwise connector: a returned synchronous WRITE
         # ends the task, including failures. Native quiescence after a transport
         # timeout and fault-safe memory reuse are outside this prototype's scope.
+        # TODO: establish transport cancellation/drain semantics before treating
+        # native timeout recovery as safe for P/D block reuse.
         src_list, dst_list, length_list = [], [], []
         try:
             local_index = self._layer_indices[batch.layer_name]
@@ -567,7 +574,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return str(exc) or type(exc).__name__
         return None
 
-    def _process_sending_requests(self, wait: bool = False, *, layer_names: list[str] | None = None) -> None:
+    def _process_sending_requests(self, wait: bool = False, *, layer_hook: bool = False, force: bool = False) -> None:
         """Collect WRITE results and submit ready layers; never send DONE here."""
         pending = []
         for batch, future in self._pending_sends:
@@ -591,10 +598,15 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 else:
                     destination.sent_tokens[batch.layer_name] = req.end_token
         self._pending_sends = pending
+        self._sending_futures = {
+            engine_id: active
+            for engine_id, futures in self._sending_futures.items()
+            if (active := [future for future in futures if not future.done()])
+        }
         batches = {}
-        # A layer hook only visits this step's requests and this physical layer.
-        # The step boundary backfills other layers, including late metadata.
-        request_ids = self._prefilling_request_ids if layer_names is not None else self._reqs_send_state
+        # A free engine flushes every ready layer accumulated while it was busy.
+        # The last layer and the step boundary bypass this submission gate.
+        request_ids = self._prefilling_request_ids if layer_hook else self._reqs_send_state
         now = time.monotonic() if wait else 0
         for request_id in request_ids:
             state = self._reqs_send_state[request_id]
@@ -602,6 +614,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             if wait and state.error is None and now - state.start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                 state.error = "Push transfer timed out"
             if state.error or state.metadata is None:
+                continue
+            if not (wait or force) and state.consumer_engine_id in self._sending_futures:
                 continue
             for rank, destination in state.destinations.items():
                 if state.error or destination.completion is not None or not destination.metadata_future.done():
@@ -624,12 +638,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                             for name in self._layer_indices
                             if self._get_transfer_partition(name, remote, rank) is not None
                         }
-                    for layer_name in destination.required_layers if layer_names is None else layer_names:
-                        if (
-                            layer_name not in destination.required_layers
-                            or layer_name not in state.available_layers
-                            or layer_name in destination.pending_layers
-                        ):
+                    for layer_name in state.available_layers:
+                        if layer_name not in destination.required_layers or layer_name in destination.pending_layers:
                             continue
                         task = self._build_layer_transfer_request(request_id, state, destination, layer_name)
                         if task is not None:
@@ -641,7 +651,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 except Exception as exc:
                     state.error = str(exc) or type(exc).__name__
                     logger.exception("Failed to prepare Push transfer %s", request_id)
-        for (_, rank, layer_name, _), (remote, event, requests) in batches.items():
+        for (engine_id, rank, layer_name, _), (remote, event, requests) in batches.items():
             # A later layer/destination may have failed while building this pass.
             active = []
             for req in requests:
@@ -652,24 +662,46 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     state.destinations[rank].pending_layers.remove(layer_name)
             if active:
                 batch = LayerTransferBatch(layer_name, rank, remote, tuple(active), event)
-                self._pending_sends.append((batch, self._sender_executor.submit(self._execute_layer_transfer, batch)))
+                future = self._sender_executor.submit(self._execute_layer_transfer, batch)
+                self._pending_sends.append((batch, future))
+                self._sending_futures.setdefault(engine_id, []).append(future)
+
+    def _send_done_after_transfers(self, params: dict[str, Any], error: str | None, transfers: list[Future]) -> bool:
+        # This task is submitted after all its dependencies. Its Future includes
+        # the notification itself, unlike a WRITE Future's add_done_callback.
+        for future in transfers:
+            try:
+                transfer_error = future.result()
+            except Exception as exc:
+                transfer_error = str(exc) or type(exc).__name__
+            error = error or transfer_error
+        return self._send_done(params, error)
 
     def _send_completions(self) -> None:
-        """Notify D at the step boundary, after all submitted WRITE tasks return."""
-        for state in self._reqs_send_state.values():
-            for destination in state.destinations.values():
+        """Queue DONE after a request's complete set of submitted WRITEs."""
+        for request_id, state in self._reqs_send_state.items():
+            transfers = []
+            pending_tokens: dict[WorkerRank, dict[str, int]] = {}
+            for batch, future in self._pending_sends:
+                for request in batch.requests:
+                    if request.request_id == request_id:
+                        transfers.append(future)
+                        pending_tokens.setdefault(batch.remote_rank, {})[batch.layer_name] = request.end_token
+            for rank, destination in state.destinations.items():
                 if destination.completion is not None:
                     continue
+                pending = pending_tokens.get(rank, {})
                 end = (
                     destination.transfer_params["num_computed_tokens"]
                     + destination.transfer_params["num_external_tokens"]
                 )
                 complete = destination.required_layers is not None and all(
-                    destination.sent_tokens.get(layer, -1) >= end for layer in destination.required_layers
+                    max(destination.sent_tokens.get(layer, -1), pending.get(layer, -1)) >= end
+                    for layer in destination.required_layers
                 )
                 if state.error or complete:
                     destination.completion = self._sender_executor.submit(
-                        self._send_done, destination.transfer_params, state.error
+                        self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
 
     def save_kv_layer(self, layer_name: str) -> None:
@@ -693,8 +725,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event = torch.npu.Event()
                         event.record()
                     state.available_layers[cache_name] = end, event
-        if event is not None:
-            self._process_sending_requests(layer_names=layer_names)
+        last_layer = layer_index == self._last_layer_index
+        if event is not None or last_layer:
+            self._process_sending_requests(layer_hook=True, force=last_layer)
+        if last_layer:
+            self._send_completions()
 
     def wait_for_save(self) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._reqs_send_state:

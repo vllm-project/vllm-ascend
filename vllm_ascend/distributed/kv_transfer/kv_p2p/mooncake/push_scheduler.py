@@ -128,7 +128,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
         meta = MooncakeConnectorMetadata()
         if self.kv_transfer_config.is_kv_producer:
-            # TODO: support P preemption and transfer cancellation before block reuse.
+            # TODO: propagate P preemption to workers and retire the old transfer
+            # before core reuses its blocks; resumed requests need fresh progress.
+            # Updating resumed block IDs alone does not provide that handshake.
+            # Ordinary request cancellation is handled by request_finished below.
             # The current deployment assumes P requests are not preempted.
             cached_reqs = scheduler_output.scheduled_cached_reqs
             num_computed_tokens = dict(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
@@ -153,7 +156,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     continue
                 meta.add_new_push_send_req(
                     request_id=req_id,
-                    local_block_ids=block_ids,
+                    # Match D's transfer table: the final Mamba block must be
+                    # the prompt state, not a speculative lookahead block.
+                    local_block_ids=self._get_transfer_block_ids(block_ids, request.num_prompt_tokens),
                     num_prompt_tokens=request.num_prompt_tokens,
                     num_computed_tokens=local_num_computed_tokens,
                     num_scheduled_tokens=min(
@@ -199,6 +204,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         normal_finish = request.status in (RequestStatus.FINISHED_LENGTH_CAPPED, RequestStatus.FINISHED_STOPPED)
         if not normal_finish:
             # Notify workers even if cancellation precedes the first dispatch.
+            # TODO: carry D completion endpoints for cancellation before the
+            # first worker dispatch. An ID-only abort has no destination to
+            # notify, so D currently terminates through its receive timeout.
             self._reqs_aborted[req_id] = params["remote_request_id"]
         if req_id not in self._reqs_need_send_layerwise:
             return False, None
