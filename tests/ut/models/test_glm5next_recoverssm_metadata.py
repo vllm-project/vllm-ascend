@@ -15,7 +15,8 @@ from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
 
 @pytest.mark.parametrize("graph_mode", [False, True])
-def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatch, graph_mode):
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatch, graph_mode, use_pcp):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
     builder.use_full_cuda_graph = graph_mode
@@ -30,6 +31,7 @@ def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatc
     original = table.clone()
     starts = torch.tensor([0, 6, 12, 18, 24], dtype=torch.int32)
     expected = None
+    pcp_context = object() if use_pcp else None
 
     def parent_build(self, prefix, common, accepted, draft_counts, fast_build):
         assert not self.use_full_cuda_graph
@@ -49,9 +51,17 @@ def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatc
             query_start_loc_cpu=starts,
             seq_lens=torch.tensor(lengths, dtype=torch.int32),
             block_table_tensor=table,
+            pcp_context=pcp_context,
         )
-        common.replace = lambda common=common, **updates: SimpleNamespace(**(vars(common) | updates))
-        builder.build(0, common, num_actual_reqs=3 if graph_mode else None)
+
+        def replace_common(common=common, **updates):
+            # Dataclass replacement does not retain dynamically attached PCP context.
+            values = {name: value for name, value in vars(common).items() if name != "pcp_context"}
+            return SimpleNamespace(**(values | updates))
+
+        common.replace = replace_common
+        metadata = builder.build(0, common, num_actual_reqs=3 if graph_mode else None)
+        assert metadata.pcp_context is pcp_context
         assert builder.use_full_cuda_graph is graph_mode
         torch.testing.assert_close(table, original, atol=0, rtol=0)
 

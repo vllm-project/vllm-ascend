@@ -1,116 +1,51 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
-from vllm.distributed.ec_transfer.ec_connector.factory import (
-    ECConnectorFactory,
-)
+from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 
 from vllm_ascend.distributed import ec_transfer as ec_transfer_module
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import connector as connector_module
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.connector import (
-    AscendECMooncakeConnector,
-)
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.connector import AscendECMooncakeConnector
 
 
-def test_register_connector_replaces_upstream_mooncake():
-    registry = {"ECMooncakeConnector": object}
-
+@pytest.mark.parametrize("registered", [False, True])
+def test_register_connector_replaces_only_existing_mooncake_entry(registered):
+    registry = {"ECMooncakeConnector": object} if registered else {}
     with (
-        patch.object(
-            ec_transfer_module,
-            "_replace_cpu_connector",
-            return_value=True,
-        ),
+        patch.object(ec_transfer_module, "_replace_cpu_connector", return_value=True),
         patch("importlib.import_module") as import_module_mock,
         patch.object(ECConnectorFactory, "_registry", registry),
-        patch.object(
-            ECConnectorFactory,
-            "register_connector",
-        ) as register_connector,
+        patch.object(ECConnectorFactory, "register_connector") as register,
     ):
         ec_transfer_module.register_connector()
-
     import_module_mock.assert_not_called()
-    assert "ECMooncakeConnector" not in registry
-    register_connector.assert_called_once_with(
-        "ECMooncakeConnector",
-        "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.connector",
-        "AscendECMooncakeConnector",
-    )
-
-
-def test_register_connector_skips_when_upstream_mooncake_not_found():
-    with (
-        patch.object(
-            ec_transfer_module,
-            "_replace_cpu_connector",
-            return_value=True,
-        ),
-        patch("importlib.import_module") as import_module_mock,
-        patch.object(ECConnectorFactory, "_registry", {}),
-        patch.object(
-            ECConnectorFactory,
-            "register_connector",
-        ) as register_connector,
-    ):
-        ec_transfer_module.register_connector()
-
-    import_module_mock.assert_not_called()
-    register_connector.assert_not_called()
-
-
-def test_connector_constructs_ascend_worker_without_upstream_factory_hooks():
-    vllm_config = MagicMock()
-    expected_worker = object()
-
-    with (
-        patch.object(
-            connector_module.ECConnectorBase,
-            "__init__",
-            return_value=None,
-        ) as base_init,
-        patch.object(
-            connector_module,
-            "AscendECMooncakeWorker",
-            return_value=expected_worker,
-        ) as worker_class,
-    ):
-        connector = AscendECMooncakeConnector(
-            vllm_config,
-            ECConnectorRole.WORKER,
+    if registered:
+        assert "ECMooncakeConnector" not in registry
+        register.assert_called_once_with(
+            "ECMooncakeConnector",
+            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.connector",
+            "AscendECMooncakeConnector",
         )
-
-    base_init.assert_called_once_with(
-        connector,
-        vllm_config=vllm_config,
-        role=ECConnectorRole.WORKER,
-    )
-    worker_class.assert_called_once_with(vllm_config)
-    assert connector._worker is expected_worker
-    assert connector._scheduler is None
+    else:
+        register.assert_not_called()
 
 
-def test_connector_constructs_upstream_scheduler():
-    vllm_config = MagicMock()
-    expected_scheduler = object()
-
+@pytest.mark.parametrize(
+    "role,factory_name,active,inactive",
+    [
+        (ECConnectorRole.WORKER, "AscendECMooncakeWorker", "_worker", "_scheduler"),
+        (ECConnectorRole.SCHEDULER, "AscendECMooncakeScheduler", "_scheduler", "_worker"),
+    ],
+)
+def test_connector_constructs_only_the_requested_ascend_role(role, factory_name, active, inactive):
+    config, expected = MagicMock(), object()
     with (
-        patch.object(
-            connector_module.ECConnectorBase,
-            "__init__",
-            return_value=None,
-        ),
-        patch.object(
-            connector_module,
-            "ECMooncakeScheduler",
-            return_value=expected_scheduler,
-        ) as scheduler_class,
+        patch.object(connector_module.ECConnectorBase, "__init__", return_value=None) as base_init,
+        patch.object(connector_module, factory_name, return_value=expected) as factory,
     ):
-        connector = AscendECMooncakeConnector(
-            vllm_config,
-            ECConnectorRole.SCHEDULER,
-        )
-
-    scheduler_class.assert_called_once_with(vllm_config)
-    assert connector._scheduler is expected_scheduler
-    assert connector._worker is None
+        connector = AscendECMooncakeConnector(config, role)
+    base_init.assert_called_once_with(connector, vllm_config=config, role=role)
+    factory.assert_called_once_with(config)
+    assert getattr(connector, active) is expected
+    assert getattr(connector, inactive) is None

@@ -133,7 +133,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
     )
     if scale_alignments:
-        # Quantized keys share pages with the FP32 tail; keep whole tail rows and aligned
+        # C8 shares pages with the FP32 tail; keep whole tail rows and aligned
         # scales when a scheduler page is split into indexer kernel blocks.
         small_page_alignment = lcm(
             *(_unpadded_page_size(spec) // spec.block_size for spec in tail_specs), *scale_alignments

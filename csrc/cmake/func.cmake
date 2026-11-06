@@ -700,13 +700,14 @@ function(add_bin_compile_target)
                 TILINGKEY_PAR_COMPILE=1
                 BIN_FILENAME_HASHED=1
             )
+            set(_CACHE_COMMAND_ENV)
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
-                list(APPEND _CACHE_SET_ENV ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
-                # Hash the generated OPP inputs before normalizing its location.
-                # Use the library target, rather than its absolute symlink text.
+                # The command already normalizes declared roots. Keep the OPP
+                # configuration as input, and host sources in the operator
+                # namespace; rebuilt library bytes embed checkout-specific logs.
+                set(_CACHE_COMMAND_ENV env ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
                 list(APPEND _CACHE_PREPARED_INPUTS
                     ${CUSTOM_DIR}/op_impl/ai_core/tbe/config/${BINARY_COMPUTE_UNIT}
-                    $<TARGET_FILE:cust_opmaster>
                 )
             endif()
 
@@ -749,10 +750,9 @@ function(add_bin_compile_target)
                 ENVIRONMENT_PROFILE ascendc
                 ENVIRONMENT_FILE ${_CACHE_ENVIRONMENT_FILES}
                 NORMALIZE_PATH ${ASCEND_CANN_PACKAGE_PATH} ${CUSTOM_DIR}
-                NORMALIZE_SET_ENV ASCEND_CUSTOM_OPP_PATH
                 EXCLUDE ${_CACHE_EXCLUDES}
                 SET_ENV ${_CACHE_SET_ENV}
-                COMMAND bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${_CACHE_ACTION_STAGE_DIR}
+                COMMAND ${_CACHE_COMMAND_ENV} bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${_CACHE_ACTION_STAGE_DIR}
             )
 
             if(CMAKE_GENERATOR MATCHES "Unix Makefiles")

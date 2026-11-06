@@ -1,9 +1,12 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
 
+from .build_cache_test_utils import build_cache_command, run_command
 from .test_build_cache import (
     _assert_success,
     _extract_key,
@@ -54,61 +57,87 @@ def test_exclusions_apply_to_prepared_inputs_and_operator_namespace(tmp_path, re
     assert counter.read_text() == ("1" if expected == "HIT" else "2")
 
 
-def test_generated_opp_relocation_hits_but_changed_inputs_miss(tmp_path):
-    source, prepared = _make_operator_inputs(tmp_path)
+@pytest.mark.skipif(shutil.which("env") is None, reason="production command uses POSIX env")
+def test_move_whole_cache_to_identical_checkout(tmp_path):
     builder = _write_builder(tmp_path)
     counter = tmp_path / "counter"
+    roots = [tmp_path / "workspace-a", tmp_path / "workspace-b"]
+    for root in roots:
+        root.mkdir()
+        source, prepared = _make_operator_inputs(root)
+        (source / "op_host").mkdir()
+        (source / "op_host/tiling.h").write_text("int tiling = 1;\n")
+        config = root / "custom-other/op_impl/ai_core/tbe/config/ascend910b"
+        config.mkdir(parents=True)
+        (config / "ops-info.json").write_text('{"Operator":{"value":1}}\n')
 
     def run(root: Path):
-        config = root / "op_impl/ai_core/tbe/config/ascend910b"
-        library = root.parent / "libcust_opmaster.so"
-        return _run_cache(
-            cache_root=tmp_path / "cache",
-            prepared_inputs=[prepared, config, library],
-            operator_source=source,
-            output_dir=tmp_path / "output",
-            builder=builder,
-            counter=counter,
-            normalize_paths=[root],
-            set_env_values=[f"ASCEND_CUSTOM_OPP_PATH={root}"],
-            normalize_set_env=["ASCEND_CUSTOM_OPP_PATH"],
+        opp = root / "custom-other"
+        output = root / "stage"
+        return run_command(
+            build_cache_command(
+                cache_root=root / "build_cache",
+                domain="custom_operator",
+                unit="test_unit",
+                output_dir=output,
+                environment_profile="ascendc",
+                prepared_inputs=[root / "prepared", opp / "op_impl/ai_core/tbe/config/ascend910b"],
+                recipe_values=[],
+                environment_values=[],
+                environment_tools=[sys.executable],
+                normalize_paths=[root, opp],
+                operator_source=root / "source",
+                operator="test_operator",
+                action="TestOperator-0",
+                publish_dir=root / "published",
+                publish_state_dir=root / "publish-state",
+                build_command=[
+                    "env",
+                    f"ASCEND_CUSTOM_OPP_PATH={opp}",
+                    sys.executable,
+                    str(builder),
+                    str(output),
+                    str(counter),
+                    "counted",
+                    "kernel.o",
+                ],
+            )
         )
 
-    roots = [tmp_path / "workspace-a/custom", tmp_path / "workspace-b/custom-other"]
-    for root in roots:
-        config = root / "op_impl/ai_core/tbe/config/ascend910b/ops-info.json"
-        config.parent.mkdir(parents=True)
-        config.write_text('{"Operator":{"value":1}}\n')
-        (root.parent / "libcust_opmaster.so").write_bytes(b"\x7fELF\x00tiling-v1")
     first = run(roots[0])
     _assert_success(first)
-    (tmp_path / "output/kernel.o").unlink()
+    assert "[build-cache] MISS" in first.stdout
+    (roots[0] / "build_cache").rename(roots[1] / "build_cache")
+    assert not (roots[0] / "build_cache").exists()
+    assert not (roots[1] / "stage").exists()
     moved = run(roots[1])
     _assert_success(moved)
     assert "[build-cache] HIT" in moved.stdout
     assert _extract_key(first) == _extract_key(moved)
+    assert (roots[1] / "published/kernel.o").read_text() == "artifact-1"
     assert counter.read_text() == "1"
 
-    config = roots[1] / "op_impl/ai_core/tbe/config/ascend910b/ops-info.json"
+    # Existing source identity must still reject changed host tiling definitions.
+    (roots[1] / "source/op_host/tiling.h").write_text("int tiling = 2;\n")
+    changed_host = run(roots[1])
+    _assert_success(changed_host)
+    assert "[build-cache] MISS" in changed_host.stdout
+    config = roots[1] / "custom-other/op_impl/ai_core/tbe/config/ascend910b/ops-info.json"
     config.write_text('{"Operator":{"value":2}}\n')
     changed_config = run(roots[1])
     _assert_success(changed_config)
     assert "[build-cache] MISS" in changed_config.stdout
-    (roots[1].parent / "libcust_opmaster.so").write_bytes(b"\x7fELF\x00tiling-v2")
-    changed_library = run(roots[1])
-    _assert_success(changed_library)
-    assert "[build-cache] MISS" in changed_library.stdout
     assert counter.read_text() == "3"
 
 
-def test_only_explicit_set_env_normalization_changes_path_identity(tmp_path):
+def test_command_root_normalizes_but_set_env_retains_exact_value(tmp_path):
     engine = _load_engine("build_cache_scope_recipe")
     roots = [tmp_path / "a/custom", tmp_path / "b/custom-other"]
 
-    def recipe(root, *, normalized=(), name="ASCEND_CUSTOM_OPP_PATH"):
-        return engine._hash_recipe([], [], ["compiler"], [root], [f"{name}={root}"], normalized)[0]
+    def recipe(root, *, command_env=False):
+        override = f"ASCEND_CUSTOM_OPP_PATH={root}"
+        command = ["env", override, "compiler"] if command_env else ["compiler"]
+        return engine._hash_recipe([], [], command, [root], [] if command_env else [override])[0]
 
     assert recipe(roots[0]) != recipe(roots[1])
-    selected = ["ASCEND_CUSTOM_OPP_PATH"]
-    assert recipe(roots[0], normalized=selected) == recipe(roots[1], normalized=selected)
-    assert recipe(roots[0], normalized=selected, name="CPATH") != recipe(roots[1], normalized=selected, name="CPATH")
+    assert recipe(roots[0], command_env=True) == recipe(roots[1], command_env=True)

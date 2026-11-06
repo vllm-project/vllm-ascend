@@ -184,13 +184,14 @@ recipe values after the same root normalization contract. `--set-env` compiler
 overrides also participate, using their exact values: an override may point to
 an input not otherwise covered by the prepared-input identity.
 
-`--normalize-set-env NAME` opts a declared override into the existing path
-normalization. The custom-operator caller uses this only for its generated
-`ASCEND_CUSTOM_OPP_PATH`, with the OPP root in `NORMALIZE_PATH` and the generated
-SoC configuration and tiling library in `PREPARED_INPUT`. Moving or renaming
-that root preserves identity when those inputs are unchanged. Different
-configuration or library bytes still invalidate the entry. Other overrides
-retain exact-value identity.
+The custom-operator command sets its generated `ASCEND_CUSTOM_OPP_PATH` through
+`env`, so the existing command normalization handles its declared OPP root.
+Generated SoC configuration remains a prepared input, and operator host/tiling
+sources remain in the operator namespace. The rebuilt tiling library is not
+hashed again: its log strings can embed a different checkout path even when
+the sources are identical. With matching source and toolchain inputs, moving
+the entire `csrc/build_cache` to another checkout can restore kernel artifacts
+into an empty build directory. Host libraries still follow the normal build.
 
 Custom-operator callers exclude README, Markdown/reStructuredText and `docs/`
 from both prepared inputs and the operator namespace. They also exclude
@@ -218,7 +219,6 @@ update the matching identity group in the same change:
 - `NORMALIZE_PATH` removes only a physical location whose referenced semantic
   content is already covered by one of those identity groups.
 
-`NORMALIZE_SET_ENV` selects which `SET_ENV` values use those declared roots.
 `EXCLUDE` applies consistently to prepared inputs and the operator namespace.
 
 Removing or omitting an identity argument can cause a false HIT. Adding a
