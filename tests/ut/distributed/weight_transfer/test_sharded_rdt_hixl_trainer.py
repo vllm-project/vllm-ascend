@@ -207,6 +207,31 @@ def test_sharded_rdt_trainer_init_requires_source():
         )
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+def test_trainer_init_retains_hixl_spawn_and_sender_handshake(monkeypatch, rank):
+    source = _rdt_source_two_layers()
+    client = RecordingClient()
+    served = []
+
+    def spawn(engine, names):
+        served.extend(names)
+        engine._server_name = f"hixl_rank_{rank}"
+
+    cls = ShardedRDTTrainerWeightTransferEngine
+    monkeypatch.setattr(cls, "_spawn_server", spawn)
+    monkeypatch.setattr(cls, "_world_and_rank", lambda self: (2, rank))
+    monkeypatch.setattr(cls, "_all_gather_server_names", lambda self, world, rank: ["hixl_rank_0", "hixl_rank_1"])
+    engine = cls.trainer_init(ShardedRDTTrainerInitInfo(num_consumers=2, rank=rank), client=client, source=source)
+    assert isinstance(engine, cls)
+    assert served == sorted(meta.name for meta in source.metadata)
+    payload = engine.get_worker_init_payload()
+    assert payload["trainer_actor_names"] == ["hixl_rank_0", "hixl_rank_1"]
+    assert payload["names"] == [meta.name for meta in source.metadata]
+    assert payload["group_lens"] == [1, 1, 1, 1]
+    assert client.order == (["init"] if rank == 0 else [])
+    assert client.last_init_info == (payload if rank == 0 else None)
+
+
 def test_sharded_rdt_worker_init_info_is_group_major(monkeypatch):
     source = _rdt_source_two_layers()
     engine = _rdt_engine_with_fake_server(
