@@ -48,7 +48,6 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -671,6 +670,11 @@ def build_attn_metadata(
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
                     )
+                if isinstance(attn_metadata_builder, QSAMetadataBuilder):
+                    # Per-batch live prefixes from CPU scheduling metadata;
+                    # QSA owns cropping before native LI V2, without NPU reads.
+                    metadata.qsa_num_live_requests = num_actual_reqs
+                    metadata.qsa_num_live_tokens = int(variant_common.query_start_loc_cpu[num_actual_reqs])
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
@@ -692,10 +696,10 @@ def build_attn_state(
     if vllm_config.model_config.runner_type == "pooling":
         if kv_cache_config is None:
             raise RuntimeError("Pooling attention state requires KVCacheConfig.")
-        if isinstance(
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-            EncoderOnlyAttentionSpec,
-        ):
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        # Encoder-only models (e.g. BERT/BGE) keep no KV cache, so they produce
+        # no kv cache groups and always run as uncached prefill.
+        if not kv_cache_groups:
             attn_state = AscendAttentionState.PrefillNoCache
         else:
             attn_state = AscendAttentionState.PrefillCacheHit

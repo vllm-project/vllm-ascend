@@ -72,6 +72,18 @@ def vit_mrope_setup(
 
 
 mrope_vit_setup.vit_mrope_setup = vit_mrope_setup
-# Update the existing model alias if loaded; later imports see the patched module.
-if "vllm.models.minimax_m3.common.vision_tower" in sys.modules:
-    vars(sys.modules["vllm.models.minimax_m3.common.vision_tower"])["vit_mrope_setup"] = vit_mrope_setup
+
+
+# Rebind preloaded aliases, including Ascend's directly loaded vision tower.
+# Later imports receive the patched wrapper from the source module above.
+def _patch_loaded_vision_towers():
+    for module_name in (
+        "vllm.models.minimax_m3.common.vision_tower",
+        "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None:
+            vars(module)["vit_mrope_setup"] = vit_mrope_setup
+
+
+_patch_loaded_vision_towers()

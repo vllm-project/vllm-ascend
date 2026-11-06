@@ -419,6 +419,21 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
+#   2. `vllm.v1.core.single_type_kv_cache_manager.MambaManager._cache_partial_tail_block`
+#    Why:
+#       vLLM v0.32.0 re-registers an unchanged cached tail and marks it as a
+#       newly produced state, serializing sibling warm-prefix requests.
+#    How:
+#       Skip only an already-keyed, non-null tail at the same token boundary
+#       without a reserved checkpoint. Delegate all other paths to upstream,
+#       retaining same-step new-state deferral and copy-on-write bookkeeping.
+#    Related PR (if no, explain why):
+#       The verified vLLM main 24420b7a341af37a9bc3186e6fc6062512e0aa58
+#       already includes the guard; the supported v0.32.0 tag does not.
+#    Future Plan:
+#       Remove this override when all supported vLLM versions include the
+#       unchanged-tail guard; keep the regression test for release compatibility.
+#
 # ** 14. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
@@ -658,6 +673,21 @@
 #       supports PLE with pipeline-parallel, stage-local ownership.
 #
 # ** 20. File: platform/patch_speculative_config.py**
+# Native MiniMax Flash draft extension:
+#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
+#   Why: native DSpark exports use a standalone architecture and carry their
+#        own dspark/config.json, while upstream normalizes unknown drafts to
+#        DSparkDraftModel.
+#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
+#        normalize the checkpoint's dspark/config.json without changing the
+#        target or checkpoint. The adapter, its checkpoint contract and weight
+#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
+#        DSpark drafting and changes only Flash norms, MLP and loading.
+#   Related PR:
+#        https://github.com/vllm-project/vllm/pull/64111
+#   Future Plan: remove the architecture guard and config/weight normalization
+#        once upstream loads native MiniMax Flash drafts. Retain only required
+#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -850,7 +880,7 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, draft_window_size, suffix
+#       V2-ready (draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
 #       speculative decoding, dflash2 graph, and p-eagle)
 #       default to v1.
@@ -1885,9 +1915,10 @@
 #       Reduce ViT mRoPE setup UB pressure on Ascend A5.
 #    How:
 #       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
-#       to 16, using the same value for the launch grid divisor. Keep the
-#       upstream kernel unchanged. Rebind the MiniMax vision tower alias if
-#       it is already loaded; subsequent imports use the patched wrapper.
+#       to 16, matching the launch grid divisor. Keep the upstream kernel
+#       unchanged. Rebind both the standard MiniMax vision tower alias and the
+#       Ascend shadow-module alias if already loaded; subsequent imports
+#       use the patched wrapper.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/58526
 #       https://github.com/vllm-project/vllm/pull/58673
@@ -1895,3 +1926,19 @@
 #       Remove once upstream supports a backend-specific setup block size
 #       suitable for Ascend UB capacity.
 #
+
+# ** File: platform/patch_shm_notify.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.__init__`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#    Why:
+#       Sustained SHM fast-path reads bypass notification polling. CONFLATE
+#       limits payloads but internal activate_read commands can accumulate.
+#    How:
+#       Backport upstream initialization and poll/recv behavior, servicing the
+#       notification socket every two seconds during successful reads.
+#       SHM and cancellation logic are unchanged.
+#    Related PR (if no, explain why):
+#       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
+#    Future Plan:
+#       Remove once the supported vLLM version includes upstream PR #63165.

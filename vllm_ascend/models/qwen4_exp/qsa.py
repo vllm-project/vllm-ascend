@@ -55,7 +55,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .lightning_indexer import qsa_select_paged_tokens_lightning_v2
 
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
@@ -357,8 +357,8 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using the CANN Lightning Indexer v2 backend.")
-        return qsa_select_paged_tokens_lightning(
+        logger.info_once("QSA is using native request-batched CANN LightningIndexerV2.")
+        return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,
@@ -369,6 +369,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
+            # Host counts are prepared with this batch's QSA metadata.
+            num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
+            num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
         )
 
 

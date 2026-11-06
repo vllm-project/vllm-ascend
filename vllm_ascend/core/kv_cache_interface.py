@@ -25,6 +25,23 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
+@dataclass(frozen=True)
+class MambaStateSharding:
+    """Model-declared persistent-state partitions and equivalent writers.
+
+    Attributes:
+        shard_rank: Index of this rank's state partition.
+        shard_count: Partitions required for a complete prefix-cache hit.
+        replica_rank: Writer index among ranks holding the same partition.
+        replica_count: Number of equivalent writers sharing that partition.
+    """
+
+    shard_rank: int
+    shard_count: int
+    replica_rank: int = 0
+    replica_count: int = 1
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state

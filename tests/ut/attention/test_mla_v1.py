@@ -287,6 +287,8 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_flashmla = False
+    # Isolate MLAPO/FA-quant policy from the strided-cache writer.
+    impl.use_mla_rope = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo

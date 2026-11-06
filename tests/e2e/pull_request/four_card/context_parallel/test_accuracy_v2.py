@@ -298,6 +298,10 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 )
 
 
+def test_dcp_q_replication() -> None:
+    """Placeholder for a node id that exists only on main."""
+
+
 @pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",

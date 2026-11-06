@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -48,7 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts, _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -56,7 +57,6 @@ from vllm.model_executor.models.glm4_1v import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
-    MixtureOfExperts,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -77,11 +77,13 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.utils import pad_sequence_parallel_tokens
 
 from .attention import Glm5NextMLAAttention
-from .kda import Glm5NextLinearAttention, get_kda_parallel_size
+from .kda import Glm5NextLinearAttention, get_kda_parallel_size, get_kda_state_sharding
 from .multimodal import (
     Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
@@ -866,7 +868,7 @@ class Glm5NextModel(nn.Module):
         return loaded_params
 
 
-class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
+class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid):
     supports_replayssm: ClassVar[Literal[True]] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -888,6 +890,22 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=_LOGIT_SCALE)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, Glm5NextMoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+        self.num_moe_layers = len(self.moe_layers)
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -943,6 +961,12 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         cls,
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
+
+    @classmethod
+    def get_mamba_state_sharding(
+        cls, parallel_config: ParallelConfig, tp_rank: int, pcp_rank: int
+    ) -> dict[MambaAttentionBackendEnum, MambaStateSharding]:
+        return {MambaAttentionBackendEnum.GDN_ATTN: get_kda_state_sharding(parallel_config, tp_rank, pcp_rank)}
 
     def compute_logits(
         self,
@@ -1014,6 +1038,12 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
 
         return Glm5NextForCausalLM.get_mamba_state_copy_func()
 
+    @classmethod
+    def get_mamba_state_sharding(
+        cls, parallel_config: ParallelConfig, tp_rank: int, pcp_rank: int
+    ) -> dict[MambaAttentionBackendEnum, MambaStateSharding]:
+        return Glm5NextForCausalLM.get_mamba_state_sharding(parallel_config, tp_rank, pcp_rank)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Glm4vForConditionalGeneration, self).__init__()
         config = vllm_config.model_config.hf_config
@@ -1043,6 +1073,7 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
                 # pattern (quant_config=None for BF16 submodules).
                 quant_config=None,
                 prefix=maybe_prefix(prefix, "visual"),
+                input_norm=build_mm_input_norm(self.model_config),
             )
 
         with self._mark_language_model(vllm_config):

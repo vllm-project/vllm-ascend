@@ -177,3 +177,80 @@ def test_deferred_mamba_postprocess_restores_batch_rows(
         torch.testing.assert_close(input_tables, request_tables[idx_mapping.clamp_min(0).long()])
     else:
         assert torch.all(input_tables == -1)
+
+
+@pytest.mark.parametrize("architecture", ["MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"])
+@pytest.mark.parametrize("cpu_consumer", [False, True])
+@pytest.mark.parametrize("sync_pp", [False, True])
+def test_minimax_dspark_skips_sync_only_without_cpu_consumers(
+    runner_cls, monkeypatch, architecture, cpu_consumer, sync_pp
+):
+    flash_backend = type("FlashBackend", (), {})
+    sparse_backend = type("SparseBackend", (), {"get_name": staticmethod(lambda: "ASCEND_MINIMAX_M3_SPARSE")})
+    dense_backend = type("DenseBackend", (), {"get_name": staticmethod(lambda: "ASCEND")})
+    monkeypatch.setitem(
+        runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", flash_backend
+    )
+    runner = runner_cls.__new__(runner_cls)
+    runner.sync_spec_pp_cpu_counts = sync_pp
+    runner.speculator = object()
+    runner.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForCausalLM"]),
+        hf_text_config=SimpleNamespace(model_type="minimax_m3_text"),
+    )
+    runner.speculative_config = SimpleNamespace(
+        method="dspark", draft_model_config=SimpleNamespace(architectures=[architecture])
+    )
+    runner.attn_groups = [[SimpleNamespace(backend=flash_backend), SimpleNamespace(backend=sparse_backend)]]
+    if cpu_consumer:
+        runner.attn_groups[0].append(SimpleNamespace(backend=dense_backend))
+    assert runner._can_skip_spec_cpu_length_sync() is (not cpu_consumer and not sync_pp)
+
+
+def test_dflash_cpu_sync_policy_is_retained(runner_cls):
+    runner = runner_cls.__new__(runner_cls)
+    runner.sync_spec_pp_cpu_counts = False
+    runner.speculator = object()
+    runner.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["GlmMoeDsaForCausalLM"]),
+        hf_text_config=SimpleNamespace(model_type="glm_moe_dsa"),
+    )
+    runner.speculative_config = SimpleNamespace(
+        method="dflash", draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"])
+    )
+    assert runner._can_skip_spec_cpu_length_sync()
+    runner.sync_spec_pp_cpu_counts = True
+    assert not runner._can_skip_spec_cpu_length_sync()
+
+
+@pytest.mark.parametrize("eager", [False, True])
+@pytest.mark.parametrize("blocked", [None, "kv_transfer", "sparse_offload", "adaptive", "pp", "mixed_backends"])
+def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch, eager, blocked):
+    flash = type("FlashBackend", (), {})
+    monkeypatch.setitem(runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", flash)
+    runner = runner_cls.__new__(runner_cls)
+    runner.sync_spec_pp_cpu_counts = False
+    runner.model_config = SimpleNamespace(
+        architecture="MiniMaxM3SparseForConditionalGeneration",
+        hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForConditionalGeneration"]),
+        hf_text_config=SimpleNamespace(model_type="minimax_m3"),
+    )
+    runner.speculative_config = SimpleNamespace(
+        method="dspark",
+        enforce_eager=eager,
+        enable_adaptive_verification=blocked == "adaptive",
+        draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"]),
+    )
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": flash})
+    if blocked == "mixed_backends":
+        runner.speculator.attn_backends["draft.1"] = object()
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=2 if blocked == "pp" else 1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+    )
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=object() if blocked == "kv_transfer" else None)
+    runner.ascend_config = SimpleNamespace(
+        sparse_kv_offload_config=SimpleNamespace(enabled=blocked == "sparse_offload")
+    )
+    assert runner._can_skip_spec_cpu_length_sync() is (blocked is None)
