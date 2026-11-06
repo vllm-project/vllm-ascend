@@ -85,6 +85,13 @@ capture and owned by the current binding. Per-round request mappings and valid
 rows remain current. Native C8 Attention already clears empty query outputs;
 the adapter returns that output without another index scan and output mask.
 
+Request-row mapping reuses Core's device implementation, with separate storage
+for each captured MTP graph owner and Ascend's padded input extent. Indexer
+writes reuse the existing SFA store with independent page strides for keys and
+scales, preserving the original payload bits. Small Host-mirror submissions use
+PTA's ordered queue with immutable scalar descriptors; full-layer batches keep
+the batch-copy API and Core's completion and payload-ownership boundaries.
+
 Keep completion-before-unregister and graph allocation ownership intact.
 Overwriting KV still invalidates any old Hot copy. Equal batch shapes do not
 permit reusing stale request mappings or lengths. No upstream vLLM source change
@@ -101,10 +108,11 @@ In the current GLM-5.2 C4 comparison (32768 input and 8192 output tokens,
 TP8/DP1, MTP3, Model Runner V2, prefix caching off and explicit
 `weight_nz_mode=0`), both arms completed two rounds with 65536 actual output
 token IDs per arm. ON's settled reported miss/H2D deltas were zero. Mean TPOT was
-12.30 ms OFF and 13.78 ms ON: an observed increase of 12.03%. Outputs and MTP
-work differed between these arms, so this mean is not an isolated measure of
-backend overhead. A preceding paired round with identical outputs and MTP work
-still showed an 18.11% increase.
+12.313 ms OFF and 13.249 ms ON: an observed increase of 7.61%. All four rounds
+had identical complete input/output-sequence multisets and MTP counters
+(59.8936% acceptance). Sampled steady Decode throughput decreased by 4.58%.
+TPOT includes the mixed Prefill/Decode portion of the requests, so its increase
+must not be attributed entirely to steady Decode or to a single operation.
 
 In separate ON comparisons with identical inputs, outputs and MTP work, native C8 output and
 length reuse reduced observed mean TPOT by 2.19% across two rounds. Bounding
@@ -112,6 +120,10 @@ compact-refill programs reduced TPOT by 1.93% in one matching round. These gains
 are not additive and do not establish statistical significance or acceptable
 performance for other workloads. Compact refill retains current device counts,
 page-strided byte copies and the existing completion dependencies.
+
+The request mapping, page-strided Indexer store and small-copy queue passed
+focused eager/Graph NPU checks before the current full-model comparison. These
+checks do not establish an isolated end-to-end gain for each individual change.
 
 Dataset accuracy, the full-model miss path and a TPOT regression within 3%
 remain unqualified. Profiling requests are separate from formal performance
