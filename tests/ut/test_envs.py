@@ -47,7 +47,7 @@ class TestEnvVariables(TestBase):
 
                     handler_source = inspect.getsource(var_handler)
                     if var_name in self.boolean_vars:
-                        test_vals = ["1", "0", "true", "false", "YES", "Off"]
+                        test_vals = ["1", "0"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     else:
@@ -70,8 +70,8 @@ class TestEnvVariables(TestBase):
                 getattr(envs_ascend, var_name)
 
     def test_boolean_env_parsing_and_invalid_values(self):
-        truthy = ["1", "true", "yes", "on", "  True  ", "YES"]
-        falsy = ["0", "false", "no", "off", "  False  ", "Off"]
+        # Only 0/1 are accepted; every other value must fail loudly.
+        rejected = ["true", "false", "yes", "no", "on", "off", "2", "enabled"]
         # The expected defaults are spelled out on purpose: deriving them from
         # the implementation would let a wrong default still pass the assertions
         # below.
@@ -83,12 +83,13 @@ class TestEnvVariables(TestBase):
             with self.subTest(var=var_name):
                 original_val = os.environ.get(var_name)
                 try:
-                    # Invalid value: error must name the variable so users can
-                    # locate the offending export immediately.
-                    os.environ[var_name] = "enabled"
-                    with self.assertRaises(ValueError) as ctx:
-                        getattr(envs_ascend, var_name)
-                    self.assertIn(var_name, str(ctx.exception))
+                    # Accepted values, including surrounding whitespace.
+                    os.environ[var_name] = "1"
+                    self.assertIs(getattr(envs_ascend, var_name), True)
+                    os.environ[var_name] = "0"
+                    self.assertIs(getattr(envs_ascend, var_name), False)
+                    os.environ[var_name] = " 1 "
+                    self.assertIs(getattr(envs_ascend, var_name), True)
 
                     # Unset and empty values (the latter is common with
                     # `export VAR=`) must both yield the documented default.
@@ -97,13 +98,13 @@ class TestEnvVariables(TestBase):
                     os.environ[var_name] = ""
                     self.assertIs(getattr(envs_ascend, var_name), expected_default)
 
-                    # Every supported spelling maps to the expected boolean.
-                    for val in truthy:
+                    # Everything else is rejected, and the error names the
+                    # variable so users can locate the offending export.
+                    for val in rejected:
                         os.environ[var_name] = val
-                        self.assertIs(getattr(envs_ascend, var_name), True)
-                    for val in falsy:
-                        os.environ[var_name] = val
-                        self.assertIs(getattr(envs_ascend, var_name), False)
+                        with self.assertRaises(ValueError) as ctx:
+                            getattr(envs_ascend, var_name)
+                        self.assertIn(var_name, str(ctx.exception))
                 finally:
                     if original_val is None:
                         os.environ.pop(var_name, None)

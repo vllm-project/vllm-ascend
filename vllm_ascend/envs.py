@@ -24,24 +24,22 @@ from typing import Any
 
 
 def _bool_env(name: str, default: bool) -> bool:
-    """Parse a boolean environment variable with clear diagnostics.
+    """Parse a boolean environment variable as ``1`` or ``0``.
 
-    Accepts 1/0, true/false, yes/no and on/off (case-insensitive, surrounding
-    whitespace ignored). Unset or empty values fall back to ``default``.
-    Any other value raises ValueError naming the variable and valid options.
+    Only ``1`` and ``0`` are accepted (surrounding whitespace is ignored).
+    Unset or empty values fall back to ``default``, which keeps
+    ``export VAR=`` from crashing. Any other value raises ValueError naming the
+    variable, instead of failing inside ``int()`` with an opaque message.
     """
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
-    value = raw.strip().lower()
-    if value in ("1", "true", "yes", "on"):
+    value = raw.strip()
+    if value == "1":
         return True
-    if value in ("0", "false", "no", "off"):
+    if value == "0":
         return False
-    raise ValueError(
-        f"Invalid value for environment variable {name}: {raw!r}. "
-        "Expected one of 1/0, true/false, yes/no, on/off (case-insensitive)."
-    )
+    raise ValueError(f"Invalid value for environment variable {name}: {raw!r}. Expected '0' or '1'.")
 
 
 # The begin-* and end* here are used by the documentation generator
