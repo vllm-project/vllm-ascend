@@ -38,7 +38,7 @@ def supports_indexer_quant_cache_int8(key: torch.Tensor, scale: torch.Tensor, nu
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _write_indexer_cache_block(
     key_ptr,
     scale_ptr,
@@ -46,7 +46,7 @@ def _write_indexer_cache_block(
     source_slots,
     source_rows,
     first_slot,
-    NUM_TOKENS: tl.constexpr,
+    num_tokens,
     PAGE_SIZE: tl.constexpr,
     KEY_PAGE_STRIDE: tl.constexpr,
     SCALE_PAGE_STRIDE: tl.constexpr,
@@ -59,10 +59,10 @@ def _write_indexer_cache_block(
 ):
     lanes = tl.arange(0, SCALES_PER_BLOCK)
     columns = tl.arange(0, HEAD_SIZE)
-    matches = (source_slots[None, :] == first_slot + lanes[:, None]) & (source_rows[None, :] < NUM_TOKENS)
+    matches = (source_slots[None, :] == first_slot + lanes[:, None]) & (source_rows[None, :] < num_tokens)
     rows = tl.min(tl.where(matches, source_rows[None, :], INPUT_ROWS), axis=1)
-    active = rows < NUM_TOKENS
-    safe_rows = tl.minimum(rows, NUM_TOKENS - 1)
+    active = rows < num_tokens
+    safe_rows = tl.minimum(rows, num_tokens - 1)
     x = tl.load(
         x_ptr + safe_rows[:, None] * X_ROW_STRIDE + columns[None, :] * X_COL_STRIDE,
         active[:, None],
@@ -93,13 +93,13 @@ def _write_indexer_cache_block(
     tl.store(scale_addresses, tl.where(active, scale.to(tl.float16), old_scale))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _indexer_quant_cache_int8_kernel(
     key_ptr,
     scale_ptr,
     x_ptr,
     slots_ptr,
-    NUM_TOKENS: tl.constexpr,
+    num_tokens,
     NUM_SLOTS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     KEY_PAGE_STRIDE: tl.constexpr,
@@ -117,13 +117,13 @@ def _indexer_quant_cache_int8_kernel(
     if (slot >= 0) & (slot < NUM_SLOTS):
         source_rows = tl.arange(0, INPUT_ROWS)
         source_slots = tl.load(
-            slots_ptr + source_rows * SLOT_STRIDE, source_rows < NUM_TOKENS, other=-1
+            slots_ptr + source_rows * SLOT_STRIDE, source_rows < num_tokens, other=-1
         ).to(tl.int64)
         # Pages and scale page strides are multiples of a 32-byte scale block.
         # Thus each logical group of 16 slots maps to one complete physical block.
         first_slot = (slot // SCALES_PER_BLOCK) * SCALES_PER_BLOCK
         in_block = (
-            (source_rows < NUM_TOKENS)
+            (source_rows < num_tokens)
             & (source_slots >= first_slot)
             & (source_slots < first_slot + SCALES_PER_BLOCK)
         )
@@ -136,7 +136,7 @@ def _indexer_quant_cache_int8_kernel(
                 source_slots,
                 source_rows,
                 first_slot,
-                NUM_TOKENS,
+                num_tokens,
                 PAGE_SIZE,
                 KEY_PAGE_STRIDE,
                 SCALE_PAGE_STRIDE,
@@ -180,7 +180,7 @@ def indexer_quant_cache_int8(
         scale_cache,
         x,
         slots,
-        NUM_TOKENS=x.shape[0],
+        num_tokens=x.shape[0],
         NUM_SLOTS=key_cache.shape[0] * key_cache.shape[1],
         PAGE_SIZE=key_cache.shape[1],
         KEY_PAGE_STRIDE=key_cache.stride(0),
