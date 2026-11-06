@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
@@ -867,6 +868,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
         self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
         self._uses_a5_packed_cache = self._device_backend is not None
+        # Opt-in on other NPUs; CPU tests retain the eager reference path.
+        # Read once at builder construction, before any graph capture.
+        self._enable_c2_metadata_fusion = (
+            getattr(device, "type", "cpu") == "npu"
+            and ascend_envs.VLLM_ASCEND_ENABLE_C2_METADATA_FUSION
+        )
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         query_metadata_size = V41_METADATA_BUFFER_SIZE if build_query_metadata else 0
@@ -955,6 +962,23 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         """
         if self._build_compressor_metadata and self._cache_kind == "compressor_state":
             source_rope = get_full_cos_and_sin_dsa_for_layer(self._c2_rope_layer_names[0])
+            if self._enable_c2_metadata_fusion and not self._uses_a5_packed_cache:
+                cos, sin = source_rope
+                # The existing fused kernel uses common cos/sin strides.
+                # Check the layout before submitting any async work.
+                if (
+                    cos.ndim != 4
+                    or cos.shape[1:3] != (1, 1)
+                    or cos.shape != sin.shape
+                    or cos.stride() != sin.stride()
+                    or cos.shape[-1] != self._c2_source_cos.shape[-1]
+                    or cos.device != self._c2_source_cos.device
+                    or sin.device != cos.device
+                ):
+                    raise ValueError(
+                        "C2 metadata fusion requires matching [L, 1, 1, D] "
+                        "source RoPE layouts on the builder device"
+                    )
             self._c2_full_source_rope = source_rope
 
     def enable_device_metadata(self) -> None:
@@ -1470,7 +1494,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
-                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
+                if (
+                    (self._uses_a5_packed_cache or self._enable_c2_metadata_fusion)
+                    and full_source_cos is not None
+                    and full_source_sin is not None
+                ):
                     build_c2_ring_metadata(
                         common.query_start_loc,
                         seq_lens,
