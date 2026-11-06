@@ -52,14 +52,13 @@ class _ReceiveState:
     expected_ranks: set[WorkerRank] = field(default_factory=set)
     finished_ranks: set[WorkerRank] = field(default_factory=set)
     failed: bool = False
-    producer_engine_id: str | None = None
 
 
-class MooncakeCompletionThread(threading.Thread):
-    """Receive terminal per-source DONE; main thread owns request accounting."""
+class MooncakeDecodeListenerThread(threading.Thread):
+    """Listen for P worker DONE messages on D; acknowledge and queue results."""
 
     def __init__(self, worker: "MooncakePushConnectorWorker") -> None:
-        super().__init__(daemon=True, name="MooncakeCompletionThread")
+        super().__init__(daemon=True, name="MooncakeDecodeListenerThread")
         self.stop_event = worker._stop_event
         self.ready_event = threading.Event()
         self.error: Exception | None = None
@@ -96,14 +95,14 @@ class MooncakeCompletionThread(threading.Thread):
                         continue
                     if self.stop_event.is_set():
                         return
-                    self._handle_frames(sock, frames)
+                    self._handle_done_message(sock, frames)
         except Exception as exc:
             self.error = exc
             logger.exception("%s failed", self.name)
         finally:
             self.ready_event.set()
 
-    def _handle_frames(self, sock: Any, frames: list[bytes]) -> None:
+    def _handle_done_message(self, sock: Any, frames: list[bytes]) -> None:
         identity, *payload = frames
         # Support REQ (empty delimiter) and DEALER callbacks.
         delimiter = [b""] if payload and payload[0] == b"" else []
@@ -138,7 +137,10 @@ class MooncakeCompletionThread(threading.Thread):
                 raise ValueError("Successful DONE must certify drained WRITEs")
             completion = message
             reply = {"kind": "done_ack", "request_id": message["request_id"]}
-        except (ValueError, msgspec.DecodeError) as exc:
+        except Exception as exc:
+            # Isolate malformed network messages, including decoder errors
+            # such as RecursionError, from the shared listener's lifetime.
+            logger.warning("Failed to parse Mooncake DONE message: %s", exc)
             reply = {"kind": "error", "error": str(exc)}
         try:
             sock.send_multipart([identity, *delimiter, msgspec.msgpack.encode(reply)])
@@ -207,7 +209,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._result_queue: queue.SimpleQueue = queue.SimpleQueue()
         self._reqs_recv_state: dict[str, _ReceiveState] = {}
         self._finished_requests: SizedDict = SizedDict(max_size=16000)
-        self._recving_thread: MooncakeCompletionThread | None = None
+        self._decode_listener_thread: MooncakeDecodeListenerThread | None = None
         self._pending_completions: SizedDict = SizedDict(max_size=16000)
         self._control_error: Exception | None = None
         self._reqs_send_state: dict[str, SendReqInfo] = {}
@@ -244,16 +246,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 thread_name_prefix="MooncakePushSending",
             )
             return
-        self._recving_thread = MooncakeCompletionThread(self)
+        self._decode_listener_thread = MooncakeDecodeListenerThread(self)
         try:
-            self._recving_thread.start()
+            self._decode_listener_thread.start()
         except Exception:
             self.shutdown()
             raise
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
-        self.maybe_raise_thread_error()
         if self.kv_transfer_config.is_kv_producer:
+            self.maybe_raise_thread_error()
             # Prepare source snapshots before any model layer can update them.
             while self._pending_sends:
                 self._process_sending_requests(wait=True)
@@ -736,7 +738,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._prefilling_request_ids = ()
 
     def maybe_raise_thread_error(self) -> None:
-        for thread in (self._recving_thread,):
+        for thread in (self._decode_listener_thread,):
             if thread is not None and thread.error is not None:
                 self._control_error = thread.error
         if self._control_error is not None:
@@ -766,10 +768,13 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     # Proxy may dispatch P before D's allocation metadata reaches
                     # this worker. Preserve early DONE, deduplicated by source.
                     pending = self._pending_completions.setdefault(request_id, {})
-                    source = tuple(payload["producer_rank"])
-                    if source in pending and pending[source] != payload:
-                        self._control_error = RuntimeError("Conflicting early Push completion")
-                        self.maybe_raise_thread_error()
+                    source = (
+                        payload["producer_engine_id"],
+                        tuple(payload["producer_sizes"]),
+                        tuple(payload["producer_rank"]),
+                        payload["status"],
+                        payload["writes_drained"],
+                    )
                     pending[source] = payload
                     continue
                 if kind == "failed":
@@ -778,26 +783,22 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     self._finished_requests[request_id] = (state.request_id, state.metadata)
                     del self._reqs_recv_state[request_id]
                     continue
-                if payload["request_id"] != state.request_id:
-                    raise ValueError("Push completion request identity mismatch")
-                sizes = payload["producer_sizes"]
-                expected = {
-                    (pp, pcp, tp) for pp in range(sizes[0]) for pcp in range(sizes[1]) for tp in range(sizes[2])
-                }
-                if state.producer_engine_id is None:
-                    state.producer_engine_id = payload["producer_engine_id"]
-                    state.expected_ranks = expected
-                elif state.producer_engine_id != payload["producer_engine_id"] or state.expected_ranks != expected:
-                    self._control_error = RuntimeError("Conflicting P engine or topology for Push completion")
-                    self.maybe_raise_thread_error()
+                if not state.expected_ranks:
+                    sizes = payload["producer_sizes"]
+                    state.expected_ranks = {
+                        (pp, pcp, tp) for pp in range(sizes[0]) for pcp in range(sizes[1]) for tp in range(sizes[2])
+                    }
                 source = tuple(payload["producer_rank"])
+                state.failed |= payload["status"] == "error"
+                if not payload["writes_drained"]:
+                    # Keep failure local without granting permission to reuse
+                    # the destination. A later drained DONE can finish this source.
+                    state.failed = True
+                    state.finished_ranks.discard(source)
+                    continue
                 if source in state.finished_ranks:
                     continue
-                if not payload["writes_drained"]:
-                    self._control_error = RuntimeError(payload.get("error", "P WRITE drain is unknown"))
-                    self.maybe_raise_thread_error()
                 state.finished_ranks.add(source)
-                state.failed |= payload["status"] == "error"
                 if state.finished_ranks == state.expected_ranks:
                     results.finished_recving.add(state.request_id)
                     if state.failed:
@@ -805,20 +806,20 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     self._finished_requests[request_id] = (state.request_id, state.metadata)
                     del self._reqs_recv_state[request_id]
             for state in self._reqs_recv_state.values():
-                if time.monotonic() - state.start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
+                if not state.failed and time.monotonic() - state.start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                     state.failed = True
-                    self._control_error = TimeoutError(f"Missing terminal Push completion for {state.request_id}")
-                    self.maybe_raise_thread_error()
+                    logger.error("Missing terminal Push completion for request %s", state.request_id)
         return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        # Failed requests are reported through failed_recving, after writes drain.
-        self.maybe_raise_thread_error()
+        # D reports request failures and checks its listener in get_transfer_results.
+        if self.kv_transfer_config.is_kv_producer:
+            self.maybe_raise_thread_error()
         return set()
 
     def shutdown(self) -> None:
         self._stop_event.set()
-        for thread in (self._recving_thread,):
+        for thread in (self._decode_listener_thread,):
             if thread is not None:
                 thread.shutdown()
         if self._sender_executor is not None:

@@ -357,7 +357,7 @@ def test_metadata_query_and_done_real_sockets(worker, monkeypatch):
         handshake_port=0,
         _result_queue=result_queue,
     )
-    completion = push_worker.MooncakeCompletionThread(d)
+    completion = push_worker.MooncakeDecodeListenerThread(d)
     completion.start()
     started = threading.Event()
     address = []
