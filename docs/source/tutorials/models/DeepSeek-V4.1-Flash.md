@@ -270,7 +270,10 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       PCP size 1, and eager Prefill (`NONE` or `FULL_DECODE_ONLY`). Each SP rank
       selects its retained rows locally and exchanges only compact states for
       the layers after the last KV source. Decode rows and requests requiring
-      prompt logprobs retain their full query spans. SP replay does not support
+      prompt logprobs retain their full query spans. Active replay batches,
+      including untrimmed DP peers, bypass `torch.compile`; ordinary Decode and
+      warmup use the configured compilation path with all model layers visible
+      to the compiler. SP replay does not support
       adaptive verification, PP, DCP, microbatching, or LoRA.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations

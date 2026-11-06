@@ -8,9 +8,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .decoder_replay_sp import SPReplayPlan
 
@@ -81,44 +79,6 @@ class AscendDecoderReplayLayers:
                 output.index_copy_(0, rows[: self.num_actual_rows], row_output[: self.num_actual_rows])
                 outputs.append(output)
             return tuple(outputs)
-
-
-def dsv41_sp_decoder_replay(
-    hidden_states: torch.Tensor,
-    pre_mix: torch.Tensor,
-    positions: torch.Tensor,
-    input_ids: torch.Tensor | None,
-    num_late_aux: int,
-    layer_name: str,
-) -> list[torch.Tensor]:
-    # Resolve the per-forward plan at execution time, not from Dynamo's warmup
-    # batch. Decode graph capture still records the ordinary, untrimmed tail.
-    replay = get_forward_context().no_compile_layers[layer_name]
-    return list(replay(hidden_states, pre_mix, positions, input_ids))
-
-
-def dsv41_sp_decoder_replay_fake(
-    hidden_states: torch.Tensor,
-    pre_mix: torch.Tensor,
-    positions: torch.Tensor,
-    input_ids: torch.Tensor | None,
-    num_late_aux: int,
-    layer_name: str,
-) -> list[torch.Tensor]:
-    return [
-        torch.empty_like(hidden_states),
-        torch.empty_like(pre_mix),
-        *(hidden_states.new_empty((positions.shape[0], hidden_states.shape[-1])) for _ in range(num_late_aux)),
-    ]
-
-
-direct_register_custom_op(
-    op_name="dsv41_sp_decoder_replay",
-    op_func=dsv41_sp_decoder_replay,
-    mutates_args=[],
-    fake_impl=dsv41_sp_decoder_replay_fake,
-    dispatch_key="PrivateUse1",
-)
 
 
 def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> AscendDecoderReplayLayers | None:

@@ -1,5 +1,5 @@
 pr: 21129
 entries:
   - category: feature
-    text: Added DeepSeek V4.1 decoder bounded replay with sequence parallelism on Model Runner V2 and PCP size 1, redistributing only retained rows between the original and compact SP layouts. Adaptive verification remains unsupported on this path.
+    text: Added DeepSeek V4.1 decoder bounded replay with sequence parallelism on Model Runner V2 and PCP size 1, redistributing only retained rows between the original and compact SP layouts. Active replay batches run eagerly while ordinary decode keeps full model compilation; adaptive verification remains unsupported on this path.
     model: deepseek-v4.1
