@@ -1,4 +1,4 @@
-pr: 20883
+pr: 20878
 entries:
   - category: bugfix
     hardware: [A3, A5]
@@ -7,3 +7,9 @@ entries:
       on A3 and A5, preserving exact indices and FP32 softmax statistics across
       attention output exchange paths. Keep non-power-of-two DCP/interleave
       sparse-index remapping on device, including interleave sizes 768 and 1536.
+  - category: bugfix
+    hardware: [A3, A5]
+    text: >-
+      Refresh compact DCP block tables at captured addresses, account for PCP
+      request segments in indexer length buffers, and reject Mooncake DCP
+      interleave sizes that do not align with the SFA kernel block size.
