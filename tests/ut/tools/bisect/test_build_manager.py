@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 
 from tools.bisect import git_ops
-from tools.bisect.build_analyzer.ir import BuildAnalysis, Operation
+from tools.bisect.build_analyzer.ir import BuildAnalysis, Instruction, Operation
+from tools.bisect.build_analyzer.planner import TransitionPlan
 from tools.bisect.build_manager import BuildManager
 from tools.bisect.config import BisectOptions
 
@@ -128,3 +129,27 @@ def test_analyzer_rejects_cann_image_change(tmp_path: Path, monkeypatch: pytest.
 
     with pytest.raises(RuntimeError, match="CANN base image changed"):
         manager.decide("b" * 40)
+
+
+def test_prepare_logs_actual_transition_instead_of_target_as_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = "a" * 40
+    target = "b" * 40
+    manager = BuildManager(BisectOptions(repo_dir=tmp_path, soc="a3", assume_built_head=False))
+    manager.last_built_commit = source
+    manager.installed_commit = source
+    analysis = BuildAnalysis((Instruction("Dockerfile.a3", 1, "FROM", "cann:a3"),), (), ())
+    plan = TransitionPlan("no-op", (), (), (), (), (), ())
+    monkeypatch.setattr(manager, "_analysis_at", lambda commit: analysis)
+    monkeypatch.setattr(manager, "_transition_plan", lambda commit: plan)
+    monkeypatch.setattr(git_ops, "resolve_commit", lambda repo, commit: commit)
+    monkeypatch.setattr(git_ops, "commit_changed_files", lambda repo, commit: [])
+    monkeypatch.setattr(git_ops, "checkout", lambda repo, commit: None)
+    monkeypatch.setattr(git_ops, "current_commit", lambda repo: target)
+    log_path = tmp_path / "round.log"
+
+    manager.prepare(target, log_path)
+
+    log = log_path.read_text(encoding="utf-8")
+    assert f"installed_commit={source[:12]} target_commit={target[:12]}" in log
+    assert f"checked_out={target[:12]} installed_commit={target[:12]} actions_executed=0" in log
+    assert "[pairing:" not in log

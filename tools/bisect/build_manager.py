@@ -37,6 +37,7 @@ from pathlib import Path
 
 from tools.bisect import git_ops
 from tools.bisect.build_analyzer import analyze_commit, plan_transition
+from tools.bisect.build_analyzer.diff import package_state_changes
 from tools.bisect.build_analyzer.ir import BuildAnalysis, BuildSyntaxError
 from tools.bisect.build_analyzer.planner import TransitionPlan
 from tools.bisect.config import (
@@ -184,6 +185,30 @@ class BuildManager:
         decision = self.decide(target_commit)
         plan = self._transition_plan(target_commit)
         logger.info("[build] %s -> %s", target_commit[:12], decision.reason)
+        if self.opt.soc and log_file is not None:
+            target_analysis = self._analysis_at(target_commit)
+            source_commit = self.installed_commit
+            sources = ", ".join(dict.fromkeys(instruction.source for instruction in target_analysis.instructions))
+            with open(log_file, "a", encoding="utf-8") as out:
+                out.write(
+                    f"[build-chain:before] installed_commit={source_commit[:12] if source_commit else 'unknown'} "
+                    f"target_commit={target_commit[:12]} SoC={self.opt.soc}\n"
+                    f"[build-chain:target] sources={sources}\n"
+                )
+                if source_commit is not None:
+                    changes = package_state_changes(self._analysis_at(source_commit), target_analysis)
+                    out.write(f"[build-chain:comparison] package_changes={len(changes)}\n")
+                    for change in changes:
+                        before = f"{change.before.action} {change.before.specification}" if change.before else "absent"
+                        after = f"{change.after.action} {change.after.specification}" if change.after else "absent"
+                        out.write(f"[build-chain:package] {change.name}: {before} -> {after}\n")
+                for outcome in target_analysis.package_outcomes:
+                    out.write(
+                        f"[build-chain:target-package] {outcome.source}:{outcome.line} "
+                        f"{outcome.name} {outcome.action} {outcome.specification}\n"
+                    )
+                for diagnostic in target_analysis.diagnostics:
+                    out.write(f"[build-chain:diagnostic] {diagnostic}\n")
         if plan is not None:
             logger.info("[build-chain] transition=%s actions=%d", plan.status, len(plan.actions))
             for blocker in plan.blockers:
@@ -238,6 +263,13 @@ class BuildManager:
             self.last_built_commit = target_commit
         self.installed_commit = target_commit
         self._baseline_untrusted = False
+        if log_file is not None:
+            with open(log_file, "a", encoding="utf-8") as out:
+                out.write(
+                    f"[build-chain:after] checked_out={git_ops.current_commit(self.repo)[:12]} "
+                    f"installed_commit={self.installed_commit[:12]} "
+                    f"actions_executed={len(plan.actions) if plan else 0} rebuilt={decision.rebuild}\n"
+                )
         self._plan_cache.clear()
         self._analysis_cache.clear()
         return decision

@@ -47,12 +47,7 @@ from tools.bisect.config import (
 )
 from tools.bisect.coordinator import Coordinator
 from tools.bisect.verdict import RunOutcome
-from tools.bisect.version_compat import (
-    TORCH_NPU_PIP_INDEX_URL,
-    VersionAdaptationError,
-    installed_torch_npu_version,
-    installed_vllm_version,
-)
+from tools.bisect.version_compat import VersionAdaptationError
 
 logger = logging.getLogger(__name__)
 
@@ -139,45 +134,6 @@ class BaseRunner:
         self.builder = builder
         self.repo = opt.repo_dir
 
-    def _log_pairing(self, commit: str, log_path: Path, phase: str) -> None:
-        """Record analyzed build inputs and observed installed versions."""
-        if not self.opt.soc:
-            return
-        analysis = self.builder._analysis_at(commit)
-        root_source, nightly_source = tuple(dict.fromkeys(instruction.source for instruction in analysis.instructions))
-        arguments = {
-            name: value
-            for operation in analysis.operations
-            if operation.source == root_source and operation.kind == "arg"
-            for name, _, value in (operation.value.partition("="),)
-        }
-        base_image = next((op.value for op in analysis.operations if op.kind == "from"), "unspecified")
-        try:
-            vllm_source = git_ops.current_commit(self.opt.vllm_dir)[:12]
-        except (OSError, git_ops.GitError):
-            vllm_source = "unavailable"
-        expected_vllm = arguments.get("VLLM_COMMIT") or arguments.get("VLLM_TAG") or "unspecified"
-        lines = [
-            f"[pairing:{phase}] vllm-ascend={commit[:12]} SoC={self.opt.soc} "
-            f"base={root_source} nightly={nightly_source}",
-            f"[pairing:{phase}] expected vLLM={expected_vllm} CANN-image={base_image}",
-            f"[pairing:{phase}] installed vLLM={installed_vllm_version() or 'missing'} "
-            f"source={vllm_source} torch-npu={installed_torch_npu_version() or 'missing'}",
-            f"[pairing:{phase}] indexes primary={os.getenv('PIP_INDEX_URL', TORCH_NPU_PIP_INDEX_URL)} "
-            f"PyTorch={arguments.get('PYTORCH_INDEX_URL') or 'default'} "
-            f"Ascend={arguments.get('ASCEND_INDEX_URL') or 'default'}",
-        ]
-        if phase == "after":
-            lines.extend(
-                f"[pairing:effect] {effect.source}:{effect.line} {effect.name} {effect.action} {effect.specification}"
-                for effect in analysis.package_effects
-            )
-            lines.extend(f"[pairing:unresolved] {message}" for message in analysis.diagnostics)
-        with open(log_path, "a", encoding="utf-8") as out:
-            out.write("\n".join(lines) + "\n")
-        for line in lines[:2]:
-            logger.info(line)
-
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["CONFIG_YAML_PATH"] = self.inp.config_yaml
@@ -217,14 +173,12 @@ class BaseRunner:
 class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-        self._log_pairing(candidate.commit, log_path, "before")
         self.builder.decide(candidate.commit)  # fail before changing dependencies when the image cannot match
         try:
             decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
         except DEPLOY_ERRORS:
             self.builder.invalidate_baseline()
             raise
-        self._log_pairing(candidate.commit, log_path, "after")
 
         if self.opt.mock_tests:
             with open(log_path, "a", encoding="utf-8") as out:
@@ -280,7 +234,6 @@ class MultiNodeRunner(BaseRunner):
 
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-        self._log_pairing(candidate.commit, log_path, "before")
         # Pre-publish deploy decision: failing here would mean the round's
         # command never appears, stranding the worker in wait_command. Publish
         # a SKIP command so both sides stay in lockstep instead.
@@ -298,7 +251,6 @@ class MultiNodeRunner(BaseRunner):
         )
         try:
             self.builder.prepare(candidate.commit, log_path)
-            self._log_pairing(candidate.commit, log_path, "after")
         except DEPLOY_ERRORS:
             self.builder.invalidate_baseline()
             self._abort_round(round_idx)
