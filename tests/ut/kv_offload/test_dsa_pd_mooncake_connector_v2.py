@@ -75,9 +75,7 @@ def test_byte_views_and_resolved_targets_are_reused_per_receive(monkeypatch, pip
     target = torch.zeros(3 * chunk, dtype=torch.int8)
     registry.register_dsa_pd_mooncake_offloaded_kv_tensor(target)
     reader = make_reader(MagicMock(), pipeline=pipeline, window=1 if not pipeline else 2)
-    reader._ensure_dsa_pd_mooncake_staging_tensor = MagicMock(
-        wraps=reader._ensure_dsa_pd_mooncake_staging_tensor
-    )
+    reader._ensure_dsa_pd_mooncake_staging_tensor = MagicMock(wraps=reader._ensure_dsa_pd_mooncake_staging_tensor)
     resolve = MagicMock(wraps=staging_module.get_dsa_pd_mooncake_offloaded_kv_byte_tensor)
     monkeypatch.setattr(staging_module, "get_dsa_pd_mooncake_offloaded_kv_byte_tensor", resolve)
     original_view = torch.Tensor.view
@@ -101,7 +99,8 @@ def test_byte_views_and_resolved_targets_are_reused_per_receive(monkeypatch, pip
     reader.engine.batch_transfer_sync_read.side_effect = read
     for request in range(2):
         assert (
-            reader.batch_transfer_sync_read("peer", [target.data_ptr()], [10 * chunk], [target.nbytes], str(request)) == 0
+            reader.batch_transfer_sync_read("peer", [target.data_ptr()], [10 * chunk], [target.nbytes], str(request))
+            == 0
         )
         assert len(flattened) == 1
         assert reader._ensure_dsa_pd_mooncake_staging_tensor.call_count == request + 1
