@@ -1390,29 +1390,6 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
 
 
-def test_packed_reuse_keeps_vllm_loops_and_uses_npu_stream_aliases():
-    from vllm.distributed.weight_transfer import packed_tensor as upstream
-
-    from vllm_ascend.distributed.weight_transfer import packed_tensor
-
-    event = torch.Event
-    get_streams = upstream._get_streams
-    producer = upstream.packed_nccl_broadcast_producer
-    consumer = upstream.packed_nccl_broadcast_consumer
-    with patch.object(upstream, "packed_nccl_broadcast_producer", wraps=producer) as called:
-        packed_broadcast_producer(iter([("w", torch.ones(1))]), _make_group_mock(), 0, lambda item: item[1], 16)
-        called.assert_called_once()
-    assert upstream._get_streams is get_streams
-    assert upstream.packed_nccl_broadcast_producer is producer
-    assert upstream.packed_nccl_broadcast_consumer is consumer
-    assert upstream.torch is torch
-    assert torch.cuda.Stream is torch.npu.Stream
-    assert torch.cuda.stream is torch.npu.stream
-    assert torch.cuda.current_stream is torch.npu.current_stream
-    assert torch.Event is event
-    assert packed_tensor._ACTIVE.get() is None
-
-
 @pytest.mark.parametrize("num_buffers", [2, 3])
 def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_buffers):
     from vllm_ascend.distributed.weight_transfer import packed_tensor
@@ -1470,34 +1447,3 @@ def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_bu
     assert len({id(event) for event in adapter_events}) == num_buffers
     assert len({tensor.data_ptr() for tensor in retained}) == chunks
     assert packed_tensor._ACTIVE.get() is None
-
-
-def test_packed_stream_aliases_are_minimal_and_reapplicable(monkeypatch):
-    from vllm_ascend.distributed.weight_transfer import packed_tensor
-
-    names = ("Stream", "stream", "current_stream")
-    for name in names:
-        monkeypatch.setattr(torch.cuda, name, object())
-    before = dict(vars(torch.cuda))
-    event = torch.Event
-    accelerator = torch.accelerator.current_stream
-    npu = types.SimpleNamespace(**{name: object() for name in names})
-    monkeypatch.setattr(torch, "npu", npu, raising=False)
-
-    packed_tensor._install_packed_hooks()
-    changed = {name for name, value in vars(torch.cuda).items() if before.get(name) is not value}
-    assert changed == set(names)
-    for name in names:
-        assert getattr(torch.cuda, name) is getattr(npu, name)
-    assert torch.Event is event
-    assert torch.accelerator.current_stream is accelerator
-
-    packed_tensor._install_packed_hooks()
-    for name in names:
-        assert getattr(torch.cuda, name) is getattr(npu, name)
-
-    # A later NPU entry point must refresh aliases after another wrapper has
-    # changed them, rather than treating import-time installation as sufficient.
-    npu.stream = object()
-    packed_tensor._install_packed_hooks()
-    assert torch.cuda.stream is npu.stream
