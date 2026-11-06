@@ -50,6 +50,8 @@ CHECK_IMPORTS = {
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
         allowed_files={
+            # CI cleanup runs in nightly-cpu without the third-party regex package.
+            ".github/workflows/scripts/lws_cleanup.py",
             # Profiling indexes run in minimal CPU jobs without third-party dependencies.
             "tools/profiling/artifacts.py",
             # Cache key preparation and native build wrappers must work before

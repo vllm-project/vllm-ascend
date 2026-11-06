@@ -220,7 +220,7 @@ jobs:
     name: multi-node
     needs: [setup-vars, parse-trigger, build-image]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' &&
       needs.setup-vars.result == 'success' &&
       needs.setup-vars.outputs.multi_node != '[]' &&
@@ -278,7 +278,7 @@ jobs:
     name: single-node
     needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.parse-trigger.outputs.run == 'true' &&
       needs.setup-vars.result == 'success' &&
       needs.setup-vars.outputs.single_node != '[]' &&
@@ -332,7 +332,7 @@ jobs:
     name: Parse multi-node profiles
     needs: [setup-vars, parse-trigger, multi-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.setup-vars.result == 'success' &&
       needs.multi-node-tests.result != 'skipped' &&
       needs.setup-vars.outputs.profile_parse == 'true'
@@ -357,7 +357,7 @@ jobs:
     name: Parse single-node profiles
     needs: [setup-vars, parse-trigger, single-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.setup-vars.result == 'success' &&
       needs.single-node-tests.result != 'skipped' &&
       needs.setup-vars.outputs.profile_parse == 'true'
@@ -393,7 +393,7 @@ jobs:
     name: Merge benchmark artifacts into nightly-a5.zip
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
     runs-on: linux-aarch64-a5-0
