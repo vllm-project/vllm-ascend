@@ -4,3 +4,5 @@ entries:
     text: >-
       Fixed MooncakeConnectorV2 Host KV allocation for DSA/SFA main caches on Model Runner V2.
       Unsupported Host KV layouts now fail explicitly instead of silently using device KV.
+  - category: performance
+    text: Reduced DSA Mooncake Host landing preparation by reusing KV byte views and resolved transfer targets.

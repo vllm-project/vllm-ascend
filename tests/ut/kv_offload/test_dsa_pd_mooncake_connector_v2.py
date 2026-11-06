@@ -2,7 +2,9 @@
 """CPU regressions for V2 routing and the shared DSA landing lifecycle."""
 
 import ctypes
+import gc
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.kv_offload import dsa_pd_mooncake as registry
+from vllm_ascend.kv_offload import dsa_pd_mooncake_staging as staging_module
 from vllm_ascend.kv_offload.dsa_pd_mooncake_staging import DSAPDMooncakeStagingReader
 
 from .mooncake_v2.helpers import make_full_spec, make_kv_cache_tensor, make_pp_metadata, make_transfer_metadata
@@ -46,6 +49,97 @@ def make_reader(engine, *, pipeline=False, window=2):
     reader._landing_streams = [MagicMock(), MagicMock()]
     reader._landing_stream = reader._landing_streams[0]
     return reader
+
+
+def test_prepared_copy_uses_supplied_staging_and_byte_view(monkeypatch):
+    reader = make_reader(MagicMock())
+    target = torch.zeros(64, dtype=torch.int8)
+    staging = torch.arange(32, dtype=torch.int8)
+    reader._ensure_dsa_pd_mooncake_staging_tensor = MagicMock(side_effect=AssertionError("rechecked staging"))
+    monkeypatch.setattr(
+        staging_module,
+        "get_dsa_pd_mooncake_offloaded_kv_tensor",
+        MagicMock(side_effect=AssertionError("resolved target twice")),
+    )
+    reader._copy_dsa_pd_mooncake_staging_to_offloaded_kv(
+        target.data_ptr() + 8, 12, 4, staging=staging, target_bytes=target, target_offset=8
+    )
+    assert torch.equal(target[8:20], staging[4:16])
+    assert torch.count_nonzero(target[:8]) == 0
+    assert torch.count_nonzero(target[20:]) == 0
+
+
+@pytest.mark.parametrize("pipeline", [False, True])
+def test_byte_views_and_resolved_targets_are_reused_per_receive(monkeypatch, pipeline):
+    chunk = 2 * 1024 * 1024
+    target = torch.zeros(3 * chunk, dtype=torch.int8)
+    registry.register_dsa_pd_mooncake_offloaded_kv_tensor(target)
+    reader = make_reader(MagicMock(), pipeline=pipeline, window=1 if not pipeline else 2)
+    reader._ensure_dsa_pd_mooncake_staging_tensor = MagicMock(
+        wraps=reader._ensure_dsa_pd_mooncake_staging_tensor
+    )
+    resolve = MagicMock(wraps=staging_module.get_dsa_pd_mooncake_offloaded_kv_byte_tensor)
+    monkeypatch.setattr(staging_module, "get_dsa_pd_mooncake_offloaded_kv_byte_tensor", resolve)
+    original_view = torch.Tensor.view
+    flattened = []
+
+    def view(tensor, *args):
+        if tensor is target:
+            flattened.append(id(tensor))
+        return original_view(tensor, *args)
+
+    monkeypatch.setattr(torch.Tensor, "view", view)
+    reads = []
+
+    def read(_session, local, _remote, lengths):
+        value = len(reads) % 3 + 1
+        reads.append(value)
+        for dst, length in zip(local, lengths):
+            ctypes.memset(dst, value, length)
+        return 0
+
+    reader.engine.batch_transfer_sync_read.side_effect = read
+    for request in range(2):
+        assert (
+            reader.batch_transfer_sync_read("peer", [target.data_ptr()], [10 * chunk], [target.nbytes], str(request)) == 0
+        )
+        assert len(flattened) == 1
+        assert reader._ensure_dsa_pd_mooncake_staging_tensor.call_count == request + 1
+        assert resolve.call_count == request + 1
+        for piece in range(3):
+            assert torch.all(target[piece * chunk : (piece + 1) * chunk] == piece + 1)
+
+
+def test_receive_does_not_retain_old_host_tensor():
+    reader = make_reader(MagicMock())
+    reader.engine.batch_transfer_sync_read.return_value = 0
+    target = torch.empty(128, dtype=torch.int8)
+    registry.register_dsa_pd_mooncake_offloaded_kv_tensor(target)
+    ref = weakref.ref(target)
+    assert reader.batch_transfer_sync_read("peer", [target.data_ptr()], [0xA00000], [128], "request") == 0
+    del target
+    gc.collect()
+    assert ref() is None
+
+
+def test_registry_byte_view_aliases_storage_and_expires_with_kv_tensor():
+    local_registry = registry._DSAPDMooncakeKVRegistry()
+    target = torch.zeros(32, dtype=torch.int16)
+    local_registry.register_offloaded_tensor(target)
+    first, offset = local_registry.resolve_offloaded_byte_tensor(target.data_ptr() + 4, 8)
+    second, _ = local_registry.resolve_offloaded_byte_tensor(target.data_ptr(), target.nbytes)
+    assert first is second and offset == 4
+    first.fill_(1)
+    assert torch.all(target == 257)
+    local_registry.clear()
+    assert local_registry.resolve_offloaded_byte_tensor(target.data_ptr(), target.nbytes) is None
+    local_registry.register_offloaded_tensor(target)
+    renewed, _ = local_registry.resolve_offloaded_byte_tensor(target.data_ptr(), target.nbytes)
+    assert renewed is not first
+    target_ref, view_ref = weakref.ref(target), weakref.ref(renewed)
+    del first, second, renewed, target
+    gc.collect()
+    assert target_ref() is None and view_ref() is None
 
 
 @pytest.mark.parametrize("host_only", [False, True])
@@ -163,7 +257,7 @@ def test_peer_bucket_cannot_overwrite_staging_during_landing():
     release_landing = threading.Event()
     second_started = threading.Event()
 
-    def land(*args):
+    def land(*args, **kwargs):
         landing_entered.set()
         assert release_landing.wait(5)
 

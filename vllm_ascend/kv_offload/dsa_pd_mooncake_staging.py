@@ -13,6 +13,7 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.kv_offload.dsa_pd_mooncake import (
     get_dsa_pd_mooncake_kv_register_location,
+    get_dsa_pd_mooncake_offloaded_kv_byte_tensor,
     get_dsa_pd_mooncake_offloaded_kv_tensor,
 )
 
@@ -95,14 +96,24 @@ class DSAPDMooncakeStagingMixin:
         )
         return staging
 
-    def _copy_dsa_pd_mooncake_staging_to_offloaded_kv(self, dst: int, length: int, staging_offset: int = 0) -> None:
-        resolved = get_dsa_pd_mooncake_offloaded_kv_tensor(dst, length)
-        if resolved is None:
-            raise RuntimeError(f"Missing DSA PD Mooncake offloaded KV tensor for dst={dst} length={length}.")
-        target_tensor, offset = resolved
-        staging = self._ensure_dsa_pd_mooncake_staging_tensor()
-        target_bytes = target_tensor.view(torch.int8).reshape(-1)
-        target_bytes.narrow(0, offset, length).copy_(
+    def _copy_dsa_pd_mooncake_staging_to_offloaded_kv(
+        self,
+        dst: int,
+        length: int,
+        staging_offset: int = 0,
+        *,
+        staging: torch.Tensor | None = None,
+        target_bytes: torch.Tensor | None = None,
+        target_offset: int = 0,
+    ) -> None:
+        if target_bytes is None:
+            resolved = get_dsa_pd_mooncake_offloaded_kv_byte_tensor(dst, length)
+            if resolved is None:
+                raise RuntimeError(f"Missing DSA PD Mooncake offloaded KV tensor for dst={dst} length={length}.")
+            target_bytes, target_offset = resolved
+        if staging is None:
+            staging = self._ensure_dsa_pd_mooncake_staging_tensor()
+        target_bytes.narrow(0, target_offset, length).copy_(
             staging[staging_offset : staging_offset + length], non_blocking=False
         )
 
@@ -172,17 +183,22 @@ class DSAPDMooncakeStagingMixin:
         direct_dst_list: list[int] = []
         direct_length_list: list[int] = []
         staged_transfers: list[tuple[int, int, int]] = []
+        # Request-local plans reuse byte views owned by the KV registry.
+        # The registry drops its views on KV Tensor destruction or reset.
+        staged_targets: dict[int, tuple[torch.Tensor, int]] = {}
         staging_chunk_bytes = self._get_dsa_pd_mooncake_staging_chunk_bytes()
         staging_alignment = 2 * 1024 * 1024
 
         for local_dst, remote_src, length in zip(src_list, dst_list, length_list):
-            if get_dsa_pd_mooncake_offloaded_kv_tensor(local_dst, length) is None:
+            resolved = get_dsa_pd_mooncake_offloaded_kv_byte_tensor(local_dst, length)
+            if resolved is None:
                 if get_dsa_pd_mooncake_kv_register_location(local_dst, length) == "cpu":
                     raise RuntimeError("Missing DSA PD Mooncake offloaded KV tensor for a Host READ destination.")
                 direct_src_list.append(local_dst)
                 direct_dst_list.append(remote_src)
                 direct_length_list.append(length)
                 continue
+            target_tensor, target_offset = resolved
             remaining = int(length)
             offset = 0
             while remaining > 0:
@@ -190,6 +206,7 @@ class DSAPDMooncakeStagingMixin:
                 piece_capacity = staging_chunk_bytes - remote_page_offset
                 piece_len = min(remaining, piece_capacity)
                 staged_transfers.append((int(local_dst) + offset, int(remote_src) + offset, piece_len))
+                staged_targets[int(local_dst) + offset] = (target_tensor, target_offset + offset)
                 offset += piece_len
                 remaining -= piece_len
 
@@ -278,6 +295,14 @@ class DSAPDMooncakeStagingMixin:
                 timing_plan_entries += len(copy_plan)
                 copy_plan = self._coalesce_dsa_pd_mooncake_copy_plan(copy_plan)
                 timing_copy_calls += len(copy_plan)
+                # Resolve before READ, reusing byte views across receives.
+                # Source and destination slices remain on the landing stream.
+                prepared_targets = []
+                for local_dst, length, staging_offset in copy_plan:
+                    target_bytes, target_offset = staged_targets[local_dst]
+                    if target_offset + length > target_bytes.numel():
+                        raise RuntimeError("Coalesced DSA Mooncake copy crosses a Host KV tensor boundary.")
+                    prepared_targets.append((target_bytes, target_offset))
                 if pipeline_active:
                     reclaim_started = time.perf_counter()
                     for slot in range(bank_slot_base, bank_slot_base + len(batch)):
@@ -313,8 +338,17 @@ class DSAPDMooncakeStagingMixin:
                 if pipeline_active:
                     try:
                         with torch.npu.stream(landing_stream):
-                            for local_dst, length, staging_offset in copy_plan:
-                                self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
+                            for (local_dst, length, staging_offset), (target_bytes, target_offset) in zip(
+                                copy_plan, prepared_targets
+                            ):
+                                self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(
+                                    local_dst,
+                                    length,
+                                    staging_offset,
+                                    staging=staging,
+                                    target_bytes=target_bytes,
+                                    target_offset=target_offset,
+                                )
                             for slot in range(bank_slot_base, bank_slot_base + len(batch)):
                                 landing_event = torch.npu.Event()
                                 landing_event.record(landing_stream)
@@ -328,8 +362,17 @@ class DSAPDMooncakeStagingMixin:
                     # device-wide sync keeps the legacy v0 contract.
                     land_started = time.perf_counter()
                     try:
-                        for local_dst, length, staging_offset in copy_plan:
-                            self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(local_dst, length, staging_offset)
+                        for (local_dst, length, staging_offset), (target_bytes, target_offset) in zip(
+                            copy_plan, prepared_targets
+                        ):
+                            self._copy_dsa_pd_mooncake_staging_to_offloaded_kv(
+                                local_dst,
+                                length,
+                                staging_offset,
+                                staging=staging,
+                                target_bytes=target_bytes,
+                                target_offset=target_offset,
+                            )
                     finally:
                         torch.npu.synchronize()
                     timing_land_exposed_secs += time.perf_counter() - land_started

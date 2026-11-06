@@ -24,6 +24,7 @@ class _DSAPDMooncakeKVRegistry:
         self._lock = threading.RLock()
         self._cpu_buffers: list[tuple[int, int]] = []
         self._offloaded_tensors: list[tuple[int, int, weakref.ReferenceType[torch.Tensor]]] = []
+        self._offloaded_byte_views: dict[int, tuple[weakref.ReferenceType[torch.Tensor], torch.Tensor]] = {}
 
     def register_cpu_buffer(self, ptr: int, size: int) -> None:
         if ptr <= 0 or size <= 0:
@@ -56,6 +57,31 @@ class _DSAPDMooncakeKVRegistry:
         with self._lock:
             self._cpu_buffers.clear()
             self._offloaded_tensors.clear()
+            self._offloaded_byte_views.clear()
+
+    def resolve_offloaded_byte_tensor(self, ptr: int, size: int) -> tuple[torch.Tensor, int] | None:
+        with self._lock:
+            resolved = self.resolve_offloaded_tensor(ptr, size)
+            if resolved is None:
+                return None
+            tensor, offset = resolved
+            key = id(tensor)
+            cached = self._offloaded_byte_views.get(key)
+            if cached is None or cached[0]() is not tensor:
+                # detach breaks the Tensor view's reference to the registered
+                # Tensor while retaining its storage. The weakref callback then
+                # releases this storage when that KV Tensor dies or is reset.
+                byte_view = tensor.view(torch.int8).reshape(-1).detach()
+
+                def release(tensor_ref: weakref.ReferenceType[torch.Tensor]) -> None:
+                    with self._lock:
+                        entry = self._offloaded_byte_views.get(key)
+                        if entry is not None and entry[0] is tensor_ref:
+                            self._offloaded_byte_views.pop(key)
+
+                cached = (weakref.ref(tensor, release), byte_view)
+                self._offloaded_byte_views[key] = cached
+            return cached[1], offset
 
     def get_register_location(self, ptr: int, size: int) -> str | None:
         ptr = int(ptr)
@@ -117,6 +143,13 @@ def get_dsa_pd_mooncake_offloaded_kv_tensor(
     size: int,
 ) -> tuple[torch.Tensor, int] | None:
     return _DSA_PD_MOONCAKE_KV_REGISTRY.resolve_offloaded_tensor(ptr, size)
+
+
+def get_dsa_pd_mooncake_offloaded_kv_byte_tensor(
+    ptr: int,
+    size: int,
+) -> tuple[torch.Tensor, int] | None:
+    return _DSA_PD_MOONCAKE_KV_REGISTRY.resolve_offloaded_byte_tensor(ptr, size)
 
 
 def is_dsa_pd_mooncake_offloaded_kv_buffer(ptr: int, size: int) -> bool:
