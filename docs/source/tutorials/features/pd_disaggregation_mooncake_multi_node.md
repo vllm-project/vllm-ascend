@@ -120,6 +120,33 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
+### KV cache transfer transport on Ascend A2/A3/A5
+
+PD disaggregation moves the KV cache through HIXL. Which transport is used is
+decided by `ASCEND_GLOBAL_RESOURCE_CONFIG` and by the fabric that actually
+connects the prefill and decode nodes; `vllm-ascend` does not select it.
+
+Export the variables **in the prefiller and decoder environments alike**,
+before `vllm serve` starts.
+
+```bash
+# A2 and A3: required since v0.30.0rc2. A5 does not need it.
+export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+
+# Only when the KV cache has to travel over HCCS, e.g. the prefill and decode
+# nodes are interconnected by HCCS and have no usable RoCE path:
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"hccs:device"}'
+```
+
+!!! note "Version and platform dependency"
+
+    `ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'` became required on A2/A3 with
+    v0.30.0rc2; earlier releases start without it. The Atlas 850/850E/950
+    SuperPod path described below uses version `1.3` instead.
+
+See the [HIXL user guide](https://gitcode.com/cann/hixl/wiki/HIXL%E4%BD%BF%E7%94%A8%E6%8C%87%E5%8D%97%28%E6%9E%84%E5%BB%BA%E4%B8%AD%29.md)
+for the full `protocol_desc` list and its hardware prerequisites.
+
 ### Atlas 850/850E/950 SuperPod Communication Configuration
 
 For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
