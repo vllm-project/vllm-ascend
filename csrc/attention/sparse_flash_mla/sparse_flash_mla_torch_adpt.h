@@ -22,7 +22,7 @@ constexpr int64_t DIM_2 = 2;
 constexpr int64_t DIM_3 = 3;
 constexpr int64_t DIM_4 = 4;
 
-constexpr int64_t SMLA_METADATA_SIZE = 1024;
+constexpr int64_t SMLA_METADATA_SIZE = VLLM_ASCEND_SMLA_METADATA_SIZE;
 
 inline at::Tensor GetValidSparseFlashMlaTensor(
     const c10::optional<at::Tensor> &tensor, const at::Device &device)

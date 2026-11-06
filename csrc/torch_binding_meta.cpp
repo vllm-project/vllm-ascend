@@ -424,7 +424,7 @@ at::Tensor npu_sparse_flash_mla_metadata_meta(
     c10::string_view layout_q, c10::string_view layout_kv,
     bool has_ori_kv, bool has_cmp_kv)
 {
-    return at::empty_symint(c10::SymDimVector{c10::SymInt(1024)},
+    return at::empty_symint(c10::SymDimVector{c10::SymInt(VLLM_ASCEND_SMLA_METADATA_SIZE)},
                             at::TensorOptions().dtype(at::kInt).device(c10::kMeta));
 }
 
