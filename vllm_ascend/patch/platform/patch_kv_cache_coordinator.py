@@ -126,6 +126,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         del pcp_world_size
         # main (cdc4824a21): upstream cache_blocks reads num_reprefillable_tokens
         self.num_reprefillable_tokens = max(0, (num_prefill_lookahead or 0) - 1)
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self.dcp_world_size = dcp_world_size
         self.scheduler_block_size = scheduler_block_size
         self.kv_cache_config = kv_cache_config
@@ -529,8 +530,8 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    num_prefill_lookahead: int = 0,
     num_hash_lookahead_tokens: int = 0,
+    num_prefill_lookahead: int = 0,
     allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call

@@ -220,6 +220,21 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    # ModelSlim Step5 checkpoints store the routed-expert projections fused
+    # across all experts as "moe.{gate,up,down}_proj" (no "experts.E."
+    # infix), so the FusedMoE "experts" container resolves its shards
+    # directly against those keys.  The rest of the fused layout
+    # (qkv_proj/qkvg_proj/qkv_indexer_proj/gate_up_proj) is seeded from the
+    # model's own STEP5_PACKED_MODULES_MAPPING.
+    "step5": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
+    "step5_vl": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
+    "step5_mtp": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
 }
 
 
@@ -284,6 +299,12 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # Same for the step5 MTP draft: the module tree nests the decoder block
+    # under ".mtp_block." while the checkpoint keys it without that infix
+    # (e.g. "model.layers.93.self_attn.q_proj.weight").
+    "step5_mtp": {
         ".mtp_block.": ".",
     },
     # GLM-5 MTP nests the decoder under ``mtp_block`` while the ModelSlim
@@ -783,6 +804,43 @@ class AscendModelSlimConfig(QuantizationConfig):
             if shard_names:
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
+    def _step5_layer_float_or_uncovered(self, prefix: str, model_type: str) -> bool:
+        """Return whether a Step5 layer must stay unquantized.
+
+        ModelSlim Step5 checkpoints quantize only the routed experts
+        (``moe.{gate,up,down}_proj`` = W8A8_MXFP8).  Everything else is
+        FLOAT or absent: the MTP draft keeps its indexer projections in
+        bf16, so its fused ``qkv_indexer_proj`` has FLOAT entries for
+        q/k/v/g but none for the indexer shards, and the vision tower is
+        keyed by the fused ``qkv_proj.weight`` alone.  Both shapes would
+        trip the strict shard checks in get_quant_type_for_layer; treat
+        probes with FLOAT-only coverage -- or no coverage at all -- as
+        unquantized.  Partial coverage that mixes FLOAT with a real quant
+        type still falls through and fails there, as it should.
+        """
+        proj_name = prefix.split(".")[-1]
+        if proj_name in self.packed_modules_mapping:
+            probes = [
+                prefix.removesuffix(proj_name) + shard
+                for shard in self.packed_modules_mapping[proj_name]
+            ]
+        else:
+            probes = []
+        probes.append(prefix)
+        covered = [
+            key
+            for key in (
+                _find_quant_description_key(
+                    self.quant_description, self.quant_prefix_mapper(model_type, probe)
+                )
+                for probe in probes
+            )
+            if key is not None
+        ]
+        if not covered:
+            return True
+        return all(self.quant_description[key] == "FLOAT" for key in covered)
+
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendEmbeddingMethod,
@@ -816,6 +874,10 @@ class AscendModelSlimConfig(QuantizationConfig):
         # Kimi K3's mixed-precision packed KDA projection is split by the model
         # adapter, so it must be resolved BEFORE get_quant_type_for_layer.
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
+            quant_type = None
+        elif model_type in ("step5", "step5_vl", "step5_mtp") and self._step5_layer_float_or_uncovered(
+            runtime_prefix, model_type
+        ):
             quant_type = None
         else:
             quant_type = get_quant_type_for_layer(
