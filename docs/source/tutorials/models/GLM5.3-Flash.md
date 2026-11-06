@@ -497,21 +497,28 @@ def parse_args():
 
 
 def run(args, devices, port, dp_rank):
-    subprocess.run(
-        [
-            "bash",
-            args.template,
-            devices,
-            str(port),
-            str(args.dp_size),
-            str(dp_rank),
-            args.dp_address,
-            args.dp_rpc_port,
-            str(args.tp_size),
-            str(args.pcp_size),
-        ],
-        check=True,
-    )
+    script_args = [
+        devices,
+        str(port),
+        str(args.dp_size),
+        str(dp_rank),
+        args.dp_address,
+        args.dp_rpc_port,
+        str(args.tp_size),
+        str(args.pcp_size),
+    ]
+    if args.dp_size == 1:
+        with open(args.template, encoding="utf-8") as f:
+            script = f.read()
+        script = "\n".join(
+            line for line in script.splitlines()
+            if "--data-parallel-rank" not in line
+            and "--data-parallel-external-lb" not in line
+        )
+        command = ["bash", "-o", "pipefail", "-c", script, args.template, *script_args]
+    else:
+        command = ["bash", "-o", "pipefail", args.template, *script_args]
+    subprocess.run(command, check=True)
 
 
 if __name__ == "__main__":
@@ -541,6 +548,12 @@ if __name__ == "__main__":
 The launcher passes visible devices, engine port, global DP size, DP rank, DP
 address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 `$8`. Each local DP rank uses TP×PCP devices. `--pcp-size` defaults to `1`.
+
+When `--dp-size 1` is selected, the launcher removes lines containing
+`--data-parallel-rank` or `--data-parallel-external-lb` before running the role
+script. These options enable external DP load balancing, which requires DP>1.
+Keep each option on its own line so other arguments are preserved when filtering.
+For DP>1, the launcher executes the role script without filtering.
 
 === "950DT products"
 
