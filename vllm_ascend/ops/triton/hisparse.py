@@ -179,7 +179,7 @@ def gather_valid_resident_rows_kernel(
     src = tl.load(row_ids + row, mask=row < ROWS, other=-1).to(tl.int64)
     src_offset = src // SOURCE_BLOCK * SOURCE_STRIDE + src % SOURCE_BLOCK * ROW_BYTES
     dst_offset = row // DEST_BLOCK * DEST_STRIDE + row % DEST_BLOCK * ROW_BYTES
-    byte = tl.arange(0, BLOCK_BYTES)
+    byte = tl.program_id(1) * BLOCK_BYTES + tl.arange(0, BLOCK_BYTES)
     valid = (row < ROWS) & (src >= 0) & (src < SOURCE_ROWS)
     mask = valid[:, None] & (byte[None, :] < ROW_BYTES)
     payload = tl.load(source + src_offset[:, None] + byte[None, :], mask=mask, other=0)

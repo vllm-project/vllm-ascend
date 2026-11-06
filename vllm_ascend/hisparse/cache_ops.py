@@ -452,7 +452,9 @@ def gather_valid_resident_rows(source: torch.Tensor, destination: torch.Tensor, 
         raise ValueError("HiSparse Resident gather requires matching, separate source and staging rows")
     row_bytes = source.size(2) * source.element_size()
     block_rows = 8
-    gather_valid_resident_rows_kernel[(triton.cdiv(rows, block_rows),)](
+    block_bytes = min(1024, triton.next_power_of_2(row_bytes))
+    grid = (triton.cdiv(rows, block_rows), triton.cdiv(row_bytes, block_bytes))
+    gather_valid_resident_rows_kernel[grid](
         source.view(torch.uint8),
         destination.view(torch.uint8),
         row_ids,
@@ -464,7 +466,7 @@ def gather_valid_resident_rows(source: torch.Tensor, destination: torch.Tensor, 
         DEST_STRIDE=destination.stride(0) * destination.element_size(),
         ROW_BYTES=row_bytes,
         BLOCK_ROWS=block_rows,
-        BLOCK_BYTES=triton.next_power_of_2(row_bytes),
+        BLOCK_BYTES=block_bytes,
         multibuffer=False,
     )
 
