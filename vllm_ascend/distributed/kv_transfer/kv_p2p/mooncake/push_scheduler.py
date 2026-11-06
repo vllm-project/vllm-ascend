@@ -169,7 +169,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._reqs_aborted = {}
             # P layer hooks need request state before forward, including steps
             # that only drain outstanding transfers or process cancellations.
-            if self._reqs_need_send_layerwise or meta.push_aborted_requests:
+            if self._reqs_need_send_layerwise or meta.requests_to_send or meta.push_aborted_requests:
                 scheduler_output.has_sync_kv_loads = True
 
         else:
@@ -203,7 +203,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         if req_id not in self._reqs_need_send_layerwise:
             return False, None
         # Normal prefill output is returned only after the worker's send barrier.
-        # TODO: propagate transfer failures as request errors before releasing KV.
+        # Transfer failures are reported to D through the worker's DONE status.
         if normal_finish or req_id not in self._reqs_sent_to_worker:
             if normal_finish and req_id in self._reqs_sent_to_worker:
                 # Retire worker bookkeeping on the next step; KV is already safe to free.

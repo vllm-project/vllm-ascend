@@ -272,6 +272,7 @@ def test_producer_delays_release_only_for_unfinished_abort(producer_scheduler, a
     terminal_step = step(request, None, computed=16, scheduled=0)
     meta = scheduler.build_connector_meta(terminal_step)
     assert set(meta.requests_to_send) == {request.request_id}
+    assert terminal_step.has_sync_kv_loads
     assert meta.push_aborted_requests == ({request.request_id: "d-request-123"} if aborted else {})
     assert not meta.push_send_requests
     assert not scheduler.build_connector_meta(terminal_step).requests_to_send

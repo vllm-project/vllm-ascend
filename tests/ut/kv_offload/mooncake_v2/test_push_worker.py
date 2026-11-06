@@ -52,7 +52,6 @@ def completion(**changes):
         consumer_engine_id="d",
         consumer_rank=[0, 0, 0],
         status="ok",
-        writes_drained=True,
         **changes,
     )
 
@@ -97,7 +96,7 @@ def test_completion_before_or_after_allocation_and_duplicates(worker, early):
     assert not worker.get_transfer_results().finished_recving
 
 
-def test_all_sources_required_and_error_is_reported_after_drain(worker):
+def test_all_sources_required_and_error_is_reported(worker):
     worker.start_load_kv(metadata())
     first = dict(completion(), producer_sizes=[1, 1, 2], status="error")
     send(worker, first)
@@ -108,20 +107,21 @@ def test_all_sources_required_and_error_is_reported_after_drain(worker):
     assert result.finished_recving == result.failed_recving == {"d-request"}
 
 
-@pytest.mark.parametrize("failure", ["undrained", "timeout"])
-def test_receive_failure_keeps_service_running_and_releases_only_after_drain(worker, failure):
+@pytest.mark.parametrize("failure", ["write", "timeout", "dispatch_timeout"])
+def test_receive_failure_finishes_request_and_keeps_service_running(worker, failure):
     worker.start_load_kv(metadata())
-    if failure == "undrained":
-        send(worker, dict(completion(), status="error", writes_drained=False, error="P WRITE timeout"))
+    if failure == "write":
+        send(worker, dict(completion(), status="error", error="P WRITE failed"))
     else:
+        if failure == "dispatch_timeout":
+            meta = MooncakeConnectorMetadata()
+            meta.push_failed_requests = {"d-request": False}
+            worker.start_load_kv(meta)
         worker._reqs_recv_state["d-request"].start_time -= push_worker.envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 1
     result = worker.get_transfer_results()
-    assert not result.failed_recving
-    assert not result.finished_recving
-    assert worker._reqs_recv_state["d-request"].failed
+    assert result.finished_recving == result.failed_recving == {"d-request"}
+    assert not worker._reqs_recv_state
     assert not worker.get_transfer_results().failed_recving
-    assert "d-request" in worker._reqs_recv_state
-    assert worker._control_error is None
     assert not worker._stop_event.is_set()
 
     next_meta = MooncakeConnectorMetadata()
@@ -132,18 +132,19 @@ def test_receive_failure_keeps_service_running_and_releases_only_after_drain(wor
     assert result.finished_recving == {"next"}
     assert not result.failed_recving
 
-    # A late drained DONE permits reclaiming the failed request's blocks.
+    # A late DONE must not reopen a request already retired by timeout.
     send(worker, completion())
-    result = finish(worker)
-    assert result.finished_recving == result.failed_recving == {"d-request"}
+    result = worker.get_transfer_results()
+    assert not result.finished_recving
+    assert not result.failed_recving
     assert "d-request" not in worker._reqs_recv_state
 
 
 @pytest.mark.parametrize("early", [False, True])
-def test_failed_done_is_not_lost_when_same_source_reports_drain(worker, early):
+def test_failed_done_is_not_lost_when_same_source_reports_success(worker, early):
     if not early:
         worker.start_load_kv(metadata())
-    send(worker, dict(completion(), status="error", writes_drained=False))
+    send(worker, dict(completion(), status="error"))
     send(worker, completion())
     if early:
         assert not worker.get_transfer_results().finished_recving
