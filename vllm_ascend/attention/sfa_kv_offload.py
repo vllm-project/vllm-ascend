@@ -619,6 +619,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self._fused_overlap_selection_capacity: tuple[int, int, int, int] | None = None
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
+        if self.use_fused_copy_sfa and not get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache:
+            return super()._resolve_preprocess_type(act_dtype)
         logger.warning_once(
             "Sparse KV offload requires the native SFA preprocessing path; sfa_prolog_v3/mlapo is disabled."
         )
@@ -875,6 +877,80 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
         return k_nope, k_pe
 
+    def _get_current_layer_resident_cache_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
+        manager = get_sparse_kv_offload_manager()
+        layer_name = self._offload_layer_name()
+        layer_id = manager._get_offload_layer_id(layer_name)
+        resident_k = manager.topk_buffers_k[layer_id].view(
+            -1,
+            self.block_size,
+            self.num_kv_heads,
+            self.kv_lora_rank,
+        )
+        resident_v = manager.topk_buffers_v[layer_id].view(
+            -1,
+            self.block_size,
+            self.num_kv_heads,
+            self.qk_rope_head_dim,
+        )
+        return (resident_k, resident_v)
+
+    def _sfa_preprocess_prolog_v3(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        if self._is_decode_only(attn_metadata):
+            kv_cache = self._get_current_layer_resident_cache_tensors()
+            slot_mapping = attn_metadata.copy_sfa_device_slots
+        return super()._sfa_preprocess_prolog_v3(
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            cos=cos,
+            sin=sin,
+            slot_mapping=slot_mapping,
+            attn_metadata=attn_metadata,
+        )
+
+    def _sfa_preprocess_mlapo(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        if self._is_decode_only(attn_metadata):
+            kv_cache = self._get_current_layer_resident_cache_tensors()
+            slot_mapping = attn_metadata.copy_sfa_device_slots
+        return super()._sfa_preprocess_mlapo(
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            cos=cos,
+            sin=sin,
+            slot_mapping=slot_mapping,
+            num_input_tokens=num_input_tokens,
+            attn_metadata=attn_metadata,
+        )
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -894,6 +970,16 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             if attn_metadata.fused_copy_sfa_enabled and self.delayed_d2h:
                 # Fused normalize/rotate/write: current-token KV is scattered
                 # directly into the resident tail pages by one operator.
+                kv_cache = self._get_current_layer_resident_cache_tensors()
+                slot_mapping = attn_metadata.copy_sfa_device_slots
+                return super().exec_kv(
+                    kv_no_split=kv_no_split,
+                    cos=cos,
+                    sin=sin,
+                    kv_cache=kv_cache,
+                    slots=slot_mapping,
+                    attn_metadata=attn_metadata,
+                )
                 assert self.kv_a_layernorm is not None
                 layer_id = manager._get_offload_layer_id(layer_name)
                 resident_k = manager.topk_buffers_k[layer_id].view(
