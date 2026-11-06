@@ -10,7 +10,10 @@ from pathlib import Path
 import numpy as np
 
 _WORKER_SHA256 = "864e2c7ce4e2cff320b4f68f8dccc9691adb829f0e50fdf6a27dc9c7885040e5"
-_RUNTIME_SHA256 = "16e33814eb5d6b44093429fbb74aaf436e8994b11b43b07d1c39851baf563759"
+_RECYCLED_RUNTIME_SHA256S = {
+    "16e33814eb5d6b44093429fbb74aaf436e8994b11b43b07d1c39851baf563759",  # Core 24420b7a
+    "935ad5669ccdcbc0ffa45d66cfd28145cee0039fe979bb1c637f325373133325",  # Core 39dbf518
+}
 # Large prefill batches keep the scalar path to bound temporary memory.
 _MAX_DESCRIPTORS = 32768
 
@@ -155,7 +158,7 @@ def install(backend_type) -> None:
     if sha256(Path(worker.__file__).read_bytes()).hexdigest() != _WORKER_SHA256:
         return
     bind_recycled = None
-    if sha256(Path(runtime.__file__).read_bytes()).hexdigest() == _RUNTIME_SHA256:
+    if sha256(Path(runtime.__file__).read_bytes()).hexdigest() in _RECYCLED_RUNTIME_SHA256S:
         from vllm_ascend.hisparse.recycled_invalidate import RecycledGroupInvalidator
 
         bind_recycled = RecycledGroupInvalidator.bind
