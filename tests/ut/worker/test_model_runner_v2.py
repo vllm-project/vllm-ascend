@@ -56,6 +56,7 @@ def _make_runner(need_timing: bool = True):
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
+    runner._sample_tokens_copy_pending = None
     runner._skip_spec_cpu_length_sync = False
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
@@ -385,6 +386,97 @@ def test_adaptive_verification_pads_fia_query_boundaries(
 
     assert actual_num_reqs == expected_num_reqs
     np.testing.assert_array_equal(actual[: len(expected)], expected)
+
+
+def test_sample_tokens_copies_corrected_counts_after_proposal_once():
+    runner = _make_runner(need_timing=False)
+    runner.pcp_manager = None
+    runner.speculator = object()
+    runner.sync_spec_pp_cpu_counts = True
+    order = []
+    corrected = torch.tensor([13, 29], dtype=torch.int32)
+    snapshot = torch.zeros_like(corrected)
+
+    def copy_counts():
+        snapshot.copy_(corrected)
+        order.append("copy")
+
+    runner._copy_num_computed_tokens_to_cpu = Mock(side_effect=copy_counts)
+
+    def sample(_self, _grammar):
+        runner.postprocess_sampled(None, None, None, None)
+        runner.postprocess_num_computed_tokens(None)
+        order.append("proposal")
+        return "output"
+
+    with (
+        patch.object(GPUModelRunner, "sample_tokens", sample),
+        patch.object(GPUModelRunner, "postprocess_sampled"),
+        patch.object(GPUModelRunner, "postprocess_num_computed_tokens"),
+    ):
+        assert runner.sample_tokens(None) == "output"
+
+    assert order == ["proposal", "copy"]
+    torch.testing.assert_close(snapshot, corrected)
+    runner._copy_num_computed_tokens_to_cpu.assert_called_once_with()
+    assert runner._sample_tokens_copy_pending is None
+
+
+@pytest.mark.parametrize("failure", ["proposal", "copy"])
+def test_sample_tokens_count_copy_request_is_retired_on_failure(failure):
+    runner = _make_runner(need_timing=False)
+    runner.pcp_manager = None
+    runner.speculator = object()
+
+    def copy_counts():
+        if failure == "copy":
+            raise RuntimeError("copy failed")
+
+    runner._copy_num_computed_tokens_to_cpu = Mock(side_effect=copy_counts)
+
+    def sample(_self, _grammar):
+        runner.postprocess_sampled(None, None, None, None)
+        if failure == "proposal":
+            raise RuntimeError("proposal failed")
+        return "output"
+
+    with (
+        patch.object(GPUModelRunner, "sample_tokens", sample),
+        patch.object(GPUModelRunner, "postprocess_sampled"),
+        pytest.raises(RuntimeError, match=f"{failure} failed"),
+    ):
+        runner.sample_tokens(None)
+
+    assert runner._sample_tokens_copy_pending is None
+    assert runner._copy_num_computed_tokens_to_cpu.call_count == int(failure == "copy")
+    runner._copy_num_computed_tokens_to_cpu.reset_mock()
+    with patch.object(GPUModelRunner, "sample_tokens", return_value="next"):
+        assert runner.sample_tokens(None) == "next"
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+
+
+def test_deferred_pp_postprocess_outside_sampling_copies_counts_immediately():
+    runner = _make_runner(need_timing=False)
+    runner.sync_spec_pp_cpu_counts = True
+    runner._copy_num_computed_tokens_to_cpu = Mock()
+
+    with patch.object(GPUModelRunner, "postprocess_num_computed_tokens"):
+        runner.postprocess_num_computed_tokens(None)
+
+    runner._copy_num_computed_tokens_to_cpu.assert_called_once_with()
+    assert runner._sample_tokens_copy_pending is None
+
+
+def test_sampling_without_count_refresh_does_not_copy():
+    runner = _make_runner(need_timing=False)
+    runner.pcp_manager = None
+    runner._copy_num_computed_tokens_to_cpu = Mock()
+
+    with patch.object(GPUModelRunner, "sample_tokens", return_value="output"):
+        assert runner.sample_tokens(None) == "output"
+
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+    assert runner._sample_tokens_copy_pending is None
 
 
 def test_sample_tokens_restores_replicated_draft_hidden_states():
