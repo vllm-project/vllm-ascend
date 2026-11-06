@@ -201,6 +201,8 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
+        ascend_config = get_ascend_config()
+        ascend_config.rl_config.apply(ascend_config)
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()

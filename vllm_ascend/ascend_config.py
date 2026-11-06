@@ -378,7 +378,8 @@ class RlConfig:
     sleep_mode_extra_cleanup: bool = False
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
-
+    sched_yield_mode: str = "default"
+    
     def apply(self, ascend_config: AscendConfig) -> None:
         if not self.enabled:
             return
@@ -389,6 +390,10 @@ class RlConfig:
                 ascend_config.weight_nz_mode,
             )
         ascend_config.weight_nz_mode = 0
+
+        from vllm_ascend.platform import _disable_expandable_segments
+
+        _disable_expandable_segments()
 
         from vllm_ascend.platform import _disable_expandable_segments
 
