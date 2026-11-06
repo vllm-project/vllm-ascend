@@ -209,6 +209,14 @@ are not interchangeable.
 | `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
 | `--reasoning-parser` | Separates reasoning from the final answer. Use the parser in the selected example (`glm47` or `glm45`); do not infer it from the tool-call parser name. |
 
+For all-layer Sparse LI C8 testing, see
+[Sparse LI C8 layer selection](../../user_guide/configuration/additional_config.md#sparse-li-c8-layer-selection).
+The optional `sparse_li_c8_all_layers` flag defaults to `false` and overrides
+per-layer quant-config filtering only when Sparse LI C8 is enabled. It does
+not supply missing quantization parameters. In PD deployments that transfer
+indexer caches, keep the per-layer indexer cache formats consistent on both
+P and D; enabling the override on only one side can cause a layout mismatch.
+
 ### 5.1 Context Below 1M
 
 <a id="glm-950-preparation"></a>
