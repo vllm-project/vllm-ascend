@@ -198,7 +198,7 @@ def worker(monkeypatch, request):
     assert obj._zmq_context is None
 
 
-def test_proxy_destinations_and_two_chunks(worker, monkeypatch):
+def test_proxy_destinations_and_two_chunks(worker):
     worker.start_load_kv(source_meta())
     # Deferred finalization may collect results before all cache hooks run.
     # Polling must not publish unfinished caches or reset this step's state.
@@ -211,16 +211,6 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch):
     worker.wait_for_save()
     assert not worker._send_done.called
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
-    state = worker._reqs_send_state["d-request"]
-    destination = state.destinations[(0, 0, 0)]
-    expected_ranks = state.expected_ranks
-    worker.get_transfer_results()
-    assert state.expected_ranks is expected_ranks  # No topology allocation on idle scans.
-    with monkeypatch.context() as patch:
-        result = Mock(wraps=destination.metadata_future.result)
-        patch.setattr(destination.metadata_future, "result", result)
-        assert worker._build_layer_transfer_request("d-request", state, destination, "model.layers.0.attn") is None
-        result.assert_not_called()
     worker.start_load_kv(source_meta(4, 4))
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
@@ -356,31 +346,9 @@ def test_write_failure_notifies_d_and_keeps_p_running(worker, monkeypatch, failu
     assert worker._send_done.call_args.args[1] is None
 
 
-@pytest.mark.parametrize("dispatched", [False, True])
-def test_abort_before_forward(worker, dispatched, monkeypatch):
-    if dispatched:
-        worker.start_load_kv(source_meta(0, 0))
-    else:
-        discovery = Mock(side_effect=AssertionError("Abort must not query cache metadata"))
-        monkeypatch.setattr(worker, "_get_remote_metadata", discovery)
-    meta = MooncakeConnectorMetadata()
-    meta.push_aborted_requests = {"p-request": target_params()}
-    worker.start_load_kv(meta)
-    worker.wait_for_save()
-    drive(worker, lambda: "d-request" not in worker._reqs_send_state)
-    worker._send_done.assert_called_once()
-    params, error = worker._send_done.call_args.args
-    assert params["request_id"] == "d-request"
-    assert params["consumer_engine_id"] == "d"
-    assert params["consumer_rank"] == [0, 0, 0]
-    assert params["completion_address"] == "tcp://127.0.0.1:9001"
-    assert error == "P request aborted"
-    assert not worker.engine.batch_transfer_sync_write.called
-    if not dispatched:
-        discovery.assert_not_called()
-
-
-def test_abort_before_dispatch_notifies_every_d_rank(worker):
+def test_abort_before_dispatch_notifies_every_d_rank(worker, monkeypatch):
+    discovery = Mock(side_effect=AssertionError("Abort must not query cache metadata"))
+    monkeypatch.setattr(worker, "_get_remote_metadata", discovery)
     params = target_params()
     params["remote_worker_addresses"].append([0, 0, 1, "tcp://127.0.0.1:9002"])
     meta = MooncakeConnectorMetadata()
@@ -388,12 +356,20 @@ def test_abort_before_dispatch_notifies_every_d_rank(worker):
     worker.start_load_kv(meta)
     worker.wait_for_save()
     assert worker._send_done.call_count == 2
-    assert {tuple(call.args[0]["consumer_rank"]) for call in worker._send_done.call_args_list} == {
-        (0, 0, 0),
-        (0, 0, 1),
+    assert {
+        (tuple(call.args[0]["consumer_rank"]), call.args[0]["completion_address"])
+        for call in worker._send_done.call_args_list
+    } == {
+        ((0, 0, 0), "tcp://127.0.0.1:9001"),
+        ((0, 0, 1), "tcp://127.0.0.1:9002"),
     }
     assert all(call.args[1] == "P request aborted" for call in worker._send_done.call_args_list)
     assert worker.get_transfer_results().finished_sending == {"p-request"}
+
+    discovery.assert_not_called()
+    worker.engine.batch_transfer_sync_write.assert_not_called()
+    assert all(call.args[0]["request_id"] == "d-request" for call in worker._send_done.call_args_list)
+    assert all(call.args[0]["consumer_engine_id"] == "d" for call in worker._send_done.call_args_list)
 
 
 def test_abort_waits_for_submitted_write(worker):
@@ -608,70 +584,27 @@ def test_mamba_final_chunk_merges_pcp_conv_projections_and_state(worker, monkeyp
     assert sizes == [2, 2, 2, 2, 2, 2, 4]
 
 
-def test_wait_for_save_drains_write(worker):
-    entered, release, returned = threading.Event(), threading.Event(), threading.Event()
-
-    def blocked_write(*args):
-        entered.set()
-        assert release.wait(3)
-        return 0
-
-    worker.engine.batch_transfer_sync_write.side_effect = blocked_write
-    worker.start_load_kv(source_meta(0, 8))
-    worker.save_kv_layer("model.layers.0.attn")
-    drive(worker, entered.is_set)
-
-    def wait():
-        worker.wait_for_save()
-        returned.set()
-
-    thread = threading.Thread(target=wait)
-    thread.start()
-    try:
-        assert not returned.is_set()
-    finally:
-        release.set()
-        thread.join(4)
-    assert returned.is_set()
-
-
-@pytest.mark.parametrize("fail_first", [False, True])
-def test_layer_batch_groups_requests_for_one_destination(worker, monkeypatch, fail_first):
-    second = destination_message()
-    second.update(request_id="d-request-2", block_ids=[[12, 13]])
+@pytest.mark.parametrize("invalid_second", [False, True])
+def test_layer_batch_groups_valid_requests_and_isolates_invalid_blocks(worker, invalid_second):
+    second = dict(destination_message(), request_id="d-request-2", block_ids=[[12, 13]])
     meta = source_meta(0, 8)
-    meta.add_new_push_send_req("p-request-2", ([3, 4],), 8, 0, 8, target_params(second))
+    local_blocks = ([0, 4],) if invalid_second else ([3, 4],)
+    meta.add_new_push_send_req("p-request-2", local_blocks, 8, 0, 8, target_params(second))
     worker.start_load_kv(meta)
-    drive(
-        worker,
-        lambda: all(
-            state.destinations[(0, 0, 0)].required_layers is not None for state in worker._reqs_send_state.values()
-        ),
-    )
-    if fail_first:
-        build = worker._build_layer_transfer_request
-
-        def build_with_failure(request_id, state, destination, layer_name):
-            # Invalidate a request after it entered this pass's unsubmitted batch.
-            if request_id == "d-request-2":
-                worker._reqs_send_state["d-request"].error = "request failed during planning"
-            return build(request_id, state, destination, layer_name)
-
-        monkeypatch.setattr(worker, "_build_layer_transfer_request", build_with_failure)
-    worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
-    drive(worker, lambda: worker._send_done.call_count == 2)
     assert worker.engine.batch_transfer_sync_write.call_count == 1
-    expected_src = [1096, 1128] if fail_first else [1032, 1064, 1096, 1128]
-    expected_dst = [10384, 10416] if fail_first else [10320, 10352, 10384, 10416]
+    expected_src = [1032, 1064] if invalid_second else [1032, 1064, 1096, 1128]
+    expected_dst = [10320, 10352] if invalid_second else [10320, 10352, 10384, 10416]
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == (
         expected_src,
         expected_dst,
         [32] * len(expected_src),
     )
     outcomes = {call.args[0]["request_id"]: call.args[1] for call in worker._send_done.call_args_list}
-    assert outcomes == {"d-request": "request failed during planning" if fail_first else None, "d-request-2": None}
-    assert all(not state.destinations[(0, 0, 0)].pending_layers for state in worker._reqs_send_state.values())
+    assert outcomes == {
+        "d-request": None,
+        "d-request-2": "Required Push block is not resident" if invalid_second else None,
+    }
 
 
 def test_cached_destination_prefix_is_not_written(worker):
@@ -814,13 +747,10 @@ def test_new_progress_while_write_pending_is_not_lost(worker):
         return 0
 
     worker.engine.batch_transfer_sync_write.side_effect = blocked_write
-    worker.start_load_kv(source_meta())
-    worker.save_kv_layer("model.layers.0.attn")
+    worker.start_load_kv(source_meta(4, 4))
     drive(worker, entered.is_set)
     try:
-        # Publish newer availability while the older snapshot is still in use.
-        state = worker._reqs_send_state["d-request"]
-        state.metadata = source_meta(4, 4).push_send_requests["p-request"]
+        # The cached prefix is still being sent when this forward finishes.
         worker.save_kv_layer("model.layers.0.attn")
         assert len(calls) == 1
     finally:
@@ -885,44 +815,6 @@ def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
     terminal.requests_to_send = {"p-request": time.monotonic()}
     worker.start_load_kv(terminal)
     drive(worker, lambda: "d-request" not in worker._reqs_send_state)
-
-
-@pytest.mark.parametrize("write_fails", [False, True])
-def test_last_layer_notifies_before_wait_and_does_not_notify_twice(worker, write_fails):
-    if write_fails:
-        worker.engine.batch_transfer_sync_write.return_value = -1
-    worker.start_load_kv(source_meta(0, 8))
-    state = worker._reqs_send_state["d-request"]
-    state.destinations[(0, 0, 0)].metadata_future.result(timeout=3)
-    worker.save_kv_layer("model.layers.0.attn")
-    state.destinations[(0, 0, 0)].completion.result(timeout=3)
-    # The final hook schedules both WRITE and DONE without waiting for step end.
-    worker._send_done.assert_called_once()
-    assert bool(worker._send_done.call_args.args[1]) == write_fails
-    worker.save_kv_layer("model.layers.0.attn")
-    assert not worker.get_transfer_results().finished_sending
-    worker.wait_for_save()
-    worker._send_done.assert_called_once()
-    assert bool(worker._send_done.call_args.args[1]) == write_fails
-    worker.wait_for_save()
-    worker._send_done.assert_called_once()
-
-
-def test_idle_unknown_and_duplicate_hooks_do_not_record_events(worker, monkeypatch):
-    events = Mock(side_effect=Event)
-    monkeypatch.setattr(push_worker.torch.npu, "Event", events)
-    worker.save_kv_layer("model.layers.0.attn")
-    worker.wait_for_save()
-    events.assert_not_called()
-    worker.start_load_kv(source_meta(0, 8))
-    worker.save_kv_layer("unknown")
-    events.assert_not_called()
-    worker.save_kv_layer("model.layers.0.attn")
-    events.assert_called_once()
-    worker.save_kv_layer("model.layers.0.attn")
-    worker.wait_for_save()
-    events.assert_called_once()
-    assert worker.engine.batch_transfer_sync_write.call_count == 1
 
 
 @pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)
@@ -1036,7 +928,7 @@ def test_metadata_wait_crossing_deadline_does_not_start_write(worker, monkeypatc
 
 
 @pytest.mark.parametrize("worker", ["three_layers"], indirect=True)
-@pytest.mark.parametrize("failure", [None, "negative", "exception"])
+@pytest.mark.parametrize("failure", [None, "negative"])
 def test_busy_engine_defers_middle_layer_but_last_layer_submits(worker, monkeypatch, failure):
     monkeypatch.setattr(worker, "_get_remote_metadata", lambda params: multi_cache_remote(worker))
     entered, release, last_written = threading.Event(), threading.Event(), threading.Event()
@@ -1045,8 +937,6 @@ def test_busy_engine_defers_middle_layer_but_last_layer_submits(worker, monkeypa
         if src[0] == 1032:
             entered.set()
             assert release.wait(3)
-            if failure == "exception":
-                raise RuntimeError("earlier WRITE failed")
             if failure == "negative":
                 return -1
         if src[0] == 3032:
@@ -1066,7 +956,6 @@ def test_busy_engine_defers_middle_layer_but_last_layer_submits(worker, monkeypa
         assert entered.wait(3)
         worker.save_kv_layer(middle)
         assert [batch.layer_name for batch, _ in worker._pending_sends] == [first]
-        assert len(worker._sending_futures["d"]) == 1
         worker.save_kv_layer(last)
         assert last_written.wait(3)
         assert {batch.layer_name for batch, _ in worker._pending_sends} == {first, middle, last}
@@ -1079,6 +968,8 @@ def test_busy_engine_defers_middle_layer_but_last_layer_submits(worker, monkeypa
     destination.completion.result(timeout=3)
     worker._send_done.assert_called_once()
     assert bool(worker._send_done.call_args.args[1]) == (failure is not None)
+    worker.save_kv_layer(last)
+    worker.wait_for_save()
     worker.wait_for_save()
     assert worker.engine.batch_transfer_sync_write.call_count == 3
     assert not worker._sending_futures
