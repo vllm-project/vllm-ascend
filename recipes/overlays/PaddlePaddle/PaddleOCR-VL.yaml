@@ -135,7 +135,7 @@ guide_sections:
   ascend: |
     ## Ascend support and version scope
 
-    The current [main tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/PaddleOCR-VL.md) discontinues future PaddleOCR-VL support from v0.30.0 and points to the [historical v0.23.0 tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/PaddleOCR-VL.html). This recipe preserves its original 0.9B model and A2/310P scenarios. The pinned v0.30.0rc2 images record reproducible validation environments; they do not promise support in future releases or establish validation of a moving main tag.
+    The current [main tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/PaddleOCR-VL.md) discontinues future PaddleOCR-VL support from v0.30.0 and points to the [historical v0.23.0 tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/PaddleOCR-VL.html). This recipe preserves its original 0.9B model and A2/310P scenarios. The pinned RC configurations and the separately identified nightly-main supplement record their measured environments; they do not promise support in future releases or validate a moving main tag.
 
     The A2 BF16 graph and 310P FP16 graph/eager variants are single-NPU configurations. The pinned 310P image passed 32 recognition requests across both modes, both aliases and four tasks, including 16 warmups. Document parsing and full-dataset results have separate environment identities.
 
@@ -202,6 +202,14 @@ guide_sections:
     the server exited with code 0 after 31.30 seconds without a forced kill, but
     the same shutdown `EngineDeadError` remained. This ineffective flag is not
     added to the recipe and the failed hypothesis does not waive the log check.
+
+    On 2026-11-06 another bounded experiment changed only the complete-image
+    launcher by removing PRoot `--kill-on-exit`, keeping shutdown timeout 0 and
+    all original serving flags. Four recognition tasks and the exact URL
+    document passed; the frontend exited with code 0 in 1.2662 seconds, but the
+    same eight EngineDeadError ERROR lines remained. This hypothesis also
+    failed and is not promoted into the recipe. The original 32-request
+    baselines and full-dataset evidence remain unchanged.
 
     ### Historical tested source environment
 
@@ -608,7 +616,7 @@ guide_sections:
     tutorial defaults failed startup on this image. Paddle layout uses its separate
     CANN 8.0 image, genuine compatible compiler dependencies, ABI 0 ATB libraries,
     and the standard-library path before forkserver workers. These settings and
-    evidence are maintained in the bilingual Ascend recipe. The A2 option is restricted to the single-NPU Ascend 910B3 profile; other A2 SKUs are unverified.
+    evidence are maintained in the bilingual Ascend recipe. These historical results cover the single-NPU 910B3 profile. The current-main 910B4 supplement is recorded separately below; 910B2 remains unverified.
     The companion [Ascend recipe PR](https://github.com/vllm-ascend/vllm-ascend-recipes/pull/101)
     also records the completed original 1355-page A2 run: Overall 92.4426% using
     unchanged official ED/TEDS/rendered CDM metrics, with page batch 16 and
@@ -642,6 +650,15 @@ guide_sections:
     plus one measured round. Content and stop reasons were checked. Startup,
     inference and explicit frontend shutdown passed the ERROR/Traceback audit.
 
+    After the full-data run below, a separate fresh service also passed the
+    exact published remote-URL document command with page batch 16 and native
+    NPU layout. It produced 31 blocks with checked content/bounds/JSON/Markdown;
+    all 27 recognition requests returned HTTP 200. Server and client logs
+    passed both ERROR/Traceback and case-insensitive error/exception/traceback
+    scans. The frontend exited with code 0 without a forced kill. All original
+    recognition model files and tracked native source trees were rechecked
+    after these runs and remained identical; no task/NPU processes remained.
+
     The exact shared document parser also passed the official PNG and the frozen
     one-page PDF: both returned 31 layout blocks with checked content, bounds,
     JSON and Markdown. All 55 recognition HTTP calls returned 200; server and
@@ -655,7 +672,41 @@ guide_sections:
     which the new 910B4 option pins. The platform did not expose the native
     container image ID, so that lookup is recorded separately from its measured
     source/package identity. No normal Docker CLI launch or future-main support
-    is claimed. Metadata remains supported rather than verified.
+    is claimed. Metadata remains supported rather than verified. Generated
+    Docker examples assume a host exposing `/dev/davinci0`; the native HiDevLab
+    run used its exposed `/dev/davinci3` and does not validate that Docker device
+    binding.
+
+
+    All 1355 unchanged original OmniDocBench v1.5 images then produced Markdown:
+    25888 HTTP 200 responses, 25873 stop and 15 length-limited outputs. One empty
+    Markdown and all truncated outputs remain in evaluation. Prediction plus
+    Markdown/crop saving took 4634.496337 seconds, or 3.42029250 seconds per
+    original image; initialization (39.96218 seconds) and cleanup were excluded.
+    Page batch 16, queues disabled, layout batch 8, VLRec batch 4096, temperature
+    0, output cap 4096 and no external warmup were used. The server restarted
+    after the pilot; compiler/filesystem caches may persist. The local API audit
+    hop and progress output are included in timing. All inference/client logs
+    passed the case-insensitive error/exception/traceback scan.
+
+    The unchanged official evaluator at the commit above, with fresh render
+    caches and two CDM workers, exited normally: text edit distance
+    0.04415666895, table TEDS 0.90661323468, formula CDM
+    0.91141464103, Overall 92.46237356%. The frozen ModelZoo
+    component-rounding calculation gives 92.46733333%.
+    All 1054 formula pairs, including 13 zero scores and all renderer/tokenizer
+    failures, are retained. Evaluation used 2 GiB/no-swap/two CPUs, recorded
+    cgroup peak 1398452224 bytes and zero OOM events. This is the measured native
+    910B4 graph result, separate from 310P, historical 910B3 and untested 910B2.
+    The linked official reference publishes no separate A2 numeric target; that
+    numeric comparison is N/A, with these measurements retained. It does not
+    establish matched-reference performance or formal acceptance.
+
+    Full-run host sampling reached 34359693312 bytes including image-preparation
+    file cache, with sampled limit-hit delta 87720 and zero OOM kills; this is
+    not pure inference RSS. HBM sampling reached 31519 of 32768 reported MB,
+    with 235 successful full-phase samples and no sampler errors. The timeline
+    started before service startup; exact transient peaks are not claimed.
 
     ### Ascend references
 
