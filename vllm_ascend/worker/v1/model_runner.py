@@ -1777,9 +1777,13 @@ class NPUModelRunner(GPUModelRunner):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
                 num_draft_tokens[req_idx] = draft_len
-                if (self.is_kv_consumer and req_id in new_schedule_reqs) or \
-                   (self.input_batch.num_computed_tokens_cpu[req_idx] >= \
-                    self.input_batch.num_prompt_tokens[req_idx]):
+                if (
+                    (self.is_kv_consumer and req_id in new_schedule_reqs)
+                    or self.input_batch.num_computed_tokens_cpu[req_idx] >= self.input_batch.num_prompt_tokens[req_idx]
+                    # A one-token prompt extension needs draft rollback, like V2.
+                    or (draft_len > 0 and num_valid_tokens[req_idx] == 1
+                        and self.input_batch.num_computed_tokens_cpu[req_idx] > 0)
+                ):
                     num_decode_draft_tokens[req_idx] = draft_len
                 else:
                     num_decode_draft_tokens[req_idx] = -1

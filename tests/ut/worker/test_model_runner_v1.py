@@ -3847,6 +3847,90 @@ class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
+    @patch("vllm_ascend.worker.v1.model_runner.lmhead_tp_enable", return_value=False)
+    @patch.object(torch.Tensor, "pin_memory", lambda self: self)
+    def test_prompt_tail_phase_preserves_draft_verification(self, _lmhead_tp_enable):
+        for computed, prompt, scheduled, drafts, consumer, expected in (
+            (32, 33, 6, [-1] * 5, False, 5),
+            (0, 1, 6, [-1] * 5, False, -1),
+            (16, 64, 8, [-1] * 5, False, -1),
+            (33, 33, 6, [1, 2, 3, 4, 5], False, 5),
+            (0, 33, 6, [-1] * 5, True, 5),
+            (32, 33, 1, [], False, -1),
+        ):
+            with self.subTest(computed=computed, scheduled=scheduled, consumer=consumer):
+                runner = self._build_runner()
+                runner.arange_np = np.arange(scheduled, dtype=np.int32)
+                runner._arange_scratch = np.empty(scheduled, dtype=np.int32)
+                runner._positions_np_buf = np.empty(scheduled, dtype=np.int64)
+                for name, size, dtype in (
+                    ("query_pos", scheduled, torch.int32),
+                    ("query_start_loc", 2, torch.int32),
+                    ("input_ids", scheduled, torch.int32),
+                    ("discard_request_indices", 1, torch.int32),
+                    ("discard_request_mask", 1, torch.bool),
+                    ("num_accepted_tokens", 1, torch.int32),
+                    ("req_indices", scheduled, torch.int32),
+                    ("num_scheduled_tokens", 1, torch.int32),
+                    ("num_decode_draft_tokens", 1, torch.int32),
+                    ("prev_positions", 1, torch.int32),
+                ):
+                    setattr(runner, name, CpuGpuBuffer(size, dtype=dtype, device=runner.device, pin_memory=False))
+                for name in (
+                    "use_async_scheduling",
+                    "use_async_spec_decode",
+                    "enable_prompt_embeds",
+                    "uses_mrope",
+                    "_has_gdn",
+                    "_needs_seq_lens_cpu_sync",
+                    "_use_flashinfer_replayssm",
+                ):
+                    setattr(runner, name, False)
+                runner.num_accepted_tokens_event = None
+                runner.dcp_size = 1
+                runner.valid_sampled_token_count_gpu = None
+                runner._pp_recv_work = None
+                runner.prefix_replay_tokens = 0
+                runner.speculative_config = SimpleNamespace(method="mtp")
+                runner.scheduler_config = SimpleNamespace(enable_chunked_prefill=True)
+                runner.lora_config = None
+                runner.is_kv_consumer = consumer
+                runner.optimistic_seq_lens_cpu = torch.zeros(1, dtype=torch.int32)
+                runner.num_computed_tokens = torch.zeros(1, dtype=torch.int32)
+                runner.positions = torch.zeros(scheduled, dtype=torch.int64)
+                runner.seq_lens = torch.zeros(1, dtype=torch.int32)
+                tokens = torch.full((1, max(prompt, computed + scheduled)), 11, dtype=torch.int32)
+                if drafts:
+                    tokens[0, computed + scheduled - len(drafts) : computed + scheduled] = torch.tensor(drafts)
+                runner.input_batch = SimpleNamespace(
+                    num_reqs=1,
+                    req_ids=["req0"],
+                    req_id_to_index={"req0": 0},
+                    num_computed_tokens_cpu=np.array([computed], dtype=np.int32),
+                    num_computed_tokens_cpu_tensor=torch.tensor([computed], dtype=torch.int32),
+                    num_prompt_tokens=np.array([prompt], dtype=np.int32),
+                    token_ids_cpu=tokens.numpy(),
+                    token_ids_cpu_tensor=tokens,
+                    prev_req_id_to_index={},
+                    prev_sampled_token_ids=None,
+                    req_prompt_embeds={},
+                    block_table=MagicMock(),
+                )
+                runner.requests = {"req0": SimpleNamespace(num_tokens=prompt)}
+                output = SimpleNamespace(
+                    total_num_scheduled_tokens=scheduled,
+                    num_scheduled_tokens={"req0": scheduled},
+                    scheduled_spec_decode_tokens={"req0": drafts},
+                    scheduled_new_reqs=[SimpleNamespace(req_id="req0")],
+                )
+
+                _, metadata, actual_tokens = runner._prepare_inputs(output, np.array([scheduled], dtype=np.int32))
+
+                self.assertEqual(runner.num_decode_draft_tokens.cpu.tolist(), [expected])
+                self.assertEqual(metadata.draft_token_ids.tolist(), drafts)
+                self.assertEqual(actual_tokens, scheduled)
+                self.assertEqual(output.scheduled_spec_decode_tokens["req0"], drafts)
+
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
