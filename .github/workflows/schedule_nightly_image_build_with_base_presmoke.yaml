@@ -139,9 +139,8 @@ jobs:
       build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
-      # Presmoke 镜像与 nightly 同名同 tag，但推到独立的 _presmoke 仓库，避免覆盖 nightly 稳定 tag。
-      ci_image_repo: 'base_image/ascend-ci/vllm-ascend_presmoke'
-      atlas_image_repo: 'atlas_inference/vllm-ascend_presmoke'
+      # Presmoke 镜像沿用 nightly 默认路径加 "_presmoke" 后缀，tag 规则不变。
+      image_repo_suffix: '_presmoke'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
