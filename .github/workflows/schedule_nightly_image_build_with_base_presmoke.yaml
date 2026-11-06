@@ -61,7 +61,6 @@ on:
       should_push:
         required: true
         type: boolean
-        default: false
         description: "If true, login to SWR and push built images."
       skip_base:
         required: false
