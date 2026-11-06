@@ -47,7 +47,12 @@ class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
         worker_handler = self.worker_handler
         if role == KVConnectorRole.WORKER and worker_handler is not None:
             cpu_capacity = worker_handler.cpu_capacity_bytes
-            self.worker_handler = SimpleCPUOffloadNPUWorker(vllm_config, kv_cache_config, cpu_capacity)
+            self.worker_handler = SimpleCPUOffloadNPUWorker(
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity,
+                num_cpu_blocks=getattr(worker_handler, "_num_cpu_blocks_override", None),
+            )
             logger.info(
                 "AscendSimpleCPUOffloadConnector: using NPU worker (per_rank=%.2f GB)",
                 cpu_capacity / (1024**3),
