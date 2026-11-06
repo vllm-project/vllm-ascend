@@ -12,7 +12,6 @@ from typing import Any
 
 import msgspec
 import torch
-import zmq
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
@@ -25,6 +24,9 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
+from zmq.constants import SocketOption, SocketType
+from zmq.error import Again, ZMQError
+from zmq.sugar.context import Context
 
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
@@ -82,15 +84,15 @@ class MooncakeDecodeListenerThread(threading.Thread):
 
     def run(self) -> None:
         try:
-            with zmq_ctx(zmq.ROUTER, self.address) as sock:
-                sock.setsockopt(zmq.RCVTIMEO, 100)
-                sock.setsockopt(zmq.SNDTIMEO, 1000)
-                self.address = sock.getsockopt(zmq.LAST_ENDPOINT).decode()
+            with zmq_ctx(SocketType.ROUTER, self.address) as sock:
+                sock.setsockopt(SocketOption.RCVTIMEO, 100)
+                sock.setsockopt(SocketOption.SNDTIMEO, 1000)
+                self.address = sock.getsockopt(SocketOption.LAST_ENDPOINT).decode()
                 self.ready_event.set()
                 while not self.stop_event.is_set():
                     try:
                         frames = sock.recv_multipart()
-                    except zmq.Again:
+                    except Again:
                         continue
                     if self.stop_event.is_set():
                         return
@@ -141,7 +143,7 @@ class MooncakeDecodeListenerThread(threading.Thread):
             reply = {"kind": "error", "error": str(exc)}
         try:
             sock.send_multipart([identity, *delimiter, msgspec.msgpack.encode(reply)])
-        except zmq.ZMQError:
+        except ZMQError:
             logger.exception("Failed to acknowledge Push completion")
             if completion is not None:
                 # Preserve request failure while waiting for the other sources.
@@ -215,7 +217,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._sending_futures: dict[str, list[Future]] = {}
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
-        self._zmq_context: zmq.Context | None = None
+        self._zmq_context: Context | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
@@ -237,7 +239,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             # Shared Mamba address calculation uses the same registered descriptors as Pull.
             for name in ("layer_names", "kv_caches_base_addr", "block_shapes", "block_strides", "block_lens"):
                 setattr(self, name, getattr(self.transfer_metadata, name))
-            self._zmq_context = zmq.Context()
+            self._zmq_context = Context()
             self._sender_executor = ThreadPoolExecutor(
                 max_workers=32,
                 initializer=torch.npu.set_device,
@@ -319,11 +321,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def _get_remote_metadata(self, params: dict[str, Any]) -> MooncakeTransferMetadataGroups:
         path = params["scheduler_address"]
-        sock = make_zmq_socket(self._zmq_context, path, zmq.REQ, bind=False)
+        sock = make_zmq_socket(self._zmq_context, path, SocketType.REQ, bind=False)
         try:
             timeout = max(1, int(envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT * 1000))
-            sock.setsockopt(zmq.SNDTIMEO, timeout)
-            sock.setsockopt(zmq.RCVTIMEO, timeout)
+            sock.setsockopt(SocketOption.SNDTIMEO, timeout)
+            sock.setsockopt(SocketOption.RCVTIMEO, timeout)
             ensure_zmq_send(sock, msgspec.msgpack.encode((b"get_meta_msg", params["consumer_engine_id"])), path)
             metadata = msgspec.msgpack.decode(ensure_zmq_recv(sock, path), type=MooncakeTransferMetadataGroups)
         finally:
@@ -339,10 +341,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         path = params["completion_address"]
         sock = None
         try:
-            sock = make_zmq_socket(self._zmq_context, path, zmq.REQ, bind=False)
+            sock = make_zmq_socket(self._zmq_context, path, SocketType.REQ, bind=False)
             timeout = max(1, int(envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT * 1000))
-            sock.setsockopt(zmq.SNDTIMEO, timeout)
-            sock.setsockopt(zmq.RCVTIMEO, timeout)
+            sock.setsockopt(SocketOption.SNDTIMEO, timeout)
+            sock.setsockopt(SocketOption.RCVTIMEO, timeout)
             message = {
                 key: params[key]
                 for key in (
