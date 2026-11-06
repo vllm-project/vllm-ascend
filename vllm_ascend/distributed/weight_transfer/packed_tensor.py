@@ -77,12 +77,25 @@ def _device_lock(device: int) -> Any:
     return Lock()
 
 
+class _PackedCudaAPI:
+    def __getattr__(self, name):
+        backend = torch.npu if name in ("Stream", "stream", "current_stream") else torch.cuda
+        return getattr(backend, name)
+
+
+class _PackedTorchAPI:
+    def __init__(self):
+        self.cuda = _PackedCudaAPI()
+
+    def __getattr__(self, name):
+        return getattr(torch, name)
+
+
 def _install_packed_hooks() -> None:
     with _INSTALL_LOCK:
-        # Standalone trainers need not initialize platform patches.
-        torch.cuda.Stream = torch.npu.Stream
-        torch.cuda.stream = torch.npu.stream
-        torch.cuda.current_stream = torch.npu.current_stream
+        # Scope stream adaptation to vLLM packed functions, not global torch.
+        if not isinstance(upstream.torch, _PackedTorchAPI):
+            upstream.torch = _PackedTorchAPI()
         if getattr(upstream.unpack_tensor, "_ascend_packed_hook", False):
             return
         unpack = upstream.unpack_tensor

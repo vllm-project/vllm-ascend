@@ -127,9 +127,6 @@ def _stub_torch_npu():
         patch.object(torch.accelerator, "current_device_index", return_value=0),
         patch.object(torch.accelerator, "current_stream", side_effect=lambda *args, **kwargs: active),
         patch.object(torch, "Event", MagicMock()),
-        patch.object(torch.cuda, "Stream", torch.cuda.Stream),
-        patch.object(torch.cuda, "stream", torch.cuda.stream),
-        patch.object(torch.cuda, "current_stream", torch.cuda.current_stream),
         patch.object(torch.Tensor, "record_stream", return_value=None),
     ):
         yield
@@ -1447,3 +1444,14 @@ def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_bu
     assert len({id(event) for event in adapter_events}) == num_buffers
     assert len({tensor.data_ptr() for tensor in retained}) == chunks
     assert packed_tensor._ACTIVE.get() is None
+
+
+def test_packed_stream_adaptation_does_not_replace_global_cuda_apis():
+    from vllm.distributed.weight_transfer import packed_tensor as upstream
+
+    names = ("Stream", "stream", "current_stream")
+    original = tuple(getattr(torch.cuda, name) for name in names)
+    packed_broadcast_producer(iter([("w", torch.ones(1))]), _make_group_mock(), 0, lambda item: item[1], 16)
+    assert tuple(getattr(torch.cuda, name) for name in names) == original
+    assert upstream.torch.cuda.get_device_properties is torch.cuda.get_device_properties
+    assert upstream.torch.Event is torch.Event
