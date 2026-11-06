@@ -176,7 +176,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
                 block_pool=self.block_pool,
-                enable_caching=enable_caching,
+                # Match upstream Hybrid: opt-out / compressor groups must not
+                # enter cache_full_blocks when block_size (1/2) does not divide
+                # hash_block_size (GCD of prefix-cacheable groups only).
+                enable_caching=enable_caching
+                and is_prefix_cacheable(kv_cache_group.kv_cache_spec),
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=1,
