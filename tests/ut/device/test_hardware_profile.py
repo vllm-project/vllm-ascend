@@ -233,6 +233,19 @@ def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_quer
     assert profile.gdn_fixed_spec_recurrent_fallback_min_query_len == expected_min_query_len
 
 
+@pytest.mark.parametrize(
+    "device_type,expected_precision",
+    [
+        (AscendDeviceType.A2, 0),
+        (AscendDeviceType.A3, 0),
+        (AscendDeviceType.A5, 1),
+        (AscendDeviceType._310P, 0),
+    ],
+)
+def test_minimax_m3_gbsa_bf16_softmax_precision_policy(device_type, expected_precision):
+    assert get_hardware_profile(device_type).minimax_m3_gbsa_bf16_softmax_precision == expected_precision
+
+
 def test_current_hardware_profile_uses_device_config() -> None:
     expected_profile = get_hardware_profile(get_device_config()._device_type)
 

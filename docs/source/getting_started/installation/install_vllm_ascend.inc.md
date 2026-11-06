@@ -129,7 +129,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     # git submodule update --init --recursive
     pip install -e . \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
     cd ..
     ```
 
@@ -149,7 +150,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         # Rebuild custom kernels and reinstall vLLM Ascend.
         pip install -e . \
             --extra-index-url https://download.pytorch.org/whl/cpu/ \
-            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
         ```
 
         **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache
@@ -171,7 +173,7 @@ After completing any of the three installation methods, install the kernel packa
 
     pip install \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-        "triton-ascend=={{ release_triton_ascend_version }}"
+        "triton-ascend==={{ release_triton_ascend_version }}"
 
     pip install --no-deps \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
