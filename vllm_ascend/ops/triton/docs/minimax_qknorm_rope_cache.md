@@ -5,7 +5,7 @@
 - **Function**: `minimax_qknorm_rope_cache` applies four Gemma RMSNorms, partial NeoX RoPE, and three cache writes in one Triton kernel. Only Q and index Q are returned. K, V, and index K are written directly into their paged caches.
 - **Location**: `vllm_ascend/ops/triton/msa/minimax_qknorm_rope_cache.py` — `_minimax_qknorm_rope_cache_kernel`, wrapper `minimax_qknorm_rope_cache`.
 - **Algorithm flow**:
-  1. The grid uses `min(num_tokens, vector_core_count)` programs. Each program handles tokens cyclically and vectorizes Q/K and index Q/K along contiguous head rows. The four normalization weights and Gemma scales are prepared before the token loop and reused across its iterations.
+  1. The grid uses `min(num_tokens, vector_core_count)` programs. Each program handles tokens cyclically and uses each projection view’s token and feature strides. The four normalization weights and Gemma scales are prepared before the token loop and reused across its iterations.
   2. Cos/sin is loaded from the RoPE cache by `positions`. No external gather, slice-contiguous, or cache-scatter kernel is launched.
   3. The model calls this through the opaque op `minimax_m3_fused_sparse_forward`, then runs the indexer and sparse attention. The original cache-insertion path is not called again.
 - **Supported modes**: BF16 NPU input, main and index head dimension 128, at most 262144 tokens including graph padding. Packed `[Q | K | V | index Q | index K]` projections and separate QKV/index projections are both supported. Other shapes keep the existing prepare path.
@@ -14,8 +14,7 @@
 
 | Parameter | Input/Output/Attribute | Description | Data type |
 | --- | --- | --- | --- |
-| `packed` | Input | Main QKV projection, or packed QKV plus index when `index_packed` is omitted | bfloat16 |
-| `index_packed` | Input | Separate index Q/K projection. Used by W8A8 QKV with BF16 index weights | bfloat16 |
+| `q`, `k`, `v`, `index_q`, `index_k` | Input | Strided `[num_tokens, heads * head_dim]` projection views. The wrapper infers head counts from the widths and norm weights | bfloat16 |
 | `cos_sin_cache` | Input | NeoX RoPE table, indexed by `positions` | floating |
 | `positions` | Input | Token positions, rank 1 | integer |
 | `q_weight`, `k_weight`, `index_q_weight`, `index_k_weight` | Input | Gemma RMSNorm weights. All four epsilons must match | floating |

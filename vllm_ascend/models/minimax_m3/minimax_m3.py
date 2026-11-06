@@ -503,10 +503,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def _run_fused_sparse_attention(
         self,
-        qkv: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        index_q: torch.Tensor,
+        index_k: torch.Tensor,
         positions: torch.Tensor,
         attn_output: torch.Tensor,
-        index_qk: torch.Tensor | None = None,
     ) -> None:
         # Lazy-load Triton only for the supported NPU path. Cache access stays
         # inside the opaque attention op, like _run_sparse_attention.
@@ -520,7 +523,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if isinstance(index_cache, (tuple, list)):
             index_cache = index_cache[0]
         query, index_query = minimax_qknorm_rope_cache(
-            qkv,
+            q,
+            k,
+            v,
+            index_q,
+            index_k,
             self.rotary_emb.cos_sin_cache,
             positions,
             self.q_norm.weight,
@@ -533,11 +540,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             main_meta.slot_mapping,
             index_meta.slot_mapping,
             main_meta.num_actual_tokens,
-            self.num_heads,
-            self.num_kv_heads,
-            self.num_idx_heads,
             self.q_norm.variance_epsilon,
-            index_packed=index_qk,
         )
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
@@ -549,9 +552,18 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         if self._can_fuse_sparse_prepare(positions, hidden_states):
             qkv, _ = self.qkv_proj(hidden_states)
-            index_qk = self.indexer_proj(hidden_states)[0] if self.indexer_proj is not None else None
+            if self.indexer_proj is None:
+                q, k, v, index_q, index_k = qkv.split(
+                    (self.q_size, self.kv_size, self.kv_size, self.index_q_size, self.idx_head_dim), dim=-1
+                )
+            else:
+                q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
+                index_qk, _ = self.indexer_proj(hidden_states)
+                index_q, index_k = index_qk.split((self.index_q_size, self.idx_head_dim), dim=-1)
             attn_out = hidden_states.new_empty((hidden_states.shape[0], self.q_size))
-            torch.ops.vllm.minimax_m3_fused_sparse_forward(qkv, positions, attn_out, self.layer_name, index_qk)
+            torch.ops.vllm.minimax_m3_fused_sparse_forward(
+                q, k, v, index_q, index_k, positions, attn_out, self.layer_name
+            )
             projected, _ = self.o_proj(attn_out)
             return projected
         q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
