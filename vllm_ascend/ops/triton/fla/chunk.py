@@ -91,8 +91,6 @@ def chunk_gated_delta_rule_fwd(
     )
 
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
-    w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
-    u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
@@ -135,6 +133,8 @@ def chunk_gated_delta_rule_fwd(
         h = h.transpose(1, 2).contiguous()
         v_new = v_new.transpose(1, 2).contiguous()
     else:
+        w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
+        u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
         h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
             k_ascendc,
             w_ascendc,
@@ -290,8 +290,18 @@ def chunk_gated_delta_rule_checkpoint(
     )
     if prebuilt_meta is None or any(getattr(prebuilt_meta, field, None) is None for field in required_fields):
         raise ValueError("GDN checkpoints require prebuilt device chunk metadata; host-only fallback is unsupported")
-    q = l2norm_fwd(q)
-    k = l2norm_fwd(k)
+    # Head-first convolution returns strided [1, T, H, D] views. The
+    # Triton pipeline uses dense pointer arithmetic, just as the ordinary
+    # prefill path guarded by input_guard does. Normalize read inputs only:
+    # checkpoint_output must remain the caller's buffer for in-place export.
+    q = l2norm_fwd(q.contiguous())
+    k = l2norm_fwd(k.contiguous())
+    v = v.contiguous()
+    g = g.contiguous()
+    beta = beta.contiguous()
+    initial_state = initial_state.contiguous()
+    cu_seqlens = cu_seqlens.contiguous()
+    checkpoint_offsets = checkpoint_offsets.contiguous()
     _, output, _, final_state, _, _, _ = chunk_gated_delta_rule_fwd(
         q,
         k,

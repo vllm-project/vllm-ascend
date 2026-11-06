@@ -396,6 +396,9 @@ and prefix caching in align mode. Requires vLLM with #60050. The option is
 experimental and disabled by default. Eligible GDN layers require BF16,
 K=V=128, PCP=1 and no ubatching. The upstream all-layer capability check preserves split
 prefill when another recurrent layer cannot export checkpoints.
+KV transfer configurations and legacy EAGLE/MTP block dropping without
+lookahead hashes fall back to existing prefill scheduling: the scheduler and
+worker cannot safely assume the same internal checkpoint boundary in these modes.
 
 Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
 AscendC FwdH implementation to export only selected FP32 chunk-start states.

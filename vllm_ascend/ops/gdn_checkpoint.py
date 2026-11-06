@@ -3,12 +3,23 @@
 """Opt-in GDN checkpoint export from FP32 chunk-start recurrent states."""
 
 import torch
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.gdn_checkpoint_plan import validate_checkpoint_plan
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
 
 GDN_CHECKPOINT_ALIGNMENT = 64
+
+
+def _supports_checkpoint_boundary_policy(config) -> bool:
+    # Ascend's connector-specific split rules and legacy EAGLE block-drop
+    # overrides can disagree with the upstream worker checkpoint planner.
+    # Never advertise a cache page whose token boundary we cannot reproduce.
+    if config.kv_transfer_config is not None:
+        return False
+    spec = config.speculative_config
+    return spec is None or bool(getattr(config, "num_hash_lookahead_tokens", 0)) or not spec.use_eagle_block_drop()
 
 
 def initialize_gdn_checkpoints(layer) -> None:
@@ -25,6 +36,12 @@ def initialize_gdn_checkpoints(layer) -> None:
         or layer.head_k_dim != 128
         or layer.head_v_dim != 128
     ):
+        return
+    if not _supports_checkpoint_boundary_policy(config):
+        logger.warning_once(
+            "GDN internal prefill checkpoints use existing prefill scheduling with "
+            "KV transfer or legacy EAGLE block dropping without lookahead hashes."
+        )
         return
     from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
     from vllm.v1.kv_cache_interface import MambaSpec
