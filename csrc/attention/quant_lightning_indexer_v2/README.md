@@ -110,6 +110,8 @@ DCP 的详细设计文档仅保留在本地，不入库；仓库内的接口、�
 | PyTorch API | - | 通过[torch.ops.cann_ops_transformer.quant_lightning_indexer](../../torch_extension/cann_ops_transformer/docs/zh/quant_lightning_indexer.md)接口调用QuantLightningIndexerV2算子。 |
 | aclnn API | [test_aclnn_quant_lightning_indexer_v2](examples/test_aclnn_quant_lightning_indexer_v2.cpp) | 通过[aclnnQuantLightningIndexerV2](docs/aclnnQuantLightningIndexerV2.md)两段式接口调用QuantLightningIndexerV2算子。 |
 
+单算子精度回归位于 `tests/e2e/nightly/single_node/ops/singlecard_ops/test_quant_lightning_indexer_v2.py::test_quant_lightning_indexer_v2_accuracy`，覆盖 A3 INT8、A3 DCP 和 A5 FP8。
+
 ## DCP 本地候选入口（Ascend 950 C8）
 
 ### Kimi A5 native DCP 框架路径
