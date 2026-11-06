@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, SparseMLAIndexGroupBuilder
@@ -524,6 +525,61 @@ class AscendHiSparseImpl(AscendSFAImpl):
             outputs.append(result)
         return torch.cat(outputs, dim=0) if len(outputs) > 1 else outputs[0]
 
+    def _try_c8_resident_prefill(self, query, query_rope, logical_topk, metadata, query_ends, key_lengths):
+        if (
+            not self.enable_sparse_sfa_c8
+            or metadata.num_decodes
+            or metadata.hisparse_for_capture
+            or query_rope is None
+            or not (query.shape[0] == logical_topk.shape[0] == metadata.num_actual_tokens)
+        ):
+            return None
+        cache = self.hisparse_cache
+        view = cache.view
+        state_indices = cache.runtime.request_state_indices
+        if (
+            not cache.all_context_pages_resident
+            or cache.dummy_batch
+            or cache.draft_layer
+            or view is None
+            or cache.block_table is None
+            or state_indices is None
+            or state_indices.numel() < metadata.num_reqs
+            or query_ends.shape != (metadata.num_reqs,)
+            or key_lengths.shape != (metadata.num_reqs,)
+        ):
+            return None
+        if (
+            get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or torch.npu.is_current_stream_capturing()
+        ):
+            return None
+
+        # Read the exact layer's live Resident table after the connector updates
+        # it. The dense HMA alias includes gaps, so scale only its physical pages.
+        page_stride, remainder = divmod(view.attention_block_stride, view.block_size)
+        storage = view.attention_cache
+        if (
+            remainder
+            or page_stride < 1
+            or not storage.is_contiguous()
+            or view.cache.stride(0) != view.attention_block_stride * view.cache.stride(1)
+            or storage.size(0) <= (view.cache.size(0) - 1) * page_stride
+        ):
+            return None
+        table = cache.block_table.index_select(0, state_indices[: metadata.num_reqs].to(torch.long))
+        table.clamp_min_(0).mul_(page_stride)
+        return super()._execute_sparse_flash_attention_process(
+            query,
+            query_rope,
+            (storage.unsqueeze(2),),
+            logical_topk.unsqueeze(1),
+            metadata,
+            query_ends,
+            key_lengths,
+            block_table=table,
+        )
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -545,6 +601,12 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # Decode's resolver already masks graph padding from this same device
         # scalar. Keep that validation at the producer of physical indices.
         self.index_group.set_logical_topk_ready(self.index_group_index)
+        if metadata.num_prefills and not metadata.num_decodes:
+            resident = self._try_c8_resident_prefill(
+                ql_nope, q_pe, logical, metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            )
+            if resident is not None:
+                return resident
         outputs = []
         num_decode = metadata.num_decode_tokens
         if num_decode:
