@@ -4,7 +4,7 @@
 
 Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models. Built upon extensive training, Qwen3 delivers groundbreaking advancements in reasoning, instruction-following, agent capabilities, and multilingual support. The Dense variants covered in this document include Qwen3-0.6B, 1.7B, 4B, 8B, 14B, and 32B, along with their quantized versions (W8A8, W4A4, and W8A8SC-310) optimized for Ascend NPU deployment.
 
-This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
+This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
 The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, and W4A4 is supported since v0.11.0rc1. Atlas 300I DUO uses the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
@@ -24,12 +24,12 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-0.6B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-1.7B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-4B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-4B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-8B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-8B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-14B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-14B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-32B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-32B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-32B) |
 
 **Quantized Versions for Atlas A2/A3 inference products:**
 
@@ -386,7 +386,7 @@ The following is an example configuration for the accuracy evaluation config fil
 
 **Accuracy Evaluation Config File:**
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
@@ -429,9 +429,9 @@ ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_pro
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The following is an example configuration for the accuracy evaluation config file:
+The following is an example configuration for the performance evaluation config file:
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content

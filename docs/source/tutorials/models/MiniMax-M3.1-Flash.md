@@ -46,22 +46,20 @@ On each host, use `ip addr` or `ifconfig` to identify the host communication IP 
 
 Choose the tab for your hardware and run the commands on each participating host.
 
-=== "A2 series (W8A8)"
+=== "950DT products"
 
-    Run the following on each A2 host. Set the model path to the W8A8 checkpoint.
+    Run the following on each 950DT products host. Set the model path to the W8A8-MXFP8 checkpoint.
 
     ```bash
-    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash"
+    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler"
     export CONTAINER_NAME=minimax_m31_flash
-    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
+    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>"
     export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
-    mkdir -p "$WORK_DIR"
 
     docker run -it --name "$CONTAINER_NAME" \
-        --network host --privileged --shm-size=100g \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
+        --network host --ipc host --privileged --shm-size=100g \
+        --device /dev/davinci_manager --device /dev/hisi_hdc \
+        --device /dev/ummu --device /dev/uburma \
         --device /dev/davinci0 --device /dev/davinci1 \
         --device /dev/davinci2 --device /dev/davinci3 \
         --device /dev/davinci4 --device /dev/davinci5 \
@@ -73,7 +71,9 @@ Choose the tab for your hardware and run the commands on each participating host
         -v /usr/local/dcmi:/usr/local/dcmi:ro \
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
         -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
+        -v /etc/hixlep:/etc/hixlep:ro \
+        -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
+        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \
         -v "$WORK_DIR":/workspace \
         -w /workspace "$IMAGE" bash
     ```
@@ -114,20 +114,22 @@ Choose the tab for your hardware and run the commands on each participating host
         -w /workspace "$IMAGE" bash
     ```
 
-=== "950DT products"
+=== "A2 series (W8A8)"
 
-    Run the following on each 950DT products host. Set the model path to the W8A8-MXFP8 checkpoint.
+    Run the following on each A2 host. Set the model path to the W8A8 checkpoint.
 
     ```bash
-    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler"
+    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash"
     export CONTAINER_NAME=minimax_m31_flash
-    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>"
+    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
     export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+    mkdir -p "$WORK_DIR"
 
     docker run -it --name "$CONTAINER_NAME" \
-        --network host --ipc host --privileged --shm-size=100g \
-        --device /dev/davinci_manager --device /dev/hisi_hdc \
-        --device /dev/ummu --device /dev/uburma \
+        --network host --privileged --shm-size=100g \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
         --device /dev/davinci0 --device /dev/davinci1 \
         --device /dev/davinci2 --device /dev/davinci3 \
         --device /dev/davinci4 --device /dev/davinci5 \
@@ -139,14 +141,34 @@ Choose the tab for your hardware and run the commands on each participating host
         -v /usr/local/dcmi:/usr/local/dcmi:ro \
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
         -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-        -v /etc/hixlep:/etc/hixlep:ro \
-        -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
-        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \
+        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
         -v "$WORK_DIR":/workspace \
         -w /workspace "$IMAGE" bash
     ```
 
-## 5 Online Service Deployment
+**Installation verification**
+
+From another terminal on each host, check the container created above:
+
+```bash
+docker ps --filter name=minimax_m31_flash
+```
+
+Expected result: the container is listed with status `Up`. In the container terminal, run `pip show vllm vllm-ascend` and confirm that both packages and their versions are reported.
+
+### 4.2 Source Code Installation
+
+For a source installation, follow the **source installation** tab in the [Installation Guide](../../getting_started/installation.md#installation-software-environment). Install the compatible upstream vLLM version first, then build vLLM Ascend for your hardware. Use the same model weights and serving configuration as the deployment examples below; installing from source does not select the model weights for you.
+
+After installation, run the following in the serving environment:
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: both packages are installed, and their reported versions match the versions selected in the installation guide.
+
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Use the container and model weights for your hardware from [Installation](#4-installation).
 
@@ -166,7 +188,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 These values belong to different deployment profiles. Weights, communication buffers, parallelism, and KV caches share device memory, so a context budget that fits one profile may not fit another. Select a value that covers the prompt and generated tokens together, and check available KV cache capacity at the intended concurrency. The `1M` model limit in the support matrix does not mean every example configuration reserves enough memory for 1M-token requests. To use the `263000` setting reported in [Text Evaluation](#72-text-evaluation), update `MAX_MODEL_LEN` in the serving scripts, including both roles for PD deployment, and recheck memory capacity before evaluation.
 
-For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
+For text-only requests, `--limit-mm-per-prompt` can be omitted; omitting it does not disable multimodal model loading. Use `--language-model-only` when the service must disable multimodal inputs, as shown in the text-only PD profiles. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.1 Single-Node Deployment
 
@@ -1229,7 +1251,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, tenant option
 | `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `4GB`, 950DT P and both D nodes use `64GB`; enable SSD offload on all nodes |
 | `lookup_rpc_port` | Not used | **Must be unique per DP rank** (`37000/37100 + DP_RANK`); on 950DT products use one distinct base port per host (D1 `37100`, D2 `37102`) to avoid IPC endpoint collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add A3 fabric-memory or 950DT Device UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
-| Container mounts | `/etc/hccn.conf`; 950DT products also keep `/etc/hixlep/` | Also mount the local SSD offload directory |
+| Container mounts | A3: `/etc/hccn.conf`; 950DT products: `/etc/hixlep/` | Also mount the local SSD offload directory |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
 
@@ -2187,56 +2209,79 @@ Proxy (:19080)
 
     This checks the TCP listener; successful worker registration and KV operations are verified in Section 5.4.5.
 
-2. Start the first A3 Decode node (global DP ranks 0–3). Use the pooled `run_decode_d1.sh`, not the normal-PD script:
+Choose the model-service startup sequence for your hardware after the Master check succeeds. Use the pooled scripts from Section 5.4.3.
 
-    ```bash
-    for rank in 0 1 2 3; do
-        nohup bash run_decode_d1.sh "$rank" > "decode-$rank.log" 2>&1 &
-    done
-    ```
+=== "950DT products"
 
-    Wait for rank 0 to print `Started DP Coordinator process`. Start the second node from another shell; initialization needs both D nodes.
+    1. Start D1 and D2 on their respective hosts before waiting for readiness. Each host runs one pooled process serving two local DP ranks.
 
-    On 950DT products, start one pooled Decode process on each Decode host instead of one process per rank. D1 serves local DP ranks 0–1 and D2 serves local DP ranks 2–3; start both before waiting, because the distributed group needs both hosts:
+        On D1:
 
-    ```bash
-    # On the first Decode host (D1).
-    nohup bash run_decode_d1.sh > decode.log 2>&1 &
-    # On the second Decode host (D2).
-    nohup bash run_decode_d2.sh > decode.log 2>&1 &
-    ```
+        ```bash
+        nohup bash run_decode_d1.sh > decode.log 2>&1 &
+        ```
 
-    Both hosts expose API port `31060`. Then skip step 3 on 950DT products.
+        On D2:
 
-3. Start the second A3 Decode node (global DP ranks 4–7; A3 only). `LOCAL_IP` is the second node's IP, but `DECODE_HEAD_IP` remains the first Decode node's IP:
+        ```bash
+        nohup bash run_decode_d2.sh > decode.log 2>&1 &
+        ```
 
-    ```bash
-    for rank in 0 1 2 3; do
-        nohup bash run_decode_d2.sh "$rank" > "decode-$((rank+4)).log" 2>&1 &
-    done
-    ```
+        Wait for both hosts to print `Application startup complete`. Each exposes API port `31060`.
 
-    D1 exposes API ports `19200`–`19203`; D2 exposes `19300`–`19303`. Wait for all eight DP ranks to print `Application startup complete`.
+    2. Start Prefill:
 
-4. Start Prefill using the pooled `run_prefill.sh`:
+        ```bash
+        nohup bash run_prefill.sh > prefill.log 2>&1 &
+        ```
 
-    ```bash
-    nohup bash run_prefill.sh > prefill.log 2>&1 &
-    ```
+        Wait for `Application startup complete` on port `31050`.
 
-    Wait for Prefill to print `Application startup complete` on port `19100`.
+    3. Start the unchanged 950DT `proxy_server.sh` from Section 5.3. It registers one Prefill endpoint on `31050` and two Decode endpoints on `31060`.
 
-    On 950DT products, start the pooled Prefill with `nohup bash run_prefill.sh > prefill.log 2>&1 &` and wait for `Application startup complete` on port `31050`.
+        ```bash
+        bash proxy_server.sh
+        ```
 
-5. Start the proxy. The A3 proxy registers one Prefill endpoint and eight Decode endpoints. Use the unchanged `proxy_server.sh` from Section 5.3:
+        Send requests to `<proxy_ip>:19080` with model name `minimax-m3.1-flash`.
 
-    ```bash
-    bash proxy_server.sh
-    ```
+=== "A3 series (W8A8)"
 
-    The service is accessible at `<proxy_ip>:19080`; use this endpoint with model name `minimax-m3.1-flash` in [Section 6](#6-functional-verification).
+    1. Start all four D1 ranks, using the pooled `run_decode_d1.sh`:
 
-    On 950DT products, use the unchanged Section 5.3 950DT `proxy_server.sh`: it registers one Prefill endpoint on `31050` and two Decode endpoints on `31060`, and the pooled scripts keep those ports.
+        ```bash
+        for rank in 0 1 2 3; do
+            nohup bash run_decode_d1.sh "$rank" > "decode-$rank.log" 2>&1 &
+        done
+        ```
+
+        Wait for rank 0 to print `Started DP Coordinator process`, then start D2 from another shell. Do not wait for D1 to become fully ready: the Decode group needs both hosts.
+
+    2. Start all four D2 ranks. Keep `DECODE_HEAD_IP` set to D1's IP:
+
+        ```bash
+        for rank in 0 1 2 3; do
+            nohup bash run_decode_d2.sh "$rank" > "decode-$((rank+4)).log" 2>&1 &
+        done
+        ```
+
+        D1 exposes ports `19200`–`19203`; D2 exposes `19300`–`19303`. Wait for all eight ranks to print `Application startup complete`.
+
+    3. Start Prefill:
+
+        ```bash
+        nohup bash run_prefill.sh > prefill.log 2>&1 &
+        ```
+
+        Wait for `Application startup complete` on port `19100`.
+
+    4. Start the unchanged A3 `proxy_server.sh` from Section 5.3. It registers one Prefill endpoint and eight Decode endpoints.
+
+        ```bash
+        bash proxy_server.sh
+        ```
+
+        Send requests to `<proxy_ip>:19080` with model name `minimax-m3.1-flash`; see [Functional Verification](#6-functional-verification).
 
 #### 5.4.5 Verification
 
@@ -2257,7 +2302,7 @@ This text-only W8A8 profile uses a 1P1D topology: one Prefill service on one hos
 | Decode host 1 | 4 / 8 / 1 | 0–1 | 31260, 31261 | 1 |
 | Decode host 2 | 4 / 8 / 1 | 2–3 | 31260, 31261 | 1 |
 
-This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. The batched-token budget limits each iteration; it does not limit the total input length.
+This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. In this 1M profile, enabling DSpark caused out-of-memory errors during validation, so DSpark is disabled to preserve functional operation. DSpark optimization for this profile remains future work. The batched-token budget limits each iteration; it does not limit the total input length.
 
 Decode reserves `48421142528` bytes (about 45.1 GiB) of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
 
@@ -2806,7 +2851,7 @@ Expected result: HTTP 200 response with a JSON body containing non-empty `choice
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
-### 7.2 Text Evaluation
+### 7.2 Evaluation Results {: #72-text-evaluation }
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
@@ -2823,6 +2868,8 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 The following is an example configuration for the performance evaluation config file:
+
+Replace `path` with the model directory from Section 3.1. Set `host_ip` and `host_port` to the serving endpoint: single-node and A2 co-located examples use port `11223`; PD examples use the proxy on `19080`. The `8009` value below is a placeholder and must be changed for these deployments.
 
 ```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
@@ -2859,6 +2906,8 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 128
 ```
 
+Expected result: AISBench reports successful and failed requests, throughput, and latency metrics such as TTFT and TPOT. Check for failed requests and retain the workload configuration with the results. No measured performance values are asserted by this example.
+
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
@@ -2867,7 +2916,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 | Scenario | Starting Configuration | Parameters to Evaluate | Validation |
 | --- | --- | --- | --- |
-| Long context | All examples set `MAX_MODEL_LEN` to `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
+| Long context | Sections 5.1–5.4 use `MAX_MODEL_LEN=133000`; the dedicated 1M profile in Section 5.5 uses `1050624`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
 | Low latency | Single-node examples in Section 5.1. | Reduce request concurrency and compare `--max-num-seqs` and `--max-num-batched-tokens` settings. | Compare TTFT and TPOT alongside output-token throughput. |
 | High throughput | PD examples in Section 5.3. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
 
@@ -2875,7 +2924,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 #### 9.2.1 DSpark and KV Cache Configuration
 
-The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
+The examples in Sections 5.1–5.4 explicitly enable FlashComm1 and seven-token DSpark. Section 5.5 disables speculative decoding and configures FlashComm1 separately for each role. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
 
 #### 9.2.2 Workload-Specific Tuning
 

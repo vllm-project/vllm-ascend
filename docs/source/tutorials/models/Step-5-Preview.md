@@ -14,6 +14,8 @@ This document describes how to quickly get started with `Step-5-Preview` model i
     - Only **950DT products** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step-5-Preview`.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step-5-Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
+The deployment example uses the custom Docker image based on vLLM and vLLM Ascend v0.27.0 listed in [Hardware and Software Preparation](#32-hardware-and-software-preparation). Its support scope remains limited to the verified experimental configuration in this guide.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -23,6 +25,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
+
+The official model is available on [Hugging Face](https://huggingface.co/stepfun-ai/Step-5-Preview). The deployment below uses the Ascend-adapted W8A8-MXFP8 checkpoint from ModelScope; these are different weight formats.
 
 | Model | Weight |
 | --- | --- |
@@ -47,6 +51,8 @@ npu-smi info
 If you want to deploy a multi-node environment, verify multi-node communication as described in [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
+
+This experimental deployment example targets 950DT products only.
 
 ### 4.1 Docker Image Installation
 
@@ -96,7 +102,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/mnt/weight`; modify it according to the actual situation.
+The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. If the host weight directory is `/mnt/weight`, add `-v /mnt/weight:/mnt/weight:ro` to the `docker run` command before the image name. Replace both paths with your actual host and container paths, and set `WEIGHT_PATH` to the container path.
 
 Enter the container interactive environment:
 
@@ -104,17 +110,21 @@ Enter the container interactive environment:
 docker exec -it ${CONTAINER_NAME} bash
 ```
 
+**Installation verification**
+
+From another host terminal, run `docker ps --filter name=step5`. Expected result: the container is listed with status `Up`. In the container, run `pip show vllm vllm-ascend`; both packages should be installed with the image's documented versions.
+
 ### 4.2 Source Code Installation
 
 !!! note
 
     `Step-5-Preview` is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:step5-a5-openeuler` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Multi-Node Co-Located Deployment
 
-DP=4 multi-node deployment with TP=4 per dp rank extends the context to 1M. Update `WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+The two-node deployment uses four global DP ranks with TP4 per rank and a total context limit of 1,048,576 tokens. Each host runs two local DP ranks across its eight NPUs. Update `WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
 
 Run the following command on node 0:
 
@@ -211,9 +221,9 @@ Key Parameter Descriptions:
 
 | Feature | Description | Configuration |
 | --- | --- | --- |
-| Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
+| Tensor Parallel (TP) | Splits each model replica across four NPUs; two local DP ranks use all eight NPUs on each host. | `--tensor-parallel-size 4` |
 | Expert Parallelism (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
-| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
+| Data Parallel (DP) | Four global data-parallel ranks across two hosts, with two local ranks per host. | `--data-parallel-size 4` |
 | Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
 | Decode Graph Capture | Captures the decode phase into a graph to reduce kernel launch overhead. | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
 | Data parallelism for shared experts | Use data parallelism to deploy shared experts | `"enable_shared_expert_dp": true` |
@@ -223,7 +233,7 @@ Key Parameter Descriptions:
 
 ## 6 Functional Verification
 
-Send an inference request to test the inference service, refer to the following command:
+Send an inference request to test the service on node 0. The server above binds to `NODE0_IP`, so replace `127.0.0.1` in the following request with that communication IP unless the service is also listening on loopback:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:10086/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -266,7 +276,59 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## 9 Declaration
+### 8.1 Using vLLM Benchmark
+
+Use the [vLLM Benchmark guide](../../developer_guide/performance_and_debug/performance_benchmark.md) for workload selection and metric definitions. After the service is ready, run this small text-only benchmark from a client with access to the checkpoint tokenizer. Replace `MODEL_PATH` with the weight directory recorded in Section 3.1 and set `SERVICE_URL` to the API endpoint selected in Chapter 5. The example port below is `10086`; use the actual host address when the service binds to a host communication IP.
+
+```bash
+export MODEL_PATH="<YOUR_MODEL_PATH>"
+export SERVICE_URL="http://<SERVICE_HOST>:10086"
+vllm bench serve \
+    --backend openai-chat \
+    --model "$MODEL_PATH" \
+    --served-model-name step \
+    --base-url "$SERVICE_URL" \
+    --endpoint /v1/chat/completions \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 128 \
+    --num-prompts 8 \
+    --request-rate 1
+```
+
+Expected result: the benchmark reports completed requests, request/output-token throughput, and latency metrics such as time to first token (TTFT) and time per output token (TPOT). Check failed requests before comparing results. These request counts and lengths are a small test workload, not a measured performance baseline or an optimal configuration. Keep the workload, concurrency, cache state, and software versions fixed when comparing deployments. Check available options with `vllm bench serve --help` in the installed environment.
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+Use the verified [multi-node co-located deployment](#51-multi-node-co-located-deployment) as the starting configuration. It is not globally optimal: suitable settings depend on input/output lengths, concurrency, and the available KV-cache capacity. This preview does not provide validated single-node or PD-disaggregated alternatives.
+
+| Scenario | Starting point | What to measure |
+| --- | --- | --- |
+| Long context | Chapter 5's `max-model-len=1048576` profile; ensure prompt and generated tokens fit together. | KV-cache capacity and failed requests at the intended concurrency. |
+| Low latency | The same deployment with reduced offered request concurrency. | TTFT and TPOT under the target input/output lengths. |
+| High throughput | The same deployment with a gradually increased request rate. | Successful request/output-token throughput, latency, and memory use. |
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+The deployment explicitly enables MTP with three speculative tokens, expert parallelism, shared-expert data parallelism, shared-expert overlap, and decode graph capture. Keep the validated combination as the baseline and change one setting at a time. Refer to [Optimization and Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for configuration constraints.
+
+## 10 FAQ
+
+For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md). This section covers the preview-specific limitations.
+
+### 10.1 Source Installation Is Unavailable
+
+**Symptom:** The source installation workflow does not provide the experimental adaptation described here.
+
+**Cause:** This guide documents the custom image; Section 4.2 states that its supporting code has not yet been merged.
+
+**Resolution:** Use the Docker image and versions in Sections 3 and 4. Do not substitute a source build while expecting the same preview behavior.
+
+### 10.2 Declaration {: #9-declaration }
 
 - The current version is only for early experience, and performance optimization is still in progress.
 - The service reliability has not been fully validated, and it is not recommended for direct use in production environments.
