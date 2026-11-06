@@ -1,7 +1,5 @@
 # Supported Models
 
-Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/1608>
-
 !!! note
 
     This list is based on the vLLM main community model list and categorizes the support status of vllm-ascend with labels such as Supported, Experimental, and Unmaintained. Models not listed may be verified independently.
