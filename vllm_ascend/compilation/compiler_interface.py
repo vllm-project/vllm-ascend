@@ -112,7 +112,7 @@ def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
     # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
     incompatible_ops = [
         "TopKV2",  # minimax-m3 910C
-        "GenericBlockSparseAttn",  # minimax-m3 910C
+        "GenericBlockSparseAttention",  # minimax-m3 910C
         "QuantBatchMatmulV3",  # glm5.2 910C
         "TransposeQuantBatchMatMul",  # dsv4 950
         "QuantLightningIndexer",  # glm5.2 950
