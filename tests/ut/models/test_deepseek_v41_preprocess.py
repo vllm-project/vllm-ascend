@@ -39,7 +39,7 @@ def test_fused_swa_cache_store_consumes_raw_projection(monkeypatch):
     def fused(*args):
         calls.append(args)
 
-    setattr(module, "dsv41_rmsnorm_rope_cache", fused)
+    monkeypatch.setattr(module, "dsv41_rmsnorm_rope_cache", fused, raising=False)
     monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_can_fuse_swa_cache", staticmethod(lambda *args: True))
     monkeypatch.setattr(
