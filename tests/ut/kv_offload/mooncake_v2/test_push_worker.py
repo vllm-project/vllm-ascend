@@ -33,7 +33,7 @@ def worker(monkeypatch):
     obj.register_kv_caches({})
     yield obj
     obj.shutdown()
-    assert not obj._recving_thread.is_alive()
+    assert not obj._decode_listener_thread.is_alive()
 
 
 def metadata():
@@ -61,7 +61,7 @@ def send(worker, message):
     with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, 2000)
-        sock.connect(worker._recving_thread.address)
+        sock.connect(worker._decode_listener_thread.address)
         sock.send(msgspec.msgpack.encode(message))
         reply = msgspec.msgpack.decode(sock.recv())
     # ACK precedes result publication; wait before inspecting main-thread state.
@@ -108,34 +108,80 @@ def test_all_sources_required_and_error_is_reported_after_drain(worker):
     assert result.finished_recving == result.failed_recving == {"d-request"}
 
 
+@pytest.mark.parametrize("failure", ["undrained", "timeout"])
+def test_receive_failure_keeps_service_running_and_releases_only_after_drain(worker, failure):
+    worker.start_load_kv(metadata())
+    if failure == "undrained":
+        send(worker, dict(completion(), status="error", writes_drained=False, error="P WRITE timeout"))
+    else:
+        worker._reqs_recv_state["d-request"].start_time -= push_worker.envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 1
+    result = worker.get_transfer_results()
+    assert not result.failed_recving
+    assert not result.finished_recving
+    assert worker._reqs_recv_state["d-request"].failed
+    assert not worker.get_transfer_results().failed_recving
+    assert "d-request" in worker._reqs_recv_state
+    assert worker._control_error is None
+    assert not worker._stop_event.is_set()
+
+    next_meta = MooncakeConnectorMetadata()
+    next_meta.add_new_push_req("next", ([3, 4],), 32, {"num_computed_tokens": 0})
+    worker.start_load_kv(next_meta)
+    send(worker, dict(completion(), request_id="next"))
+    result = finish(worker)
+    assert result.finished_recving == {"next"}
+    assert not result.failed_recving
+
+    # A late drained DONE permits reclaiming the failed request's blocks.
+    send(worker, completion())
+    result = finish(worker)
+    assert result.finished_recving == result.failed_recving == {"d-request"}
+    assert "d-request" not in worker._reqs_recv_state
+
+
 @pytest.mark.parametrize("early", [False, True])
-def test_conflicting_producer_cannot_release_blocks(worker, early):
+def test_failed_done_is_not_lost_when_same_source_reports_drain(worker, early):
     if not early:
         worker.start_load_kv(metadata())
-    first = dict(completion(), producer_sizes=[1, 1, 2])
-    send(worker, first)
-    assert not worker.get_transfer_results().finished_recving
-    send(worker, dict(first, producer_engine_id="restarted"))
-    with pytest.raises(RuntimeError, match="Push control failed"):
-        worker.get_transfer_results()
-    assert "d-request" not in worker._finished_requests
+    send(worker, dict(completion(), status="error", writes_drained=False))
+    send(worker, completion())
+    if early:
+        assert not worker.get_transfer_results().finished_recving
+        worker.start_load_kv(metadata())
+    result = finish(worker)
+    assert result.finished_recving == result.failed_recving == {"d-request"}
 
 
-def test_undrained_write_failure_stops_d_without_releasing_blocks(worker):
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [b"\xc1"],
+        [b"\x91" * 10000 + b"\xc0"],
+        [msgspec.msgpack.encode({"kind": "done"})],
+        [b"extra", b"payload"],
+    ],
+    ids=["malformed-msgpack", "decoder-recursion", "missing-fields", "multipart-payload"],
+)
+def test_invalid_done_does_not_stop_listener_or_finish_request(worker, frames):
     worker.start_load_kv(metadata())
-    send(worker, dict(completion(), status="error", writes_drained=False, error="P WRITE timeout"))
-    with pytest.raises(RuntimeError, match="Push control failed"):
-        finish(worker)
-    assert "d-request" in worker._reqs_recv_state
-    assert not worker._reqs_recv_state["d-request"].finished_ranks
-
-
-def test_missing_completion_cannot_release_blocks(worker, monkeypatch):
-    worker.start_load_kv(metadata())
-    monkeypatch.setattr(push_worker.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 0)
-    with pytest.raises(RuntimeError, match="Push control failed"):
-        worker.get_transfer_results()
-    assert "d-request" in worker._reqs_recv_state
+    with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, 2000)
+        sock.connect(worker._decode_listener_thread.address)
+        sock.send_multipart(frames)
+        reply = msgspec.msgpack.decode(sock.recv())
+        assert reply["kind"] == "error"
+        assert worker._decode_listener_thread.is_alive()
+        assert worker._decode_listener_thread.error is None
+        result = worker.get_transfer_results()
+        assert not result.finished_recving
+        assert not result.failed_recving
+        # Use the same connection to verify the listener continues serving.
+        sock.send(msgspec.msgpack.encode(completion()))
+        assert msgspec.msgpack.decode(sock.recv()) == {"kind": "done_ack", "request_id": "d-request"}
+    result = finish(worker)
+    assert result.finished_recving == {"d-request"}
+    assert not result.failed_recving
 
 
 def test_done_ack_send_error_reports_request_failure(worker):
@@ -144,7 +190,7 @@ def test_done_ack_send_error_reports_request_failure(worker):
     def fail_send(frames):
         raise zmq.Again()
 
-    worker._recving_thread._handle_frames(
+    worker._decode_listener_thread._handle_done_message(
         SimpleNamespace(send_multipart=fail_send), [b"producer", b"", msgspec.msgpack.encode(completion())]
     )
     result = finish(worker)
@@ -156,7 +202,7 @@ def test_push_thread_start_failure_is_reported_and_stopped(worker, monkeypatch):
         raise OSError("Cannot initialize control transport")
 
     monkeypatch.setattr(push_worker, "zmq_ctx", fail)
-    thread = push_worker.MooncakeCompletionThread(worker)
+    thread = push_worker.MooncakeDecodeListenerThread(worker)
     with pytest.raises(RuntimeError, match="failed to start"):
         thread.start()
     assert isinstance(thread.error, OSError)

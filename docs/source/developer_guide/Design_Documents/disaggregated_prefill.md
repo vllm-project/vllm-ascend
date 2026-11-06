@@ -92,12 +92,19 @@ establishment failures are retried up to three attempts; response failures are
 not replayed because P may already have been dispatched. Background HTTP
 failures are collected in a later scheduling step and sent to D workers. A
 connection-establishment failure finishes that receive as failed. Invalid
-metaserver URLs, rejected pool submissions and an unavailable D metadata service
-also fail new receives before publishing their addresses. When P may
+metaserver URLs and rejected pool submissions also fail new receives before
+publishing their addresses. When P may
 already have been dispatched, D marks the receive failed but retains its blocks
 until all P ranks report drained writes. Late HTTP errors do not reopen completed
-receives. Missing terminal completions still trigger the existing fatal timeout
-protection; cancellation and safe recovery from a lost P are not implemented.
+receives. Each request is assumed to use one P engine with a fixed topology.
+On D, missing terminal completions and unconfirmed WRITE drain mark only the
+affected receive as failed; they do not stop the worker. Failure is reported together with receive completion
+once all source WRITEs are confirmed drained. Until then, the request and its
+blocks remain pending (client cancellation can end the request but does not
+release its blocks). A late drained DONE can complete the receive.
+Cancellation/drain recovery for a permanently lost P is not yet
+implemented, so repeated failures can exhaust D's available KV blocks. A failure
+of the shared DONE listener remains fatal.
 
 #### Mooncake D2RH Connector
 
