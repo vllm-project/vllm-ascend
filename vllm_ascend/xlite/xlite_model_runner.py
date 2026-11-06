@@ -163,9 +163,17 @@ class XliteModelRunnerV2(XliteModelRunnerMixin, NPUModelRunnerV2):  # type: igno
             return super()._dummy_run(*args, is_profile=is_profile, **kwargs)  # type: ignore[return-value]
 
     def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, kv_cache_allocation_context: AbstractContextManager | None = None
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        super().initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context)
+        super().initialize_kv_cache(
+            kv_cache_config, is_profiling=is_profiling, kv_cache_allocation_context=kv_cache_allocation_context
+        )
+        if is_profiling:
+            # Profiling uses temporary caches; register only the final backing.
+            return
         kv_caches: list[torch.Tensor] = self._get_flattened_kv_caches(self.kv_caches, check_is_contiguous=False)
         logger.info_once("xlite: registering kv caches to runner model: %s", _TensorRepr(kv_caches, max_it=None))
         self.runner_model.register_kv_caches(kv_caches)

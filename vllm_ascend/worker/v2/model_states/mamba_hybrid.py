@@ -129,7 +129,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ``wait_for_layer_load``); in that case the bulk pre-copy launch is
         skipped for this step.
         """
-        if not has_kv_transfer_group():
+        # Warmup/profile forwards do not execute live connector layer-load
+        # hooks. Keep their copies synchronous instead of leaving a deferral
+        # that the first real request would be required to complete.
+        if getattr(self, "kvpp_is_dummy_run", False) or not has_kv_transfer_group():
             return False
         connector = get_kv_transfer_group()
         prepare_mamba_state_copy = getattr(connector, "prepare_mamba_state_copy", None)
@@ -291,7 +294,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # Per-layer copies are executed by the connector right after each
             # layer's KV load finishes (do_mamba_copy_for_layer).
             return
-        if has_kv_transfer_group() and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False):
+        if (
+            not getattr(self, "kvpp_is_dummy_run", False)
+            and has_kv_transfer_group()
+            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+        ):
             # Sync KV loads run later in KVConnector.pre_forward. Keep the
             # decision kernel above before attention metadata construction,
             # but copy the loaded state only after pre_forward has completed.

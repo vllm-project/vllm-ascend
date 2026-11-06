@@ -1,0 +1,4 @@
+pr: 20906
+entries:
+  - category: feature
+    text: Added opt-in Mooncake layerwise KV buffer reuse on prefill producers, including native MTP, exact recurrent snapshots and GLM main-pack placement. MooncakeConnectorV2 can select component-aware P/D layerwise transport with a D-first proxy.

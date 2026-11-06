@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -7,15 +8,15 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
-    get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
@@ -28,6 +29,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
+    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        if self.layerwise_offload and request_tracker.layerwise_request_id is None:
+            request_tracker.layerwise_request_id = uuid4().hex
+        return super()._build_req_meta(request_tracker, *args, **kwargs)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -46,18 +52,25 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
+        self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.load_async = False
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer or get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
+        self.layerwise_head_sharded_groups: frozenset[int] = (
+            getattr(kv_cache_config, "layerwise_head_sharded_groups", frozenset())
+            if self.use_layerwise_transfer
+            else frozenset()
+        )
+        key_namespace = getattr(kv_cache_config, "layerwise_key_namespace", "") if self.use_layerwise_transfer else ""
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
-                model_name=vllm_config.model_config.model.split("/")[-1],
+                model_name=vllm_config.model_config.model.split("/")[-1] + key_namespace,
                 use_hybrid=self.use_hybrid,
                 grouped_block_size=self.grouped_block_size,
             )
@@ -85,11 +98,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
         reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
         if kv_cache_config is not None and reuse_config is not None:
-            reuse_layout = build_layerwise_reuse_layout(
-                get_layerwise_kv_cache_specs(kv_cache_config),
-                self.num_layers,
-                reuse_config,
-            )
+            reuse_layout = get_layerwise_reuse_layout(kv_cache_config, self.num_layers, reuse_config)
             if reuse_layout.layer_cache_specs:
                 self.num_layers = max(
                     self.num_layers,
@@ -126,6 +135,21 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if self.layerwise_offload:
+            load_spec = self.load_specs.get(request.request_id)
+            restored_tokens = load_spec.kvpool_cached_tokens if load_spec is not None else 0
+            # Local hashes survive scratch reuse; their payload does not.
+            # Never admit a local hit whose overwritten payload is unavailable.
+            if restored_tokens < num_computed_tokens:
+                raise RuntimeError("Layerwise reuse local prefix has no complete external restore point")
+            if load_spec is not None and self.num_speculative_blocks_by_group:
+                # Private tail reconstruction can shorten a full external hit.
+                # Restore recurrent state at that exact endpoint.
+                load_spec.kvpool_store_skip_tokens = restored_tokens
+        return result
+
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
@@ -148,6 +172,15 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.layerwise_offload and (
+            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            # Probe the endpoint we can actually resume from. Trimming a full
+            # hit afterwards could select an earlier recurrent checkpoint that was
+            # never produced by chunked prefill.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
@@ -316,6 +349,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         head_or_tp_ranks = (
             self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
         )
+        if group_id in getattr(self, "layerwise_head_sharded_groups", ()) or (
+            getattr(self, "use_layerwise_transfer", False) and getattr(self, "use_kvpp", False)
+        ):
+            head_or_tp_ranks *= getattr(self, "pcp_size", 1)
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))

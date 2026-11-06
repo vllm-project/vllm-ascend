@@ -873,3 +873,24 @@ class TestAscendStoreResetCache(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDraftLayerwiseHookRouting(unittest.TestCase):
+    def test_native_mtp_uses_mooncake_object_hooks_but_companion_drafts_do_not(self):
+        for excluded in (False, True):
+            with self.subTest(companion=excluded):
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = connector.can_put = True
+                connector._loaded_layer = None
+                connector._mamba_copy_bufs = connector._mamba_state = None
+                worker = MagicMock()
+                draft = "model.layers.4.attn"
+                worker.kv_cache_config.layerwise_draft_layer_names = (draft,)
+                worker._dspark_draft_layer_names = {draft} if excluded else set()
+                worker._extract_physical_layer_index.return_value = 4
+                connector.connector_worker = worker
+                connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+                connector.wait_for_layer_load(draft)
+                connector.save_kv_layer(draft, MagicMock(), MagicMock())
+                self.assertEqual(worker.wait_for_layer_load.call_count, 0 if excluded else 1)
+                self.assertEqual(worker.save_kv_layer.call_count, 0 if excluded else 1)

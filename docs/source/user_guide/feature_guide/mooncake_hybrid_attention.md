@@ -34,7 +34,7 @@ The common Mooncake dependency and deployment requirements are listed in the
 | PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
 | PCP | Each PCP rank stores its own snapshot. Account for these copies in Store capacity and bandwidth. |
 | KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
-| Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
+| Cache storage | Producers can opt into [prefill buffer reuse](mooncake_prefill_offload.md), including private chunk snapshots. Ordinary pooling publishes complete aligned snapshots. |
 | Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
 
 Model-specific quantization, graph mode, and speculative-decoding support should
