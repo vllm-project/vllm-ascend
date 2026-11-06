@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.attention.context_parallel.graph_spec import CPGraphSpec
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
 )
@@ -129,7 +130,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
     def _prepare_graph_pcp_context(
         self,
         pcp_context: "AscendPCPAttentionContext",
-        full_graph_mode: bool,
+        graph_spec: CPGraphSpec,
     ) -> "AscendPCPAttentionContext":
         """Prepare graph-stable DSA tensors without changing the PCP batch layout."""
         global_batch = pcp_context.global_batch
@@ -139,7 +140,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
         # must cover every padded row. Other modes run the DSA cache update
         # with the actual token extent, and compact indices avoid restoring
         # placeholder rows that would be trimmed before the cache write anyway.
-        num_restore_tokens = global_batch.num_tokens_after_padding if full_graph_mode else num_actual_tokens
+        num_restore_tokens = global_batch.num_tokens_after_padding if graph_spec.is_full else num_actual_tokens
         # Use the preallocated buffer to keep the address fixed for graph replay.
         hidden_restore_idx = self._hidden_restore_idx_buffer[:num_restore_tokens]
         hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
@@ -336,8 +337,22 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
         num_actual_reqs: int | None = None,
         common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
         full_graph_mode: bool = False,
+        graph_spec: CPGraphSpec | None = None,
         **kwargs: Any,
     ) -> AscendDSAMetadata:
+        # ``full_graph_mode`` is the batch-level hint; ``graph_spec`` keeps the
+        # mode explicit so piecewise capture and replay cannot be mistaken for
+        # full graphs. See the CP piecewise design document.
+        spec = (
+            graph_spec
+            if graph_spec is not None
+            else CPGraphSpec.from_runtime(
+                self.vllm_config.compilation_config.cudagraph_mode,
+                full_graph=full_graph_mode,
+                capturing=full_graph_mode,
+            )
+        )
+        full_graph_mode = spec.is_full
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         assert common_ratio_to_sas_metadata is not None
@@ -373,7 +388,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             if prepared is None:
                 prepared = self._prepare_graph_pcp_context(
                     pcp_context,
-                    full_graph_mode=full_graph_mode,
+                    graph_spec=spec,
                 )
                 shared["pcp_context"] = prepared
             pcp_context = prepared
@@ -408,11 +423,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
                 can_use_rope_cache=False,
                 full_graph_mode=full_graph_mode,
             )
-            if (
-                not has_prefill
-                and self._is_decode_sharded
-                and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            ):
+            if not has_prefill and self._is_decode_sharded and spec.is_full:
                 # Keep the global RoPE at graph-stable addresses of its own.
                 req_metadata = global_dsa_metadata.req_metadata
                 assert req_metadata is not None

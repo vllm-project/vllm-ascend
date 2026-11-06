@@ -14,6 +14,7 @@ from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_shard
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
+from vllm_ascend.attention.context_parallel.graph_spec import CPGraphSpec
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41Metadata,
@@ -144,8 +145,13 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         # DualChunkSwap doubles prefill rows; decode graphs also pad requests.
         max_reqs = vllm_config.scheduler_config.max_num_seqs
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
         graph_reqs = max(capture_sizes, default=0)
+        if cudagraph_mode.has_piecewise_cudagraphs() and not cudagraph_mode.has_full_cudagraphs():
+            # Piecewise capture pads tokens, not requests, so the compile sizes
+            # bound request capacity only through max_num_reqs.
+            graph_reqs = min(graph_reqs, max_reqs)
         self._resize_request_buffers(self, max(self._request_capacity_factor * max_reqs, graph_reqs) + 1)
         self._resize_request_buffers(self._global_builder, max(max_reqs, graph_reqs) + 1)
 
@@ -254,6 +260,17 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     ) -> AscendDSAV41Metadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
+        # Resolve the graph contract once and keep the legacy ``full_graph_mode``
+        # keyword consistent for the DSA V4.1 builders underneath.
+        graph_spec = kwargs.pop("graph_spec", None)
+        if not isinstance(graph_spec, CPGraphSpec):
+            full_graph = bool(kwargs.get("full_graph_mode", False))
+            graph_spec = CPGraphSpec.from_runtime(
+                self.vllm_config.compilation_config.cudagraph_mode,
+                full_graph=full_graph,
+                capturing=full_graph,
+            )
+        kwargs["full_graph_mode"] = graph_spec.is_full
         if not uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp):
             # Without a PCP context the batch runs replicated on every rank,
             # like a PCP=1 model (e.g. a replicated draft decode), so build the
@@ -272,7 +289,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         if needs_global_metadata:
             pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(
-                self, pcp_context, full_graph_mode=kwargs.get("full_graph_mode", False)
+                self, pcp_context, graph_spec=graph_spec
             )
             global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
                 pcp_context, pcp_cache_group_idx, common_attn_metadata
@@ -282,7 +299,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         )
 
         # Match graph capture shapes; dummy batches must not advance the C2 ring.
-        if kwargs.get("full_graph_mode", False):
+        if graph_spec.is_full:
             local_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(local_common, num_actual_reqs)
             if needs_global_metadata:
                 global_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
