@@ -1,4 +1,3 @@
-import importlib
 import math
 from abc import ABC, abstractmethod
 from typing import Any
@@ -19,7 +18,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    backend_map,
+    resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
@@ -61,8 +60,7 @@ class BaseKVPoolScheduler(ABC):
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        backend_name = str(extra_config.get("backend", "mooncake"))
-        self.backend_name = backend_name.lower()
+        self.backend_name, backend_class = resolve_backend(extra_config)
         self.layerwise_offload: bool = False
         hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
         hf_config = getattr(vllm_config.model_config, "hf_config", hf_text_config)
@@ -145,14 +143,8 @@ class BaseKVPoolScheduler(ABC):
         )
         self.tp_mismatch = tp_mismatch_info.enabled
 
-        backend = backend_map.get(self.backend_name)
-        if backend is None:
-            raise ValueError(f"Unsupported KV pool backend: {backend_name}")
-        backend_path = backend.get("path")
-        backend_class_name = backend.get("name")
-        assert backend_path is not None and backend_class_name is not None
-        backend_module = importlib.import_module(backend_path)
-        backend_class = getattr(backend_module, backend_class_name)
+        if backend_class is None:
+            raise ValueError(f"Unsupported KV pool backend: {self.backend_name}")
         self.store_scheduler = backend_class.create_scheduler_client(vllm_config.parallel_config)
 
         model_config = vllm_config.model_config
@@ -629,12 +621,6 @@ class BaseKVPoolScheduler(ABC):
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
             self._async_loading_req_ids.copy(),
-        )
-        # Immediate block free: requests finished in the previous output
-        # processing and requests preempted by this schedule released their
-        # blocks; the worker fences their queued saves before reuse.
-        meta.released_req_ids = set(scheduler_output.preempted_req_ids or ()) | set(
-            scheduler_output.finished_req_ids or ()
         )
 
         for request in scheduler_output.scheduled_new_reqs:

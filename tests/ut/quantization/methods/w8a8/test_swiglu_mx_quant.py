@@ -13,8 +13,12 @@ from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8 as module
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
-def make_method(scale_alg):
-    config = SimpleNamespace(quant_config=SimpleNamespace(), use_v2_model_runner=True)
+def make_method(scale_alg, enable_eplb=False):
+    config = SimpleNamespace(
+        quant_config=SimpleNamespace(),
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(enable_eplb=enable_eplb),
+    )
     with (
         patch.object(module, "get_current_vllm_config", return_value=config),
         patch.object(module, "get_ascend_config"),
@@ -25,10 +29,11 @@ def make_method(scale_alg):
     return method
 
 
+@pytest.mark.parametrize("enable_eplb", [False, True])
 @pytest.mark.parametrize("scale_alg", list(DynamicMXQuantScaleAlg))
 @pytest.mark.parametrize("activation", list(MoEActivation))
-def test_fused_activation_dispatch(scale_alg, activation):
-    method = make_method(scale_alg)
+def test_fused_activation_dispatch(scale_alg, activation, enable_eplb):
+    method = make_method(scale_alg, enable_eplb=enable_eplb)
     expected = activation == MoEActivation.SILU or (
         scale_alg == DynamicMXQuantScaleAlg.CEIL and activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
     )
