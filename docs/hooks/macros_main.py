@@ -1,10 +1,14 @@
 """MkDocs macros plugin main module.
 
 Exposes version variables from mkdocs.yml extra configuration as Jinja2 macros.
-Variables are defined in the 'extra' section of mkdocs.yml.
+Variables are defined in the 'extra' section of mkdocs.yml, except the main
+development stack versions, which derive from requirements.txt via the
+`req_version` macro so the pins have a single source of truth.
 """
 
 from pathlib import Path
+
+import regex as re
 
 # UI string translations keyed by DOCS_LANG. Injected into config.extra.i18n
 # in define_env() so override templates (e.g. docs/overrides/main.html) can
@@ -45,10 +49,25 @@ def define_env(env):
     if tag_path.exists():
         main_vllm_tag = tag_path.read_text(encoding="utf-8").strip()
 
-    # Static release/main stack variables come exclusively from mkdocs.yml so
-    # maintainers have one place to update dependency versions.
+    # Static release stack variables come from mkdocs.yml. The main stack
+    # versions derive from requirements.txt via req_version() so maintainers
+    # only update the pins once.
     env.variables["main_vllm_commit"] = main_vllm_commit
     env.variables["main_vllm_tag"] = main_vllm_tag
+
+    requirements_path = repo_root / "requirements.txt"
+    requirements_lines = (
+        requirements_path.read_text(encoding="utf-8").splitlines() if requirements_path.exists() else []
+    )
+
+    @env.macro
+    def req_version(name):
+        """Return the pinned version of a package from requirements.txt."""
+        for line in requirements_lines:
+            match = re.match(r"^" + re.escape(name) + r"(?:===|==)(\S+)$", line)
+            if match:
+                return match.group(1)
+        return "unknown"
 
     # Expose UI translations to override templates by attaching the dict
     # to config.extra. See module docstring for the rationale.
