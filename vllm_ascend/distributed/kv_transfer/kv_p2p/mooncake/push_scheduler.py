@@ -61,7 +61,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_sent_to_worker: set[str] = set()
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_pending_send: dict[str, float] = {}
-        self._reqs_aborted: dict[str, str] = {}
+        self._reqs_aborted: dict[str, dict[str, Any]] = {}
         self._remote_worker_addresses: tuple[tuple[int, int, int, str], ...] = ()
         self.metaserver_client = MooncakeMetaserverClient() if self.kv_transfer_config.is_kv_consumer else None
 
@@ -204,10 +204,11 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         normal_finish = request.status in (RequestStatus.FINISHED_LENGTH_CAPPED, RequestStatus.FINISHED_STOPPED)
         if not normal_finish:
             # Notify workers even if cancellation precedes the first dispatch.
-            # TODO: carry D completion endpoints for cancellation before the
-            # first worker dispatch. An ID-only abort has no destination to
-            # notify, so D currently terminates through its receive timeout.
-            self._reqs_aborted[req_id] = params["remote_request_id"]
+            self._reqs_aborted[req_id] = dict(
+                remote_request_id=params["remote_request_id"],
+                remote_engine_id=params["remote_engine_id"],
+                remote_worker_addresses=tuple(tuple(address) for address in params["remote_worker_addresses"]),
+            )
         if req_id not in self._reqs_need_send_layerwise:
             return False, None
         # Normal prefill output is returned only after the worker's send barrier.

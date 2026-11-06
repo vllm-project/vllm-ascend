@@ -289,7 +289,7 @@ def test_producer_delays_release_only_for_unfinished_abort(producer_scheduler, a
     meta = scheduler.build_connector_meta(terminal_step)
     assert set(meta.requests_to_send) == {request.request_id}
     assert terminal_step.has_sync_kv_loads
-    assert meta.push_aborted_requests == ({request.request_id: "d-request-123"} if aborted else {})
+    assert set(meta.push_aborted_requests) == ({request.request_id} if aborted else set())
     assert not meta.push_send_requests
     assert not scheduler.build_connector_meta(terminal_step).requests_to_send
     output = SimpleNamespace(finished_sending={request.request_id}, finished_recving=None)
@@ -309,15 +309,23 @@ def test_abort_before_dispatch_does_not_pin_blocks(producer_scheduler):
     assert producer_scheduler.request_finished(request, ([1], [11])) == (False, None)
     assert not producer_scheduler._reqs_need_send_layerwise
     meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
-    assert meta.push_aborted_requests == {request.request_id: "d-request-123"}
+    assert meta.push_aborted_requests[request.request_id] == dict(
+        remote_request_id="d-request-123",
+        remote_engine_id="d",
+        remote_worker_addresses=((0, 0, 0, "tcp://127.0.0.1:9001"),),
+    )
 
 
-def test_abort_before_allocation_notifies_worker_by_request_id(producer_scheduler):
+def test_abort_before_allocation_preserves_completion_routing(producer_scheduler):
     request = prefill_request()
     request.status = RequestStatus.FINISHED_ABORTED
     assert producer_scheduler.request_finished(request, ([], [])) == (False, None)
     meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
-    assert meta.push_aborted_requests == {request.request_id: "d-request-123"}
+    assert meta.push_aborted_requests[request.request_id] == dict(
+        remote_request_id="d-request-123",
+        remote_engine_id="d",
+        remote_worker_addresses=((0, 0, 0, "tcp://127.0.0.1:9001"),),
+    )
     assert not meta.push_send_requests
 
 

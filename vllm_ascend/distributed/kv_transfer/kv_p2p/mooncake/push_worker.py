@@ -173,7 +173,7 @@ class LayerTransferBatch:
 @dataclass
 class RemoteReqInfo:
     transfer_params: dict[str, Any]
-    metadata_future: Future
+    metadata_future: Future | None  # Aborts before dispatch need only DONE routing.
     required_layers: set[str] | None = None
     sent_tokens: dict[str, int] = field(default_factory=dict)
     pending_layers: set[str] = field(default_factory=set)
@@ -270,10 +270,29 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             for state in self._reqs_send_state.values():
                 if state.local_request_id in metadata.requests_to_send:
                     state.inference_finished = True
-            for local_request_id, request_id in metadata.push_aborted_requests.items():
+            for local_request_id, params in metadata.push_aborted_requests.items():
+                request_id = params["remote_request_id"]
                 state = self._reqs_send_state.setdefault(request_id, SendReqInfo(local_request_id))
                 state.inference_finished = True
                 state.error = "P request aborted"
+                if not state.destinations:
+                    # No WRITE was dispatched: notify D without querying cache
+                    # metadata. Existing states retain their WRITE dependencies.
+                    for pp, pcp, tp, address in params["remote_worker_addresses"]:
+                        rank = (pp, pcp, tp)
+                        state.destinations[rank] = RemoteReqInfo(
+                            dict(
+                                request_id=request_id,
+                                producer_engine_id=self.engine_id,
+                                producer_rank=[self.pp_rank, self.pcp_rank, self.tp_rank],
+                                consumer_engine_id=params["remote_engine_id"],
+                                consumer_rank=list(rank),
+                                completion_address=address,
+                                num_computed_tokens=0,
+                                num_external_tokens=0,
+                            ),
+                            metadata_future=None,
+                        )
             self._prefilling_request_ids = tuple(req.request_id for req in metadata.push_send_requests.values())
             self._process_sending_requests()
 
