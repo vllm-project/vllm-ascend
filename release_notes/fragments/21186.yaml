@@ -1,5 +1,0 @@
-pr: 21186
-entries:
-  - category: bugfix
-    text: Fixed SparseFlashMLA metadata allocation on A5 with ops-transformer 9.3.0 by using 2048 elements and matching the Meta output shape.
-    hardware: [A5]
