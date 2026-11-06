@@ -184,8 +184,8 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-@pytest.fixture
-def compiled_sp_model(monkeypatch):
+@pytest.fixture(params=[False, True], ids=["non_sp", "sp"])
+def compiled_replay_model(monkeypatch, request):
     class Layer(torch.nn.Module):
         engram = None
 
@@ -204,7 +204,7 @@ def compiled_sp_model(monkeypatch):
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
     model.hc_mult = 1
-    model.use_sequence_parallel = True
+    model.use_sequence_parallel = request.param
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = torch.nn.ModuleList(Layer(i) for i in range(3))
@@ -214,7 +214,7 @@ def compiled_sp_model(monkeypatch):
     model.decoder_replay_start = 1
     model.aux_hidden_state_layers = (1, 3)
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
-    replay.sequence_parallel = True
+    replay.sequence_parallel = model.use_sequence_parallel
     model.decoder_replay_layers = replay
     # One-rank SP isolates the compile dispatch. Multi-rank data movement is
     # covered separately by the real Gloo tests.
@@ -230,7 +230,14 @@ def compiled_sp_model(monkeypatch):
         graphs.append(graph)
         return graph.forward
 
-    compiled = torch.compile(model.forward, backend=backend, fullgraph=True)
+    # Match vLLM's unguarded dispatch: runtime state changes must be handled
+    # outside the compiled entry, without relying on Dynamo recompilation.
+    compiled = torch.compile(
+        model.forward,
+        backend=backend,
+        fullgraph=True,
+        options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe},
+    )
 
     def compiled_entry(self, *args, **kwargs):
         compiled_calls.append(True)
@@ -262,8 +269,8 @@ def compiled_sp_model(monkeypatch):
 
 
 @pytest.mark.parametrize("replay_enabled", [False, True])
-def test_sp_decode_compiles_every_layer_including_decoder_tail(compiled_sp_model, replay_enabled):
-    case = compiled_sp_model
+def test_decode_compiles_every_layer_including_decoder_tail(compiled_replay_model, replay_enabled):
+    case = compiled_replay_model
     if not replay_enabled:
         case.model.decoder_replay_layers = None
     output, aux = case.forward()
@@ -278,8 +285,8 @@ def test_sp_decode_compiles_every_layer_including_decoder_tail(compiled_sp_model
     assert all("dsv41_sp_decoder_replay" not in str(node.target) for node in case.graphs[0].graph.nodes)
 
 
-def test_sp_capture_engram_inputs_keep_compiled_entry(compiled_sp_model):
-    case = compiled_sp_model
+def test_capture_engram_inputs_keep_compiled_entry(compiled_replay_model):
+    case = compiled_replay_model
     entered = []
 
     @contextmanager
@@ -295,8 +302,8 @@ def test_sp_capture_engram_inputs_keep_compiled_entry(compiled_sp_model):
     assert sum(node.target == torch.nn.functional.linear for node in case.graphs[0].graph.nodes) == 3
 
 
-def test_sp_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_sp_model):
-    case = compiled_sp_model
+def test_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_replay_model):
+    case = compiled_replay_model
     case.forward()  # compile ordinary warmup/decode with no replay plan
     contexts = []
 
@@ -312,9 +319,10 @@ def test_sp_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_sp
         case.replay.rows = torch.tensor(rows)
         case.replay.num_actual_rows = len(rows)
         case.replay.context_factory = decoder_context
-        case.replay.sp_plan = SPReplayPlan.build(
-            np.array(offsets), np.array(kept), 6, len(rows), 1, 0, torch.device("cpu")
-        )
+        if case.model.use_sequence_parallel:
+            case.replay.sp_plan = SPReplayPlan.build(
+                np.array(offsets), np.array(kept), 6, len(rows), 1, 0, torch.device("cpu")
+            )
         output, aux = case.forward()
         expected = torch.zeros_like(case.embeddings)
         expected[rows] = case.embeddings[rows] * 24
