@@ -60,7 +60,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
         self._reqs_sent_to_worker: set[str] = set()
         self._reqs_need_send: dict[str, float] = {}
-        self._reqs_finished_sending: set[str] = set()
         self._reqs_pending_send: dict[str, float] = {}
         self._reqs_aborted: dict[str, str] = {}
         self._remote_worker_addresses: tuple[tuple[int, int, int, str], ...] = ()
@@ -84,12 +83,8 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         if self.kv_transfer_config.is_kv_producer:
             if not params or not params.get("do_remote_decode"):
                 return
-            if not params.get("remote_request_id"):
-                raise ValueError("Missing Push transfer parameter: remote_request_id")
             if params["remote_num_external_tokens"] == 0:
                 return
-            if request.request_id in self._reqs_sent_to_worker:
-                raise RuntimeError("Preempting an active Mooncake Push transfer is not supported")
             self._reqs_need_send_layerwise[request.request_id] = (
                 request,
                 tuple(list(group) for group in blocks.get_block_ids()),
@@ -133,11 +128,8 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
         meta = MooncakeConnectorMetadata()
         if self.kv_transfer_config.is_kv_producer:
-            # Core can recycle preempted blocks before the worker receives this
-            # output. Until WRITE lifetime fencing is implemented, fail before
-            # dispatching a new model step rather than reuse a stale source table.
-            if set(scheduler_output.preempted_req_ids or ()) & self._reqs_sent_to_worker:
-                raise RuntimeError("Preempting an active Mooncake Push transfer is not supported")
+            # TODO: support P preemption and transfer cancellation before block reuse.
+            # The current deployment assumes P requests are not preempted.
             cached_reqs = scheduler_output.scheduled_cached_reqs
             num_computed_tokens = dict(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
             for req in scheduler_output.scheduled_new_reqs:
@@ -159,7 +151,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 local_num_computed_tokens = num_computed_tokens[req_id]
                 if local_num_computed_tokens >= request.num_prompt_tokens:
                     continue
-                assert request.kv_transfer_params is not None
                 meta.add_new_push_send_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
@@ -203,7 +194,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             return False, None
         req_id = request.request_id
         params = request.kv_transfer_params
-        if not params or not params.get("do_remote_decode") or not params.get("remote_request_id"):
+        if not params or not params.get("do_remote_decode"):
             return False, None
         normal_finish = request.status in (RequestStatus.FINISHED_LENGTH_CAPPED, RequestStatus.FINISHED_STOPPED)
         if not normal_finish:
@@ -211,8 +202,12 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._reqs_aborted[req_id] = params["remote_request_id"]
         if req_id not in self._reqs_need_send_layerwise:
             return False, None
-        if req_id not in self._reqs_sent_to_worker or req_id in self._reqs_finished_sending:
-            self._reqs_finished_sending.discard(req_id)
+        # Normal prefill output is returned only after the worker's send barrier.
+        # TODO: propagate transfer failures as request errors before releasing KV.
+        if normal_finish or req_id not in self._reqs_sent_to_worker:
+            if normal_finish and req_id in self._reqs_sent_to_worker:
+                # Retire worker bookkeeping on the next step; KV is already safe to free.
+                self._reqs_pending_send[req_id] = time.monotonic()
             self._reqs_sent_to_worker.discard(req_id)
             self._reqs_need_send_layerwise.pop(req_id)
             return False, None
@@ -233,10 +228,8 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 self._reqs_need_send_layerwise.pop(req_id)
                 self._reqs_pending_send.pop(req_id, None)
                 self._reqs_aborted.pop(req_id, None)
-            elif req_id in self._reqs_need_send_layerwise:
-                # Do not let core free a still-running request when transfer
-                # completion arrives before request_finished (e.g. async PP).
-                self._reqs_finished_sending.add(req_id)
+        # Normal requests were already freed; only delayed cancellations need
+        # finished_sending forwarded to core.
         connector_output.finished_sending = finished_sending or None
 
     def set_xfer_handshake_metadata_from_workers(

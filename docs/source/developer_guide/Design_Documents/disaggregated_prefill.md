@@ -82,7 +82,31 @@ P queries D's scheduler metadata service for cache layouts. Its transfer
 pool writes each layer and sends completion to D workers. D waits for all P
 ranks, including ranks with no data to send, before reporting receive completion.
 Completions that arrive before D's worker allocation metadata are buffered.
-P retains its WRITE barriers and delayed block release until sends finish.
+P waits for this step's metadata queries, WRITEs and terminal DONE callbacks
+before returning worker results. Normal prefill completion releases KV without
+delay-free; asynchronous scheduling remains enabled. This path currently assumes
+successful transfer; request-level transfer failure reporting is TODO. Early
+cancellation still retains the existing delayed-release protection.
+
+P follows this lifecycle:
+
+1. `update_state_after_alloc()` records source blocks. `build_connector_meta()`
+   appends new chunk blocks and snapshots the scheduled prompt token range.
+2. `start_load_kv()` installs the chunk metadata and starts or reuses the D
+   metadata query. Destination topology is checked once per request after the
+   query completes. The previous step's sends have already been drained.
+3. `save_kv_layer()` records a device event for the layer's caches and submits
+   available ranges to the transfer pool. SWA, circular and Mamba caches wait
+   for the final chunk; non-owner ranks send DONE without a WRITE.
+4. The runner calls `wait_for_save()` to publish remaining cache ranges and
+   drain this step's transfers. With speculative decoding, this happens during
+   finalization after draft execution. `get_transfer_results()` polls results
+   without invoking this barrier or marking unfinished caches ready.
+5. `request_finished()` releases normally completed requests immediately and
+   sends a worker bookkeeping cleanup notice on the next step. Published
+   requests cancelled before completion keep their blocks until workers report
+   `finished_sending`; only those cancellations are forwarded to core for
+   delayed release. P preemption remains unsupported and is a TODO.
 
 The existing metaserver responds after P finishes. Consequently, outstanding
 HTTP requests occupy pool threads for that duration. A multi-prompt request

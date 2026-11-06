@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -186,7 +187,7 @@ class RemoteReqInfo:
 
 @dataclass
 class SendReqInfo:
-    local_request_id: str | None = None
+    local_request_id: str
     metadata: PushSendReqMeta | None = None
     start_time: float = field(default_factory=time.monotonic)
     # Available end token and device fence for each persistent cache layer.
@@ -255,13 +256,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
-            self.maybe_raise_thread_error()
-            # Prepare source snapshots before any model layer can update them.
-            while self._pending_sends:
-                self._process_sending_requests(wait=True)
+            # The previous step's wait_for_save has already drained its WRITEs.
             for local_request_id, request in metadata.push_send_requests.items():
-                state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo())
-                state.local_request_id = local_request_id
+                state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
@@ -276,8 +273,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 if state.local_request_id in metadata.requests_to_send:
                     state.inference_finished = True
             for local_request_id, request_id in metadata.push_aborted_requests.items():
-                state = self._reqs_send_state.setdefault(request_id, SendReqInfo())
-                state.local_request_id = local_request_id
+                state = self._reqs_send_state.setdefault(request_id, SendReqInfo(local_request_id))
                 state.inference_finished = True
                 state.error = "P request aborted"
             self._prefilling_request_ids = tuple(req.request_id for req in metadata.push_send_requests.values())
@@ -383,7 +379,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             state.destinations[rank] = RemoteReqInfo(target, future)
         if not state.destinations:
             raise ValueError("Missing D worker completion endpoints")
-        state.expected_ranks = set(state.destinations)
 
     def _get_transfer_partition(
         self, layer_name: str, remote: MooncakeTransferMetadataGroups, rank: WorkerRank
@@ -508,7 +503,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     raise ValueError("Required Push block is not resident")
                 local_ids.append(local_block * local_scale + index % local_scale)
                 remote_ids.append(remote_block * remote_scale + index % remote_scale)
-            local_ids, remote_ids = tuple(local_ids), tuple(remote_ids)
         return LayerTransferRequest(request_id, tuple(local_ids), tuple(remote_ids), start, end), event
 
     def _execute_layer_transfer(self, batch: LayerTransferBatch) -> tuple[str | None, bool]:
@@ -628,7 +622,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     continue
                 try:
                     remote = destination.metadata_future.result()
-                    if destination.required_layers is None:
+                    if state.expected_ranks is None:
                         expected = {
                             (pp, pcp, tp)
                             for pp in range(remote.pp_size)
@@ -637,9 +631,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         }
                         if set(state.destinations) != expected:
                             raise ValueError("D worker endpoints do not match its topology")
-                        if rank not in expected:
-                            raise ValueError("Destination rank is absent from D topology")
                         state.expected_ranks = expected
+                    if destination.required_layers is None:
                         destination.required_layers = {
                             name
                             for name in self._layer_indices
@@ -678,15 +671,12 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             all_done = all(
                 dest.completion is not None and dest.completion.done() for dest in state.destinations.values()
             )
-            all_destinations_known = (
-                state.expected_ranks is not None and set(state.destinations) == state.expected_ranks
-            )
-            if not in_flight and all_done and (all_destinations_known or expired):
-                if state.inference_finished or (state.local_request_id is None and expired):
-                    if state.local_request_id is not None:
-                        self._finished_sending.add(state.local_request_id)
-                    self._finished_requests[request_id] = True
-                    del self._reqs_send_state[request_id]
+            # Destinations are fixed at first dispatch. Cancellation before
+            # dispatch has no destinations and can retire immediately.
+            if state.inference_finished and not in_flight and all_done:
+                self._finished_sending.add(state.local_request_id)
+                self._finished_requests[request_id] = True
+                del self._reqs_send_state[request_id]
         for (_, rank, layer_name, _), (remote, event, requests) in batches.items():
             # A later layer/destination may have failed while building this pass.
             active = []
@@ -703,7 +693,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer:
             return
-        self.maybe_raise_thread_error()
         layer_index = self._layer_index_by_name.get(layer_name)
         if layer_index is not None:
             # The layer save hook follows all of this layer's cache writes.
@@ -730,11 +719,21 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
                 state.available_layers[layer_name] = end, event
+        states = [self._reqs_send_state[req_id] for req_id in self._prefilling_request_ids]
+        # A late metadata query must not leave this step's KV unsent when core
+        # handles normal completion and immediately releases the source blocks.
+        wait_futures({dest.metadata_future for state in states for dest in state.destinations.values()})
         self._process_sending_requests(wait=True)
         # Drain tasks just submitted above before the next step can overwrite
         # window/state pages or the scheduler can recycle any source blocks.
         while self._pending_sends:
             self._process_sending_requests(wait=True)
+        for state in states:
+            for destination in state.destinations.values():
+                if destination.completion is not None:
+                    destination.completion.result()
+        # TODO: report query/WRITE/DONE failures as request errors. The normal
+        # no-delay-free path currently assumes successful transfer.
         self._prefilling_request_ids = ()
 
     def maybe_raise_thread_error(self) -> None:
@@ -812,9 +811,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        # D reports request failures and checks its listener in get_transfer_results.
-        if self.kv_transfer_config.is_kv_producer:
-            self.maybe_raise_thread_error()
+        # Request results and control errors are handled by get_transfer_results.
         return set()
 
     def shutdown(self) -> None:
