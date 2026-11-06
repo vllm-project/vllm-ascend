@@ -22,7 +22,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                 | Download                                                                 |
 | -------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) / [Hugging Face](https://huggingface.co/Qwen/Qwen3-30B-A3B)        |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)        |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
 | Eagle3 Draft Model   | NA                                                                   | [Hugging Face](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3) |
 
@@ -128,7 +128,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
-
 === "Atlas 300I DUO"
 
     **Docker Run:**
@@ -159,8 +158,6 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
     The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
-
-For the A2/A3 containers started in the background, run `docker exec -it vllm-ascend-env bash` on the host to enter the container before executing package checks and deployment commands. For an interactive Atlas 300I DUO container, use the existing container shell. Run the `docker ps` check below on the host.
 
 **Installation Verification:**
 
@@ -224,7 +221,7 @@ For more details, please refer to the [Installation Guide](../../getting_started
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. The Qwen3-30B-A3B examples below enable Expert Parallelism (EP) to distribute experts across NPUs.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 

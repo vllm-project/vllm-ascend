@@ -31,8 +31,6 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 | `MiniMax-M3-MXFP8` (MXFP8) | 1 950DT node (96GB × 8) | [ModelScope](https://www.modelscope.cn/models/MiniMax/MiniMax-M3-MXFP8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache. |
 | `MiniMax-M3-EAGLE3-GQA` | / | [ModelScope](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA) | Draft model for EAGLE3 speculative decoding; uses Grouped Query Attention (GQA). |
 
-The official model is also available on [Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-M3). Use the Ascend-adapted weight variant from the table for the selected deployment profile; the official checkpoint and the quantized variants are different artifacts.
-
 It is recommended to place the model weight in a shared cache directory.
 
 Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `EAGLE3_WEIGHT_PATH` to the downloaded EAGLE3 draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
@@ -150,18 +148,6 @@ pip show vllm-ascend
 ```
 
 Expected result: The version information is displayed, matching the pulled image version.
-
-### 4.2 Source Code Installation
-
-For a source installation, follow the **source installation** tab in the [Installation Guide](../../getting_started/installation.md#installation-software-environment). Install the compatible upstream vLLM version first, then build vLLM Ascend for your hardware. Use the same model weights and serving configuration as the deployment examples below; installing from source does not select the model weights for you.
-
-After installation, run the following in the serving environment:
-
-```bash
-pip show vllm vllm-ascend
-```
-
-Expected result: both packages are installed, and their reported versions match the versions selected in the installation guide.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -909,7 +895,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 7](#7-functional-verification).
 
     To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
@@ -1155,7 +1141,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31060 31061
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 7](#7-functional-verification).
 
     **Scaling to three nodes (still 1P1D)**
 
@@ -1999,7 +1985,7 @@ Proxy (:8009)
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in [Section 6](#6-functional-verification).
+    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in [Section 7](#7-functional-verification).
 
 ##### 5.3.2.5 Verification
 
@@ -2582,13 +2568,9 @@ FLASHCOMM1 and `--language-model-only` can be enabled together for text-only ser
 --language-model-only
 ```
 
-<a id="6-thinking-and-parser-configuration"></a>
+## 6 Thinking and Parser Configuration
 
-### 5.6 Thinking and Parser Configuration
-
-<a id="61-thinking-mode"></a>
-
-#### 5.6.1 Thinking Mode
+### 6.1 Thinking Mode
 
 MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `chat_template_kwargs`:
 
@@ -2598,9 +2580,7 @@ MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `cha
 | `disabled` | No thinking; the model answers directly | Latency-sensitive turns |
 | `adaptive` | The model decides whether to think based on the task (default when unset) | General use |
 
-<a id="611-request-examples"></a>
-
-##### 5.6.1.1 Request Examples
+#### 6.1.1 Request Examples
 
 **With thinking disabled (curl):**
 
@@ -2640,13 +2620,11 @@ print(getattr(msg, "reasoning", None))  # the <mm:think> block
 print(msg.content)                       # the final answer
 ```
 
-<a id="62-reasoning-parser"></a>
-
-#### 5.6.2 Reasoning Parser
+### 6.2 Reasoning Parser
 
 The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
 
-##### 5.6.2.1 Server Configuration
+#### 6.2.1 Server Configuration
 
 The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
 
@@ -2659,9 +2637,7 @@ vllm serve ${WEIGHT_PATH} \
   ...
 ```
 
-<a id="622-output-format"></a>
-
-##### 5.6.2.2 Output Format
+#### 6.2.2 Output Format
 
 MiniMax-M3 uses explicit thinking delimiters:
 
@@ -2669,22 +2645,18 @@ MiniMax-M3 uses explicit thinking delimiters:
 <mm:think>reasoning process...</mm:think>final answer
 ```
 
-<a id="623-parser-behavior"></a>
-
-##### 5.6.2.3 Parser Behavior
+#### 6.2.3 Parser Behavior
 
 - **`thinking_mode="enabled"`**: The chat template pre-fills `<mm:think>` in the prompt. Generated text starts inside the reasoning block and transitions to content after `</mm:think>`.
 - **`thinking_mode="disabled"` or default**: Model output is treated as plain content. If `<mm:think>` appears, the parser splits on the delimiters.
 - **Streaming**: Reasoning and content are streamed incrementally via `DeltaMessage.reasoning` and `DeltaMessage.content` token-by-token.
 - **Token counting**: Reasoning tokens inside `<mm:think>` blocks are correctly counted.
 
-<a id="63-tool-call-parser"></a>
-
-#### 5.6.3 Tool Call Parser
+### 6.3 Tool Call Parser
 
 MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-call-parser minimax_m3`.
 
-##### 5.6.3.1 Server Configuration
+#### 6.3.1 Server Configuration
 
 When both `--reasoning-parser minimax_m3` and `--tool-call-parser minimax_m3` are specified, the parsers work together automatically to handle responses that contain both reasoning blocks and tool calls:
 
@@ -2699,9 +2671,7 @@ vllm serve ${WEIGHT_PATH} \
   ...
 ```
 
-<a id="632-tool-call-format"></a>
-
-##### 5.6.3.2 Tool Call Format
+#### 6.3.2 Tool Call Format
 
 Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
 
@@ -2717,18 +2687,14 @@ Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
 ]<]minimax[>[</tool_call>
 ```
 
-<a id="633-key-features"></a>
-
-##### 5.6.3.3 Key Features
+#### 6.3.3 Key Features
 
 - **Recursive parameter parsing**: Supports nested objects and arrays (e.g., `shipping` containing `city`/`zip`).
 - **Schema-aware type coercion**: String parameter values are automatically converted to the correct types (integer, boolean, object, array) based on the function's JSON Schema definition.
 - **Multiple invocations**: A single `<tool_call>` block can contain multiple `<invoke>` blocks.
 - **Streaming**: Tool name and argument fragments are streamed incrementally as the `<invoke>` block is received.
 
-<a id="634-request-example-curl"></a>
-
-##### 5.6.3.4 Request Example (curl)
+#### 6.3.4 Request Example (curl)
 
 ```bash
 curl http://{ip}:{port}/v1/chat/completions \
@@ -2763,13 +2729,9 @@ curl http://{ip}:{port}/v1/chat/completions \
   }'
 ```
 
-<a id="7-functional-verification"></a>
+## 7 Functional Verification
 
-## 6 Functional Verification
-
-<a id="71-text"></a>
-
-### 6.1 Text
+### 7.1 Text
 
   ```bash
   curl http://{ip}:{port}/v1/chat/completions \
@@ -2791,9 +2753,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: the answer is C.
 
-<a id="72-single-image"></a>
-
-### 6.2 Single Image
+### 7.2 Single Image
 
   Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
@@ -2823,9 +2783,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the image.
 
-<a id="73-single-video"></a>
-
-### 6.3 Single Video
+### 7.3 Single Video
 
   Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
 
@@ -2858,9 +2816,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the video content.
 
-<a id="74-mixed-image-and-video-request"></a>
-
-### 6.4 Mixed Image and Video Request
+### 7.4 Mixed Image and Video Request
 
   Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
 
@@ -2890,21 +2846,15 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text that describes the image and video separately and explains whether they are related.
 
-<a id="8-accuracy-evaluation"></a>
+## 8 Accuracy Evaluation
 
-## 7 Accuracy Evaluation
+The context-limit entries below use the unified serving setting `max-model-len=133000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
 
-The table below retains the context limits and scores from the existing evaluations. These include evaluation-specific settings that differ from the default deployment examples; use the setting recorded for the corresponding row and recheck memory capacity before evaluation. The scores have not been remeasured with this documentation update.
-
-<a id="81-using-aisbench"></a>
-
-### 7.1 Using AISBench
+### 8.1 Using AISBench
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
-<a id="82-text-evaluation"></a>
-
-### 7.2 Text and Image Evaluation
+### 8.2 Text Evaluation
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
@@ -2917,9 +2867,7 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
 | MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
 
-<a id="83-multimodal-evaluation"></a>
-
-### 7.3 Multimodal Evaluation
+### 8.3 Multimodal Evaluation
 
 MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
 
@@ -2954,30 +2902,6 @@ ais_bench \
 | Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
 | Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
 
-## 8 Performance Evaluation
-
-### 8.1 Using vLLM Benchmark
-
-Use the [vLLM Benchmark guide](../../developer_guide/performance_and_debug/performance_benchmark.md) for workload selection and metric definitions. After the service is ready, run this small text-only benchmark from a client with access to the checkpoint tokenizer. Replace `MODEL_PATH` with the weight directory recorded in Section 3.1 and set `SERVICE_URL` to the API endpoint selected in Chapter 5. The example port below is `8009`; use the actual host address when the service binds to a host communication IP.
-
-```bash
-export MODEL_PATH="<YOUR_MODEL_PATH>"
-export SERVICE_URL="http://<SERVICE_HOST>:8009"
-vllm bench serve \
-    --backend openai-chat \
-    --model "$MODEL_PATH" \
-    --served-model-name minimax-m3 \
-    --base-url "$SERVICE_URL" \
-    --endpoint /v1/chat/completions \
-    --dataset-name random \
-    --random-input-len 1024 \
-    --random-output-len 128 \
-    --num-prompts 8 \
-    --request-rate 1
-```
-
-Expected result: the benchmark reports completed requests, request/output-token throughput, and latency metrics such as time to first token (TTFT) and time per output token (TPOT). Check failed requests before comparing results. These request counts and lengths are a small test workload, not a measured performance baseline or an optimal configuration. Keep the workload, concurrency, cache state, and software versions fixed when comparing deployments. Check available options with `vllm bench serve --help` in the installed environment.
-
 ## 9 Performance Tuning
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -3004,8 +2928,6 @@ Use the following adjustments as starting points for the target workload. Rechec
 | Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
-
-For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md). This chapter covers MiniMax-M3-specific questions.
 
 - **Q: How can I reinstall vLLM Ascend?**
 
