@@ -29,6 +29,7 @@ def test_engram_patch_is_noop_without_upstream_config(monkeypatch):
 def engram_config():
     config_module = pytest.importorskip("vllm.config.engram")
     return SimpleNamespace(
+        additional_config={"engram_config": {"enabled": True}},
         use_v2_model_runner=False,
         model_config=SimpleNamespace(
             architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1])
@@ -81,7 +82,9 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
     _validate_engram_config(config)
     assert type(config.engram_config) is EngramConfig
     if original is not None:
-        assert config.engram_config is original
+        assert config.engram_config is not original
+        assert config.engram_config.cpu_offload == original.cpu_offload
+        assert original.dp_shared_memory == shared
     assert config.engram_config.dp_shared_memory == bool(shared)
 
 
@@ -120,5 +123,39 @@ def test_platform_leaves_non_engram_models_alone(engram_config):
 
     engram_config.engram_config = None
     engram_config.model_config.architecture = "OtherModel"
+    engram_config.additional_config = {}
     _validate_engram_config(engram_config)
     assert engram_config.engram_config is None
+
+
+def test_native_schema_and_resolver_are_not_extended():
+    from pydantic import TypeAdapter
+    from vllm.config import EngramConfig, VllmConfig, replace
+
+    original_fields = {"cpu_offload", "dp_shared_memory", "embedding_across_dp"}
+    assert set(TypeAdapter(EngramConfig).json_schema()["properties"]) == original_fields
+    assert set(TypeAdapter(VllmConfig).json_schema()["$defs"]["EngramConfig"]["properties"]) == original_fields
+    assert VllmConfig._resolve_and_verify_engram_config.__name__ == "_resolve_and_verify_engram_config"
+    value = EngramConfig(cpu_offload=False)
+    assert not replace(value).cpu_offload
+    with pytest.raises(ValueError):
+        EngramConfig(enabled=True)
+
+
+def test_native_cli_accepts_only_original_fields():
+    import argparse
+    from dataclasses import dataclass
+
+    from vllm.config import EngramConfig
+    from vllm.engine.arg_utils import get_kwargs
+
+    @dataclass
+    class CliConfig:
+        engram_config: EngramConfig | None = None
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--engram-config", **get_kwargs(CliConfig)["engram_config"])
+    args = parser.parse_args(["--engram-config", '{"cpu_offload":true,"dp_shared_memory":false}'])
+    assert args.engram_config.cpu_offload and not args.engram_config.dp_shared_memory
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--engram-config", '{"enabled":true}'])

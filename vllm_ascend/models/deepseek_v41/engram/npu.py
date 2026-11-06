@@ -28,12 +28,7 @@ CHUNK_ROWS = 1 << 22
 
 
 def engram_cpu_offload(vllm_config) -> bool:
-    """Whether the Engram table is offloaded to host memory (UVA lookup).
-
-    ``--engram-config`` turns on host offload. Without it, the tables stay on
-    the device, exactly like upstream.
-    """
-
+    """Read the upstream projection of the normalized Engram residency policy."""
     engram_config = getattr(vllm_config, "engram_config", None)
     return bool(engram_config is not None and engram_config.cpu_offload)
 

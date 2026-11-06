@@ -373,6 +373,10 @@ class NPUWorker(WorkerBase):
             weight_transfer_engine.shutdown()
 
         if model_runner := getattr(self, "model_runner", None):
+            model = getattr(model_runner, "model", None)
+            destroy_engram = getattr(model, "destroy_engram", None)
+            if destroy_engram is not None and getattr(model, "has_engram", True):
+                destroy_engram()
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()

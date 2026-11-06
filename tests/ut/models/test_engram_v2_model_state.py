@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import model_state as state_mod
@@ -293,6 +294,90 @@ def make_state(model, monkeypatch):
     state.lookback_token_ids = torch.full((4, 2), -1, dtype=torch.int32)
     state._cg_mode = CUDAGraphMode.FULL
     return state
+
+
+@pytest.fixture
+def elastic_request(monkeypatch):
+    model = SimpleNamespace(
+        uses_elastic_engram=True,
+        prepare_engram_inputs=Mock(return_value={"engram_elastic_inputs": {}}),
+        prepare_engram_graph_inputs=Mock(return_value={"engram_elastic_inputs": {}}),
+    )
+    state = make_state(model, monkeypatch)
+    batch = SimpleNamespace(
+        input_ids=torch.arange(4),
+        positions=torch.arange(4),
+        num_tokens=4,
+        num_tokens_after_padding=4,
+        num_reqs=2,
+        req_ids=["b", "a", "padding"],
+        idx_mapping=torch.tensor([1, 0]),
+        query_start_loc=torch.tensor([0, 2, 4]),
+        is_dummy=False,
+    )
+    req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+    )
+    return state, batch, req_states
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("dummy", [False, True])
+@pytest.mark.parametrize("cache_mode", ["missing", "none", "empty", "features"])
+def test_elastic_state_handles_optional_encoder_cache(elastic_request, mode, dummy, cache_mode):
+    state, batch, req_states = elastic_request
+    state._cg_mode = mode
+    batch.is_dummy = dummy
+    assert not hasattr(state, "encoder_cache")
+    if cache_mode == "none":
+        state.encoder_cache = None
+    elif cache_mode in ("empty", "features"):
+        state.encoder_cache = EncoderCache()
+        state.supports_mm_inputs = True
+        if cache_mode == "features":
+            state.encoder_cache.mm_features = {
+                "a": [SimpleNamespace(mm_position=SimpleNamespace(offset=1, length=2))],
+                "b": [SimpleNamespace(mm_position=SimpleNamespace(offset=3, length=4))],
+            }
+            # Features are valid even before the encoder produces cached outputs.
+            assert not state.encoder_cache
+
+    result = state.prepare_inputs(batch, req_states)
+    assert result["lookback_token_ids"] is state.lookback_token_ids
+    state.model.prepare_engram_inputs.assert_not_called()
+    if dummy:
+        assert "multimodal_spans" not in state._engram_inputs
+        assert (state.lookback_token_ids == -1).all()
+    else:
+        expected = [[(3, 4)], [(1, 2)]] if cache_mode == "features" else [[], []]
+        assert state._engram_inputs["multimodal_spans"] == expected
+    state.prepare_engram()
+    assert state._engram_inputs is None
+    assert state.model.prepare_engram_inputs.call_args.kwargs["force_dummy"] is dummy
+
+
+def test_elastic_state_refreshes_multimodal_spans_after_reorder_and_removal(elastic_request):
+    state, batch, req_states = elastic_request
+    state.encoder_cache = EncoderCache()
+    state.encoder_cache.mm_features = {
+        "a": [SimpleNamespace(mm_position=SimpleNamespace(offset=1, length=2))],
+        "b": [SimpleNamespace(mm_position=SimpleNamespace(offset=3, length=4))],
+    }
+    state.prepare_inputs(batch, req_states)
+    state.prepare_engram()
+    assert state.model.prepare_engram_inputs.call_args.kwargs["multimodal_spans"] == [[(3, 4)], [(1, 2)]]
+
+    state.encoder_cache.remove_request("b")
+    batch.req_ids = ["a", "b", "padding"]
+    state.prepare_inputs(batch, req_states)
+    state.prepare_engram()
+    assert state.model.prepare_engram_inputs.call_args.kwargs["multimodal_spans"] == [[(1, 2)], []]
+
+    state.encoder_cache.remove_request("a")
+    state.prepare_inputs(batch, req_states)
+    state.prepare_engram()
+    assert state.model.prepare_engram_inputs.call_args.kwargs["multimodal_spans"] == [[], []]
 
 
 def test_state_gathers_lookback_and_overlaps_engram(runtime, monkeypatch):

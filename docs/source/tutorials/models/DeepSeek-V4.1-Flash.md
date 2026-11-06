@@ -227,6 +227,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --async-scheduling \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
+            "engram_config":{"enabled":true},
             "ascend_compilation_config":{
                 "enable_npugraph_ex":true,
                 "enable_static_kernel":false
@@ -252,7 +253,8 @@ and use the `main` branch with the matching vLLM revision recorded in
     - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Keep this
         value at `0` because DeepSeek-V4.1-Flash currently does not support model
         runner V2 on Ascend.
-    - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
+    - `additional_config.engram_config.enabled=true` enables Engram. The native
+        `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
         Engram table in host memory and lets local DP ranks share the host-memory
         allocation. This is required on A3 because the model's 24 Engram heads
         cannot be evenly divided across 16 logical devices. It also reduces
@@ -416,6 +418,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --enable-prefix-caching \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
+            "engram_config":{"enabled":true},
             "enable_cpu_binding":true,
             "enable_fused_mc2":1,
             "enable_dsa_cp":true,
@@ -517,6 +520,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         }' \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
+            "engram_config":{"enabled":true},
             "ascend_compilation_config":{
                 "enable_npugraph_ex":true,
                 "enable_static_kernel":false
@@ -579,7 +583,8 @@ and use the `main` branch with the matching vLLM revision recorded in
       model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model,
       while `enforce_eager` inside `--speculative-config` applies to the Decode
       draft model.
-    - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
+    - `additional_config.engram_config.enabled=true` enables Engram. The native
+        `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
       Engram table in host memory and lets local DP ranks share the host-memory
       allocation. `dp_shared_memory` is required on A3 because the model's 24
       Engram heads cannot be evenly divided across 16 logical devices. Both A3
@@ -701,7 +706,7 @@ and use the `main` branch with the matching vLLM revision recorded in
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --additional-config '{"engram_config":{"enabled":true},"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
