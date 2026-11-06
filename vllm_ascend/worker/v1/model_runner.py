@@ -247,6 +247,12 @@ from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.worker.v1.target_token_scoring import (  # noqa: E402
+    TargetTokenScoringState,
+    compact_sample,
+    evaluate_wave_admission,
+    project_target_token_logits,
+)
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -375,6 +381,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+    target_token_scoring: TargetTokenScoringState | None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -2344,6 +2351,50 @@ class NPUModelRunner(GPUModelRunner):
         return cut_tokens
 
     @torch.inference_mode()
+    def _resolve_lm_head(self) -> "nn.Module | None":
+        """Locate the LM head module, descending into ``language_model`` for
+        composite models (e.g. encoder-decoder / multi-modal wrappers)."""
+        model = self.model
+        lm_head = getattr(model, "lm_head", None)
+        if lm_head is not None:
+            return lm_head
+        inner = getattr(model, "language_model", None)
+        if inner is not None:
+            return getattr(inner, "lm_head", None)
+        return None
+
+    def _maybe_target_token_scoring(
+        self,
+        sample_hidden_states: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> tuple[torch.Tensor | None, TargetTokenScoringState | None]:
+        """Try the compact target-token-scoring fast path.
+
+        Returns ``(compact_logits[B, K], state)`` when the wave is eligible,
+        else ``(None, None)`` and the caller runs the native path. Eligibility
+        is wave-level: any single failure downgrades the whole wave to native.
+        """
+        if not envs.VLLM_ASCEND_TARGET_TOKEN_SCORING:
+            return None, None
+        lm_head = self._resolve_lm_head()
+        if lm_head is None:
+            return None, None
+        decision = evaluate_wave_admission(
+            self.model_config,
+            self.input_batch,
+            self.requests,
+            lm_head,
+            spec_decode_metadata=spec_decode_metadata,
+        )
+        if not decision.ok:
+            return None, None
+        result = project_target_token_logits(
+            self.model, sample_hidden_states, decision
+        )
+        if result is None:
+            return None, None
+        return result
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2729,6 +2780,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
+            tts_state: TargetTokenScoringState | None = None
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -2750,7 +2802,13 @@ class NPUModelRunner(GPUModelRunner):
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                tts_logits, tts_state = self._maybe_target_token_scoring(
+                    sample_hidden_states, spec_decode_metadata
+                )
+                if tts_logits is not None:
+                    logits = tts_logits
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2761,7 +2819,13 @@ class NPUModelRunner(GPUModelRunner):
                     logits = None
                 else:
                     sample_hidden_states = hidden_states[logits_indices]
-                    logits = self.model.compute_logits(sample_hidden_states)
+                    tts_logits, tts_state = self._maybe_target_token_scoring(
+                        sample_hidden_states, spec_decode_metadata
+                    )
+                    if tts_logits is not None:
+                        logits = tts_logits
+                    else:
+                        logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data: dict[str, Any] = {}
                 if logits is not None:
@@ -2786,6 +2850,7 @@ class NPUModelRunner(GPUModelRunner):
                 ec_connector_output,
                 cudagraph_stats,
                 batch_desc,
+                target_token_scoring=tts_state,
             )
             self.kv_connector_output = kv_connector_output
 
@@ -2914,12 +2979,16 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
+            tts_state,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
 
-        # Apply structured output bitmasks if present.
-        if grammar_output is not None:
+        # Apply structured output bitmasks if present. Skipped on the compact
+        # target-token-scoring path: admission rejects guided/structured output,
+        # so grammar_output is None whenever tts_state is set, and a vocab-shaped
+        # bitmask must never touch the compact [B, K] logits.
+        if grammar_output is not None and tts_state is None:
             # here we are different from gpu_model_runner,
             # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
             logits_dtype = logits.dtype
@@ -2928,7 +2997,12 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if tts_state is not None:
+                sampler_output = compact_sample(
+                    logits, tts_state, self.input_batch.sampling_metadata
+                )
+            else:
+                sampler_output = self._sample(logits, spec_decode_metadata)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:

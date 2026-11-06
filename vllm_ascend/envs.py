@@ -72,6 +72,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the compact target-token-scoring fast path for reranker /
+    # relevance-scoring workloads. When set to "1" and a wave's requests only
+    # need scores for a small fixed candidate set (via logprob_token_ids, greedy,
+    # max_tokens=1), the full-vocab LM Head matmul is replaced by an
+    # index_select of the K candidate weight rows + a compact [B, K] linear.
+    # Ineligible waves fall back to the native path unchanged. Default "0".
+    "VLLM_ASCEND_TARGET_TOKEN_SCORING": lambda: bool(int(os.getenv("VLLM_ASCEND_TARGET_TOKEN_SCORING", "0"))),
 }
 
 # end-env-vars-definition
