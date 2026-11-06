@@ -25,7 +25,6 @@ def gather_rows_kernel(
     HOT_STRIDE_BYTES: tl.constexpr,
     TOP_K: tl.constexpr,
     ATTENTION_BLOCK: tl.constexpr,
-    COMPACT: tl.constexpr,
     HAS_ATTENTION: tl.constexpr,
     HAS_STATE: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -35,7 +34,7 @@ def gather_rows_kernel(
     offset = tl.arange(0, BLOCK)
     padding = tl.load(state + row) < 0 if HAS_STATE else False
     if PARALLEL_COLUMNS > 0:
-        tl.static_assert(COMPACT and not HAS_ATTENTION)
+        tl.static_assert(not HAS_ATTENTION)
         count = tl.minimum(TOP_K, tl.maximum(tl.load(counts + row), 0))
         # Empty compact plans do not inspect stale source/destination entries.
         # Keep enough independent programs for small misses and retain the
@@ -63,10 +62,7 @@ def gather_rows_kernel(
         if HAS_ATTENTION:
             value = tl.where((dst >= 0) & ~padding, dst // HOT_BLOCK * ATTENTION_BLOCK + dst % HOT_BLOCK, -1)
             tl.store(attention + index, value)
-        if COMPACT:
-            copy = col < tl.minimum(TOP_K, tl.maximum(tl.load(counts + row), 0))
-        else:
-            copy = tl.load(mask_ptr + index) != 0
+        copy = tl.load(mask_ptr + index) != 0
         if copy & ~padding:
             src = tl.load(source + index)
             valid = (src >= 0) & (dst >= 0) & (dst < HOT_ROWS)

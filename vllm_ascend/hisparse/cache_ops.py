@@ -364,9 +364,9 @@ class HiSparseNPUOps:
             _check_tensor(attention, "attention", device, (torch.int32,), shape=source.shape)
             if attention_block < block_size:
                 raise ValueError("HiSparse attention block stride must cover a physical block")
-        if rows == 0:
+        if rows == 0 or topk == 0:
             return
-        parallel_columns = min(topk, 128) if counts is not None and attention is None else 0
+        parallel_columns = min(topk, 128) if counts is not None else 0
         gather_rows_kernel[(rows, parallel_columns or topk)](
             self.host_mapping.address_of(host_cache),
             hot_cache.view(torch.uint8),
@@ -383,7 +383,6 @@ class HiSparseNPUOps:
             HOT_STRIDE_BYTES=hot_stride,
             TOP_K=topk,
             ATTENTION_BLOCK=attention_block,
-            COMPACT=counts is not None,
             HAS_ATTENTION=attention is not None,
             HAS_STATE=state is not None,
             BLOCK=min(1024, triton.next_power_of_2(row_bytes)),
