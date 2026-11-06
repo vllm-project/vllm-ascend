@@ -15,16 +15,20 @@ import mmap
 import torch
 from vllm.triton_utils import triton
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.hisparse import (
     gather_rows_kernel,
     gather_valid_resident_rows_kernel,
     invalidate_kernel,
+    invalidate_written_slots_sorted,
     pack_attention_rows_kernel,
+    pack_written_slot_keys,
     scatter_packed_kv_kernel,
 )
 
 _ACL_HOST_REGISTER_MAPPED = 0
 _ACL_HAC_AIV = 3
+_SORTED_WRITTEN_SLOT_COUNT = 8192
 
 
 class MappedHostTensor:
@@ -419,11 +423,45 @@ class HiSparseNPUOps:
         _check_tensor(request_state_indices, "request_state_indices", device, (torch.int32,), ndim=1)
         _check_tensor(written_slots, "written_slots", device, (torch.int32, torch.int64), ndim=1)
         _check_tensor(req_id_per_token, "req_id_per_token", device, (torch.int32,), shape=written_slots.shape)
-        if written_slots.numel() == 0:
+        num_tokens = written_slots.numel()
+        if num_tokens == 0:
             return
         if region == 0 or state_rows == 0 or groups == 0:
             return
-        invalidate_kernel[(written_slots.numel(), triton.cdiv(region, 256), groups)](
+        # The 8192-row Prefill chunk is the measured large shape. Keep scratch
+        # bounded and preserve the existing path for capture and other shapes.
+        if (
+            grouped
+            and num_tokens == _SORTED_WRITTEN_SLOT_COUNT
+            and is_950()
+            and not torch.npu.is_current_stream_capturing()
+        ):
+            keys = torch.empty((num_tokens,), dtype=torch.int64, device=device)
+            sorted_keys = torch.empty_like(keys)
+            order = torch.empty_like(keys)
+            pack_written_slot_keys[(triton.cdiv(num_tokens, 256),)](
+                request_state_indices,
+                req_id_per_token,
+                written_slots,
+                keys,
+                ROWS=num_tokens,
+                REQUESTS=request_state_indices.numel(),
+                STATES=state_rows,
+                TILE=256,
+                multibuffer=False,
+            )
+            torch.sort(keys, out=(sorted_keys, order))
+            invalidate_written_slots_sorted[(groups, state_rows, triton.cdiv(region, 256))](
+                device_global_indices,
+                sorted_keys,
+                ROWS=num_tokens,
+                HOT=region,
+                TILE=256,
+                STEPS=num_tokens.bit_length(),
+                multibuffer=False,
+            )
+            return
+        invalidate_kernel[(num_tokens, triton.cdiv(region, 256), groups)](
             device_global_indices,
             request_state_indices,
             req_id_per_token,

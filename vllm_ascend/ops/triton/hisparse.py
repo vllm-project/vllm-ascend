@@ -104,6 +104,60 @@ def invalidate_kernel(
 
 
 @triton.jit
+def pack_written_slot_keys(
+    states,
+    requests,
+    written,
+    keys,
+    ROWS: tl.constexpr,
+    REQUESTS: tl.constexpr,
+    STATES: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    request = tl.load(requests + row, mask=row < ROWS, other=-1)
+    slot = tl.load(written + row, mask=row < ROWS, other=-1)
+    valid = (request >= 0) & (request < REQUESTS) & (slot >= 0) & (slot <= 2147483647)
+    state = tl.load(states + request, mask=valid, other=-1)
+    valid = valid & (state >= 0) & (state < STATES)
+    # Each key identifies a Host slot within one request state. Slots above
+    # int32 cannot match a Hot entry and share the padding sentinel.
+    key = (state.to(tl.int64) << 31) | slot.to(tl.int64)
+    tl.store(keys + row, tl.where(valid, key, 9223372036854775807), mask=row < ROWS)
+
+
+@triton.jit
+def invalidate_written_slots_sorted(
+    tables,
+    keys,
+    ROWS: tl.constexpr,
+    HOT: tl.constexpr,
+    TILE: tl.constexpr,
+    STEPS: tl.constexpr,
+):
+    table = tl.load(tables + tl.program_id(0)).to(tl.pointer_type(tl.int32))
+    state = tl.program_id(1)
+    offset = tl.program_id(2) * TILE + tl.arange(0, TILE)
+    pointer = table + state.to(tl.int64) * HOT + offset
+    cached = tl.load(pointer, mask=offset < HOT, other=-1)
+    valid = (offset < HOT) & (cached >= 0)
+    if tl.sum(valid.to(tl.int32), 0) > 0:
+        query = (state.to(tl.int64) << 31) | cached.to(tl.int64)
+        low = tl.full((TILE,), 0, tl.int32)
+        high = tl.full((TILE,), ROWS, tl.int32)
+        for _ in tl.static_range(STEPS):
+            active = valid & (low < high)
+            mid = low + (high - low) // 2
+            value = tl.load(keys + mid, mask=active, other=9223372036854775807)
+            advance = active & (value < query)
+            low = tl.where(advance, mid + 1, low)
+            high = tl.where(active & ~advance, mid, high)
+        inside = valid & (low < ROWS)
+        key = tl.load(keys + low, mask=inside, other=9223372036854775807)
+        tl.store(pointer, -1, mask=inside & (key == query))
+
+
+@triton.jit
 def pack_attention_rows_kernel(
     cache,
     indices,
