@@ -1,0 +1,39 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+
+name: Presmoke Trigger On Label
+on:
+  pull_request:
+    types: [labeled]
+jobs:
+  run-presmoke-pipeline:
+    if: ${{ github.event.label.name == 'presmoke' }}
+    uses: ./.github/workflows/schedule_nightly_image_build_with_base_presmoke.yaml
+    with:
+      # 对齐上游workflow注释：os 只允许 ubuntu / openeuler
+      os: "ubuntu"
+      soc: "910b"
+      target: "a2"
+      dockerfile: "Dockerfile"
+      suffix: "presmoke"
+      # ⚠️ PR presmoke场景：不从nightly镜像链继承，这个字段不再作为镜像tag
+      vllm_ascend_branch: ${{ github.event.pull_request.base.ref }}
+      # base.ref 给 nightly Dockerfile FROM 和 rebase 目标（需要分支名）
+      base_image_branch: ${{ github.event.pull_request.base.ref }}
+      should_push: false
+      run_presmoke: true
+      # 新增标记：presmoke走原始CANN基础镜像从头构建，不依赖nightly预构建镜像
+      build_from_raw_base: true
+    secrets: inherit
