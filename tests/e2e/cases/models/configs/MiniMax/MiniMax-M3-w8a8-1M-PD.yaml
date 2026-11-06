@@ -166,8 +166,6 @@ templates:
       - "${PP_SIZE}"
       - "--distributed-executor-backend"
       - "mp"
-      - "--served-model-name"
-      - "minimax-m3"
       - "--enable-expert-parallel"
       - "--seed"
       - "1024"
