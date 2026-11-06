@@ -49,8 +49,7 @@ def _get_kv_compress_epilog_op() -> Callable:
         return torch.ops.cann_ops_transformer.kv_compress_epilog
     except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "DeepSeek-V4 FP8 KV cache requires kv_compress_epilog from a "
-            "matching cann_ops_transformer package."
+            "DeepSeek-V4 FP8 KV cache requires kv_compress_epilog from a matching cann_ops_transformer package."
         ) from exc
 
 
