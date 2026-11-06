@@ -124,10 +124,11 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -155,7 +156,7 @@ jobs:
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
@@ -211,10 +212,11 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel-a3:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-a3:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -242,7 +244,7 @@ jobs:
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
@@ -292,10 +294,11 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel-310p:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-310p:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -323,7 +326,7 @@ jobs:
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
@@ -374,10 +377,11 @@ jobs:
           --build-arg MAX_JOBS=2 \
           -t wheel-a5:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-a5:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -405,7 +409,7 @@ jobs:
           PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
           OUTPUT_DIR: dist/variants
         run: |
-          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install build git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
@@ -447,7 +451,7 @@ jobs:
 
       - name: Generate combined variant index
         run: |
-          pip install git+https://github.com/wheelnext/variantlib.git --quiet
+          pip install git+https://github.com/wheelnext/variantlib.git@67a62d53fb8b5a91334d9632bc7d1546ee67349e --quiet
           variantlib generate-index-json -d combined-variants/
           echo "Generated index files:"
           ls combined-variants/

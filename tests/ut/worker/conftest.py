@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_ascend_config(monkeypatch):
+    # Bare-runner harnesses reach lmhead TP gates (sample_tokens, the dummy
+    # join) that read the global ascend config; stub it as lmhead-off so the
+    # gates no-op instead of raising on the uninitialized config read.
+    from vllm_ascend import ascend_config as _ascend_config_module
+
+    monkeypatch.setattr(
+        _ascend_config_module,
+        "_ASCEND_CONFIG",
+        SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
+            ascend_compilation_config=object(),
+            eplb_config=object(),
+            draft_window_size=None,
+            ascend_warmup_config=SimpleNamespace(enable_early_kernel_warmup=False, enable_early_nz_warmup=False),
+        ),
+    )

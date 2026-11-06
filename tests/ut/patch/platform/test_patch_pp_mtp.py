@@ -9,6 +9,7 @@ from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
+from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
@@ -23,21 +24,31 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_ipc_runtime_patch,
     _use_pp_mtp_runtime_patch,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
-def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch):
+@pytest.mark.parametrize(
+    "model_type,architecture",
+    [
+        ("qwen3_5_mtp", "Qwen3_5MTP"),
+        ("qwen3", "DSparkDraftModel"),
+        ("qwen3", "Qwen3DSparkModel"),
+        ("kimi_k3", "K3DSparkModel"),
+    ],
+)
+def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, model_type, architecture):
     fake_registry = SimpleNamespace(
         is_pp_supported_model=lambda _architectures, _model_config: False,
     )
     monkeypatch.setattr(ModelConfig, "registry", property(lambda _self: fake_registry))
 
     model_config = ModelConfig.__new__(ModelConfig)
-    model_config.hf_config = SimpleNamespace(model_type="qwen3_5_mtp")
+    model_config.hf_config = SimpleNamespace(model_type=model_type)
     model_config.runner = "draft"
     model_config.model_arch_config = SimpleNamespace(
         total_num_attention_heads=1,
-        architectures=["Qwen3_5MTP"],
+        architectures=[architecture],
     )
     model_config.multimodal_config = None
 
@@ -46,6 +57,8 @@ def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch)
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
+        # Both supported vLLM lanes read this during model/parallel validation.
+        enable_hc_sp=False,
     )
 
     ModelConfig.verify_with_parallel_config(model_config, parallel_config)
@@ -71,6 +84,8 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
+        # Both supported vLLM lanes read this during model/parallel validation.
+        enable_hc_sp=False,
     )
 
     with pytest.raises(NotImplementedError):
@@ -207,7 +222,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        "vllm_ascend.worker.v1.model_runner.get_pp_group",
         lambda: SimpleNamespace(is_last_rank=False),
     )
 
@@ -219,7 +234,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     runner.discard_request_mask = SimpleNamespace(
         np=np.zeros(2, dtype=bool),
     )
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=2,
         req_ids=["req-0", "req-1"],
         prev_sampled_token_ids=None,
@@ -245,7 +260,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
         "req-0": 0,
         "req-1": 1,
     }
-    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]
+    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]  # type: ignore[union-attr]
     assert runner.requests["req-0"].output_token_ids == [
         31,
         PLACEHOLDER_TOKEN_ID,
@@ -264,7 +279,7 @@ def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        "vllm_ascend.worker.v1.model_runner.get_pp_group",
         lambda: SimpleNamespace(is_last_rank=False),
     )
 
@@ -273,7 +288,7 @@ def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
     runner.is_kv_consumer = False
     runner.use_async_scheduling = False
     runner.device = torch.device("cpu")
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=1,
         req_ids=["req-0"],
         prev_sampled_token_ids="keep",
@@ -307,15 +322,14 @@ def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_as
 ):
     request = SimpleNamespace(
         spec_token_ids=[],
+        use_structured_output=False,
         structured_output_request=None,
         is_finished=lambda: False,
     )
     scheduler = SimpleNamespace(
         scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
         requests={"req-0": request},
-        structured_output_manager=SimpleNamespace(
-            should_advance=lambda _request: False,
-        ),
+        structured_output_manager=StructuredOutputManager.__new__(StructuredOutputManager),
     )
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
     model_runner_output = SimpleNamespace(
@@ -373,19 +387,22 @@ def test_pp_mtp_post_step_skips_inflight_batch():
 
 def test_pp_mtp_spec_token_id_edge_cases():
     finished = SimpleNamespace(is_finished=lambda: True, spec_token_ids=["keep"])
-    grammar = SimpleNamespace(validate_tokens=lambda tokens: tokens[:1])
+    grammar = SimpleNamespace(validate_tokens=lambda tokens: tokens[:1], is_terminated=lambda: False)
     advancing = SimpleNamespace(
         spec_token_ids=[],
         is_finished=lambda: False,
-        structured_output_request=SimpleNamespace(grammar=grammar),
+        use_structured_output=True,
+        structured_output_request=SimpleNamespace(grammar=grammar, reasoning_ended=True),
     )
     empty_sampled = SimpleNamespace(
         spec_token_ids=["keep"],
         is_finished=lambda: False,
     )
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = False
     scheduler = SimpleNamespace(
         requests={"fin": finished, "adv": advancing, "empty": empty_sampled},
-        structured_output_manager=SimpleNamespace(should_advance=lambda req: req is advancing),
+        structured_output_manager=manager,
     )
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"missing": 1, "fin": 1, "no-index": 1, "empty": 1, "adv": 1},
@@ -399,7 +416,41 @@ def test_pp_mtp_spec_token_id_edge_cases():
     _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
     assert finished.spec_token_ids == ["keep"]
     assert empty_sampled.spec_token_ids == []
-    assert advancing.spec_token_ids == [401]
+    # Main trims to the validated prefix plus one lookahead token; 0.32.0 returns
+    # only the validated prefix.
+    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.32.0") else [401, 402])
+
+
+def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):
+    def validate_grammar(_tokens):
+        pytest.fail("Grammar must not constrain tokens before reasoning ends")
+
+    request = SimpleNamespace(
+        spec_token_ids=[],
+        is_finished=lambda: False,
+        use_structured_output=True,
+        all_token_ids=[200],
+        structured_output_request=SimpleNamespace(
+            grammar=SimpleNamespace(validate_tokens=validate_grammar),
+            reasoning_ended=False,
+        ),
+    )
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = False
+    monkeypatch.setattr(
+        manager,
+        "_get_reasoner",
+        lambda _request: SimpleNamespace(is_reasoning_end_streaming=lambda _ids, _tokens: False),
+    )
+    scheduler = SimpleNamespace(requests={"req-0": request}, structured_output_manager=manager)
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
+    model_runner_output = SimpleNamespace(
+        req_id_to_index={"req-0": 0}, sampled_token_ids=[[200]], spec_token_ids=[[301, 302]]
+    )
+
+    _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
+
+    assert request.spec_token_ids == [301, 302]
 
 
 def test_pp_ipc_cached_request_data_skips_empty_output_tokens():

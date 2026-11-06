@@ -1,14 +1,38 @@
 import torch
+import torch_npu
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
-from vllm_ascend.sample.sampler import _apply_top_k_top_p_pytorch
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
-def apply_top_k_top_p_npu(logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None) -> torch.Tensor:
-    # NOTE: During the warmup stage, if both k and p are None, the NPU op is skipped.
-    # As a result, its workspace is not reserved during warmup, which may lead to an OOM
-    # when the op is executed later.
-    # TODO: Fix the workspace reservation issue in the future.
+def _apply_top_k_top_p_npu(  # type: ignore[misc]
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    has_topp_only_rows: bool = True,
+) -> torch.Tensor:
+    # ``has_topp_only_rows`` only selects the split top-p Triton pipeline upstream;
+    # the fused operator handles top-p-only rows natively.
+    #
+    # NOTE: TopKtopPSampleV2 takes ``(logits, p, k)`` with ``p`` whose dtype matches ``logits``;
+    # it is absent on 310P.
     if k is None and p is None:
         return logits
-    # use pytorch ops
-    return _apply_top_k_top_p_pytorch(logits, k, p)
+    return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
+
+
+def _apply_top_k_top_p_pytorch(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    has_topp_only_rows: bool = True,
+) -> torch.Tensor:
+    """Adapt the upstream reference implementation to the extra top-p flag."""
+    return apply_top_k_top_p_pytorch(logits, k=k, p=p)
+
+
+apply_top_k_top_p = (
+    _apply_top_k_top_p_npu
+    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P)
+    else _apply_top_k_top_p_pytorch
+)

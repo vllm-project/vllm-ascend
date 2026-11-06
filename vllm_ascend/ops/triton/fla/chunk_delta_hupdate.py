@@ -195,8 +195,6 @@ def chunk_gated_delta_rule_fwd_hupdate(
     update_indices = update_chunk_offsets[:-1]
     h_update[:, update_indices, :, :, :] = torch.eye(K, dtype=h_update.dtype, device=h_update.device)
 
-    g = g.transpose(1, 2).contiguous()
-
     def grid(meta):
         return (1, N * H)
 

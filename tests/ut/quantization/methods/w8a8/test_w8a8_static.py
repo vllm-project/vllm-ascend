@@ -114,6 +114,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         layer.input_offset.data = torch.tensor([0])
         layer.weight_scale.data = torch.randn(128, 1)
         layer.weight_offset.data = torch.randn(128, 1)
+        layer.deq_scale.data = torch.full((128,), 0.025)
 
         mock_npu_format_cast.side_effect = identity
         self.method.process_weights_after_loading(layer)
@@ -124,6 +125,7 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         self.assertEqual(layer.weight.data.shape, (256, 128))
         self.assertEqual(layer.weight_scale.data.shape, (128,))
+        torch.testing.assert_close(layer.weight_scale.data, torch.full((128,), 0.25))
         self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
         self.assertTrue(isinstance(layer.deq_scale, MagicMock))
@@ -155,3 +157,32 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
         self.assertFalse(isinstance(layer.deq_scale, MagicMock))
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_static.maybe_trans_nz", side_effect=identity)
+    def test_recover_modelslim_weight_scale_without_checkpoint_tensor(self, _mock_trans_nz):
+        # Static ModelSlim checkpoints can omit weight_scale. MLAPO needs
+        # the per-channel weight scale, not an uninitialized parameter.
+        for dtype in (torch.bfloat16, torch.float16):
+            with self.subTest(dtype=dtype):
+                layer = torch.nn.Module()
+                layer.weight = torch.nn.Parameter(torch.ones(3, 4, dtype=torch.int8), requires_grad=False)
+                layer.input_scale = torch.nn.Parameter(torch.tensor([0.125], dtype=dtype), requires_grad=False)
+                layer.input_offset = torch.nn.Parameter(torch.tensor([7], dtype=torch.int8), requires_grad=False)
+                expected = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float32)
+                deq_scale = expected * layer.input_scale.float()
+                if dtype == torch.float16:
+                    deq_scale = deq_scale.view(torch.int32).to(torch.int64)
+                layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)
+                layer.weight_scale = torch.nn.Parameter(
+                    torch.full((3, 1), float("nan"), dtype=dtype), requires_grad=False
+                )
+                layer.weight_offset = torch.nn.Parameter(torch.zeros(3, 1, dtype=dtype), requires_grad=False)
+                original_deq_scale = layer.deq_scale.clone()
+
+                self.method.process_weights_after_loading(layer)
+
+                self.assertTrue(torch.isfinite(layer.weight_scale).all())
+                torch.testing.assert_close(layer.weight_scale, expected)
+                torch.testing.assert_close(layer.deq_scale, original_deq_scale)
+                self.assertEqual(layer.weight.shape, (4, 3))
+                self.assertFalse(layer.weight_scale.requires_grad)

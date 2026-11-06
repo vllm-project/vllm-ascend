@@ -15,7 +15,7 @@ This document describes the supported features, environment preparation, single-
 
 Cohere Transcribe is supported by upstream vLLM (via the `cohere_asr` model implementation). Use a vLLM-Ascend image that matches your vLLM version, and refer to the support matrix for the current release status.
 
-The current release is adapted for Atlas A2 inference products. Support for the Ascend 950DT series is planned for the next phase.
+The current release is adapted for Atlas A2 inference products. Support for the 950DT Products is planned for the next phase.
 
 ## 2 Supported Features
 

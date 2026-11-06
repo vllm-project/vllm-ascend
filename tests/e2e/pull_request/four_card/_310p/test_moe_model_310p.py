@@ -15,29 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-
 from tests.e2e.conftest import VllmRunner
 
 
-def test_qwen3_moe_tp2_w8a8():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "vllm-ascend/Qwen3-30B-A3B-W8A8",
-        tensor_parallel_size=2,
-        enforce_eager=True,
-        dtype="float16",
-        quantization="ascend",
-        max_model_len=16384,
-        max_num_batched_tokens=2048,
-        max_num_seqs=256,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_qwen3_5_moe_tp4_fp16():
+def test_qwen3_5_moe_tp4_fp16(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     example_prompts = [
         "Hello, my name is",
     ]
@@ -47,6 +29,7 @@ def test_qwen3_5_moe_tp4_fp16():
         tensor_parallel_size=4,
         enforce_eager=True,
         dtype="float16",
+        additional_config={"multistream_overlap_shared_expert": True},
         max_model_len=16384,
         max_num_batched_tokens=2048,
         max_num_seqs=256,

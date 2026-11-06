@@ -9,17 +9,21 @@ import pytest
 import torch
 from vllm.v1.sample.ops.penalties import apply_all_penalties as v1_apply_all_penalties
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.penalties import apply_all_penalties as ascend_apply_all_penalties
 
-# Same scenario grid as test_apply_penalties_model_executor (equivalence + boundaries).
+# Fixed paired scenes sample the original scenario grid and size boundaries.
 APPLY_PENALTY_CASES = [
-    pytest.param(0, 0, "mixed", id="empty-both"),
-    pytest.param(0, 16, "mixed", id="empty-prompt"),
-    pytest.param(32, 0, "mixed", id="empty-output"),
-    pytest.param(1, 1, "mixed", id="single-token-each"),
-    pytest.param(32, 16, "mixed", id="typical-small"),
-    pytest.param(128, 64, "mixed", id="typical-large"),
-    pytest.param(128, 64, "all_padding", id="all-padding"),
+    pytest.param(1, 5120, 32, 16, "mixed", id="typical-small"),
+    pytest.param(128, 151936, 128, 64, "mixed", id="typical-large"),
+    pytest.param(1, 5120, 0, 0, "mixed", id="empty-both"),
+    pytest.param(8, 5120, 0, 16, "mixed", id="empty-prompt"),
+    pytest.param(32, 5120, 32, 0, "mixed", id="empty-output"),
+    pytest.param(1, 5120, 1, 1, "mixed", id="single-token-each"),
+    pytest.param(32, 151936, 128, 64, "all_padding", id="all-padding"),
+    pytest.param(128, 5120, 128, 64, "mixed", id="large-batch-small-vocab"),
 ]
 
 
@@ -40,11 +44,12 @@ def _make_tokens(
     return tokens
 
 
-@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
-@pytest.mark.parametrize("num_seqs", [1, 8, 32, 128])
-@pytest.mark.parametrize("vocab_size", [5120, 151936])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
-    "max_prompt_len,max_output_len,token_mode",
+    "num_seqs,vocab_size,max_prompt_len,max_output_len,token_mode",
     APPLY_PENALTY_CASES,
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -59,8 +64,6 @@ def test_apply_all_penalties_v1_vs_ascend(
     device="npu",
     seed=42,
 ):
-    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
     init_device_properties_triton()
     torch.manual_seed(seed)
 

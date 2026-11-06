@@ -1,0 +1,5 @@
+pr: 19321
+entries:
+  - category: feature
+    text: Added support for using Prefill Context Parallelism with DeepSeek V4.1 SWA bounded decoder replay, including cold prefill when prefix caching is disabled.
+    model: deepseek-v4.1

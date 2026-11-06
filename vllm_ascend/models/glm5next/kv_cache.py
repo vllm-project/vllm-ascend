@@ -19,11 +19,27 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
     return getattr(spec, "model_version", None) == "glm5_next"
+
+
+def get_kpool_tail_ring_capacity(vllm_config: VllmConfig, compress_ratio: int) -> int:
+    """Keep the open pool plus every not-yet-accepted speculative token.
+
+    Target verification writes all draft rows before rejection sampling is
+    known.  The first row is the already-sampled token and is committed; the
+    remaining ``num_speculative_tokens`` rows are lookahead.  Retaining that
+    lookahead in addition to one full pool prevents rejected rows from wrapping
+    around and destroying committed history that a replayed boundary token
+    still needs.
+    """
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    lookahead = int(getattr(speculative_config, "num_speculative_tokens", 0) or 0)
+    if lookahead < 0:
+        raise ValueError(f"num_speculative_tokens must be nonnegative, got {lookahead}.")
+    return compress_ratio + lookahead
 
 
 def format_indexer_kpool_slot_mapping(
@@ -74,6 +90,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"and {compress_ratio}."
             )
         self.head_dim = head_dim
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(f"GLM KPool cache requires BF16 or FP8, got {dtype}.")
         self.dtype = dtype
         self.cache_role = cache_role
         self.cache_config = cache_config
@@ -88,16 +106,14 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
-        ratio_kwargs: dict[str, Any] = (
-            {"compress_ratio": self.compress_ratio}
-            if vllm_version_is("0.28.0")
-            else {"tokens_per_state": self.compress_ratio}
-        )
+        ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            scale_dim=1 if self.dtype == torch.float8_e4m3fn else 0,
+            scale_dtype=torch.float32 if self.dtype == torch.float8_e4m3fn else torch.int8,
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -238,18 +254,22 @@ class KpoolTailManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 
-    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+    def _claim_ring_block(self, request_id: str, record_for_zeroing: bool = True) -> list[KVCacheBlock]:
         req_blocks = self.req_to_blocks[request_id]
         if req_blocks:
             return []
         new_blocks = self.block_pool.get_new_blocks(1)
         req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
+        if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
         return new_blocks
+
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        return self._claim_ring_block(request_id)
 
     def add_local_computed_blocks(
         self,
@@ -261,6 +281,12 @@ class KpoolTailManager(FullAttentionManager):
         assert not new_computed_blocks, "Tail blocks cannot be shared through prefix caching."
 
     def allocate_external_computed_blocks(
-        self, request_id: str, num_local_computed_tokens: int, num_external_computed_tokens: int
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
-        self.allocate_new_blocks(request_id, num_local_computed_tokens + num_external_computed_tokens, 0)
+        # An asynchronous connector load initializes the ring; zeroing it after
+        # the transfer starts would race with and overwrite the received state.
+        self._claim_ring_block(request_id, record_for_zeroing)

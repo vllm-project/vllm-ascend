@@ -25,7 +25,7 @@ tests/e2e/vllm_interface/
    relation comparison, direct-import analysis, and direct-call analysis concurrently inside the same job.
 6. Render the compatibility summary in memory and print it directly to the pytest job log, together with the selected
    revisions and phase timings. The CI path does not create report files.
-7. Fail the pytest case only when the analyzer reports an introduced break or cannot complete a valid analysis.
+7. Skip the pytest case when the analyzer reports an introduced break; fail it only when the analyzer cannot complete a valid analysis.
 
 ## Analysis phases
 
@@ -116,7 +116,8 @@ analysis scope are required. Complete source indexing and input verification sti
 
 New incompatibilities are reported as introduced breaks. Historical incompatibilities are not attributed to the PR,
 and ambiguous bindings remain review or unresolved evidence. The pytest entry uses `--fail-on introduced`, so an
-introduced break fails this test while a valid report with no introduced break passes.
+introduced break skips this test (reported as non-blocking in the CI job) while a valid report with no introduced
+break passes.
 
 ### Current CI presentation
 

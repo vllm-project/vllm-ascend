@@ -6,12 +6,10 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
-from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
 
@@ -43,9 +41,10 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation() -> None:
         assert scope.active
         return raw_tensors
 
-    def reshape(_kv_cache_config, tensors):
+    def reshape(_kv_cache_config, tensors, kernel_block_sizes):
         assert not scope.active
         assert tensors is raw_tensors
+        assert kernel_block_sizes is None
         return reshaped
 
     def bind(*_args, **_kwargs):
@@ -96,10 +95,6 @@ def test_310p_kv_pool_only_wraps_backing_allocation() -> None:
     assert not scope.active
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="v0.28.0 still reconstructs metadata via post_kv_cache_wake_up",
-)
 def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     model = torch.nn.Module()
     model.register_buffer("_k_scale", torch.tensor(0.5))
@@ -123,6 +118,9 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     worker.sleep_wakeup_manager = MagicMock()
 
     with (
+        # wake_up ends with a device barrier; this UT runs on a CPU runner, so the
+        # barrier must be mocked or torch.npu.synchronize() would try to init NPU.
+        patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device") as mock_synchronize,
         patch("vllm_ascend.worker.worker.CaMemAllocator") as mock_allocator_class,
         patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_config,
     ):
@@ -136,21 +134,26 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     assert runner.recovery_calls == 0
     assert model.get_buffer("_k_scale").item() == 0.5
     assert model.get_buffer("_v_scale").item() == 0.25
+    mock_synchronize.assert_called_once_with()
 
 
 def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
     worker.model_runner = SimpleNamespace(model=model)
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()
     return worker
 
 
+@patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
 @patch("vllm_ascend.worker.worker.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
-def test_level1_sleep_does_not_cpu_backup_hadamard(mock_get_config, mock_allocator_class, _mock_mem_get_info) -> None:
+def test_level1_sleep_does_not_cpu_backup_hadamard(
+    mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
+) -> None:
     mock_get_config.return_value = SimpleNamespace(
         rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False)
     )
@@ -165,13 +168,16 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(mock_get_config, mock_allocat
 
     assert worker._sleep_saved_buffers == {}
     assert torch.equal(model.get_buffer("_dsa_hadamard"), hadamard)
+    # Both sleep barriers fire on the cleanup-disabled path too.
+    assert mock_synchronize_device.call_count == 2
 
 
+@patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
 @patch("vllm_ascend.worker.worker.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
 def test_level2_sleep_still_cpu_backups_named_buffers(
-    mock_get_config, mock_allocator_class, _mock_mem_get_info
+    mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
     mock_get_config.return_value = SimpleNamespace(
         rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False)
@@ -188,3 +194,4 @@ def test_level2_sleep_still_cpu_backups_named_buffers(
     assert "_dsa_hadamard" in worker._sleep_saved_buffers
     assert worker._sleep_saved_buffers["_dsa_hadamard"].device.type == "cpu"
     assert torch.equal(worker._sleep_saved_buffers["_dsa_hadamard"], hadamard)
+    assert mock_synchronize_device.call_count == 2

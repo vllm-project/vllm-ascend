@@ -1,0 +1,180 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+"""vllm ``releases/v0.27.1`` does not ship the pluggable kv-cache-dtype
+mechanism that the ``kvquant_27`` branch added (``register_kv_cache_dtype``
+injects ``fp8 -> torch.float8_e4m3fn`` into ``STR_DTYPE_TO_TORCH_DTYPE`` in
+place, so Ascend's MLA/DSA kernels get native float8 instead of upstream's
+``torch.uint8`` raw bytes).
+
+On vllm builds that lack ``register_kv_cache_dtype`` this patch reproduces
+that effect directly: it mutates
+``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
+``torch.float8_e4m3fn`` in the live per-process dict, so the call sites in
+``vllm_ascend/models/deepseek_v4/{model,indexer}.py`` that do
+``kv_cache_dtype_str_to_dtype("fp8", ...)`` resolve to ``float8_e4m3fn``.
+
+This runs as a worker patch (``adapt_patch(is_global_patch=False)`` in
+``NPUWorker.__init__``) because the dtype is resolved inside each spawned
+Worker process — the launcher's platform patch does not propagate to the
+workers' fresh interpreters. It is applied before model loading, which is
+when ``kv_cache_dtype_str_to_dtype`` is called.
+
+The registration API can exist without an Ascend handler having updated the
+mapping. In that case, replace only the upstream ``torch.uint8`` default.
+Leave any other handler-provided dtype unchanged. Remove this fallback when
+all supported vLLM builds reliably register the Ascend FP8 dtype in workers.
+
+Worker-side dtype Literal widening: the launcher's platform patches
+(``patch/platform/patch_kv_cache_dtype.py`` and
+``patch/platform/patch_indexer_kv_dtype.py``) let ``--kv-cache-dtype int8``
+and ``--attention_config.indexer_kv_dtype int8`` through CLI/pydantic
+validation, but only in the main process. Worker processes run in fresh
+interpreters, so the ``CacheDType`` / ``IndexerKVDType`` Literals still reject
+``"int8"`` there. This patch widens both in every worker, mirroring the
+platform patches. The same goes for the mutable ``KV_CACHE_DTYPES`` mirror
+list that current vLLM main gates ``CacheConfig.cache_dtype`` on: a spawned
+worker starts from the upstream list, so ``"int8"``/``"mxfp8"`` are appended
+here as well. Without it, ``vllm/v1/attention/selector.py::get_attn_backend``
+dies with ``AssertionError: Invalid kv_cache_dtype: int8`` when the attention
+backend is selected during model init, and the speculative draft path
+(``DraftModelProposer._create_draft_vllm_config`` -> ``replace``) re-validates
+``AttentionConfig`` and raises a pydantic ``literal_error``.
+"""
+
+import typing
+
+import torch
+import vllm.utils.torch_utils as _torch_utils
+
+# Ascend-only ``--kv-cache-dtype`` values; keep in sync with
+# ``_ASCEND_CACHE_DTYPES`` in ``patch/platform/patch_kv_cache_dtype.py``.
+_ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
+
+
+def _apply_fp8_kv_cache_dtype_flip() -> None:
+    try:
+        from vllm.config.cache import register_kv_cache_dtype  # noqa: F401
+    except ImportError:
+        # No pluggable mechanism: flip the dtype in place to match what
+        # Fp8AscendHandler.torch_dtype() would have injected.
+        _torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"] = torch.float8_e4m3fn
+        # int8 already maps to torch.int8 upstream; nothing to flip.
+        return
+
+    # The registration API may exist without an Ascend handler updating the
+    # mapping. Only replace upstream raw-byte storage, preserving handler dtypes.
+    if _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.get("fp8") == torch.uint8:
+        _torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"] = torch.float8_e4m3fn
+
+
+def _widen_cache_dtype_literal_for_worker() -> None:
+    """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"``/``"mxfp8"`` in the worker.
+
+    Mirrors ``patch/platform/patch_kv_cache_dtype.py``: update the module-level
+    Literal, the ``CacheConfig`` annotation and dataclass field type, then
+    rebuild the pydantic schema.
+
+    Fork trap: the worker is forked from the main process, where the platform
+    patch has already widened ``vllm.config.cache.CacheDType`` and rebuilt
+    ``CacheConfig``; those changes are inherited, so the early-return branch
+    below is the NORMAL path in the real worker. However, the selector module
+    (``vllm.v1.attention.selector``) may have been imported in the main process
+    BEFORE the platform patch widened the Literal, so its module-global
+    ``CacheDType`` still binds the ORIGINAL Literal even though the cache
+    module's attribute is widened. ``get_attn_backend``'s assertion
+    (``assert kv_cache_dtype in get_args(CacheDType)``) reads that stale module
+    global. The rebind below must therefore run UNCONDITIONALLY, in both
+    branches.
+    """
+    import pydantic.dataclasses as _pdc
+    from vllm.config import cache as _cache_mod
+    from vllm.config.cache import CacheConfig
+
+    # Current vLLM main also validates ``CacheConfig.cache_dtype`` against
+    # the mutable ``KV_CACHE_DTYPES`` mirror list (``is_known_kv_cache_dtype``
+    # in ``_validate_cache_dtype``; the ``get_attn_backend`` assertion in
+    # ``vllm/v1/attention/selector.py`` reads the same list object). A
+    # spawned worker starts from the upstream list, so append the Ascend
+    # dtypes here too; idempotent when fork already inherited the append.
+    # The mirror list only exists on newer vLLM main; releases (e.g. v0.32.0)
+    # gate on the Literal alone, so the append is main-only.
+    mirror_list = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
+    if mirror_list is not None:
+        for dtype in _ASCEND_CACHE_DTYPES:
+            if dtype not in mirror_list:
+                mirror_list.append(dtype)
+
+    existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
+    missing = tuple(d for d in _ASCEND_CACHE_DTYPES if d not in existing_args)
+    if missing:
+        # Derive from the current upstream Literal and append the Ascend-only
+        # dtypes so no upstream member is dropped. Subscripting with the plain
+        # tuple is the same __getitem__ call as star-unpacking it and parses
+        # on Python 3.10 (PEP 646 starred subscripts are 3.11+).
+        widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
+
+        _cache_mod.CacheDType = widened
+        CacheConfig.__annotations__["cache_dtype"] = widened
+        CacheConfig.__dataclass_fields__["cache_dtype"].type = widened
+
+        _pdc.rebuild_dataclass(
+            CacheConfig,
+            force=True,
+            raise_errors=True,
+            _parent_namespace_depth=1,
+        )
+    else:
+        # Already widened by the platform patch in the main process and
+        # inherited via fork; nothing to patch here.
+        widened = _cache_mod.CacheDType
+
+    # The C8-MXFP path stores FP8 KV payloads; the generic impl constructor
+    # resolves the dtype string before the C8 backend swaps the class, so the
+    # mapping must exist even though the C8 caches are allocated as raw int8
+    # bytes.
+    _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.setdefault("mxfp8", torch.float8_e4m3fn)
+
+    # Unconditional rebind: the selector's module-global CacheDType must point
+    # at the widened Literal regardless of import order / fork inheritance.
+    try:
+        import vllm.v1.attention.selector as _selector
+    except ImportError:
+        pass
+    else:
+        _selector.CacheDType = widened
+
+
+def _widen_indexer_kv_dtype_literal_for_worker() -> None:
+    """Widen ``AttentionConfig.indexer_kv_dtype`` to accept ``"int8"`` in the worker.
+
+    Mirrors ``patch/platform/patch_indexer_kv_dtype.py``. Needed because the
+    speculative draft path runs in the worker and re-instantiates
+    ``AttentionConfig`` via ``replace()``, which passes every field explicitly
+    (including the default ``indexer_kv_dtype="auto"``) and re-validates it
+    against the Literal.
+    """
+    import pydantic.dataclasses as _pdc
+    from vllm.config import attention as _attention_mod
+    from vllm.config.attention import AttentionConfig
+
+    existing_args = getattr(_attention_mod.IndexerKVDType, "__args__", ())
+    if "int8" in existing_args:
+        return
+
+    widened = typing.Literal[*existing_args + ("int8",)]  # type: ignore[valid-type]
+
+    _attention_mod.IndexerKVDType = widened
+    AttentionConfig.__annotations__["indexer_kv_dtype"] = widened
+    AttentionConfig.__dataclass_fields__["indexer_kv_dtype"].type = widened
+
+    _pdc.rebuild_dataclass(
+        AttentionConfig,
+        force=True,
+        raise_errors=True,
+        _parent_namespace_depth=1,
+    )
+
+
+_apply_fp8_kv_cache_dtype_flip()
+_widen_cache_dtype_literal_for_worker()
+_widen_indexer_kv_dtype_literal_for_worker()

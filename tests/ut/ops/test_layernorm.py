@@ -3,12 +3,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops import layernorm as ascend_layernorm
+from vllm_ascend.ops.layernorm import (
+    AscendFusedRMSNormGated,
+    AscendRMSNormGated,
+    LayerNormFn,
+)
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
 
@@ -85,6 +90,34 @@ def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
     assert not layer.bias.requires_grad
 
 
+@patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", create=True, side_effect=mock_add_rms_norm_bias)
+@patch("torch_npu.npu_add_rms_norm", create=True, side_effect=mock_add_rms_norm)
+def test_GemmaRMSNorm_residual_uses_native_op(
+    mock_native, mock_bias_op, _custom_op_enabled, dummy_tensor, default_vllm_config
+):
+    """GemmaRMSNorm has no beta, so AddRmsNormBias has nothing to fuse.
+
+    The operator is only reachable where the custom OPP is installed, while the
+    native operator computes the same result everywhere.
+
+    ``enable_custom_op`` is pinned to True even though the method no longer
+    consults it: that is what the removed branch keyed on, so the pin makes this
+    test fail against the previous implementation on a CPU runner too, where the
+    ambient value is False and both implementations would otherwise agree.
+    """
+    layer = GemmaRMSNorm(hidden_size=8, eps=1e-05)
+    assert not hasattr(layer, "bias")
+
+    residual = torch.randn(4, 8, dtype=torch.float16)
+    out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
+
+    mock_native.assert_called_once()
+    mock_bias_op.assert_not_called()
+    assert torch.allclose(out_x, 2 * dummy_tensor)
+    assert torch.allclose(out_residual, 2 * residual)
+
+
 def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation="sigmoid")
     x = torch.randn(1, 4, 2, 8)
@@ -92,7 +125,7 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     residual = torch.randn_like(x)
     expected = (torch.empty_like(x), torch.empty_like(x))
 
-    with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=expected) as fused_norm_gate:
+    with patch("vllm_ascend.ops.fused_rms_norm_gated.rms_norm_gated", return_value=expected) as fused_norm_gate:
         actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True)
 
     assert isinstance(layer, AscendFusedRMSNormGated)
@@ -107,10 +140,60 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
         eps=1e-6,
         prenorm=True,
         residual_in_fp32=True,
+        out=None,
     )
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
+@pytest.mark.parametrize("activation", ["sigmoid", "swish"])
+def test_RMSNormGated_forwards_activation(default_vllm_config, activation):
+    layer = AscendRMSNormGated(
+        hidden_size=8,
+        eps=1e-6,
+        norm_before_gate=True,
+        activation=activation,
+    )
+    x = torch.randn(2, 8)
+    z = torch.randn_like(x)
+    expected = torch.empty_like(x)
+
+    with patch.object(LayerNormFn, "apply", return_value=expected) as apply:
+        assert layer.forward_oot(x, z) is expected
+
+    assert apply.call_args.args[-1] == activation
+
+
+def test_LayerNormFn_forwards_sigmoid_to_npu_kernel(default_vllm_config):
+    x = torch.randn(2, 8)
+    z = torch.randn_like(x)
+    weight = torch.ones(8)
+    bias = torch.zeros(8)
+    expected = torch.empty_like(x)
+    rstd = torch.ones(2)
+
+    with patch(
+        "vllm_ascend.ops.layernorm.layer_norm_fwd_npu",
+        return_value=(expected, None, rstd),
+    ) as npu_kernel:
+        actual = LayerNormFn.apply(
+            x,
+            weight,
+            bias,
+            z,
+            1e-6,
+            None,
+            True,
+            True,
+            "sigmoid",
+        )
+
+    assert actual.data_ptr() == expected.data_ptr()
+    assert npu_kernel.call_args.kwargs["activation"] == "sigmoid"
+
+
+@pytest.mark.skipif(
+    get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES),
+    reason="310P device unittest case.",
+)
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float16)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
@@ -128,3 +211,57 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+class _CountingQuantDescription(dict):
+    """Counts full scans so the cache can be asserted on."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scans = 0
+
+    def __iter__(self):
+        self.scans += 1
+        return super().__iter__()
+
+
+@pytest.fixture
+def clean_norm_bias_cache():
+    ascend_layernorm._NORM_BIAS_IN_QUANT_DESCRIPTION.clear()
+    yield
+    ascend_layernorm._NORM_BIAS_IN_QUANT_DESCRIPTION.clear()
+
+
+def test_norm_bias_lookup_scans_quant_description_once(clean_norm_bias_cache):
+    """Every RMSNorm used to rescan the whole quant_description."""
+    quant_description = _CountingQuantDescription(
+        {
+            "model.layers.0.self_attn.q_proj.weight": "W8A8",
+            "model.layers.0.input_layernorm.norm.bias": "FLOAT",
+        }
+    )
+
+    assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is True
+    assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is True
+
+    assert quant_description.scans == 1
+
+
+def test_norm_bias_lookup_reports_missing_bias(clean_norm_bias_cache):
+    quant_description = {"model.layers.0.self_attn.q_proj.weight": "W8A8"}
+
+    assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is False
+
+
+def test_norm_bias_lookup_ignores_a_stale_entry(clean_norm_bias_cache):
+    """An id can only be reused after the old dict is gone; never trust it blindly."""
+    quant_description = {"model.layers.0.input_layernorm.norm.bias": "FLOAT"}
+    ascend_layernorm._NORM_BIAS_IN_QUANT_DESCRIPTION[id(quant_description)] = ({}, False)
+
+    assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is True
+
+
+def test_norm_bias_lookup_handles_empty_description(clean_norm_bias_cache):
+    assert ascend_layernorm._quant_description_has_norm_bias({}) is False
+    assert ascend_layernorm._quant_description_has_norm_bias(None) is False
+    assert not ascend_layernorm._NORM_BIAS_IN_QUANT_DESCRIPTION

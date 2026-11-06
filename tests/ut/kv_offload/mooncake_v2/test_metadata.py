@@ -57,7 +57,7 @@ def test_transfer_metadata_groups_msgpack_round_trip() -> None:
     decoded = msgspec.msgpack.decode(encoded, type=MooncakeTransferMetadataGroups)
 
     assert decoded == groups
-    assert decoded.metadata_by_pp_rank[0].metadata_by_tp_rank[0].te_rpc_port == 9000
+    assert decoded.metadata_by_pp_rank[0].metadata_by_pcp_rank[0].metadata_by_tp_rank[0].te_rpc_port == 9000
 
 
 def test_connector_metadata_adds_complete_request() -> None:

@@ -1,0 +1,4 @@
+pr: 19954
+entries:
+  - category: performance
+    text: Reduced GDN metadata preparation overhead with aligned Mamba caches, including mixed prefill and decode batches and variable speculative lengths.

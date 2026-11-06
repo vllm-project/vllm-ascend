@@ -136,7 +136,7 @@ TILING_DATA_FIELD_DEF(uint32_t, candidateMode)
 TILING_DATA_FIELD_DEF(uint32_t, candidateTopkBlocks)
 TILING_DATA_FIELD_DEF(uint32_t, candidateBlockSize)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(QuantLightningIndexerV2, QLIV2TilingData)
+REGISTER_TILING_DATA_CLASS(VllmAscendQuantLightningIndexerV2, QLIV2TilingData)
 
 // -----------算子CompileInfo定义-------------------
 struct QLIV2CompileInfo {};

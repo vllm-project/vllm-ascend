@@ -25,18 +25,19 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
-import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
+import vllm_ascend.ascend_forward_context as ascend_forward_context
+import vllm_ascend.worker.v1.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
-from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
+from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.utils import SlidingWindowAdapter
 
 enable_custom_op()
 
@@ -45,6 +46,48 @@ enable_custom_op()
 _CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(autouse=True)
+def use_v1_forward_context(monkeypatch):
+    """Keep legacy proposer fixtures on the V1 forward-context layout."""
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+    )
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", False)
+
+
+class _NullPatch:
+    """No-op stand-in for a ``unittest.mock.patch`` object."""
+
+    def start(self):
+        return None
+
+    def stop(self):
+        return None
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _supports_multimodal_inputs_patch(vllm_config=None):
+    """Keep the proposer on the text-only path for both supported vLLM lanes.
+
+    Both supported lanes read ``ModelConfig.supports_multimodal_inputs``.
+    Set the fixture flags when a ``vllm_config`` is provided.
+    """
+    if vllm_config is not None:
+        model_config = getattr(vllm_config, "model_config", None)
+        if model_config is not None:
+            # The fixtures use MagicMock configs whose auto-created attributes
+            # are truthy, so force both entry points onto the text-only path.
+            model_config.supports_multimodal_inputs = False
+            model_config.is_multimodal_model = False
+    return _NullPatch()
 
 
 @dataclass
@@ -381,9 +424,7 @@ class TestEagleProposerInitialization(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -414,10 +455,11 @@ class TestEagleProposerInitialization(TestBase):
             self.assertTrue(proposer.use_cuda_graph)
 
             expected_max_num_tokens = proposer.max_num_tokens
+            expected_arange_size = max(proposer.max_batch_size, expected_max_num_tokens) + 1
             self.assertEqual(proposer.input_ids.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.positions.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
-            self.assertEqual(proposer.arange.shape, (expected_max_num_tokens,))
+            self.assertEqual(proposer.arange.shape, (expected_arange_size,))
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -536,9 +578,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -553,9 +593,9 @@ class TestEagleProposerLoadModel(TestBase):
         # Clear the current vllm config
         set_current_vllm_config(None)
 
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_model")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_pp_group")
     def test_load_model_pp1(self, mock_pp_group, mock_get_model, mock_get_layers):
         mock_pp_group.return_value.world_size = 1
         mock_target_layer1 = MagicMock()
@@ -588,9 +628,9 @@ class TestEagleProposerLoadModel(TestBase):
             self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
             self.assertIs(self.proposer.model.model.embed_tokens, mock_model.model.embed_tokens)
 
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_model")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_pp_group")
     def test_load_model_pp_gt1(self, mock_pp_group, mock_get_model, mock_get_layers):
         mock_pp_group.return_value.world_size = 2
         mock_target_layer1 = MagicMock()
@@ -610,10 +650,10 @@ class TestEagleProposerLoadModel(TestBase):
             self.assertIsNot(self.proposer.model.model.embed_tokens, mock_model.model.embed_tokens)
             self.assertEqual(self.proposer.attn_layer_names, ["layer2"])
 
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_model")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_pp_group")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.supports_multimodal")
     def test_load_model_multimodal(self, mock_supports_multi, mock_pp_group, mock_get_model, mock_get_layers):
         mock_model = MagicMock()
         mock_model.get_language_model.return_value.lm_head = MagicMock()
@@ -697,9 +737,7 @@ class TestEagleProposerDummyRun(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Mock parallel state functions
@@ -713,12 +751,18 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_dp_group = patch("vllm_ascend.ascend_forward_context.get_dp_group", return_value=mock_dp_group)
         self.mock_dp_group.start()
 
+        self.mock_use_updatable_graph = patch(
+            "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.use_updatable_graph", return_value=False
+        )
+        self.mock_use_updatable_graph.start()
+
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
         self.proposer.update_stream = MagicMock()
+        self.proposer.draft_attn_groups = [MagicMock()]
 
     def tearDown(self):
         self.mock_get_ascend_config.stop()
@@ -726,13 +770,14 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
+        self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context, mock_get_context, mock_get_context_2):
         num_tokens = 32
         with_prefill = False
@@ -746,8 +791,8 @@ class TestEagleProposerDummyRun(TestBase):
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context, mock_get_context_2):
         mock_context.return_value.__enter__.return_value = None
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
@@ -756,9 +801,9 @@ class TestEagleProposerDummyRun(TestBase):
             self.assertTrue(self.proposer._runnable.call_count == 1)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.update_full_graph_params")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_in_graph_capture(
         self, mock_context, mock_get_context, mock_update_full_graph_params, mock_get_context_2
     ):
@@ -770,6 +815,7 @@ class TestEagleProposerDummyRun(TestBase):
         mock_get_context.return_value = mock_return_context
         mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        self.proposer.draft_attn_groups = [MagicMock()]
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -778,9 +824,9 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.use_cuda_graph = last_use_cuda_graph
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.update_full_graph_params")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_forward_context")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_in_graph_run(
         self, mock_context, mock_get_context, mock_update_full_graph_params, mock_get_context_2
     ):
@@ -840,9 +886,7 @@ class TestEagleProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -938,9 +982,7 @@ class TestEagleProposerPropose:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Mock parallel state functions
@@ -964,6 +1006,11 @@ class TestEagleProposerPropose:
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
+        self.mock_use_updatable_graph = patch(
+            "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.use_updatable_graph", return_value=False
+        )
+        self.mock_use_updatable_graph.start()
+
         yield
 
         self.mock_cpugpubuffer.stop()
@@ -971,6 +1018,7 @@ class TestEagleProposerPropose:
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
         self.mock_get_ascend_config.stop()
+        self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
         clear_ascend_config()
@@ -1030,7 +1078,7 @@ class TestEagleProposerPropose:
     # config: prefill and decode, Qwen3-30B, tp2, ep_enable, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
     @pytest.mark.parametrize('model_type', ['qwen_dense','qwen_moe', 'deepseek'])
     @pytest.mark.parametrize('graphmode', ['eager','full'])
-    @patch('vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer.get_model')
+    @patch('vllm_ascend.worker.v1.spec_decode.eagle_proposer.AscendEagleProposer.get_model')
     def test_propose(self, mock_get_model, graphmode, model_type, flag_prefill_decode,
                      query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
                      num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
@@ -1059,6 +1107,7 @@ class TestEagleProposerPropose:
                 )
 
         # mock and adjust functions and var in propose
+        self.proposer.draft_model_config.use_mla = model_type == 'deepseek'
         if model_type == 'deepseek':
             self.proposer.method = 'mtp'
             if not self.is_decode(flag_prefill_decode):
@@ -1388,29 +1437,32 @@ class TestEagleProposerPropose:
             assert captured_common_attn_metadata.max_query_len == 1
             assert captured_common_attn_metadata.max_seq_len == 0
             assert captured_common_attn_metadata._seq_lens_cpu is None
+            # Later draft steps consume the exact NPU seq_lens with rejected
+            # tokens removed. The CPU mirror intentionally remains an
+            # optimistic upper bound to avoid an NPU-to-CPU synchronization.
             if model_type == 'qwen_dense':
                 if graphmode == 'full':
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19] + [0]*13))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 0, 0, 0, 0, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 else:
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19]))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
             if model_type == 'qwen_moe':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([18, 17, 17]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([145, 272, 400]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([21, 19, 19]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([17, 15, 15]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([17, 16, 16, 18, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                           2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
             if model_type == 'deepseek':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([16, 15, 16]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15, 13, 13]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142, 268, 396]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([16, 15, 16]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
@@ -1512,7 +1564,7 @@ class TestEagleProposerPropose:
         assert isinstance(
             inspect.getattr_static(
                 vllm.config.ModelConfig,
-                "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims",
+                "mrope_num_dims",
             ),
             property
         )
@@ -1535,9 +1587,9 @@ class TestEagleProposerPropose:
         assert not missing, f"Missing dataclass fields: {missing}"
 
 
-        import vllm_ascend.worker.model_runner_v1
-        assert hasattr(vllm_ascend.worker.model_runner_v1, "NPUModelRunner")
-        RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
+        import vllm_ascend.worker.v1.model_runner
+        assert hasattr(vllm_ascend.worker.v1.model_runner, "NPUModelRunner")
+        RunnerCls = vllm_ascend.worker.v1.model_runner.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
             "dcp_size",
@@ -1553,7 +1605,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_sync_metadata_across_dp")
         sig = inspect.signature(RunnerCls._sync_metadata_across_dp)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode', 'allow_dp_padding']
+        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode']
 
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
@@ -1561,9 +1613,9 @@ class TestEagleProposerPropose:
         assert sig_name == ['self', 'query_start_loc', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
 
 
-        import vllm_ascend.spec_decode.llm_base_proposer
-        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        import vllm_ascend.worker.v1.spec_decode.llm_base_proposer
+        assert hasattr(vllm_ascend.worker.v1.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         assert hasattr(RunnerCls, "_get_model")
         assert hasattr(RunnerCls, "_update_full_graph_params")
         assert hasattr(RunnerCls, "_propose")
@@ -1629,7 +1681,6 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             '_num_computed_tokens_cache'
         }
 
@@ -1645,7 +1696,8 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
+            'dcp_local_seq_lens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)
@@ -1654,9 +1706,9 @@ class TestEagleProposerPropose:
         assert not missing, f"Missing dataclass fields: {missing}"
 
 
-        import vllm_ascend.spec_decode.llm_base_proposer
-        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        import vllm_ascend.worker.v1.spec_decode.llm_base_proposer
+        assert hasattr(vllm_ascend.worker.v1.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         assert hasattr(RunnerCls, "_run_merged_draft")
         sig = inspect.signature(RunnerCls._run_merged_draft)
         sig_name = self.get_param_names(sig)
@@ -1782,9 +1834,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         set_current_vllm_config(self.vllm_config)
@@ -2274,13 +2324,11 @@ class TestRunMergedDraft(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
-        self.mock_enable_sp = patch("vllm_ascend.spec_decode.llm_base_proposer.enable_sp", return_value=False)
+        self.mock_enable_sp = patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.enable_sp", return_value=False)
         self.mock_enable_sp.start()
-        self.mock_extra_ctx = patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=MagicMock())
+        self.mock_extra_ctx = patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._EXTRA_CTX", new=MagicMock())
         self.mock_extra_ctx.start()
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
@@ -2323,7 +2371,7 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims"
+        rope_dims_field = "mrope_num_dims"
         for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
@@ -2366,7 +2414,6 @@ class TestRunMergedDraft(TestBase):
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
         assert hasattr(vllm.config, "PassConfig"), "PassConfig not found"
-        assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
 
         import vllm.forward_context
 
@@ -2375,10 +2422,6 @@ class TestRunMergedDraft(TestBase):
         import vllm.multimodal.registry
 
         assert hasattr(vllm.multimodal.registry, "MultiModalRegistry")
-        assert hasattr(vllm.multimodal.registry.MultiModalRegistry, "supports_multimodal_inputs")
-        sig = inspect.signature(vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "model_config"]
 
         import vllm.v1.spec_decode.eagle
 
@@ -2418,7 +2461,7 @@ class TestRunMergedDraft(TestBase):
         missing = fields - extra_attrs
         assert not missing, f"Missing extra forward context attrs: {missing}"
 
-        import vllm_ascend.spec_decode.llm_base_proposer
+        import vllm_ascend.worker.v1.spec_decode.llm_base_proposer
 
         for attr in (
             "AscendSpecDecodeBaseProposer",
@@ -2427,10 +2470,10 @@ class TestRunMergedDraft(TestBase):
             "get_forward_context",
             "_EXTRA_CTX",
         ):
-            assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, attr), (
-                f"vllm_ascend.spec_decode.llm_base_proposer.{attr} not found"
+            assert hasattr(vllm_ascend.worker.v1.spec_decode.llm_base_proposer, attr), (
+                f"vllm_ascend.worker.v1.spec_decode.llm_base_proposer.{attr} not found"
             )
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         for attr in (
             "_run_merged_draft",
             "model_returns_tuple",
@@ -2455,19 +2498,19 @@ class TestRunMergedDraft(TestBase):
         sig_name = self.get_param_names(sig)
         assert sig_name == ["self"]
 
-        import vllm_ascend.spec_decode.dflash_proposer
+        import vllm_ascend.worker.v1.spec_decode.dflash_proposer
 
-        assert hasattr(vllm_ascend.spec_decode.dflash_proposer, "AscendDflashProposer")
-        RunnerCls = vllm_ascend.spec_decode.dflash_proposer.AscendDflashProposer
+        assert hasattr(vllm_ascend.worker.v1.spec_decode.dflash_proposer, "AscendDflashProposer")
+        RunnerCls = vllm_ascend.worker.v1.spec_decode.dflash_proposer.AscendDflashProposer
         assert hasattr(RunnerCls, "build_model_inputs_first_pass")
         sig = inspect.signature(RunnerCls.build_model_inputs_first_pass)
         sig_name = self.get_param_names(sig)
         assert sig_name == ["self", "num_input_tokens", "_context_slots"]
 
-        import vllm_ascend.worker.model_runner_v1
+        import vllm_ascend.worker.v1.model_runner
 
-        assert hasattr(vllm_ascend.worker.model_runner_v1, "NPUModelRunner")
-        RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
+        assert hasattr(vllm_ascend.worker.v1.model_runner, "NPUModelRunner")
+        RunnerCls = vllm_ascend.worker.v1.model_runner.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
             "dcp_size",
@@ -2527,7 +2570,6 @@ class TestRunMergedDraft(TestBase):
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
@@ -2591,7 +2633,6 @@ class TestRunMergedDraft(TestBase):
         )
         self.proposer.input_ids[:12] = initial_input_ids
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
@@ -2647,7 +2688,6 @@ class TestRunMergedDraft(TestBase):
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
@@ -2706,7 +2746,6 @@ class TestRunMergedDraft(TestBase):
             (2, True, torch.tensor([0, 1, 2, 3], dtype=torch.int64), (2, 2)),
         ]
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         for num_speculative_tokens, parallel_drafting, token_indices_to_sample, expected_shape in test_cases:
             with self.subTest(num_speculative_tokens=num_speculative_tokens, parallel_drafting=parallel_drafting):
                 self.proposer.method = "eagle3"
@@ -2776,9 +2815,7 @@ class TestDraftProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch(self.vllm_config)
         self.mock_supports_multimodal_inputs.start()
 
         # Set the current vllm config
@@ -2794,7 +2831,7 @@ class TestDraftProposerHelperMethods(TestBase):
 
     
     @patch('torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs', create=True)
-    @patch("vllm_ascend.spec_decode.llm_base_proposer.compute_new_slot_mapping")
+    @patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.compute_new_slot_mapping")
     def test_set_inputs_first_pass(self, mock_slot, mock_expand):
         self.assertTrue(self.proposer.needs_extra_input_slots)
         target_token_ids = torch.tensor([0,1,2,3,4])
@@ -2853,7 +2890,7 @@ class TestEagleProposerPrepareInputs:
     def _no_pin_memory(self):
         # prepare_inputs allocates pinned CPU tensors via is_pin_memory_available().
         # Without physical NPU, t.pin_memory() raises PrivateUse1HooksInterface errors.
-        with patch("vllm_ascend.spec_decode.llm_base_proposer.is_pin_memory_available", return_value=False):
+        with patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.is_pin_memory_available", return_value=False):
             yield
 
     @pytest.fixture(autouse=True)
@@ -2871,9 +2908,7 @@ class TestEagleProposerPrepareInputs:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch()
         self.mock_supports_multimodal_inputs.start()
 
         yield
@@ -2938,7 +2973,7 @@ class TestEagleProposerPrepareInputs:
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            _supports_multimodal_inputs_patch(vllm_config),
             set_current_vllm_config(vllm_config),
         ):
             proposer = AscendEagleProposer(
@@ -3224,9 +3259,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch()
         self.mock_supports_multimodal_inputs.start()
 
         yield
@@ -3291,7 +3324,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            _supports_multimodal_inputs_patch(vllm_config),
             set_current_vllm_config(vllm_config),
         ):
             proposer = AscendEagleProposer(
@@ -3350,7 +3383,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         with (
             patch(
-                "vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON",
+                "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.HAS_TRITON",
                 has_triton,
             ),
             patch.multiple(
@@ -3475,7 +3508,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         with (
             patch(
-                "vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON",
+                "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.HAS_TRITON",
                 has_triton,
             ),
             patch.multiple(
@@ -3576,9 +3609,7 @@ class TestEagleProposerSetInputsFirstPass:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
+        self.mock_supports_multimodal_inputs = _supports_multimodal_inputs_patch()
         self.mock_supports_multimodal_inputs.start()
 
         yield
@@ -3659,7 +3690,7 @@ class TestEagleProposerSetInputsFirstPass:
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            _supports_multimodal_inputs_patch(vllm_config),
             set_current_vllm_config(vllm_config),
         ):
             if method == "eagle":
@@ -4229,13 +4260,16 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         # Construct several submodules: some have topk_indices_buffer, some don't
         mod1 = MagicMock()
         mod1.topk_indices_buffer = MagicMock()  # This should be replaced
+        mod1.uses_lim_topk_metadata = False
         mod2 = MagicMock()
         del mod2.topk_indices_buffer  # This doesn't have the attribute, shouldn't throw an error
+        mod2.uses_lim_topk_metadata = False
         mod3 = MagicMock()
         mod3.topk_indices_buffer = MagicMock()  # This should also be replaced
+        mod3.uses_lim_topk_metadata = True
 
-        # Mock the return value of named_modules
-        draft_model_mock.model.named_modules.return_value = [("layer.0", mod1), ("layer.1", mod2), ("layer.2", mod3)]
+        # Mock the module traversal used for buffer sharing and fused_copy_sfa discovery.
+        draft_model_mock.model.modules.return_value = [mod1, mod2, mod3]
         proposer.model = draft_model_mock
 
         # Execute the target method
@@ -4248,8 +4282,21 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(mod1.topk_indices_buffer, target_buffer_mock, "Module 1 buffer should be updated.")
         self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
         self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
+        self.assertEqual(proposer._lim_topk_compactors, [mod3])
 
-    def _run_index_sharing_draft(self, share=True, supports_compact=True, dsa_cp=False):
+    def test_maybe_collects_lim_compactor_without_target_buffer(self):
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        copy_sfa_attention = SimpleNamespace(uses_lim_topk_metadata=True)
+        draft_model = MagicMock()
+        draft_model.modules.return_value = [copy_sfa_attention]
+        proposer.model = SimpleNamespace(model=draft_model)
+        target_model = SimpleNamespace(model=SimpleNamespace())
+
+        proposer._maybe_share_topk_indices(target_model)
+
+        self.assertEqual(proposer._lim_topk_compactors, [copy_sfa_attention])
+
+    def _run_index_sharing_draft(self, share=True, supports_compact=True):
         """Run the real proposer and MLA hooks with known rows in place of model compute."""
         proposer = AscendEagleProposer.__new__(AscendEagleProposer)
         proposer.runner = None
@@ -4272,10 +4319,13 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer._set_positions = lambda n, positions: proposer.positions[:n].copy_(positions)
         proposer.maybe_pad_and_reduce = lambda hidden, positions: (hidden, positions)
         proposer.maybe_all_gather_and_unpad = lambda last, positions, hidden: (last, positions, hidden)
-        proposer.compute_draft_token_ids = lambda hidden, sampling_metadata: (torch.arange(hidden.shape[0]), None)
+        # Set by upstream LLMBaseProposer.__init__; required by _sample_draft_from_logits.
+        proposer._enable_probabilistic_draft_probs = False
 
         buffer = torch.full((8, 4), -1, dtype=torch.int32)
         impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)
+        impl.use_fused_copy_sfa = True
+        impl.compact_lim_topk_metadata = MagicMock()
         attention = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
         torch.nn.Module.__init__(attention)
         attention.mla_attn = SimpleNamespace(impl=impl)
@@ -4287,39 +4337,29 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         layer.mtp_block.self_attn = torch.nn.Module()
         layer.mtp_block.self_attn.mla_attn = attention
         predictor.layers = torch.nn.ModuleDict({"80": layer})
+        proposer._lim_topk_compactors = [attention]
         if not supports_compact:
             predictor = SimpleNamespace(set_skip_topk=predictor.set_skip_topk)
 
         observed: list[tuple[bool, torch.Tensor]] = []
         step0_rows = torch.arange(32, dtype=torch.int32).reshape(8, 4)
         indices = torch.tensor([1, 6], dtype=torch.int32)
-        group = MagicMock(world_size=2, rank_in_group=0)
-
-        def all_reduce(rows):
-            expected_contribution = torch.stack([step0_rows[1], torch.zeros(4, dtype=torch.int32)])
-            torch.testing.assert_close(rows, expected_contribution)
-            return step0_rows[indices]
-
-        group.all_reduce.side_effect = all_reduce
 
         def forward(**kwargs):
             if not observed:
-                if dsa_cp:
-                    buffer[:4].copy_(step0_rows[:4])
-                else:
-                    buffer.copy_(step0_rows)
+                buffer.copy_(step0_rows)
             observed.append((impl.skip_topk, buffer.clone()))
             return kwargs["hidden_states"].clone()
 
         proposer.model = MagicMock(side_effect=forward)
         proposer.model.model = predictor
+        # The reduce-sample branch was removed; step 0 now goes through
+        # compute_logits + _sample_draft_from_logits, so compute_logits must
+        # return a real tensor for logits.argmax to produce token ids.
+        proposer.model.compute_logits = lambda hidden: torch.zeros((hidden.shape[0], 4), dtype=torch.float32)
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer.ascend_utils, "enable_dsa_cp", return_value=dsa_cp),
-            patch.object(llm_base_proposer, "get_tp_group", return_value=group),
-            patch.object(
-                llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace(enable_reduce_sample=True)
-            ),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace()),
             patch("vllm.forward_context._forward_context", SimpleNamespace(moe_layer_index=0)),
         ):
             result = proposer._run_merged_draft(
@@ -4333,26 +4373,21 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
             )
         self.assertEqual(result.shape, (2, 2))
         self.assertEqual(len(observed), 2)
-        if dsa_cp:
-            group.all_reduce.assert_called_once()
-        return observed, step0_rows, indices
+        return observed, step0_rows, indices, impl
 
     def test_run_merge_draft_mtp_skip_topk(self):
-        observed, original, indices = self._run_index_sharing_draft()
+        observed, original, indices, impl = self._run_index_sharing_draft()
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1][:2], original[indices])
+        impl.compact_lim_topk_metadata.assert_called_once_with(indices)
 
     def test_run_merge_draft_mtp_skip_topk_without_compact(self):
-        observed, original, _ = self._run_index_sharing_draft(supports_compact=False)
+        observed, original, _, _ = self._run_index_sharing_draft(supports_compact=False)
         self.assertEqual([skip for skip, _ in observed], [False, True])
         torch.testing.assert_close(observed[1][1], original)
-
-    def test_run_merge_draft_mtp_dsa_cp_compacts_remote_rows(self):
-        observed, original, indices = self._run_index_sharing_draft(dsa_cp=True)
-        self.assertEqual([skip for skip, _ in observed], [False, True])
-        torch.testing.assert_close(observed[1][1][:2], original[indices])
 
     def test_run_merge_draft_mtp_sharing_disabled(self):
-        observed, original, _ = self._run_index_sharing_draft(share=False)
+        observed, original, _, impl = self._run_index_sharing_draft(share=False)
         self.assertEqual([skip for skip, _ in observed], [False, False])
         torch.testing.assert_close(observed[1][1], original)
+        impl.compact_lim_topk_metadata.assert_not_called()

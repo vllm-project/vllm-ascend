@@ -4,8 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole, KVConnectorTransferResults
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakeBaseConnector,
     MooncakeConnector,
@@ -25,6 +26,19 @@ def make_facade() -> MooncakeBaseConnector:
 
 def test_mooncake_connector_aliases_pull_connector() -> None:
     assert MooncakeConnector is MooncakePullConnector
+
+
+def test_loaded_group_ids_hook_is_version_gated() -> None:
+    assert "get_loaded_kv_cache_group_ids" in MooncakeBaseConnector.__dict__
+
+
+def test_loaded_group_ids_returns_transfer_groups() -> None:
+    # A P/D transfer restores the request's own blocks, so the scheduler must
+    # skip zeroing (and SWA replay) for every transfer group, not only the
+    # prefix-cacheable ones.
+    connector = make_facade()
+    connector._kv_cache_config = SimpleNamespace(transfer_group_ids=(0, 2))  # type: ignore[attr-defined]
+    assert connector.get_loaded_kv_cache_group_ids(MagicMock()) == (0, 2)
 
 
 def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None:
@@ -58,6 +72,10 @@ def test_facade_delegates_scheduler_methods() -> None:
 def test_facade_delegates_worker_methods_and_metadata() -> None:
     connector = make_facade()
     connector.connector_worker.get_finished.return_value = ({"sent"}, {"received"})
+    results = KVConnectorTransferResults(
+        finished_sending={"sent"}, finished_recving={"received", "failed"}, failed_recving={"failed"}
+    )
+    connector.connector_worker.get_transfer_results.return_value = results
     connector.connector_worker.get_block_ids_with_load_errors.return_value = {10}
     connector.connector_worker.xfer_handshake_metadata = MagicMock()
     connector._connector_metadata.requests["request"] = MagicMock()
@@ -66,6 +84,8 @@ def test_facade_delegates_worker_methods_and_metadata() -> None:
     connector.start_load_kv(MagicMock())
 
     assert connector.get_finished(set()) == ({"sent"}, {"received"})
+    assert connector.get_transfer_results(set()) is results
+    connector.connector_worker.get_transfer_results.assert_called_once_with()
     assert connector.get_block_ids_with_load_errors() == {10}
     assert connector.get_handshake_metadata() is connector.connector_worker.xfer_handshake_metadata
     connector.connector_worker.start_load_kv.assert_called_once_with(connector._connector_metadata)
@@ -84,12 +104,14 @@ def test_pull_connector_selects_implementation_by_role() -> None:
 
     with (
         patch.object(MooncakeBaseConnector, "__init__", initialize_base),
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector.MooncakePullConnectorScheduler",
+        patch.object(
+            connector_module,
+            "MooncakePullConnectorScheduler",
             return_value=MagicMock(),
         ) as scheduler_cls,
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector.MooncakePullConnectorWorker",
+        patch.object(
+            connector_module,
+            "MooncakePullConnectorWorker",
             return_value=MagicMock(),
         ) as worker_cls,
     ):

@@ -8,6 +8,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.worker import mamba_utils
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
@@ -24,12 +26,23 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             kv_cache_config=kv_cache_config,
         )
 
+        transfer = vllm_config.kv_transfer_config
+        self._requires_full_dspark_prompt = (
+            uses_sfa_dspark_kv_transfer(vllm_config) and transfer.is_kv_producer and not transfer.is_kv_consumer
+        )
+        self._dspark_prefix_provider_index: int | None = None
+        if self._requires_full_dspark_prompt:
+            self.configure_dspark_prefix_cache(vllm_config)
+
         self._all_support_hma = all(supports_hma(c) for c in self._connectors)
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
         self._mamba_copy_bufs = None
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind a layerwise child connector.
+        self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = any(
             getattr(
                 connector,
@@ -38,6 +51,24 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             )
             for connector in self._connectors
         )
+
+        self.requires_mamba_state_copy_after_load = any(
+            getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
+        )
+
+    def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
+        """Select a store that restores both target and persistent draft KV."""
+        providers = []
+        for index, connector in enumerate(self._connectors):
+            configure = getattr(connector, "configure_dspark_prefix_cache", None)
+            if callable(configure) and configure(vllm_config):
+                providers.append(index)
+        if len(providers) > 1:
+            raise ValueError("DSpark prefix reuse requires exactly one paired target/draft store")
+        self._dspark_prefix_provider_index = providers[0] if providers else None
+        if providers:
+            self._requires_full_dspark_prompt = False
+        return bool(providers)
 
     def _configure_layerwise_reuse_completion(self) -> None:
         # Producers that report when a shared physical KV slot is safe to reuse.
@@ -67,6 +98,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         for provider in self._layerwise_slot_release_providers:
             provider.wait_for_layer_reuse(layer_idx)
 
+    def shutdown(self) -> None:
+        # Release provider waits before joining the store's receive threads.
+        self._connectors[:] = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
+        super().shutdown()
+
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Observe child completion without advancing their layer cursors."""
+        for connector in self._connectors:
+            wait_ready = getattr(connector, "wait_for_layer_load_ready", None)
+            if wait_ready is not None:
+                wait_ready(layer_name)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if getattr(self, "_external_slot_release_sink_configured", False):
             # AscendStore owns the layer-entry reuse wait after accepting the
@@ -83,21 +126,36 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 copy_bufs,
                 layer_name,
             )
+        # Mamba state copy runs after every child connector finished this
+        # layer's load so the copy never reads half-loaded state. The model
+        # state no-ops for non-mamba layers and for already-copied layers.
+        if (mamba_state := getattr(self, "_mamba_state", None)) is not None:
+            mamba_state.do_mamba_copy_for_layer(layer_name)
 
-    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+    def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
+        """Take over the mamba align pre-copy for this step.
+
+        The V1 model runner passes its mamba copy buffers; the V2 model runner
+        passes its mamba hybrid model state. Returns True when any child
+        connector executes per-layer copies from its ``wait_for_layer_load``;
+        see ``AscendStoreConnector.prepare_mamba_state_copy``.
+        """
         if not self.requires_mamba_state_copy_after_layer_load:
             return False
-        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
-        self._mamba_copy_bufs = copy_bufs
+        if hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
+            self._mamba_state = mamba_state_or_copy_bufs
+        else:
+            mamba_utils.prepare_mamba_copy_by_layer(mamba_state_or_copy_bufs)
+            self._mamba_copy_bufs = mamba_state_or_copy_bufs
         return True
 
     def finish_mamba_state_copy(self) -> None:
-        if self._mamba_copy_bufs is None:
-            return
-        try:
-            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
-        finally:
-            self._mamba_copy_bufs = None
+        if self._mamba_copy_bufs is not None:
+            try:
+                mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+            finally:
+                self._mamba_copy_bufs = None
+        self._mamba_state = None
 
     def save_kv_layer(
         self,
@@ -143,6 +201,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        # A target-only child cannot initialize the skipped draft context.
+        if getattr(self, "_requires_full_dspark_prompt", False):
+            return 0, False
+        provider_index = getattr(self, "_dspark_prefix_provider_index", None)
+        if provider_index is not None:
+            tokens, load_async = self._connectors[provider_index].get_num_new_matched_tokens(
+                request, num_computed_tokens
+            )
+            if tokens is not None and tokens > 0:
+                self._requests_to_connector[request.request_id] = provider_index
+            return tokens, load_async
+
         # Recompute offload may contain an unhashed partial block that other
         # prefix-cache connectors cannot restore. Give its request state
         # priority regardless of connector ordering.

@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFAPCPDCPImpl, AscendSFAPCPImpl
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +41,7 @@ def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, sl
     for slot, value in zip(slots.tolist(), values):
         if slot >= 0:
             expected[1 + slot // block_size, slot % block_size, 0] = value
-    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=dim, kv_a_layernorm=lambda x: x)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=dim, kv_a_layernorm=lambda x: x, enable_sparse_sfa_c8=False)
     native = sparse_mla.torch_npu.npu_scatter_nd_update_
     with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
         result = AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
@@ -55,7 +58,7 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
     cache = torch.zeros(2, 4, 1, 8, dtype=torch.bfloat16)
     values = torch.randn(2, 8, dtype=torch.float32)
     slots = torch.tensor([1, 4, 7], dtype=torch.int32)
-    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x, enable_sparse_sfa_c8=False)
     AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
     expected = torch.zeros_like(cache)
     expected[0, 1, 0] = values[0].to(cache.dtype)
@@ -69,7 +72,7 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
     before = backing.clone()
     values = torch.randn(1, 8)
     slots = torch.tensor([4], dtype=torch.int32)
-    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x, enable_sparse_sfa_c8=False)
     with (
         patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_") as scatter,
         pytest.raises(RuntimeError, match="view size is not compatible"),
@@ -105,6 +108,39 @@ class _RecordingIndexer:
 
 def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+
+
+def _dynamic_int8_block_quant(values, *, dst_type, row_block_size, col_block_size):
+    assert dst_type == torch.int8
+    assert row_block_size == 1
+    assert col_block_size == 128
+    tiles = values.float().reshape(*values.shape[:-1], -1, col_block_size)
+    scale = tiles.abs().amax(dim=-1).clamp_min(1e-12) / 127
+    quantized = (tiles / scale.unsqueeze(-1)).round().clamp(-127, 127).to(torch.int8)
+    return quantized.reshape(values.shape), scale
+
+
+def _pack_nope_int8(values):
+    quantized, scales = _dynamic_int8_block_quant(values, dst_type=torch.int8, row_block_size=1, col_block_size=128)
+    return torch.cat((quantized, scales.contiguous().view(torch.int8)), dim=-1)
+
+
+def _unpack_nope_int8(cache):
+    scales = cache[..., 512:].contiguous().view(torch.float32)
+    values = cache[..., :512].reshape(*cache.shape[:-1], 4, 128).float()
+    return (values * scales.unsqueeze(-1)).reshape(*cache.shape[:-1], 512)
+
+
+def _reference_quantized_sparse_attention(**kwargs):
+    assert kwargs["rope_head_dim"] == 0
+    assert kwargs["key"].dtype == torch.int8
+    assert kwargs["key"].shape[-1] == 528
+    assert kwargs["key_quant_mode"] == kwargs["value_quant_mode"] == 2
+    assert kwargs["quant_scale_repo_mode"] == 1
+    assert kwargs["tile_size"] == 128
+    assert kwargs["key"] is kwargs["value"]
+    cache = _unpack_nope_int8(kwargs["key"])
+    return _reference_sparse_attention(**dict(kwargs, key=cache, value=cache, query_rope=None, key_rope=None))
 
 
 def _reference_sparse_attention(**kwargs):
@@ -144,14 +180,15 @@ def _reference_sparse_attention(**kwargs):
 
 @pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize("empty_rope_handle", [False, True])
-def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, empty_rope_handle) -> None:
+@pytest.mark.parametrize("enable_c8", [False, True])
+def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, empty_rope_handle, enable_c8) -> None:
     torch.manual_seed(7)
     num_tokens = 3
     padded_tokens = 4
     hidden_dim = 5
     num_heads = 2
     q_nope_dim = 4
-    latent_dim = 8
+    latent_dim = 512 if enable_c8 else 8
     value_dim = 3
     output_dim = 4
 
@@ -170,6 +207,8 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     if graph_mode:
         indices = torch.cat((indices, torch.full_like(indices[:1], -1)))
     initial_cache = torch.randn(5, 1, 1, latent_dim)
+    if enable_c8:
+        initial_cache = _pack_nope_int8(initial_cache)
     kv_cache: tuple[torch.Tensor, ...] = (initial_cache.clone(),)
     if empty_rope_handle:
         kv_cache = (*kv_cache, torch.empty(5, 1, 1, 0))
@@ -211,13 +250,45 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
 
     indexer.head_dim = latent_dim
     indexer.enable_sparse_li_c8 = False
-    config = SimpleNamespace(kv_transfer_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    ascend_config = SimpleNamespace(enable_sparse_sfa_c8=False, enable_mlapo=False)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        kv_transfer_config=None,
+        weight_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        # Since #17448 the packed SFA C8 dtype comes from the cache_dtype CLI
+        # field; indexer_kv_dtype now only drives the LI C8 indexer cache.
+        # "int8" is what this test packs and what
+        # _reference_quantized_sparse_attention asserts.
+        cache_config=SimpleNamespace(cache_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+    )
+    ascend_config = SimpleNamespace(
+        enable_sparse_sfa_c8=enable_c8,
+        enable_sparse_sfa_turboquant=False,
+        enable_mlapo=False,
+        rl_config=SimpleNamespace(enabled=False),
+    )
+    kv_norm = SimpleNamespace(weight=torch.ones(latent_dim), variance_epsilon=1e-6) if enable_c8 else _rms_norm
     with (
         patch.object(sparse_mla, "get_current_vllm_config", return_value=config),
         patch.object(sparse_mla, "get_ascend_config", return_value=ascend_config),
+        # `AscendSFAImpl.__init__` asks `vllm_ascend.utils` whether RL pushes
+        # weights into the live model, and that module holds its own reference
+        # to the config singleton, so patching the `sfa_v1` name alone leaves
+        # the predicate reading the real (uninitialised) config.
+        patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
         patch.object(sparse_mla, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(sparse_mla, "enable_sp", return_value=False),
+        patch.object(
+            sparse_mla,
+            "get_current_hardware_profile",
+            return_value=SimpleNamespace(
+                device_adaptor_family=sparse_mla.DeviceAdaptorFamily.STANDARD, supports=lambda capability: False
+            ),
+        ),
     ):
         impl = AscendSFAImpl(
             q_lora_rank=latent_dim,
@@ -236,7 +307,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             logits_soft_cap=None,
             attn_type=None,
             kv_sharing_target_layer_name=None,
-            kv_a_layernorm=_rms_norm,
+            kv_a_layernorm=kv_norm,
             layer_name="model.layers.0.self_attn",
             fused_qkv_a_proj=fused_qkv,
             q_a_layernorm=_rms_norm,
@@ -265,14 +336,24 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             side_effect=_reference_sparse_attention,
             create=True,
         ) as sparse_attention,
-        patch.object(sparse_mla, "record_attention_compute_start"),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_flash_attention_vllm",
+            side_effect=_reference_quantized_sparse_attention,
+            create=True,
+        ) as quantized_sparse_attention,
+        patch.object(sparse_mla, "attention_transfer_window"),
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
         patch.object(
             sparse_mla,
             "torch_npu",
-            SimpleNamespace(npu_scatter_nd_update_=sparse_mla.torch_npu.npu_scatter_nd_update_),
+            SimpleNamespace(
+                npu_scatter_nd_update_=sparse_mla.torch_npu.npu_scatter_nd_update_,
+                npu_rms_norm=lambda x, gamma, epsilon: (_rms_norm(x, epsilon) * gamma, None),
+                npu_dynamic_block_quant=_dynamic_int8_block_quant,
+            ),
         ),
     ):
         actual = AscendSFAImpl.forward(
@@ -285,17 +366,21 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         )
 
     real_hidden = hidden_states[:num_tokens]
-    expected_qkv = real_hidden @ fused_weight
+    # Graph mode projects the full padded batch; preserve its FP32 rounding
+    # when checking the packed scale bytes exactly.
+    projected_hidden = hidden_states if graph_mode else real_hidden
+    expected_qkv = (projected_hidden @ fused_weight)[:num_tokens]
     expected_q_c = _rms_norm(expected_qkv[:, :latent_dim])
     expected_kv = _rms_norm(expected_qkv[:, latent_dim:])
     expected_cache = initial_cache.clone()
-    expected_cache[slot_mapping[:num_tokens], 0, 0] = expected_kv
+    expected_cache[slot_mapping[:num_tokens], 0, 0] = _pack_nope_int8(expected_kv) if enable_c8 else expected_kv
+    reference_cache = _unpack_nope_int8(expected_cache) if enable_c8 else expected_cache
     expected_q_nope = (expected_q_c @ q_weight).view(-1, num_heads, q_nope_dim)
     expected_query = torch.einsum("thd,hdl->thl", expected_q_nope, uk_weight)
     expected_latent = _reference_sparse_attention(
         query=expected_query,
-        key=expected_cache,
-        value=expected_cache,
+        key=reference_cache,
+        value=reference_cache,
         sparse_indices=indices[:num_tokens],
         scale_value=impl.scale,
         sparse_block_size=1,
@@ -317,10 +402,12 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     expected_o_input = torch.zeros(padded_tokens, num_heads * value_dim)
     expected_o_input[:num_tokens] = expected_values
     expected_output = expected_o_input @ output_weight
+    if not graph_mode:
+        # Eager writes only the active output view; padding stays untouched.
+        expected_output[num_tokens:] = 123.0
 
     assert actual is output
     torch.testing.assert_close(actual, expected_output)
-    torch.testing.assert_close(actual[num_tokens:], torch.zeros(1, output_dim))
     torch.testing.assert_close(kv_cache[0], expected_cache)
     assert fused_qkv.calls[0][0].shape[0] == (padded_tokens if graph_mode else num_tokens)
     assert indexer.call is not None
@@ -329,9 +416,16 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     torch.testing.assert_close(indexer.call[2][:num_tokens], real_hidden)
     assert indexer.call[3] is indexer_metadata
     assert indexer.call[4] is True
+    expected_o_rows = padded_tokens if graph_mode else num_tokens
+    torch.testing.assert_close(output_proj.calls[0][0], expected_o_input[:expected_o_rows])
     assert output_proj.calls[0][1] == {}
 
-    kwargs = sparse_attention.call_args.kwargs
+    if enable_c8:
+        sparse_attention.assert_not_called()
+        kwargs = quantized_sparse_attention.call_args.kwargs
+    else:
+        quantized_sparse_attention.assert_not_called()
+        kwargs = sparse_attention.call_args.kwargs
     torch.testing.assert_close(kwargs["query"][:num_tokens], expected_query)
     torch.testing.assert_close(kwargs["key"], expected_cache)
     torch.testing.assert_close(kwargs["actual_seq_lengths_query"], torch.tensor([2, 3], dtype=torch.int32))
@@ -340,3 +434,83 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     assert latent_dim != value_dim
     assert expected_values.shape[-1] == num_heads * value_dim
     assert metadata.smla_metadata is None
+
+
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("actual_tokens", [0, 1, 3])
+@pytest.mark.parametrize(
+    "impl_cls,sharded_decode,global_prefill",
+    [(AscendSFAPCPImpl, False, True), (AscendSFAPCPImpl, True, False), (AscendSFAPCPDCPImpl, False, True)],
+)
+def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
+    impl_cls, sharded_decode, global_prefill, actual_tokens, graph_mode
+):
+    """Run the real forward entry; PCP peers need the same padded row count."""
+    impl = impl_cls.__new__(impl_cls)
+    impl._parallel_o_proj = SimpleNamespace(batch=lambda **kwargs: nullcontext(), uses_full_weight=False)
+    impl.qk_rope_head_dim = 0
+    impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=2))
+    impl.is_pcp_decode_sharded = sharded_decode
+    impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.q_lora_rank = impl.kv_lora_rank = impl.v_head_dim = 2
+    impl.local_num_heads = 1
+    impl.preprocess_type = PreprocessType.NATIVE
+    impl.g_proj = impl.layerwise_kv_cache_hook = None
+    impl.has_indexer = True
+    impl.skip_topk = impl.use_index_cache = False
+    impl.layer_name = "layer"
+    impl._is_mtp_layer = False
+    hidden = torch.ones(4, 2)
+    metadata = SimpleNamespace(
+        cos=None,
+        sin=None,
+        num_actual_tokens=actual_tokens,
+        num_input_tokens=4,
+        uses_pcp_sharded_layout=True,
+        slot_mapping=torch.tensor([0, 1, 2, -1]),
+        pcp_has_global_prefill=global_prefill,
+        attn_state=AscendAttentionState.ChunkedPrefill if global_prefill else AscendAttentionState.DecodeOnly,
+        num_prefills=int(global_prefill and actual_tokens > 0),
+    )
+    impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
+    impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
+    impl._get_indexer_attn_metadata = MagicMock(return_value=object())
+    impl._get_parallel_forward_context = MagicMock(
+        return_value=SimpleNamespace(
+            actual_seq_lengths_query=torch.tensor([actual_tokens]),
+            actual_seq_lengths_key=torch.tensor([actual_tokens]),
+            kv_slot_mapping=metadata.slot_mapping,
+            topk_num_tokens=4,
+        )
+    )
+    impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
+    impl.q_a_layernorm = lambda value: value
+    impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
+    impl._store_parallel_kv = MagicMock(return_value=(None, None))
+    impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
+    impl._record_query_gather_context = MagicMock()
+    impl._prepare_indexer_metadata = MagicMock()
+    impl.indexer = MagicMock(return_value=torch.zeros(4, 1, 1, dtype=torch.int32))
+    impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(4, 2))
+    impl._v_up_proj = lambda value: value
+    impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
+    with (
+        patch.object(
+            sparse_mla, "get_forward_context", return_value=SimpleNamespace(cudagraph_runtime_mode=graph_mode)
+        ),
+        patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
+        patch.object(sparse_mla, "notify_kv_cache_written"),
+        patch.object(sparse_mla, "attention_transfer_window"),
+        patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
+    ):
+        output = torch.empty_like(hidden)
+        assert impl.forward("layer", hidden, (), metadata, output) is output
+    impl._get_parallel_forward_context.assert_called_once()
+    assert impl._get_parallel_forward_context.call_args.args[1] == 4
+    assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
+    impl._store_parallel_kv.assert_called_once()
+    impl._finalize_o_proj.assert_called_once()
+    assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
+    assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
+    assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
+    torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))

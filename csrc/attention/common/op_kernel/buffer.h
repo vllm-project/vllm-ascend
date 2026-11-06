@@ -188,6 +188,11 @@ public:
         }
     }
 
+    __aicore__ inline void SetCrossCoreID(uint32_t forwardId, uint32_t backwardId) {
+        id0_ = forwardId;
+        id1_ = backwardId;
+    }
+
     template<HardEvent EventType>
     __aicore__ inline TEventID GetEventID() {
         if ASCEND_IS_AIC {

@@ -1,0 +1,81 @@
+name: Recipes Preview
+
+# Reuse vllm-project/recipes for preview builds, cleanup, and production sync.
+# Enable only after its receiver routes events by source; the original receiver
+# treats every preview-pr event as a vLLM PR, even if a source is supplied.
+#
+# pull_request_target allows fork PRs to use the dispatch App. Never check out
+# or run PR code here. Only a fixed source name and a validated PR number leave
+# this workflow. Keep the App key in the main-only recipes-preview environment.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - 'recipes/**/*.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'recipes/**/*.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recipes-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'vllm-project/vllm-ascend' &&
+      vars.RECIPES_PREVIEW_ENABLED == 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    timeout-minutes: 5
+    environment:
+      name: recipes-preview
+      url: >-
+        ${{ github.event_name == 'push' && 'https://recipes.vllm.ai' ||
+        (github.event.action != 'closed' &&
+        format('https://vllm-recipes-git-preview-vllm-ascend-pr-{0}-inferact-inc.vercel.app', github.event.pull_request.number) ||
+        '') }}
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+      - name: Create a token for vllm-project/recipes
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        env:
+          # Job containers inherit the runner's proxy settings.
+          NODE_USE_ENV_PROXY: '1'
+        with:
+          app-id: ${{ vars.RECIPES_APP_ID }}
+          private-key: ${{ secrets.RECIPES_APP_PRIVATE_KEY }}
+          owner: vllm-project
+          repositories: recipes
+          permission-contents: write
+
+      - name: Dispatch to vllm-project/recipes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Send JSON directly for older gh versions without nested field support.
+          if [ "$EVENT" = push ]; then
+            printf '%s\n' '{"event_type":"recipes-updated","client_payload":{"source":"vllm-ascend"}}' |
+              gh api --method POST repos/vllm-project/recipes/dispatches \
+                -H 'Content-Type: application/json' --input -
+            exit 0
+          fi
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid PR number: $PR"; exit 1; }
+          printf '{"event_type":"preview-pr","client_payload":{"source":"vllm-ascend","pr":%s}}\n' "$PR" |
+            gh api --method POST repos/vllm-project/recipes/dispatches \
+              -H 'Content-Type: application/json' --input -

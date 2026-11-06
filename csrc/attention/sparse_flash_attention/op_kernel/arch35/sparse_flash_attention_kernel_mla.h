@@ -105,6 +105,7 @@ private:
     __gm__ int32_t *actualSeqQlenAddr = nullptr;
 
     GlobalTensor<int32_t> actualSeqLengthsQGm;
+    GlobalTensor<int32_t> sparseIndicesGm;
     uint32_t usedCoreNum = 0U;
 
     GlobalTensor<int32_t> oriTopkLengthGm;
@@ -156,6 +157,7 @@ template <typename CubeBlockType, typename VecBlockType>
         this->aicIdx, constInfo.subBlockIdx, actualSeqLengthsQ, actualSeqLengths);
     if ASCEND_IS_AIV {
         constInfo.bSize = this->sharedParams.bSize;
+        constInfo.n2Size = this->sharedParams.n2Size;
         constInfo.gSize = this->sharedParams.gSize;
         constInfo.s1Size = this->sharedParams.s1Size;
         constInfo.dSizeV = 512;
@@ -334,6 +336,7 @@ void SparseFlashAttentionKernelMla<CubeBlockType, VecBlockType>::InitGlobalBuffe
         actualSeqKvlenAddr = (__gm__ int32_t *)actualSeqLengths;
     }
 
+    sparseIndicesGm.SetGlobalBuffer((__gm__ int32_t *)sparseIndices);
     vecBlock.InitGlobalBuffer(key, value, keyRope, sparseIndices, blockTable, softmaxMax, softmaxSum);
     cubeBlock.InitCubeInput(key, keyRope, sparseIndices, blockTable, actualSeqLengthsQ, constInfo);
 }
@@ -570,6 +573,29 @@ __aicore__ inline void SparseFlashAttentionKernelMla<CubeBlockType, VecBlockType
                 // s1和s2有任意一个不需要算, 则continue, 如果是当前核最后一次循环，则补充计算taskIdx+2的部分
                 bool s2NoNeedCalc =
                     ComputeS2LoopInfo<TEMPLATE_INTF_ARGS>(runParam, this->constInfo);
+                if (!s1NoNeedCalc && !s2NoNeedCalc && sharedParams.returnSoftmaxLse && constInfo.sparseMode == 0) {
+                    // Valid indices form a prefix. DCP can leave fewer selected
+                    // tokens than min(local KV length, sparse index capacity).
+                    int64_t queryOffset = runParam.boIdx * constInfo.s1Size;
+                    if constexpr (LAYOUT_T == SFA_LAYOUT::TND) {
+                        queryOffset = runParam.boIdx == 0 ? 0 : actualSeqQlenAddr[runParam.boIdx - 1];
+                    }
+                    int64_t indexOffset = (queryOffset + runParam.s1oIdx) * constInfo.sparseBlockCount;
+                    int64_t first = 0;
+                    int64_t last = runParam.s2LineEndIdx;
+                    while (first < last) {
+                        int64_t middle = first + (last - first) / 2;
+                        if (sparseIndicesGm.GetValue(indexOffset + middle) >= 0) {
+                            first = middle + 1;
+                        } else {
+                            last = middle;
+                        }
+                    }
+                    runParam.s2LineEndIdx = first;
+                    runParam.kvLoopEndIdx = (first + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
+                    runParam.s2LoopEndIdx = runParam.kvLoopEndIdx;
+                    s2NoNeedCalc = first == 0;
+                }
                 if (s1NoNeedCalc || s2NoNeedCalc) {
                     continue;
                 }

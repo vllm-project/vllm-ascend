@@ -29,6 +29,7 @@ from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_gro
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
+from .methods.base import PreparedLinearInput
 
 # vLLM's typed parameter classes take these through their constructor and expose
 # them as read-only properties, so replaying them via set_weight_attrs raises.
@@ -95,6 +96,10 @@ class AscendLinearMethod(LinearMethodBase):
     ) -> None:
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
+
+        self.quant_method.validate_weight_shapes(
+            layer, input_size, output_size, input_size_per_partition, output_partition_sizes
+        )
 
         weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
 
@@ -208,7 +213,7 @@ class AscendLinearMethod(LinearMethodBase):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
@@ -292,6 +297,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
+        self.quant_method.validate_weight_shapes(layer, intermediate_size_per_partition)
+
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size, params_dtype
         )

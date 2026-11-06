@@ -83,7 +83,7 @@ def test_deepseek_v4_mtp_full_decode_only():
             "num_speculative_tokens": num_speculative_tokens,
             "method": "mtp",
         },
-        additional_config={"enable_dsa_cp": False},
+        attention_config={"indexer_kv_dtype": "int8"},
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -139,11 +139,13 @@ def test_dspark_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=4096,
+        max_num_seqs=len(prompts),
         tensor_parallel_size=4,
         enable_expert_parallel=True,
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         async_scheduling=True,
+        attention_config={"indexer_kv_dtype": "int8"},
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,

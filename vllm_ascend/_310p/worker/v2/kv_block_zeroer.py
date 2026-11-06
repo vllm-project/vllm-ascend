@@ -15,6 +15,15 @@ if TYPE_CHECKING:
 class AscendKVBlockZeroer310V2(AscendKVBlockZeroer310):
     """Normalize the V2 flat block-size layout without changing V1."""
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.enabled = True
+
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        if not self.enabled:
+            return
+        super().zero_block_ids(block_ids)
+
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],

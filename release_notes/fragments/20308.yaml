@@ -1,0 +1,9 @@
+pr: 20308
+entries:
+  - category: performance
+    text: >-
+      Reduced prefill latency for MiniMax-M3 fused QK normalization, RoPE, and
+      cache insertion on Ascend A3 by reusing normalization weights across
+      tokens. Very small batches may see minor latency regressions.
+    model: minimax-m3
+    hardware: [A3]

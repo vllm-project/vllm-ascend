@@ -3,10 +3,25 @@
 
 import sys
 import types
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+from vllm.config import ParallelConfig
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import KVConnectorOutput
+
+from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -20,7 +35,11 @@ for _module_name in list(sys.modules):
 for _module_name in _to_remove:
     _saved_modules[_module_name] = sys.modules.pop(_module_name)
 
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec  # noqa: E402
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload import (  # noqa: E402
+    manager as preempt_manager,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager import (  # noqa: E402
     PreemptedRequestState,
     PreemptOffloadScheduler,
@@ -28,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.mana
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (  # noqa: E402
     INVALID_JOB_ID,
+    MambaConvLoadMeta,
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
@@ -35,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.pree
     PreemptOffloadConnectorV1,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker import (  # noqa: E402
+    MambaConvCacheBinding,
     PreemptOffloadWorker,
 )
 
@@ -62,6 +83,7 @@ def test_preempt_offload_connector_metadata_defaults_are_empty():
     assert metadata.preempt_load_event == INVALID_JOB_ID
     assert metadata.preempt_load_gpu_blocks == []
     assert metadata.preempt_load_cpu_blocks == []
+    assert metadata.preempt_load_mamba_conv == []
     assert metadata.preempt_load_event_to_reqs == {}
 
 
@@ -153,6 +175,7 @@ def test_preempt_offload_connector_capacity_priority():
 
 def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempted_req_states = {}
     scheduler._cleanup_preempt_cache_request = MagicMock()
     request = SimpleNamespace(request_id="req-1", num_tokens=10)
@@ -178,6 +201,7 @@ def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states()
 
 def test_preempt_offload_connector_scheduler_update_state_after_alloc_errors():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._prepare_preempt_load_after_alloc = MagicMock(return_value=False)
     request = SimpleNamespace(request_id="req-1")
     blocks = MagicMock()
@@ -198,6 +222,7 @@ def test_preempt_offload_connector_scheduler_update_state_after_alloc_errors():
 
 def test_preempt_offload_connector_scheduler_aligns_sliding_window_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True, False]
 
     assert scheduler._align_group_block_ids(0, [7, 8], 4) == [0, 0, 7, 8]
@@ -211,10 +236,11 @@ def test_preempt_offload_connector_scheduler_aligns_sliding_window_blocks():
     assert scheduler._align_group_block_ids(0, [7, 8], 0) == []
 
 
-def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
+def test_preempt_offload_connector_cpu_config_uses_single_layer_tensor_layout():
     gpu_tensor = SimpleNamespace(
         size=1024,
-        shared_by=["layer.0"],
+        layers=["layer.0"],
+        layer_stride=0,
         offset=32,
         block_stride=64,
     )
@@ -225,10 +251,6 @@ def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
     )
 
     with (
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
-            return_value=True,
-        ),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
@@ -251,13 +273,14 @@ def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
     assert cpu_config.kv_cache_groups == ["group"]
     assert vars(cpu_config.kv_cache_tensors[0]) == {
         "size": 512,
-        "shared_by": ["layer.0"],
+        "layers": ["layer.0"],
+        "layer_stride": 0,
         "offset": 32,
         "block_stride": 64,
     }
 
 
-def test_preempt_offload_connector_cpu_config_uses_v029_tensor_layout():
+def test_preempt_offload_connector_cpu_config_preserves_layer_stride():
     gpu_tensor = SimpleNamespace(
         size=1024,
         layers=["layer.0"],
@@ -272,10 +295,6 @@ def test_preempt_offload_connector_cpu_config_uses_v029_tensor_layout():
     )
 
     with (
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
-            return_value=False,
-        ),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
@@ -320,10 +339,6 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
 
     with (
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
-            return_value=False,
-        ),
-        patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
         ),
@@ -348,10 +363,11 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
 
 def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
     )
     scheduler.enable_offload_prefix_caching = False
     scheduler._pending_hash_blocks = {}
@@ -383,10 +399,11 @@ def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
 
 def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
     )
     scheduler._gpu_block_pool = SimpleNamespace(blocks={30: "gpu30", 31: "gpu31"}, touch=MagicMock())
     scheduler._preempted_req_states = {
@@ -415,10 +432,11 @@ def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_block
 
 def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [False]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
     )
     scheduler._gpu_block_pool = SimpleNamespace(
         blocks={10: "gpu10", 11: "gpu11", 12: "gpu12"},
@@ -446,8 +464,169 @@ def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
     assert state.load_transfer_meta == TransferMeta([10, 11, 12], [1, 2, 3])
 
 
+def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
+    scheduler.num_spec_tokens = 3
+    scheduler._group_is_mamba = [True]
+    scheduler._group_has_mamba_conv = [True]
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([101, 102, 103, 104],),
+            num_computed_tokens=20,
+            store_transfer_meta=TransferMeta(
+                [201, 202, 203, 204],
+                [101, 102, 103, 104],
+            ),
+            load_start_tokens=0,
+            ready=True,
+        )
+    }
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={50: "gpu50"},
+        touch=MagicMock(),
+    )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False),
+            )
+        ]
+    )
+    return scheduler
+
+
+def test_preempt_offload_connector_scheduler_classifies_mamba_conv_groups():
+    linear_spec = MambaSpec(
+        block_size=16,
+        shapes=((8, 128, 128),),
+        dtypes=(torch.float32,),
+        mamba_type=MambaAttentionBackendEnum.LINEAR,
+    )
+    gdn_spec = MambaSpec(
+        block_size=16,
+        shapes=((6, 128), (8, 128, 128)),
+        dtypes=(torch.float32, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=linear_spec),
+            SimpleNamespace(kv_cache_spec=gdn_spec),
+        ]
+    )
+
+    assert PreemptOffloadScheduler._get_group_has_mamba_conv(kv_cache_config) == [
+        False,
+        True,
+    ]
+
+
+def test_preempt_offload_connector_scheduler_h2d_mamba_align_target():
+    scheduler = _make_ready_mamba_scheduler()
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=20),
+        ([0, 0, 0, 50, 51, 52, 53],),
+        num_external_tokens=20,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [103])
+    assert state.load_mamba_conv_meta == [
+        MambaConvLoadMeta(
+            gpu_block_id=50,
+            cpu_block_id=101,
+            source_offset=2,
+        )
+    ]
+    scheduler._gpu_block_pool.touch.assert_called_once_with(["gpu50"])
+
+
+def test_preempt_offload_connector_scheduler_h2d_mamba_none_target():
+    scheduler = _make_ready_mamba_scheduler()
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=20),
+        ([50, 51, 52, 53],),
+        num_external_tokens=20,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [103])
+    assert state.load_mamba_conv_meta == [
+        MambaConvLoadMeta(
+            gpu_block_id=50,
+            cpu_block_id=101,
+            source_offset=2,
+        )
+    ]
+
+
+def test_preempt_offload_connector_scheduler_h2d_linear_mamba_skips_conv_load():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler._group_has_mamba_conv = [False]
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=20),
+        ([50, 51, 52, 53],),
+        num_external_tokens=20,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [103])
+    assert state.load_mamba_conv_meta == []
+
+
+def test_preempt_offload_connector_scheduler_h2d_mamba_conv_uses_residual_offset_after_boundary():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler._preempted_req_states["req-1"].num_computed_tokens = 17
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=18),
+        ([50, 51, 52, 53],),
+        num_external_tokens=17,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [104])
+    assert state.load_mamba_conv_meta == [
+        MambaConvLoadMeta(
+            gpu_block_id=50,
+            cpu_block_id=101,
+            source_offset=1,
+        )
+    ]
+
+
+def test_preempt_offload_connector_scheduler_h2d_rejects_invalid_mamba_mapping():
+    invalid_cases = [
+        (10, [0, 0, 0, 50, 51, 52, 53]),
+        (20, [50, 51, 52]),
+        (20, [0, 0, 0, 0, 51, 52, 53]),
+    ]
+    for num_tokens, gpu_block_ids in invalid_cases:
+        scheduler = _make_ready_mamba_scheduler()
+        try:
+            scheduler._prepare_preempt_load_after_alloc(
+                SimpleNamespace(request_id="req-1", num_tokens=num_tokens),
+                (gpu_block_ids,),
+                num_external_tokens=20,
+            )
+        except RuntimeError as exc:
+            assert "Invalid recompute H2D Mamba block mapping" in str(exc)
+        else:
+            raise AssertionError("Expected invalid Mamba block mapping")
+
+
 def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._store_event_counter = 4
     scheduler._load_event_counter = 7
     scheduler._preempt_store_event_to_blocks = {}
@@ -468,6 +647,13 @@ def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events
             num_computed_tokens=8,
             store_transfer_meta=TransferMeta([], []),
             load_transfer_meta=TransferMeta([11], [3]),
+            load_mamba_conv_meta=[
+                MambaConvLoadMeta(
+                    gpu_block_id=11,
+                    cpu_block_id=2,
+                    source_offset=1,
+                )
+            ],
             ready=True,
         ),
     }
@@ -482,6 +668,13 @@ def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events
     assert metadata.preempt_load_event == 7
     assert metadata.preempt_load_gpu_blocks == [11]
     assert metadata.preempt_load_cpu_blocks == [3]
+    assert metadata.preempt_load_mamba_conv == [
+        MambaConvLoadMeta(
+            gpu_block_id=11,
+            cpu_block_id=2,
+            source_offset=1,
+        )
+    ]
     assert metadata.preempt_load_event_to_reqs == {7: ["load-req"]}
     assert scheduler._preempted_req_states["store-req"].store_event == 4
     assert scheduler._preempted_req_states["load-req"].load_event == 7
@@ -490,6 +683,7 @@ def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events
 
 def test_preempt_offload_connector_scheduler_update_connector_output_marks_store_ready():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._expected_worker_count = 2
     scheduler._store_event_pending_counts = {}
     scheduler._preempted_req_states = {}
@@ -512,6 +706,7 @@ def test_preempt_offload_connector_scheduler_update_connector_output_marks_store
 
 def test_preempt_offload_connector_scheduler_request_finished_ready_and_pending():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempted_req_states = {
         "ready": PreemptedRequestState(
             req_id="ready",
@@ -552,6 +747,7 @@ def test_preempt_offload_connector_scheduler_request_finished_ready_and_pending(
 
 def test_preempt_offload_connector_scheduler_process_store_event_finishes_pending_req():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     cpu_block = MagicMock()
     cpu_block.block_hash = None
     scheduler.cpu_block_pool = SimpleNamespace(blocks={4: cpu_block})
@@ -579,6 +775,7 @@ def test_preempt_offload_connector_scheduler_process_store_event_finishes_pendin
 
 def test_preempt_offload_connector_scheduler_pending_and_reset_cache_paths():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._store_event_pending_counts = {}
     scheduler._preempt_store_event_to_blocks = {}
     scheduler._preempted_req_states = {}
@@ -611,6 +808,7 @@ def test_preempt_offload_connector_scheduler_pending_and_reset_cache_paths():
 
 def test_preempt_offload_connector_scheduler_cleanup_preempt_load_request():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempt_load_event_to_reqs = {2: ["req-1"]}
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
@@ -639,6 +837,7 @@ def test_preempt_offload_connector_scheduler_cleanup_preempt_load_request():
 
 def test_preempt_offload_connector_scheduler_cleanup_skips_null_cpu_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
             req_id="req-1",
@@ -661,6 +860,7 @@ def test_preempt_offload_connector_worker_metadata_and_empty_transfers():
     worker._connector_metadata = None
     worker._pending_load_event_indices = set()
     worker._submitted_load_event_indices = set()
+    worker._submitted_store_event_indices = {1}
     worker._completed_store_events = {}
     worker._load_events = []
     worker._load_hwm = -1
@@ -686,6 +886,7 @@ def test_preempt_offload_connector_worker_metadata_and_empty_transfers():
 
     worker.clear_connector_metadata()
     assert worker._connector_metadata is None
+    assert worker._submitted_store_event_indices == set()
 
 
 def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
@@ -693,6 +894,7 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
     worker._submit_transfer = MagicMock()
     worker._flush_and_sync_all = MagicMock()
     worker._connector_metadata = None
+    worker._submitted_store_event_indices = set()
     metadata = PreemptOffloadMetadata(
         need_flush=True,
         preempt_store_event=3,
@@ -704,8 +906,9 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
     )
 
     worker.handle_preemptions(metadata)
+    worker.handle_preemptions(metadata)
 
-    worker._flush_and_sync_all.assert_called_once_with()
+    assert worker._flush_and_sync_all.call_count == 2
     worker._submit_transfer.assert_called_once_with(
         [1],
         [2],
@@ -713,6 +916,7 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
         is_store=True,
         sync=True,
     )
+    assert worker._submitted_store_event_indices == {3}
 
     worker._submit_transfer.reset_mock()
     worker.start_load_kv()
@@ -726,7 +930,48 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
         4,
         is_store=False,
         sync=True,
+        mamba_conv_loads=[],
     )
+
+
+@pytest.mark.parametrize("accept_offset", [0, 1, 2, 3])
+def test_preempt_offload_connector_worker_restores_only_conv_history(accept_offset):
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
+    conv_cpu = torch.arange(5 * 12).view(5, 12)
+    conv_gpu = torch.full((6, 12), -1)
+    ssm_cpu = torch.arange(5 * 8).view(5, 8)
+    ssm_gpu = torch.full((6, 8), -7)
+    worker.cpu_kv_caches = {"conv": conv_cpu, "ssm": ssm_cpu}
+    worker.gpu_kv_caches = {"conv": conv_gpu, "ssm": ssm_gpu}
+    worker.mamba_conv_cache_bindings = {"conv": MambaConvCacheBinding((6, 2), torch.int64)}
+    worker.num_spec_tokens = 3
+
+    worker._copy_mamba_conv_loads(
+        [
+            MambaConvLoadMeta(
+                gpu_block_id=4,
+                cpu_block_id=1,
+                source_offset=accept_offset,
+            )
+        ]
+    )
+
+    restored_conv = conv_gpu[4].view(6, 2)
+    source_conv = conv_cpu[1].view(6, 2)
+    torch.testing.assert_close(
+        restored_conv[:3],
+        source_conv[accept_offset : accept_offset + 3],
+    )
+    assert torch.all(restored_conv[3:] == -1)
+    assert torch.all(ssm_gpu == -7)
+
+
+def test_preempt_offload_connector_worker_classifies_mamba_state_roles():
+    spec = SimpleNamespace(mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+    assert PreemptOffloadWorker._is_conv_state(spec, 0) is True
+    assert PreemptOffloadWorker._is_conv_state(spec, 1) is False
+    linear_spec = SimpleNamespace(mamba_type=MambaAttentionBackendEnum.LINEAR)
+    assert PreemptOffloadWorker._is_conv_state(linear_spec, 0) is False
 
 
 def test_preempt_offload_connector_worker_wait_for_layer_load_once():
@@ -754,6 +999,9 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.failed_recving_kv_req_ids = set()
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
+    # vLLM main tracks prefix-replay bookkeeping on the scheduler.
+    scheduler.prefix_replay_tokens = 0
+    scheduler.prefix_replay_group_ids = ()
 
     request = SimpleNamespace(
         request_id="req-1",
@@ -777,11 +1025,14 @@ def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
-
     request = SimpleNamespace(
         request_id="req-1",
         num_computed_tokens=0,
     )
+    # vLLM main tracks prefix-replay bookkeeping on the scheduler and
+    # reads request.num_tokens to decide the full-prompt-hit rewind.
+    scheduler.prefix_replay_tokens = 0
+    request.num_tokens = 8
 
     scheduler._update_waiting_for_remote_kv(request)
 
@@ -789,3 +1040,339 @@ def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
     scheduler.kv_cache_manager.cache_blocks.assert_not_called()
     assert scheduler.failed_recving_kv_req_ids == set()
     assert scheduler.finished_recving_kv_req_ids == set()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("large_scale", [1, 2])
+def test_worker_registers_largest_same_pointer_view(reverse, large_scale):
+    backing = torch.arange(48).to(torch.uint8)
+    small = backing.as_strided((3, 4), (16, 1))
+    large = backing.view(3 * large_scale, 16 // large_scale)
+    caches = {"small": small, "large": large}
+    if reverse:
+        caches = dict(reversed(list(caches.items())))
+    caches["alias"] = small
+    first_name = next(iter(caches))
+    config = SimpleNamespace(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(size=48, layers=list(caches))],
+        kv_cache_groups=[SimpleNamespace(layer_names=list(caches), kv_cache_spec=SimpleNamespace())],
+    )
+    worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.get_kv_cache_tensor_layers", side_effect=lambda t: t.layers),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.cpu_kv_caches is not None
+    assert list(worker.gpu_kv_caches) == [first_name]
+    assert worker.gpu_kv_caches[first_name].shape == large.shape
+    assert worker.gpu_kv_caches[first_name].stride() == large.stride()
+    assert worker.block_size_scale[first_name] == large_scale
+    assert worker.cpu_kv_caches[first_name].shape == large.shape
+    assert worker.cpu_kv_caches[first_name].numel() == 48
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("attention_scale", [1, 9])
+@pytest.mark.parametrize("alias", [False, True])
+def test_worker_keeps_mamba_views_separate_from_attention(reverse, attention_scale, alias):
+    n, page = 3, 144
+    backing = torch.arange(n * page).to(torch.uint8)
+    k = backing.as_strided((n * attention_scale, 8), (page // attention_scale, 1))
+    v = backing.as_strided((n * attention_scale, 8), (page // attention_scale, 1), 8)
+    conv = backing.view(torch.int32).as_strided((n, 6, 4), (36, 4, 1))
+    ssm = backing.view(torch.int32).as_strided((n, 3, 4), (36, 4, 1), 24)
+    caches: dict[str, torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]] = {
+        "attn": (k, v),
+        "mamba": (conv, ssm),
+    }
+    if alias:
+        caches["mamba_alias"] = (conv.as_strided(conv.shape, conv.stride()), ssm.as_strided(ssm.shape, ssm.stride()))
+    if reverse:
+        caches = dict(reversed(list(caches.items())))
+    mamba_names = [name for name in caches if name.startswith("mamba")]
+    first_mamba = mamba_names[0]
+    # Empty RoPE caches must not enter pointer deduplication.
+    caches["empty_rope"] = torch.empty(n, 0)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((6, 4), (3, 4)),
+        dtypes=(torch.int32, torch.int32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    config = SimpleNamespace(
+        num_blocks=n,
+        kv_cache_tensors=[SimpleNamespace(size=n * page, layers=list(caches))],
+        kv_cache_groups=[SimpleNamespace(layer_names=mamba_names, kv_cache_spec=spec)],
+    )
+    worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.get_kv_cache_tensor_layers", side_effect=lambda t: t.layers),
+        patch(f"{module}.torch.npu.synchronize"),
+        patch(f"{module}.torch.npu.stream", side_effect=lambda stream: nullcontext()),
+        patch(f"{module}.torch.npu.Event"),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.cpu_kv_caches is not None
+        assert set(worker.gpu_kv_caches) == {"attn.0", "attn.1", f"{first_mamba}.0", f"{first_mamba}.1"}
+        assert len({t.data_ptr() for t in worker.cpu_kv_caches.values()}) == 4
+        assert worker.block_size_scale["attn.0"] == attention_scale
+        assert worker.block_size_scale[f"{first_mamba}.0"] == 1
+        assert list(worker.mamba_conv_cache_bindings) == [f"{first_mamba}.0"]
+        before = backing.clone()
+        worker._submit_transfer([2], [1], 10, is_store=True, sync=True)
+        backing[:page].zero_()
+        worker._submit_transfer([1], [0], 11, is_store=False, sync=True)
+        torch.testing.assert_close(backing[:page], before[2 * page :])
+        worker.num_spec_tokens = 3
+        ssm_before = ssm[0].clone()
+        worker._copy_mamba_conv_loads([MambaConvLoadMeta(0, 1, 2)])
+        torch.testing.assert_close(conv[0, :3], conv[2, 2:5])
+        torch.testing.assert_close(ssm[0], ssm_before)
+
+
+@pytest.mark.parametrize("glm_tail", [False, True])
+@pytest.mark.parametrize("uniform", [False, True])
+@pytest.mark.parametrize("load_start", [0, 48])
+def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_start):
+    if glm_tail:
+        spec = AscendIndexerKPoolTailSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float32,
+            sliding_window=4,
+            compress_ratio=4,
+        )
+    else:
+        spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    if uniform:
+        spec = UniformTypeKVCacheSpecs.from_specs({"ring": spec})
+        assert spec is not None
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
+    scheduler.cpu_kv_cache_config = config
+    scheduler._group_is_sliding_window = scheduler._get_group_is_sliding_window(config)
+    scheduler._group_is_mamba = [False]
+    scheduler.enable_offload_prefix_caching = True
+    scheduler._pending_hash_blocks = {}
+    scheduler._preempted_req_states = {}
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={20: SimpleNamespace(block_id=20, block_hash="unused-ring-hash"), 30: "gpu30"},
+        touch=MagicMock(),
+    )
+    scheduler.cpu_block_pool = SimpleNamespace(
+        get_num_free_blocks=MagicMock(return_value=8),
+        get_new_blocks=MagicMock(return_value=[SimpleNamespace(block_id=101, _block_hash=None)]),
+        cached_block_hash_to_block=SimpleNamespace(get_one_block=MagicMock()),
+    )
+    assert scheduler._create_preempt_state("req", ([20],), 64)
+    state = scheduler._preempted_req_states["req"]
+    assert state.cpu_block_ids == ([101],)
+    assert state.store_transfer_meta == TransferMeta([20], [101])
+    scheduler.cpu_block_pool.get_new_blocks.assert_called_once_with(1)
+    scheduler.cpu_block_pool.cached_block_hash_to_block.get_one_block.assert_not_called()
+    state.ready = True
+    state.load_start_tokens = load_start
+    assert scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req"),
+        ([30],),
+        num_external_tokens=64 - load_start,
+    )
+    assert state.load_transfer_meta == TransferMeta([30], [101])
+    scheduler._gpu_block_pool.touch.assert_called_once_with(["gpu30"])
+
+
+@pytest.mark.parametrize("difference", [None, "shape", "stride", "dtype", "scale", "pointer", "role"])
+def test_worker_only_deduplicates_identical_mamba_state_views(difference):
+    backing = torch.arange(96, dtype=torch.int32)
+    first = backing.as_strided((3, 3, 4), (24, 4, 1))
+    second = first.as_strided(first.shape, first.stride())
+    if difference == "shape":
+        second = backing.as_strided((3, 2, 6), (24, 6, 1))
+    elif difference == "stride":
+        second = backing.as_strided(first.shape, (20, 4, 1))
+    elif difference == "dtype":
+        second = second.view(torch.float32)
+    elif difference == "scale":
+        second = backing.as_strided((6, 3, 4), (12, 4, 1))
+    elif difference == "pointer":
+        second = backing.as_strided(first.shape, first.stride(), 1)
+    caches = {"first": (first,), "second": (second,)}
+    groups = []
+    for name, (tensor,) in caches.items():
+        groups.append(
+            SimpleNamespace(
+                layer_names=[name],
+                kv_cache_spec=MambaSpec(
+                    block_size=16,
+                    shapes=(tuple(tensor.shape[1:]),),
+                    dtypes=(tensor.dtype,),
+                    mamba_type=(
+                        MambaAttentionBackendEnum.SHORT_CONV
+                        if difference == "role" and name == "first"
+                        else MambaAttentionBackendEnum.LINEAR
+                    ),
+                ),
+            )
+        )
+    config = SimpleNamespace(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(size=backing.numel() * backing.element_size(), layers=list(caches))],
+        kv_cache_groups=groups,
+    )
+    worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.get_kv_cache_tensor_layers", side_effect=lambda t: t.layers),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.cpu_kv_caches is not None
+    expected_names = {"first.0"} if difference is None else {"first.0", "second.0"}
+    assert set(worker.gpu_kv_caches) == expected_names
+    assert set(worker.cpu_kv_caches) == expected_names
+    if difference == "role":
+        assert set(worker.mamba_conv_cache_bindings) == {"first.0"}
+
+
+@pytest.mark.parametrize("dcp_size,sharded,computed_tokens", [(1, True, 385), (16, True, 6145), (16, False, 385)])
+def test_preempt_offload_dcp_partial_block_round_trip(dcp_size, sharded, computed_tokens):
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = dcp_size
+    scheduler._group_is_sliding_window = [False]
+    scheduler._group_is_mamba = [False]
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=384, dcp_sharded=sharded))]
+    )
+    scheduler.enable_offload_prefix_caching = False
+    scheduler._pending_hash_blocks = {}
+    scheduler._preempted_req_states = {}
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={i: SimpleNamespace(block_id=i, block_hash=None) for i in [20, 21, 22, 30, 31, 32]},
+        touch=MagicMock(),
+    )
+    scheduler.cpu_block_pool = SimpleNamespace(
+        get_num_free_blocks=MagicMock(return_value=8),
+        get_new_blocks=MagicMock(
+            side_effect=lambda count: [SimpleNamespace(block_id=101 + i, _block_hash=None) for i in range(count)]
+        ),
+    )
+    # Two computed blocks, including a partial last block; the third is speculative.
+    assert scheduler._create_preempt_state("dcp", ([20, 21, 22],), computed_tokens)
+    state = scheduler._preempted_req_states["dcp"]
+    assert state.store_transfer_meta == TransferMeta([20, 21], [101, 102])
+    state.ready = True
+    state.load_start_tokens = computed_tokens - 1
+    assert scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="dcp"), ([30, 31, 32],), 1)
+    assert state.load_transfer_meta == TransferMeta([31], [102])
+
+
+@pytest.mark.parametrize(
+    "pcp,tp,pp,dcp",
+    [(1, 16, 1, 16), (2, 8, 1, 16), (4, 4, 1, 16), (2, 8, 1, 2), (2, 8, 1, 1), (2, 8, 2, 16)],
+)
+@pytest.mark.parametrize("sharded", [False, True])
+def test_pcp_offload_local_round_trip_waits_for_all_workers(pcp, tp, pp, dcp, sharded):
+    config = make_dyntra_test_config(block_size=384)
+    config.parallel_config = ParallelConfig(
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+        distributed_executor_backend="mp",
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=384,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                    dcp_sharded=sharded,
+                ),
+            )
+        ],
+    )
+    # Keep the real CPU coordinator and block pool; avoid host-capacity probing.
+    with (
+        patch.object(PreemptOffloadScheduler, "_derive_cpu_config", return_value=kv_config),
+        patch.object(
+            preempt_manager, "get_kv_cache_coordinator", wraps=preempt_manager.get_kv_cache_coordinator
+        ) as coordinator,
+    ):
+        scheduler = PreemptOffloadScheduler(
+            config, kv_config, cpu_capacity_bytes=1, enable_offload_prefix_caching=False
+        )
+    assert coordinator.call_args.kwargs["pcp_world_size"] == 1
+    assert coordinator.call_args.kwargs["dcp_world_size"] == dcp
+    assert scheduler._expected_worker_count == tp * pp * pcp
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={i: SimpleNamespace(block_id=i, block_hash=None) for i in (20, 21, 22, 30, 31, 32)},
+        touch=MagicMock(),
+    )
+    # PCP does not multiply the local block span. Keep two computed blocks,
+    # with one token in the second, and leave the speculative third block out.
+    computed = 384 * (dcp if sharded else 1) + 1
+    assert scheduler._create_preempt_state("pcp", ([20, 21, 22],), computed)
+    state = scheduler._preempted_req_states["pcp"]
+    assert state.store_transfer_meta.gpu_block_ids == [20, 21]
+    assert len(state.store_transfer_meta.cpu_block_ids) == 2
+    state.ready = True
+    state.load_start_tokens = computed - 1
+    assert scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="pcp"), ([30, 31, 32],), 1)
+    assert state.load_transfer_meta == TransferMeta([31], [state.store_transfer_meta.cpu_block_ids[1]])
+
+    scheduler._process_preempt_store_event = MagicMock()
+    partial = tp * pp if pcp > 1 else tp * pp - 1
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=PreemptOffloadWorkerMetadata(
+                completed_store_events={5: partial},
+            )
+        )
+    )
+    scheduler._process_preempt_store_event.assert_not_called()
+    assert scheduler._store_event_pending_counts == {5: partial}
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=PreemptOffloadWorkerMetadata(
+                completed_store_events={5: tp * pp * pcp - partial},
+            )
+        )
+    )
+    scheduler._process_preempt_store_event.assert_called_once_with(5)
+    assert scheduler._store_event_pending_counts == {}

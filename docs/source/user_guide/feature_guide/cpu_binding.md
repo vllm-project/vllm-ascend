@@ -90,14 +90,14 @@ degrade latency or throughput.**
 For optimal locality, use a cpuset that is evenly distributed across NUMA
 nodes. Unbalanced cpusets may reduce the locality benefit of CPU binding.
 
-On Ascend 950, CPU binding uses NPU-to-CPU affinity from `npu-smi info -t topo`
+On 950PR&950DT Products, CPU binding uses NPU-to-CPU affinity from `npu-smi info -t topo`
 to select the worker's affinity NUMA node. Each worker main process is pinned to
 one CPU cluster from that NUMA node. The cluster size is derived from `lscpu`
-`Thread(s) per core`: 8 CPUs when it is 1, and 16 CPUs when it is 2. Ascend 950
+`Thread(s) per core`: 8 CPUs when it is 1, and 16 CPUs when it is 2. 950PR&950DT Products
 also pins host `uvb_poll_window_thread` threads to NUMA0 CPUs except CPU0,
 constrained by the current cpuset. In Docker deployments, add `--pid=host` when
 creating the container so vLLM Ascend can discover and bind these host threads.
-Ascend 950 still can migrate memory pages when `migratepages` is available, but
+950PR&950DT Products still can migrate memory pages when `migratepages` is available, but
 it does not separately pin ACL/release threads and does not apply IRQ binding.
 
 For IRQ binding, the process also needs permission to read `/proc/interrupts`
@@ -106,11 +106,11 @@ can use `systemctl`, vLLM Ascend stops it before applying IRQ affinity. In
 containers where `systemctl` is unavailable, stop `irqbalance` on the host when
 IRQ affinity matters.
 
-Ascend 950 does not apply IRQ binding. When running on Ascend 950, the log contains
+950PR&950DT Products does not apply IRQ binding. When running on 950PR&950DT Products, the log contains
 `[irq] IRQ binding skipped on Ascend 950.` and no `/proc/irq/*/smp_affinity` files are
 written by this feature.
 
-Ascend 950 allocation logs use `worker=[...]` instead of `acl=[...]` or
+950PR&950DT Products allocation logs use `worker=[...]` instead of `acl=[...]` or
 `release=[...]`, because ACL/release threads are not separately pinned on this
 device type. When UVB polling threads are found and bound, the log also reports
 their thread IDs and CPU pool:
@@ -140,10 +140,10 @@ sudo systemctl start irqbalance
 | --- | --- | --- |
 | `CPU binding skipped: non-ARM CPU detected.` | CPU binding only runs on ARM. | No action needed on x86_64. |
 | `Can not get running npu info.` | No running NPU was found, or `ASCEND_RT_VISIBLE_DEVICES` filtered all NPUs. | Check visible NPU IDs and `npu-smi info`. |
-| `Insufficient CPUs for binding...` | Fewer CPUs are available than the role split requires. Devices with IRQ binding need at least 5 CPUs per logical NPU. Ascend 950 needs one full cluster per worker. | Expand the cpuset or reduce visible NPUs. |
-| `NPU topo affinity not found...` | Topology affinity is unavailable. | On Ascend 950, worker CPU binding is skipped. On other topo-affinity devices, vLLM Ascend falls back to `global_slice`. Check `npu-smi info -t topo` when topology affinity is expected. |
-| `uvb_poll_window_thread not found... --pid=host` | Ascend 950 could not see host UVB polling threads. | Recreate the Docker container with `--pid=host`, then restart vLLM. |
-| `failed to bind uvb_poll_window_thread... --pid=host` | Ascend 950 found a UVB polling thread but failed to bind it. | Check permissions and recreate the Docker container with `--pid=host` if running in Docker. |
+| `Insufficient CPUs for binding...` | Fewer CPUs are available than the role split requires. Devices with IRQ binding need at least 5 CPUs per logical NPU. 950PR&950DT Products needs one full cluster per worker. | Expand the cpuset or reduce visible NPUs. |
+| `NPU topo affinity not found...` | Topology affinity is unavailable. | On 950PR&950DT Products, worker CPU binding is skipped. On other topo-affinity devices, vLLM Ascend falls back to `global_slice`. Check `npu-smi info -t topo` when topology affinity is expected. |
+| `uvb_poll_window_thread not found... --pid=host` | 950PR&950DT Products could not see host UVB polling threads. | Recreate the Docker container with `--pid=host`, then restart vLLM. |
+| `failed to bind uvb_poll_window_thread... --pid=host` | 950PR&950DT Products found a UVB polling thread but failed to bind it. | Check permissions and recreate the Docker container with `--pid=host` if running in Docker. |
 | `The 'migratepages' command is not available...` | Memory migration is skipped, while CPU thread binding still proceeds. | Install `numactl` if NUMA locality or performance is affected. |
-| `[irq] IRQ binding skipped on Ascend 950.` | Ascend 950 does not use the IRQ binding step. | No action needed. Worker main binding and memory migration still proceed. |
+| `[irq] IRQ binding skipped on Ascend 950.` | 950PR&950DT Products does not use the IRQ binding step. | No action needed. Worker main binding and memory migration still proceed. |
 | `Bind cpus failed in rank...` | A binding step failed and CPU binding was skipped for that rank. | Check `taskset`, `lscpu`, `npu-smi`, cpuset size, and `/proc/irq` permissions. |

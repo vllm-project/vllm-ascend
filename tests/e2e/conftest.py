@@ -57,17 +57,17 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.multi_node.internal_dp.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from tests.e2e.coverage_taxonomy import (
     validate_coverage_marker,
 )
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
-from vllm_ascend.utils import adapt_patch, vllm_version_is  # noqa E402
+from vllm_ascend.utils import adapt_patch  # noqa E402
 
 adapt_patch(True)
 adapt_patch(False)
@@ -400,7 +400,11 @@ class RemoteOpenAIServer:
         start = time.time()
         client = requests
 
-        ready = {node_ip: False for node_ip, _ in targets}
+        # Key by (node_ip, url): several servers may share one IP (e.g. the
+        # single-node PD/EPD modes start multiple engines on 127.0.0.1), so a
+        # plain-IP key would collapse their readiness state together and make
+        # the timeout message report an empty not-ready list.
+        ready = {(node_ip, url): False for node_ip, url in targets}
 
         last_log_time = 0.0
 
@@ -410,13 +414,13 @@ class RemoteOpenAIServer:
             should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
-                if ready[node_ip] and not always_check_nodes:
+                if ready[(node_ip, url)] and not always_check_nodes:
                     continue
 
                 try:
                     resp = client.get(url)
                     if resp.status_code == 200:
-                        ready[node_ip] = True
+                        ready[(node_ip, url)] = True
                         logger.info("[READY] Node %s: %s is ready.", node_ip, url)
                 except RequestException:
                     all_ready = False
@@ -436,7 +440,7 @@ class RemoteOpenAIServer:
                 break
 
             if now - start > timeout:
-                not_ready_nodes = [n for n, ok in ready.items() if not ok]
+                not_ready_nodes = [url for (_, url), ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
                     f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
@@ -521,7 +525,8 @@ class RemotePDServer(RemoteOpenAIServer):
         vllm_serve_args: list[str] | list[list[str]],
         server_host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
-        max_wait_seconds: float | None = 600,
+        env_dicts: list[dict[str, str]] | None = None,
+        max_wait_seconds: float | None = 2800,
     ) -> None:
         self._proc_list = []
 
@@ -547,6 +552,15 @@ class RemotePDServer(RemoteOpenAIServer):
                 ]
         else:
             raise RuntimeError("vllm_serves_args must be a list")
+        if env_dicts is not None:
+            if not isinstance(env_dicts, list) or not all(isinstance(item, dict) for item in env_dicts):
+                raise TypeError("env_dicts must be a list of dicts")
+            if len(env_dicts) != len(self.vllm_serve_args_list):
+                raise ValueError(
+                    f"env_dicts has {len(env_dicts)} entries, "
+                    f"but there are {len(self.vllm_serve_args_list)} vllm serve instances"
+                )
+        self.env_dicts = env_dicts
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
         visible_devices = self.env_dict.get(
@@ -563,6 +577,8 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
+            if self.env_dicts is not None:
+                server_env.update(self.env_dicts[i])
             end_device_id = start_device_id + required_devices
             if available_device_ids is None:
                 assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]
@@ -917,13 +933,23 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         if not full_device_ids:
             full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
+        # Pass the full (un-sharded) device list for every backend. vLLM
+        # slices it per DP rank internally via assigned_physical_gpu_ids
+        # (see get_physical_gpu_ids_for_local_dp_rank).
+        llm_kwargs["device_ids"] = full_device_ids
+
+        # The Ray backend starts a node-local Ray instance per DP worker and
+        # binds its workers to the devices visible to that instance. Shard
+        # ASCEND_RT_VISIBLE_DEVICES per DP rank so each engine's Ray instance
+        # only sees its own slice; with the full list the independent Ray
+        # instances can bind workers of different DP ranks (or of several PP
+        # ranks) to the same physical NPU. The device_ids above stays the
+        # complete list, so vLLM's per-rank slicing does not rely on the env
+        # var.
         if llm_kwargs.get("distributed_executor_backend") == "ray":
-            devs = full_device_ids
-            chunk = max(len(devs) // dp_size, 1)
+            chunk = max(len(full_device_ids) // dp_size, 1)
             start = dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-        else:
-            llm_kwargs["device_ids"] = full_device_ids
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(full_device_ids[start : start + chunk])
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
@@ -2007,14 +2033,8 @@ PROMPT_CONFIGS = {
         "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
-        **(
-            {
-                "skip": "HunyuanVL is not supported on vLLM main branch "
-                "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL)."
-            }
-            if not vllm_version_is("0.28.0")
-            else {}
-        ),
+        "skip": "HunyuanVL is not supported by the pinned vLLM versions "
+        "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL).",
     },
 }
 

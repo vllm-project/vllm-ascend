@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
@@ -22,13 +23,15 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
+    DsaAttnKvPlan,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
+    write_dsa_cache,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_pcp,
     get_or_register_attention_buffer,
+    is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -37,7 +40,10 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    attention_transfer_window,
+    record_attention_compute_start,
+)
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
@@ -45,6 +51,8 @@ from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -60,16 +68,55 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+    from vllm_ascend.ops.triton.dspark_swa_indices import (
+        build_dspark_swa_slot_indices_triton,
+        dspark_swa_indices_supported,
+    )
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms
 
 if HAS_TRITON:
+    from vllm_ascend.ops.triton.dspark_swa_indices import (  # noqa: F811
+        build_dspark_swa_slot_indices_triton,
+        dspark_swa_indices_supported,
+    )
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
+    from vllm_ascend.ops.triton.spec_decode.dspark_swa_indices import (
+        build_dspark_swa_indices_triton,
+    )
 else:
+    build_dspark_swa_slot_indices_triton = None  # type: ignore
     triton_q_rms = None  # type: ignore
+    build_dspark_swa_indices_triton = None  # type: ignore
+    dspark_swa_indices_supported = None  # type: ignore
 
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
+
+
+class OProjBufferPool:
+    """Model-owned, address-stable OTP scratch storage shared by sequential layers."""
+
+    def __init__(self) -> None:
+        self.exchange: dict[tuple[tuple[int, ...], torch.dtype, torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
+        self.reduce_scatter: dict[tuple[tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
+
+    def get_exchange(
+        self, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = (shape, dtype, device)
+        if key not in self.exchange:
+            send = torch.zeros(shape, dtype=dtype, device=device)
+            self.exchange[key] = (send, torch.empty_like(send))
+        return self.exchange[key]
+
+    def get_reduce_scatter(self, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        key = (shape, dtype, device)
+        if key not in self.reduce_scatter:
+            self.reduce_scatter[key] = torch.empty(shape, dtype=dtype, device=device)
+        return self.reduce_scatter[key]
+
+
 CompressorMetadataOutput: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 _DSV4_DSA_OVERLAP_STREAM = None
@@ -213,23 +260,52 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
 
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # What the two Ascend parts can store between them; which one applies is decided
+    # per device in ``supports_kv_cache_dtype``. Everything else -- fp8_e4m3,
+    # fp8_e5m2, mxfp8, nvfp4 -- has no Ascend build.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "int8",
+        "turboquant_4bit_nc",
+    ]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        """Accept the KV cache dtypes this part has an implementation for.
+
+        A5 builds the compressed cache as fp8 and selects the plan from the literal
+        ``cache_config.cache_dtype``: ``bfloat16`` takes the SparseFlashMla path and
+        skips the compress epilog (``dsa_attn_kv_plan.is_a5_bf16_kv_enabled``), fp8
+        takes the epilog. ``auto`` means the model dtype, bfloat16, and is resolved to
+        that literal before this is asked, so it accepts the same layout.
+
+        A3 runs no compressed cache, stores the MLA cache as int8, and still runs
+        turboquant.
+
+        Only the dtype and the device decide this; the per-device split is why the
+        base class's flat list is not enough.
+        """
+        if kv_cache_dtype is None:
+            return True
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+            return kv_cache_dtype in ("auto", "bfloat16", "fp8")
+        return kv_cache_dtype in ("auto", "bfloat16", "int8", "turboquant_4bit_nc")
 
     @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
+
     @staticmethod
     def get_builder_cls():
-        from vllm_ascend.utils import enable_dsa_cp
-
-        use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
-        if use_dsa_cp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
-
-            return AscendDSACPMetadataBuilder
+        use_pcp = is_pcp_enabled()
         if use_pcp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
 
@@ -252,16 +328,7 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
-        from vllm_ascend.utils import enable_dsa_cp
-
-        use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
-        if use_dsa_cp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
-
-            return AscendDSACPImpl
+        use_pcp = is_pcp_enabled()
         if use_pcp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
 
@@ -269,17 +336,21 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAImpl
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [2, 4, 8, 16, 32, 64, 128]
 
 
 class AscendDSAC4Backend(AscendDSABackend):
     @staticmethod
+    def get_builder_cls():
+        return _get_dsa_role_builder("Attention")
+
+    @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA_C4"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         # Align with upstream's logical block-size contract: Ascend's physical
         # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
         return [128, 256, 512]
@@ -287,11 +358,15 @@ class AscendDSAC4Backend(AscendDSABackend):
 
 class AscendDSAC128Backend(AscendDSABackend):
     @staticmethod
+    def get_builder_cls():
+        return _get_dsa_role_builder("Attention")
+
+    @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA_C128"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         # Align with upstream's logical block-size contract: Ascend's physical
         # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
         return [4096, 8192, 16384]
@@ -299,34 +374,80 @@ class AscendDSAC128Backend(AscendDSABackend):
 
 class AscendDSASWABackend(AscendDSABackend):
     @staticmethod
+    def get_builder_cls():
+        return _get_dsa_role_builder("SWA")
+
+    @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA_SWA"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [32, 64, 128]
 
 
 class AscendDSAC4StateBackend(AscendDSABackend):
     @staticmethod
+    def get_builder_cls():
+        return _get_dsa_role_builder("State")
+
+    @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA_C4_STATE"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [2, 4, 8]
 
 
 class AscendDSAC128StateBackend(AscendDSABackend):
     @staticmethod
+    def get_builder_cls():
+        return _get_dsa_role_builder("State")
+
+    @staticmethod
     def get_name() -> str:
         return "ASCEND_DSA_C128_STATE"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
             return [4, 8, 16]
         return [8, 16, 32]
+
+
+class AscendDSAIndexerBackend(AscendDSAC4Backend):
+    """Separate indexer consumers from compressed attention cache groups."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_DSA_INDEXER"
+
+    @staticmethod
+    def get_builder_cls():
+        return _get_dsa_role_builder("Indexer")
+
+
+def _get_dsa_role_builder(role: str):
+    # Backend discovery can run before model modules finish importing.
+    builder_cls = AscendDSABackend.get_builder_cls()
+    if builder_cls is AscendDSAMetadataBuilder:
+        return {
+            "State": AscendDSAStateMetadataBuilder,
+            "SWA": AscendDSASWAMetadataBuilder,
+            "Attention": AscendDSAAttentionMetadataBuilder,
+            "Indexer": AscendDSAIndexerMetadataBuilder,
+        }[role]
+    from vllm_ascend.attention.context_parallel import dsa_cp
+
+    if builder_cls is dsa_cp.AscendDSAPCPMetadataBuilder:
+        return {
+            "State": dsa_cp.AscendDSAPCPStateMetadataBuilder,
+            "SWA": dsa_cp.AscendDSAPCPSWAMetadataBuilder,
+            "Attention": dsa_cp.AscendDSAPCPAttentionMetadataBuilder,
+            "Indexer": dsa_cp.AscendDSAPCPIndexerMetadataBuilder,
+        }[role]
+    return builder_cls
 
 
 @dataclass
@@ -428,11 +549,16 @@ def build_dspark_swa_indices(
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
     buffer: torch.Tensor | None = None,
+    *,
+    use_logical_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
     whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
+    ``use_logical_indices`` returns positions within each sequence for
+    SparseFlashMLA, which applies its own block-table lookup. The default
+    preserves physical slots for existing DSA callers.
 
     When ``buffer`` is given, the per-token slots are copied into its leading
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
@@ -450,6 +576,22 @@ def build_dspark_swa_indices(
     if query_start_loc is None or seq_lens is None:
         raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
 
+    if (
+        use_logical_indices
+        and build_dspark_swa_indices_triton is not None
+        and query_start_loc.device.type == "npu"
+        and num_decode_tokens is not None
+        and indices_output is None
+        and buffer is None
+    ):
+        return build_dspark_swa_indices_triton(
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens,
+            index_width,
+            window_size,
+        )
+
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     prefix_lens = seq_lens - query_lens
     start_pos = (prefix_lens - int(window_size)).clamp(min=0)
@@ -460,13 +602,15 @@ def build_dspark_swa_indices(
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    block_nums = pos // block_size
-    # Clamp to valid block-table columns so gather never goes OOB on the
-    # out-of-range columns (their results are discarded by col_mask anyway).
-    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
-    block_offsets = pos % block_size
-    block_ids = torch.gather(block_table, 1, safe_nums)
-    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    if use_logical_indices:
+        slot_ids = pos.to(torch.int32)
+    else:
+        block_nums = pos // block_size
+        # Clamp out-of-range columns before gathering; col_mask discards them.
+        safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+        block_offsets = pos % block_size
+        block_ids = torch.gather(block_table, 1, safe_nums)
+        slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
@@ -589,6 +733,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     _request_capacity_factor: ClassVar[int] = 1
 
+    def _use_specialized_metadata(self) -> bool:
+        # Deferred device tasks and vision models keep their existing metadata path.
+        # A concrete request builder defines the role; no per-role feature flags
+        # are needed by the common batch-layout code.
+        return (
+            type(self).build_req_metadata is not AscendDSAMetadataBuilder.build_req_metadata
+            and not self._device_metadata_enabled
+            and not getattr(self.model_config.hf_config, "vision_n_layers", 0)
+        )
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -602,7 +756,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        # Declarative JIT warmup for the fused Q-RMS kernel (upstream-style
+        # registry window is held open by the model runner while builders are
+        # constructed; no-op elsewhere).
+        from vllm_ascend.ops.triton.rms_norm import _TRITON_Q_RMS_KERNEL
+
+        _TRITON_Q_RMS_KERNEL.register_warmup(vllm_config)
         self.device = device
+        self._sas_variant_buffers: dict = {}
+        # DSpark target and draft builders must not overwrite module-global RoPE.
+        self._step_rope_buffers: dict = {}
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
         scheduler_config = vllm_config.scheduler_config
@@ -659,6 +822,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.block_table: torch.Tensor = None
         self.common_ratio_to_sas_metadata: dict | None = None
         self.seq_lens: torch.Tensor = None
+        self.tq_group_block_sizes: torch.Tensor | None = None
 
         # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
         self.compressor_ratio = getattr(
@@ -668,6 +832,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
+        self.layer_names = list(layer_names)
         # vLLM assigns the builder result to every layer in an attention group.
         self.cache_group_key = layer_names[0]
         self.hadamard = None
@@ -694,6 +859,21 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.qli_cmp_residual_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
+        # DSpark triton fast-path state: exact per-request query count (set by
+        # the proposer; None -> spec+1 fallback) and the aligned index width.
+        # dspark_lens_scratch pairs with dspark_swa_indices_buffer (allocated
+        # in enable_dspark_device_metadata) so the executor-stream task never
+        # allocates. JIT warmup runs from kernel_warmup (see
+        # warmup/dspark_swa_indices_warmup.py), before ACL graph capture.
+        self.dspark_lens_scratch: torch.Tensor | None = None
+        self._dspark_num_query_per_req: int | None = None
+        self._dspark_index_width = (
+            _aligned_dspark_index_width(
+                self.model_config.hf_config.sliding_window, self.speculative_config.num_speculative_tokens
+            )
+            if self.speculative_config
+            else None
+        )
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -815,6 +995,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        can_use_rope_cache: bool = True,
+        full_graph_mode: bool = False,
+        build_query: bool = True,
+        update_cache: bool = True,
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -822,7 +1007,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None
         self.set_num_actual_tokens(common_attn_metadata)
-        num_input_tokens = common_attn_metadata.num_input_tokens
+        assert self.num_actual_tokens is not None
 
         if self.common_ratio_to_sas_metadata.get("num_decodes") is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
@@ -839,22 +1024,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             assert self.num_decode_tokens + self.num_prefill_tokens == common_attn_metadata.num_actual_tokens
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-            elif common_attn_metadata.seq_lens_cpu is not None:
-                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            else:
-                seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-            self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
-            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
-            cos, sin = get_cos_and_sin_dsa(
-                input_positions,
-                use_cache=self.num_prefills == 0,
-            )
-            self.common_ratio_to_sas_metadata["cos"] = cos
-            self.common_ratio_to_sas_metadata["sin"] = sin
         else:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
                 self.common_ratio_to_sas_metadata["num_decodes"],
@@ -863,27 +1032,25 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.common_ratio_to_sas_metadata["num_prefill_tokens"],
             )
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
-            seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
-            cos = self.common_ratio_to_sas_metadata["cos"]
-            sin = self.common_ratio_to_sas_metadata["sin"]
-
-        # CommonAttentionMetadata uses logical raw-token slots. They directly
-        # describe only uncompressed SWA/state caches; C4/C128 physical slots
-        # are generated later from the logical block table by compressor_metadata.
-        if self.compressor_ratio <= 1:
-            slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-            self.slot_mapping[:num_input_tokens] = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
-                slot_mapping, self.storage_block_size
-            )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        req_metadata = self.build_req_metadata(
+        request_builder = (
+            type(self).build_req_metadata
+            if self._use_specialized_metadata()
+            else AscendDSAMetadataBuilder.build_req_metadata
+        )
+        req_metadata = request_builder(
+            self,
             common_attn_metadata=common_attn_metadata,
-            seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu=None,
             num_actual_reqs=num_actual_reqs,
-            cos=cos,
-            sin=sin,
-            full_graph_mode=kwargs.get("full_graph_mode", False),
+            cos=None,
+            sin=None,
+            full_graph_mode=full_graph_mode,
+            build_query=build_query,
+            update_cache=update_cache,
+            can_use_rope_cache=can_use_rope_cache,
+            formatted_slot_mapping=kwargs.get("formatted_slot_mapping"),
         )
 
         return self.metadata_cls(  # type: ignore
@@ -907,50 +1074,25 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv: int | torch.Tensor,
         cu_seqlens_ori_kv: torch.Tensor | None,
         cu_seqlens_cmp_kv: torch.Tensor | None,
+        ori_win_left: int,
+        ori_win_right: int,
+        dspark_swa: bool,
     ) -> torch.Tensor:
-        sas_metadata = metadata_cache.get(layer_name)
-        if sas_metadata is None:
-            tp_size = get_tensor_model_parallel_world_size()
-            n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-            index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = (
-                _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
-                if self.compressor_ratio <= 1
-                else 4
-                if self.compressor_ratio == 4
-                else 128
-            )
-            kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-            metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
-            metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            sas_metadata = metadata_op(
-                **metadata_kwargs,
-                num_heads_q=n_local_heads,
-                num_heads_kv=1,
-                head_dim=self.model_config.get_head_size(),
-                cu_seqlens_q=query_start_loc,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=self.seqused_q,
-                seqused_kv=seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                batch_size=len(seq_lens),
-                cmp_topk=index_topk if self.compressor_ratio == 4 else 0,
-                cmp_ratio=cmp_ratio,
-                ori_mask_mode=4,  # 4:sliding window
-                cmp_mask_mode=3,  # 3:causal
-                ori_win_left=self.model_config.hf_config.sliding_window - 1,
-                ori_win_right=0,
-                layout_q="TND",
-                layout_kv=_dsa_layout_kv(self.vllm_config),
-                has_ori_kv=True,
-                has_cmp_kv=self.compressor_ratio > 1,
-            )
-            metadata_cache[layer_name] = sas_metadata
-
-        self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
-        return self.sas_metadata_buffer
+        """Compatibility entry for generic and drafting metadata consumers."""
+        return AscendDSAAttentionMetadataBuilder._build_sas_metadata(
+            self,
+            metadata_cache=metadata_cache,
+            layer_name=layer_name,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            dspark_swa=dspark_swa,
+        )
 
     def _build_qli_metadata(
         self,
@@ -960,45 +1102,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q: int,
         max_seqlen_kv: int,
     ) -> torch.Tensor:
-        qli_metadata = metadata_cache.get("qli")
-        if qli_metadata is None:
-            # QLI v2 PA_BBND reads the compressed K length plus the residual
-            # from the original length. Write both into persistent builder
-            # buffers so their addresses remain stable during graph replay.
-            seq_lens_i32 = seq_lens
-            if seq_lens_i32.dtype != torch.int32:
-                seq_lens_i32 = seq_lens_i32.to(torch.int32)
-            num_reqs = seq_lens_i32.shape[0]
-            qli_seqused_k = self.qli_seqused_k[:num_reqs]
-            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
-            torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
-            torch.remainder(
-                seq_lens_i32,
-                4,
-                out=qli_cmp_residual_k,
-            )
-            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
-                num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                topk=self.model_config.hf_config.index_topk,
-                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
-                cu_seqlens_q=query_start_loc,
-                seqused_k=qli_seqused_k,
-                cmp_residual_k=qli_cmp_residual_k,
-                batch_size=len(seq_lens),
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_kv // 4,
-                layout_q="TND",
-                layout_k="PA_BBND",
-                mask_mode=3,
-                cmp_ratio=4,
-                device=str(self.seqused_q.device),
-            )
-            metadata_cache["qli"] = qli_metadata
-
-        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
-        return self.qli_metadata_buffer
+        """Compatibility entry for generic and drafting metadata consumers."""
+        return AscendDSAIndexerMetadataBuilder._build_qli_metadata(
+            self,
+            metadata_cache=metadata_cache,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+        )
 
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
@@ -1018,10 +1130,110 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.model_config.hf_config.sliding_window,
             self.speculative_config.num_speculative_tokens,
         )
-        self.dspark_swa_indices_buffer = torch.empty(
-            (max_num_tokens, 1, index_width),
-            dtype=torch.int32,
-            device=self.device,
+        # The buffer keeps the __init__ allocation (sized for the token-count
+        # cap) unless the caller's query-token quota needs more rows; either
+        # way the row count must cover the triton capacity grid, which is
+        # derived from the builder's padded request capacity below.
+        min_rows = self.max_num_reqs_for_dspark() * self.dspark_num_query_per_req()
+        if self.dspark_swa_indices_buffer is None or self.dspark_swa_indices_buffer.shape[0] < max(
+            max_num_tokens, min_rows
+        ):
+            self.dspark_swa_indices_buffer = torch.empty(
+                (max(max_num_tokens, min_rows), 1, index_width),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        # Lens is scratch (the production call site discards it), but keep it
+        # persistent alongside the indices buffer so the executor-stream task
+        # avoids a per-step transient allocation. Same pattern as
+        # spec_sas_metadata. Independent predicate: the regrow branch above is
+        # rarely taken (the __init__ allocation usually already covers the
+        # quota), so sizing the scratch only inside it would leave it None on
+        # the common path.
+        if (
+            self.dspark_lens_scratch is None
+            or self.dspark_lens_scratch.shape[0] < (self.dspark_swa_indices_buffer.shape[0])
+        ):
+            self.dspark_lens_scratch = torch.empty(
+                (self.dspark_swa_indices_buffer.shape[0],),
+                dtype=torch.int64,
+                device=self.device,
+            )
+
+    def max_num_reqs_for_dspark(self) -> int:
+        """Padded request capacity for the DSpark capacity grid.
+
+        Mirrors the __init__ sizing of the per-request QLI buffers: full-decode
+        graphs pad the request count beyond max_num_seqs (cudagraph capture
+        sizes plus the FIA dummy request), so the triton capacity grid
+        ``grid=(R_alloc * NUM_CB,)`` must stay fixed across replays.
+        """
+        max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs * self._request_capacity_factor
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and compilation_config.cudagraph_capture_sizes:
+            max_num_reqs = max(max_num_reqs, compilation_config.max_cudagraph_capture_size)
+        return max_num_reqs
+
+    def dspark_num_query_per_req(self) -> int:
+        """Row-expansion factor per request, as configured by the proposer.
+
+        DSpark anchor sampling drafts ``num_speculative_tokens`` queries per
+        request; the non-anchor path drafts one more. Falls back to the
+        DFlash-style ``spec + 1`` when device metadata is disabled and the
+        proposer never registered the exact factor.
+        """
+        if self._dspark_num_query_per_req is not None:
+            return self._dspark_num_query_per_req
+        return self.speculative_config.num_speculative_tokens + 1
+
+    def set_dspark_num_query_per_req(self, num_query_per_req: int) -> None:
+        """Register the proposer's exact per-request query count."""
+        self._dspark_num_query_per_req = int(num_query_per_req)
+
+    def _dspark_swa_indices_fast_path_eligible(self, num_decode_reqs: int) -> bool:
+        """Whether the fused triton build can replace the eager torch chain."""
+        if build_dspark_swa_slot_indices_triton is None or self._dspark_index_width is None:
+            return False
+        return dspark_swa_indices_supported(self.storage_block_size, self.block_table.shape[1]) and (
+            num_decode_reqs <= self.max_num_reqs_for_dspark()
+        )
+
+    def _build_dspark_swa_indices_eager(
+        self, dspark_swa_args: tuple, buffer: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Eager (non-device-metadata) DSpark indices build, triton fast path first.
+
+        The eager path has no captured graph to protect, so the triton kernel
+        runs with the plain active-row allocation (no max_num_reqs capacity
+        grid) and falls back to the reference torch chain when the kernel is
+        unavailable or the shape is unsupported. ``buffer`` keeps the
+        stable-address contract of the previous eager call sites.
+        """
+        block_table, num_speculative_tokens, window_size, block_size, query_start_loc, seq_lens, num_decode_tokens = (
+            dspark_swa_args
+        )
+        if self._dspark_swa_indices_fast_path_eligible(query_start_loc.shape[0] - 1):
+            return build_dspark_swa_slot_indices_triton(
+                block_table,
+                num_speculative_tokens,
+                window_size,
+                block_size,
+                query_start_loc,
+                seq_lens,
+                num_decode_tokens=num_decode_tokens,
+                index_width=self._dspark_index_width,
+                indices_output=buffer,
+                num_query_per_req=self.dspark_num_query_per_req(),
+            )
+        return build_dspark_swa_indices(
+            block_table,
+            num_speculative_tokens,
+            window_size,
+            block_size,
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens=num_decode_tokens,
+            buffer=buffer,
         )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
@@ -1032,236 +1244,166 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     def build_req_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        seq_lens_cpu: torch.Tensor,
+        seq_lens_cpu: torch.Tensor | None,
         num_actual_reqs: int | None,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
         full_graph_mode: bool = False,
+        build_query: bool = True,
+        update_cache: bool = True,
+        *,
+        can_use_rope_cache: bool = True,
+        formatted_slot_mapping: torch.Tensor | None = None,
+    ) -> AscendDSAReqMetadata:
+        """Full metadata for legacy, deferred-device and vision consumers.
+
+        These paths retain per-builder output ownership. Role builders below
+        assemble only the fields their layer consumes, using the same primitives.
+        """
+        req = self._new_req_metadata(common_attn_metadata, num_actual_reqs, cos, sin)
+        limits = self._prepare_query_inputs(
+            common_attn_metadata, req, seq_lens_cpu, can_use_rope_cache, full_graph_mode
+        )
+        req.start_pos = self._build_start_positions(req)
+        AscendDSAAttentionMetadataBuilder._build_attention_query(self, common_attn_metadata, req, limits)
+        if self.compressor_ratio == 4:
+            AscendDSAIndexerMetadataBuilder._build_indexer_query(self, req, limits)
+        if self.compressor_ratio > 1:
+            AscendDSAAttentionMetadataBuilder._build_compressed_cache(self, common_attn_metadata, req, full_graph_mode)
+        else:
+            AscendDSASWAMetadataBuilder._build_swa_cache(self, common_attn_metadata, req, formatted_slot_mapping)
+        return req
+
+    def _new_req_metadata(
+        self,
+        common: AscendCommonAttentionMetadata,
+        num_actual_reqs: int | None,
+        cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None,
     ) -> AscendDSAReqMetadata:
         assert self.common_ratio_to_sas_metadata is not None
-        metadata_cache = self.common_ratio_to_sas_metadata
         assert self.num_actual_tokens is not None
-        num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-        seq_lens = self.seq_lens[:num_reqs]
-        seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
-        max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-            and self.num_prefills == 0
-        ):
-            # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
-            # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
-            # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
-            max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
-        max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
-        has_prefill = self.num_prefills > 0
-
-        self.start_pos_prefill.fill_(0)
-        self.start_pos_prefill[:num_reqs] = seq_lens - seq_lens_q
-        if num_actual_reqs is None:
-            num_actual_reqs = num_reqs
-        else:
-            num_actual_reqs = min(num_actual_reqs, num_reqs)
-            if num_actual_reqs < num_reqs:
-                self.start_pos_prefill[num_actual_reqs:num_reqs].fill_(0)
-                self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
-        layer_name = f"c{self.compressor_ratio}"
-        cu_seqlens_ori_kv = None
-        cu_seqlens_cmp_kv = None
-        dspark_swa_indices = None
-        vision_swa_indices = None
-        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
-        if not has_prefill and not common_attn_metadata.causal:
-            # DSpark non-causal parallel drafting: every draft query attends to
-            # the trailing context window plus the whole current draft block.
-            # Not gated on the SAS metadata cache: the indices depend on the
-            # current step's block table / sequence lengths, so they must be
-            # rebuilt whenever a DSpark draft step runs.
-            assert self.speculative_config is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
-                self.block_table[: self.num_decodes],
-                self.speculative_config.num_speculative_tokens,
-                self.model_config.hf_config.sliding_window,
-                self.storage_block_size,
-                query_start_loc[: self.num_decodes + 1],
-                self.seq_lens[: self.num_decodes],
-                self.num_decode_tokens,
-                buffer=self.dspark_swa_indices_buffer,
-            )
-            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
-        # Text-only requests and lightweight metadata fixtures do not carry
-        # multimodal document ranges. Treat those as having no vision spans.
-        mm_ranges = getattr(common_attn_metadata, "mm_req_doc_ranges", None)
-        max_image_tokens = (
-            getattr(
-                self.model_config.hf_config,
-                "vision_max_n_token",
-                0,
-            )
-            if getattr(
-                self.model_config.hf_config,
-                "vision_n_layers",
-                0,
-            )
-            > 0
-            else 0
-        )
-        if has_prefill and max_image_tokens > 0 and mm_ranges:
-            actual_reqs = num_reqs if num_actual_reqs is None else num_actual_reqs
-            vision_swa_indices, _ = build_vision_bidirectional_swa_indices(
-                block_table=self.block_table[:actual_reqs],
-                window_size=self.model_config.hf_config.sliding_window,
-                max_image_tokens=max_image_tokens,
-                block_size=self.storage_block_size,
-                query_start_loc=query_start_loc[: actual_reqs + 1],
-                seq_lens=seq_lens[:actual_reqs],
-                mm_prefix_ranges=mm_ranges,
-                num_tokens=self.num_actual_tokens,
-            )
-        if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
-            cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
-                self.common_ratio_to_sas_metadata,
-                "cu_seqlens_ori_kv",
-                seq_lens,
-                num_reqs,
-                self._zero_i32,
-                self.cu_seqlens_ori_kv,
-            )
-            cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
-        elif has_prefill:
-            cu_seqlens_ori_kv = query_start_loc
-
-        if self._device_metadata_enabled:
-
-            def build_sas_metadata() -> None:
-                self._build_sas_metadata(
-                    metadata_cache=metadata_cache,
-                    layer_name=layer_name,
-                    query_start_loc=query_start_loc,
-                    seq_lens=seq_lens,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                    cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                )
-
-            def build_qli_metadata() -> None:
-                self._build_qli_metadata(
-                    metadata_cache=metadata_cache,
-                    query_start_loc=query_start_loc,
-                    seq_lens=seq_lens,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                )
-
-            if self.compressor_ratio == 4:
-                self._device_metadata_tasks = (
-                    DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
-                    DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
-                )
-            else:
-                self._device_metadata_tasks = (
-                    DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
-                )
-            sas_metadata = self.sas_metadata_buffer
-            qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
-        else:
-            self._device_metadata_tasks = ()
-            sas_metadata = self._build_sas_metadata(
-                metadata_cache=metadata_cache,
-                layer_name=layer_name,
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            )
-            qli_metadata = self._build_qli_metadata(
-                metadata_cache=metadata_cache,
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-            )
-
-        full_compress_cos, full_compress_sin = None, None
-        if self.compressor_ratio > 1:
-            if full_graph_mode:
-                num_tokens = common_attn_metadata.num_input_tokens
-                num_compressed_tokens = min(num_tokens, num_tokens // self.compressor_ratio + num_reqs)
-                num_actual_reqs = num_reqs
-            else:
-                num_compressed_tokens = self._num_compressor_metadata_rows(num_reqs)
-            full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
-            slot_mapping = None
-        else:
-            num_compressed_tokens = self.num_actual_tokens
-            slot_mapping = self.slot_mapping[: self.num_actual_tokens]
-
-        qli_cu_seqlens_q = None
-        qli_seqused_k = None
-        qli_cmp_residual_k = None
-        if self.compressor_ratio == 4:
-            # QLI v2 PA_BBND reads the compressed K length plus the residual
-            # from the original length; the persistent builder buffers are
-            # refreshed in _build_qli_metadata.
-            qli_cu_seqlens_q = query_start_loc
-            qli_seqused_k = self.qli_seqused_k[:num_reqs]
-            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
-
-        req_metadata = AscendDSAReqMetadata(
-            block_table=self.block_table[:num_reqs, ...],
-            seq_lens=seq_lens,
-            slot_mapping=slot_mapping,
+        num_reqs = common.num_reqs
+        actual_reqs = num_reqs if num_actual_reqs is None else min(num_actual_reqs, num_reqs)
+        self.block_table[actual_reqs:num_reqs].zero_()
+        self._device_metadata_tasks = ()
+        return AscendDSAReqMetadata(
+            block_table=self.block_table[:num_reqs],
+            seq_lens=self.seq_lens[:num_reqs],
+            slot_mapping=None,
             storage_block_size=self.storage_block_size,
-            query_start_loc=query_start_loc,
-            num_compressed_tokens=num_compressed_tokens,
-            sin=sin,
-            cos=cos,
-            full_compress_sin=full_compress_sin,
-            full_compress_cos=full_compress_cos,
-            start_pos=self.start_pos_prefill[:num_reqs],
-            num_actual_reqs=num_actual_reqs,
+            query_start_loc=common.query_start_loc[: num_reqs + 1],
+            num_actual_reqs=actual_reqs,
             cache_group_key=self.cache_group_key,
-            sas_metadata=sas_metadata,
-            qli_metadata=qli_metadata,
-            qli_cu_seqlens_q=qli_cu_seqlens_q,
-            qli_seqused_k=qli_seqused_k,
-            qli_cmp_residual_k=qli_cmp_residual_k,
-            attn_mask=None,
-            cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
-            dspark_swa_indices=dspark_swa_indices,
-            vision_swa_indices=vision_swa_indices,
+            cos=cos,
+            sin=sin,
         )
-        if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
-            assert num_compressed_tokens is not None
-            buffers = self.compressor_metadata_buffers
-            outputs = (
-                buffers[0][:num_compressed_tokens],
-                buffers[1][:num_compressed_tokens],
-                buffers[2][:num_compressed_tokens],
+
+    def _prepare_rope(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        req: AscendDSAReqMetadata,
+        can_use_rope_cache: bool,
+        full_graph_mode: bool,
+    ) -> None:
+        if req.cos is not None:
+            return
+        cache = self.common_ratio_to_sas_metadata
+        assert cache is not None
+        if "cos" not in cache:
+            num_position_tokens = (
+                common_attn_metadata.num_input_tokens if full_graph_mode else common_attn_metadata.num_actual_tokens
             )
-            group_id = id(buffers[0])
-            req_metadata.compressor_metadata = outputs
-            req_metadata.compressor_metadata_group_id = group_id
-            self._device_metadata_tasks = (
-                DeviceMetadataTask(
-                    DeviceMetadataStage.COMPRESSOR,
-                    lambda: build_compressor_metadata_out(
-                        req_metadata, self.compressor_ratio, outputs, self.vllm_config
-                    ),
-                    group_id,
-                ),
-                *self._device_metadata_tasks,
+            input_positions = common_attn_metadata.positions[:num_position_tokens].long()
+            is_dspark = (
+                self._use_specialized_metadata()
+                and self.speculative_config is not None
+                and self.speculative_config.method == "dspark"
             )
-        return req_metadata
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=can_use_rope_cache and self.num_prefills == 0 and not is_dspark,
+            )
+            if (
+                is_dspark
+                and can_use_rope_cache
+                and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                cos, sin = cos.copy_to_buffers(self._step_rope_buffers, self.slot_mapping.shape[0])
+            cache["cos"], cache["sin"] = cos, sin
+        req.cos, req.sin = cache["cos"], cache["sin"]
+
+    def _prepare_query_inputs(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        req: AscendDSAReqMetadata,
+        seq_lens_cpu: torch.Tensor | None,
+        can_use_rope_cache: bool,
+        full_graph_mode: bool,
+    ) -> tuple[int, int]:
+        self._prepare_rope(common_attn_metadata, req, can_use_rope_cache, full_graph_mode)
+        metadata_cache = self.common_ratio_to_sas_metadata
+        assert metadata_cache is not None
+        num_reqs = common_attn_metadata.num_reqs
+        if seq_lens_cpu is None:
+            seq_lens_cpu = metadata_cache.get("seq_lens_cpu")
+            if seq_lens_cpu is None:
+                seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+                if seq_lens_cpu is None:
+                    seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+                if seq_lens_cpu is None:
+                    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+                metadata_cache["seq_lens_cpu"] = seq_lens_cpu
+        # build() runs once per (kv_cache_group, attn_group) pair, but
+        # build_attn_metadata hands every pair the same query_start_loc /
+        # seq_lens objects -- only block_table, slot_mapping and causal vary by
+        # group. The length limits are group-invariant: compute them on the first
+        # group of the step and share them like seq_lens / cos / sin above.
+        # Keyed separately from the num_decodes gate in build() so a caller that
+        # populates this dict itself still gets the sharing.
+        assert seq_lens_cpu is not None
+        preamble = metadata_cache.get("req_preamble")
+        if preamble is None:
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+            max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
+            if (
+                self.speculative_config is not None
+                and getattr(self.speculative_config, "method", None) == "dspark"
+                and getattr(self.speculative_config, "enable_adaptive_verification", False)
+                and self.num_prefills == 0
+            ):
+                # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
+                # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
+                # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+                max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
+            preamble = (
+                max_seqlen_q,
+                torch.max(seq_lens_cpu[:num_reqs]).item(),
+            )
+            metadata_cache["req_preamble"] = preamble
+        max_seqlen_q, max_seqlen_kv = preamble
+        return max_seqlen_q, max_seqlen_kv
+
+    def _build_start_positions(self, req: AscendDSAReqMetadata) -> torch.Tensor:
+        metadata_cache = self.common_ratio_to_sas_metadata
+        assert metadata_cache is not None
+        num_reqs = req.seq_lens.shape[0]
+        actual_reqs = req.num_actual_reqs
+        seq_lens, query_start_loc = req.seq_lens, req.query_start_loc
+        use_specialized_metadata = self._use_specialized_metadata()
+        start_key = ("start_pos", actual_reqs)
+        start_pos = metadata_cache.get(start_key) if use_specialized_metadata else None
+        if start_pos is None:
+            start_values = metadata_cache.get("start_pos_values")
+            if start_values is None:
+                start_values = seq_lens - (query_start_loc[1:] - query_start_loc[:-1])
+                metadata_cache["start_pos_values"] = start_values
+            self.start_pos_prefill[:num_reqs].copy_(start_values)
+            self.start_pos_prefill[actual_reqs:].zero_()
+            start_pos = self.start_pos_prefill[:num_reqs]
+            if use_specialized_metadata:
+                metadata_cache[start_key] = start_pos
+        return start_pos
 
     def build_for_drafting(
         self,
@@ -1285,9 +1427,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         if self.num_prefills:
-            cos, sin = get_cos_and_sin_dsa(input_positions)
+            cos, sin = get_cos_and_sin_dsa(input_positions, layer_names=self.layer_names)
         else:
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=True,
+                draft_index=draft_index,
+                layer_names=self.layer_names,
+            )
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = get_dsa_attn_kv_plan(
@@ -1358,13 +1505,51 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         "DSpark SWA metadata rows exceed the persistent buffer capacity: "
                         f"active={self.num_actual_tokens}, capacity={self.dspark_swa_indices_buffer.shape[0]}"
                     )
-                dspark_swa_indices = self.dspark_swa_indices_buffer[: self.num_actual_tokens]
-                build_dspark_swa = lambda: build_dspark_swa_indices(
-                    *dspark_swa_args,
-                    indices_output=dspark_swa_indices,
-                )
+                # Fused triton fast path: capacity grid + FULL buffer. The
+                # eager torch chain needs indices_output pre-sliced to the
+                # active rows (its copy_ has a shape check), while the triton
+                # kernel writes in place and requires the full-capacity
+                # buffer so the pad-row cleanup ([T_active, T_padded)) fires
+                # and a captured graph never replays stale rows. The kernel
+                # emits physical slot ids, so the sparse (logical-index) draft
+                # path must take the buffer + lambda route below.
+                if self._dspark_swa_indices_fast_path_eligible(num_reqs):
+                    num_query_per_req = self.dspark_num_query_per_req()
+                    num_actual_tokens = self.num_actual_tokens
+                    max_num_reqs = self.max_num_reqs_for_dspark()
+                    buffer = self.dspark_swa_indices_buffer
+                    lens_scratch = self.dspark_lens_scratch
+                    window = self.model_config.hf_config.sliding_window
+
+                    def build_dspark_swa_triton():
+                        slots, _ = build_dspark_swa_slot_indices_triton(
+                            dspark_swa_args[0],
+                            dspark_swa_args[1],
+                            window,
+                            dspark_swa_args[3],
+                            dspark_swa_args[4],
+                            dspark_swa_args[5],
+                            num_decode_tokens=num_actual_tokens,
+                            index_width=self._dspark_index_width,
+                            indices_output=buffer,
+                            lens_output=lens_scratch,
+                            max_num_reqs=max_num_reqs,
+                            num_query_per_req=num_query_per_req,
+                        )
+                        return slots
+
+                    build_dspark_swa = build_dspark_swa_triton
+                    dspark_swa_indices = buffer[: self.num_actual_tokens]
+                else:
+                    dspark_swa_indices = self.dspark_swa_indices_buffer[: self.num_actual_tokens]
+                    build_dspark_swa = lambda: build_dspark_swa_indices(
+                        *dspark_swa_args,
+                        indices_output=dspark_swa_indices,
+                    )
             else:
-                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
+                dspark_swa_indices, _ = self._build_dspark_swa_indices_eager(
+                    dspark_swa_args, buffer=self.dspark_swa_indices_buffer
+                )
                 dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
@@ -1383,6 +1568,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
+
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -1392,6 +1578,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         def build_attention_metadata() -> torch.Tensor:
             if build_dspark_swa is not None:
                 build_dspark_swa()
+            sas_seq_lens = seq_lens
+            if dspark_swa_indices is not None:
+                sas_seq_lens = torch.minimum(seq_lens, seq_lens_q + self.model_config.hf_config.sliding_window)
             result = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -1401,12 +1590,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                 cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                 seqused_q=self.seqused_q,
-                seqused_kv=seq_lens,
+                seqused_kv=sas_seq_lens,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 batch_size=num_reqs,
                 cmp_ratio=1,
-                ori_mask_mode=4,
+                ori_mask_mode=0 if dspark_swa_indices is not None else 4,
                 cmp_mask_mode=3,
                 ori_win_left=ori_win_left,
                 ori_win_right=ori_win_right,
@@ -1481,11 +1670,461 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return attn_metadata
 
 
+class AscendDSAStateMetadataBuilder(AscendDSAMetadataBuilder):
+    """State cache: only the block table and request layout are consumed."""
+
+    def build_req_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor | None,
+        num_actual_reqs: int | None,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        full_graph_mode: bool = False,
+        build_query: bool = True,
+        update_cache: bool = True,
+        *,
+        can_use_rope_cache: bool = True,
+        formatted_slot_mapping: torch.Tensor | None = None,
+    ) -> AscendDSAReqMetadata:
+        return self._new_req_metadata(common_attn_metadata, num_actual_reqs)
+
+
+class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
+    """Compressed attention: SAS queries and compressor cache writes.
+
+    SWA reuses the SAS query construction; Indexer reuses compressed writes.
+    Each concrete builder assembles its own request metadata below.
+    """
+
+    def _build_sas_metadata(
+        self,
+        metadata_cache: dict,
+        layer_name: str,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seqlen_q: int | torch.Tensor,
+        max_seqlen_kv: int | torch.Tensor,
+        cu_seqlens_ori_kv: torch.Tensor | None,
+        cu_seqlens_cmp_kv: torch.Tensor | None,
+        ori_win_left: int,
+        ori_win_right: int,
+        dspark_swa: bool,
+    ) -> torch.Tensor:
+        # DSpark widens the SWA window to include the whole draft block.
+        # Metadata and execution must use the same window so split-G cores
+        # agree on the number of KV iterations and synchronization events.
+        # These values change attention semantics even for the same ratio.
+        key = ("sas", layer_name, ori_win_left, ori_win_right, dspark_swa)
+        use_specialized_metadata = self._use_specialized_metadata()
+        output_key = ("sas_output", key)
+        if use_specialized_metadata and output_key in metadata_cache:
+            return metadata_cache[output_key]
+        sas_metadata = metadata_cache.get(key)
+        if sas_metadata is None:
+            tp_size = get_tensor_model_parallel_world_size()
+            n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+            index_topk = self.model_config.hf_config.index_topk
+            cmp_ratio = (
+                _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
+                if self.compressor_ratio <= 1
+                else 4
+                if self.compressor_ratio == 4
+                else 128
+            )
+            kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compressor_ratio)
+            metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+            metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            # Explicit DSpark indices give every query in a draft block the
+            # same visible KV set. Plan it as non-causal attention over that
+            # set, including when a short context crosses an S2 tile boundary.
+            sas_seq_lens = seq_lens
+            if dspark_swa:
+                query_lens = query_start_loc[1:] - query_start_loc[:-1]
+                sas_seq_lens = torch.minimum(seq_lens, query_lens + self.model_config.hf_config.sliding_window)
+            sas_metadata = metadata_op(
+                **metadata_kwargs,
+                num_heads_q=n_local_heads,
+                num_heads_kv=1,
+                head_dim=self.model_config.get_head_size(),
+                cu_seqlens_q=query_start_loc,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
+                seqused_kv=sas_seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                batch_size=len(seq_lens),
+                cmp_topk=index_topk if self.compressor_ratio == 4 else 0,
+                cmp_ratio=cmp_ratio,
+                ori_mask_mode=0 if dspark_swa else 4,
+                cmp_mask_mode=3,  # 3:causal
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                layout_q="TND",
+                layout_kv=_dsa_layout_kv(self.vllm_config),
+                has_ori_kv=True,
+                has_cmp_kv=self.compressor_ratio > 1,
+            )
+            metadata_cache[key] = sas_metadata
+
+        output = self.sas_metadata_buffer
+        if use_specialized_metadata:
+            # A single builder can encounter both causal and DSpark groups.
+            # Each variant needs its own capture-stable output address.
+            if key not in self._sas_variant_buffers:
+                self._sas_variant_buffers[key] = torch.empty_like(output)
+            output = self._sas_variant_buffers[key]
+        output[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
+        if use_specialized_metadata:
+            metadata_cache[output_key] = output
+        return output
+
+    def build_req_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor | None,
+        num_actual_reqs: int | None,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        full_graph_mode: bool = False,
+        build_query: bool = True,
+        update_cache: bool = True,
+        *,
+        can_use_rope_cache: bool = True,
+        formatted_slot_mapping: torch.Tensor | None = None,
+    ) -> AscendDSAReqMetadata:
+        req = self._new_req_metadata(common_attn_metadata, num_actual_reqs, cos, sin)
+        if build_query:
+            limits = self._prepare_query_inputs(
+                common_attn_metadata, req, seq_lens_cpu, can_use_rope_cache, full_graph_mode
+            )
+            self._build_attention_query(common_attn_metadata, req, limits)
+        if update_cache:
+            self._build_compressed_cache(common_attn_metadata, req, full_graph_mode)
+        return req
+
+    def _build_attention_query(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        req: AscendDSAReqMetadata,
+        limits: tuple[int, int],
+    ) -> None:
+        metadata_cache = self.common_ratio_to_sas_metadata
+        assert metadata_cache is not None
+        assert self.num_actual_tokens is not None
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_reqs = req.num_actual_reqs
+        query_start_loc, seq_lens = req.query_start_loc, req.seq_lens
+        max_seqlen_q, max_seqlen_kv = limits
+        has_prefill = self.num_prefills > 0
+        layer_name = f"c{self.compressor_ratio}"
+        cu_seqlens_ori_kv = None
+        cu_seqlens_cmp_kv = None
+        dspark_swa_indices = None
+        vision_swa_indices = None
+        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
+        if (
+            not has_prefill
+            and not common_attn_metadata.causal
+            and (self.compressor_ratio <= 1 or not is_turboquant(self.vllm_config))
+        ):
+            # DSpark non-causal parallel drafting: every draft query attends to
+            # the trailing context window plus the whole current draft block.
+            # Not gated on the SAS metadata cache: the indices depend on the
+            # current step's block table / sequence lengths, so they must be
+            # rebuilt whenever a DSpark draft step runs.
+            assert self.speculative_config is not None
+            dspark_swa_indices, _ = self._build_dspark_swa_indices_eager(
+                (
+                    self.block_table[: self.num_decodes],
+                    self.speculative_config.num_speculative_tokens,
+                    self.model_config.hf_config.sliding_window,
+                    self.storage_block_size,
+                    query_start_loc[: self.num_decodes + 1],
+                    self.seq_lens[: self.num_decodes],
+                    self.num_decode_tokens,
+                ),
+                buffer=self.dspark_swa_indices_buffer,
+            )
+            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
+        # Text-only requests and lightweight metadata fixtures do not carry
+        # multimodal document ranges. Treat those as having no vision spans.
+        mm_ranges = getattr(common_attn_metadata, "mm_req_doc_ranges", None)
+        max_image_tokens = (
+            getattr(
+                self.model_config.hf_config,
+                "vision_max_n_token",
+                0,
+            )
+            if getattr(
+                self.model_config.hf_config,
+                "vision_n_layers",
+                0,
+            )
+            > 0
+            else 0
+        )
+        if has_prefill and max_image_tokens > 0 and mm_ranges:
+            actual_reqs = num_reqs if num_actual_reqs is None else num_actual_reqs
+            vision_swa_indices, _ = build_vision_bidirectional_swa_indices(
+                block_table=self.block_table[:actual_reqs],
+                window_size=self.model_config.hf_config.sliding_window,
+                max_image_tokens=max_image_tokens,
+                block_size=self.storage_block_size,
+                query_start_loc=query_start_loc[: actual_reqs + 1],
+                seq_lens=seq_lens[:actual_reqs],
+                mm_prefix_ranges=mm_ranges,
+                num_tokens=self.num_actual_tokens,
+            )
+        if not has_prefill:
+            cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+                self.common_ratio_to_sas_metadata,
+                "cu_seqlens_ori_kv",
+                seq_lens,
+                num_reqs,
+                self._zero_i32,
+                self.cu_seqlens_ori_kv,
+            )
+            cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+        elif has_prefill:
+            cu_seqlens_ori_kv = query_start_loc
+
+        def build_sas_metadata() -> torch.Tensor:
+            return self._build_sas_metadata(
+                metadata_cache=metadata_cache,
+                layer_name=layer_name,
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                dspark_swa=dspark_swa_indices is not None,
+            )
+
+        if self._device_metadata_enabled:
+            self._device_metadata_tasks += (
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
+            )
+            req.sas_metadata = self.sas_metadata_buffer
+        else:
+            req.sas_metadata = build_sas_metadata()
+        req.cu_cmp_seqlen_list = cu_seqlens_cmp_kv
+        req.ori_win_left, req.ori_win_right = ori_win_left, ori_win_right
+        req.dspark_swa_indices = dspark_swa_indices
+        req.vision_swa_indices = vision_swa_indices
+
+    def _build_compressed_cache(
+        self,
+        common: AscendCommonAttentionMetadata,
+        req: AscendDSAReqMetadata,
+        full_graph_mode: bool,
+    ) -> None:
+        if req.start_pos is None:
+            req.start_pos = self._build_start_positions(req)
+        if full_graph_mode:
+            num_tokens = common.num_input_tokens
+            req.num_compressed_tokens = min(num_tokens, num_tokens // self.compressor_ratio + common.num_reqs)
+            req.num_actual_reqs = common.num_reqs
+        else:
+            req.num_compressed_tokens = self._num_compressor_metadata_rows(common.num_reqs)
+        req.full_compress_cos, req.full_compress_sin = get_full_cos_and_sin_dsa(f"c{self.compressor_ratio}")
+        if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
+            num_compressed_tokens = req.num_compressed_tokens
+            assert num_compressed_tokens is not None
+            buffers = self.compressor_metadata_buffers
+            outputs = (
+                buffers[0][:num_compressed_tokens],
+                buffers[1][:num_compressed_tokens],
+                buffers[2][:num_compressed_tokens],
+            )
+            group_id = id(buffers[0])
+            req.compressor_metadata = outputs
+            req.compressor_metadata_group_id = group_id
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(
+                    DeviceMetadataStage.COMPRESSOR,
+                    lambda: build_compressor_metadata_out(req, self.compressor_ratio, outputs, self.vllm_config),
+                    group_id,
+                ),
+                *self._device_metadata_tasks,
+            )
+
+
+class AscendDSASWAMetadataBuilder(AscendDSAAttentionMetadataBuilder):
+    """SWA: SAS queries and uncompressed KV writes at raw-token slots."""
+
+    def build_req_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor | None,
+        num_actual_reqs: int | None,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        full_graph_mode: bool = False,
+        build_query: bool = True,
+        update_cache: bool = True,
+        *,
+        can_use_rope_cache: bool = True,
+        formatted_slot_mapping: torch.Tensor | None = None,
+    ) -> AscendDSAReqMetadata:
+        req = self._new_req_metadata(common_attn_metadata, num_actual_reqs, cos, sin)
+        if build_query:
+            limits = self._prepare_query_inputs(
+                common_attn_metadata, req, seq_lens_cpu, can_use_rope_cache, full_graph_mode
+            )
+            self._build_attention_query(common_attn_metadata, req, limits)
+        if update_cache:
+            self._prepare_rope(common_attn_metadata, req, can_use_rope_cache, full_graph_mode)
+            self._build_swa_cache(common_attn_metadata, req, formatted_slot_mapping)
+        return req
+
+    def _build_swa_cache(
+        self,
+        common: AscendCommonAttentionMetadata,
+        req: AscendDSAReqMetadata,
+        formatted_slot_mapping: torch.Tensor | None,
+    ) -> None:
+        # Only SWA writes use the common metadata's raw-token slots.
+        num_input_tokens = common.num_input_tokens
+        if formatted_slot_mapping is None:
+            formatted_slot_mapping = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
+                common.slot_mapping[:num_input_tokens], self.storage_block_size
+            )
+        self.slot_mapping[:num_input_tokens].copy_(formatted_slot_mapping[:num_input_tokens])
+        req.num_compressed_tokens = self.num_actual_tokens
+        req.slot_mapping = self.slot_mapping[: self.num_actual_tokens]
+
+
+class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
+    """Indexer: QLI query/length metadata and compressor cache writes."""
+
+    def _build_qli_metadata(
+        self,
+        metadata_cache: dict,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_kv: int,
+    ) -> torch.Tensor:
+        use_specialized_metadata = self._use_specialized_metadata()
+        if use_specialized_metadata and "qli_output" in metadata_cache:
+            return metadata_cache["qli_output"][0]
+        # Share the tiling output AND its length/residual buffers for this batch.
+        seq_lens_i32 = seq_lens
+        if seq_lens_i32.dtype != torch.int32:
+            seq_lens_i32 = seq_lens_i32.to(torch.int32)
+        num_reqs = seq_lens_i32.shape[0]
+        qli_seqused_k = self.qli_seqused_k[:num_reqs]
+        qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+        torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
+        torch.remainder(seq_lens_i32, 4, out=qli_cmp_residual_k)
+
+        qli_metadata = metadata_cache.get("qli")
+        if qli_metadata is None:
+            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                num_heads_k=1,
+                head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                topk=self.model_config.hf_config.index_topk,
+                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
+                cu_seqlens_q=query_start_loc,
+                seqused_k=qli_seqused_k,
+                cmp_residual_k=qli_cmp_residual_k,
+                batch_size=len(seq_lens),
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_kv // 4,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=4,
+                device=str(self.seqused_q.device),
+            )
+            metadata_cache["qli"] = qli_metadata
+
+        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        if use_specialized_metadata:
+            metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
+        return self.qli_metadata_buffer
+
+    def build_req_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor | None,
+        num_actual_reqs: int | None,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        full_graph_mode: bool = False,
+        build_query: bool = True,
+        update_cache: bool = True,
+        *,
+        can_use_rope_cache: bool = True,
+        formatted_slot_mapping: torch.Tensor | None = None,
+    ) -> AscendDSAReqMetadata:
+        req = self._new_req_metadata(common_attn_metadata, num_actual_reqs, cos, sin)
+        if build_query:
+            limits = self._prepare_query_inputs(
+                common_attn_metadata, req, seq_lens_cpu, can_use_rope_cache, full_graph_mode
+            )
+            self._build_indexer_query(req, limits)
+        if update_cache:
+            self._build_compressed_cache(common_attn_metadata, req, full_graph_mode)
+        return req
+
+    def _build_indexer_query(self, req: AscendDSAReqMetadata, limits: tuple[int, int]) -> None:
+        metadata_cache = self.common_ratio_to_sas_metadata
+        assert metadata_cache is not None
+        max_seqlen_q, max_seqlen_kv = limits
+
+        def build_qli_metadata() -> torch.Tensor:
+            return self._build_qli_metadata(
+                metadata_cache=metadata_cache,
+                query_start_loc=req.query_start_loc,
+                seq_lens=req.seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+            )
+
+        if self._device_metadata_enabled:
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
+                *self._device_metadata_tasks,
+            )
+            req.qli_metadata = self.qli_metadata_buffer
+        else:
+            req.qli_metadata = build_qli_metadata()
+        req.qli_cu_seqlens_q = req.query_start_loc
+        if self._use_specialized_metadata():
+            _, req.qli_seqused_k, req.qli_cmp_residual_k = metadata_cache["qli_output"]
+        else:
+            num_reqs = req.seq_lens.shape[0]
+            req.qli_seqused_k = self.qli_seqused_k[:num_reqs]
+            req.qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+
+
 class AscendDSAImpl(AttentionImplBase[Any]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    enable_pcp_o_proj_weight_sharding = False
+
+    _oproj_send_buf: torch.Tensor
+    turboquant: TurboQuantLatent | None = None
+    _tq_kv_plan: DsaAttnKvPlan | None = None
+
+    def get_kv_plan(self) -> DsaAttnKvPlan:
+        # Only TQ modules cache their fixed execution plan. Other cache modes
+        # retain the baseline planner and operator selection on every call.
+        if self.turboquant is None:
+            return get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        if self._tq_kv_plan is None:
+            self._tq_kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
+        return self._tq_kv_plan
 
     def __init__(
         self,
@@ -1504,6 +2143,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         **kwargs,
     ):
         self.vllm_config = kwargs["vllm_config"]
+        self._oproj_buffer_pool = OProjBufferPool()
         self.num_heads = n_heads
         self.n_local_heads = n_local_heads
         self.scale = scale
@@ -1516,6 +2156,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.window_size = window_size
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
+        self.turboquant = (
+            TurboQuantLatent(legacy_hadamard=True) if is_turboquant(self.vllm_config) and compress_ratio == 4 else None
+        )
         self.softmax_scale = self.head_dim**-0.5
         self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
@@ -1546,6 +2189,26 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+
+    def _write_kv_cache(self, cache, kv, slot_mapping, *, quantize: bool):
+        if self.turboquant is not None:
+            if kv is None or kv.shape[0] == 0:
+                return
+            if quantize:
+                if cache.dtype != torch.uint8:
+                    raise TypeError(f"TurboQuant C4 cache must use torch.uint8, got {cache.dtype}")
+                kv = self.turboquant.compress(kv)
+                # A2/A3 scatter update dispatches packed bytes through INT8.
+                cache, kv = cache.view(torch.int8), kv.view(torch.int8)
+            else:
+                if cache.dtype != kv.dtype:
+                    raise TypeError(f"TurboQuant SWA cache dtype {cache.dtype} does not match KV dtype {kv.dtype}")
+                # The mixed attention query is rotated as well. Keep the BF16
+                # SWA cache in that basis without applying C4 quantization.
+                kv = self.turboquant.forward(kv)
+            write_dsa_cache(cache, kv, slot_mapping)
+            return
+        get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(cache, kv, slot_mapping)
 
     def _get_layer_metadata(
         self,
@@ -1597,37 +2260,68 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Attention impls are not walked by vllm's process_weights_after_loading
-        # dispatcher (only LinearMethodBase subclasses are). OTP buffers are
-        # allocated lazily on the first _forward_o_proj call, which always runs
-        # before ACL graph capture (profiling run triggers it).
+        # dispatcher (only LinearMethodBase subclasses are). The owning model
+        # reserves OTP storage during construction, before KV memory profiling.
         pass
 
-    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        num_tokens = o_proj_input.shape[0]
-        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
-        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
-        # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP path below, so it must win first.
-        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-        if use_a5_quant_o_proj:
-            o = o_proj_input
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-            o = torch_npu.npu_transpose_quant_batchmatmul(
-                o,
+    def _wo_a_bmm(self, o_proj_input: torch.Tensor) -> torch.Tensor:
+        """Project grouped activations with FP8 or BF16, preserving the 3D layout."""
+        if self.support_fp8_attention and _has_weight_scale(self.wo_a):
+            o_proj_input, act_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
+            return torch_npu.npu_transpose_quant_batchmatmul(
+                o_proj_input,
                 self.wo_a.weight,
                 dtype=torch.bfloat16,
                 bias=None,
                 group_sizes=(0, 0, 32),
-                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                x1_scale=act_scale.view(torch.float8_e8m0fnu),
                 x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
                 perm_x1=(1, 0, 2),
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        elif oproj_tp_enable():
+        return torch_npu.npu_transpose_batchmatmul(
+            o_proj_input,
+            self.wo_a.weight,
+            bias=None,
+            scale=None,
+            perm_x1=(1, 0, 2),
+            perm_x2=(0, 1, 2),
+            perm_y=(1, 0, 2),
+            batch_split_factor=1,
+        )
+
+    def reserve_oproj_buffers(self, device: torch.device, dtype: torch.dtype) -> None:
+        """Reserve graph-stable OTP storage before KV cache capacity is measured."""
+        if not oproj_tp_enable():
+            return
+        if not hasattr(self, "_oproj_buffer_pool"):
+            self._oproj_buffer_pool = OProjBufferPool()
+        oproj_tp_size = get_otp_group().world_size
+        if self.n_local_groups % oproj_tp_size != 0:
+            raise ValueError(
+                f"n_local_groups={self.n_local_groups} must be divisible by oproj_tensor_parallel_size={oproj_tp_size}"
+            )
+        # Decode is graph-bound when OTP is enabled. Profiling may use a larger
+        # scheduler budget, but it only needs to exercise this decode capacity.
+        exchange_num_tokens = get_potential_max_tokens()
+        group_hidden_dim = self.n_local_heads * self.head_dim // self.n_local_groups
+        buf_shape = (
+            oproj_tp_size,
+            exchange_num_tokens,
+            self.n_local_groups // oproj_tp_size,
+            group_hidden_dim,
+        )
+        self._oproj_send_buf, self._oproj_recv_buf = self._oproj_buffer_pool.get_exchange(buf_shape, dtype, device)
+        self._oproj_rs_out_buf = self._oproj_buffer_pool.get_reduce_scatter(
+            (exchange_num_tokens, self.wo_b.output_size), dtype, device
+        )
+
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        num_tokens = o_proj_input.shape[0]
+        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
+        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
+        if oproj_tp_enable():
             oproj_group = get_otp_group()
             oproj_tp_size = oproj_group.world_size
             if self.n_local_groups % oproj_tp_size != 0:
@@ -1641,26 +2335,30 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
             o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
             # Pad to a static exchange size so the all_to_all / reduce_scatter
-            # shapes are identical across all ACL graph buckets — variable
-            # shapes desync the HCCL communicator during graph replay.
-            # potential_max_tokens is computed once in the model runner __init__,
-            # so reading it here is a cheap global lookup.
+            # shapes stay identical across ACL graph buckets. potential_max_tokens
+            # already covers the largest decode batch; a larger scheduler budget
+            # would only pad every decode step, so the guard below rejects it.
             exchange_num_tokens = get_potential_max_tokens()
             if exchange_num_tokens < num_tokens:
+                scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
-                    "oproj static exchange capacity must cover local tokens, "
-                    f"got {exchange_num_tokens} and {num_tokens}."
+                    f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
+                    f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
+                    "capacity >= the largest decode graph bucket. Please raise "
+                    "max_cudagraph_capture_size or the largest "
+                    "cudagraph_capture_sizes entry "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs})."
                 )
-            # Lazily allocate static send/recv buffers on first call. The
-            # profiling run hits this path before ACL graph capture, so the
-            # buffers exist and keep a stable device address across all later
-            # capture/replay cycles (graph replay requires the same address
-            # that was recorded at capture; new_zeros per call would desync
-            # the HCCL operator).
+            # Model construction reserves these buffers before KV profiling.
+            # Keep the lazy fallback for standalone attention implementations.
             if not hasattr(self, "_oproj_send_buf"):
                 buf_shape = (oproj_tp_size, exchange_num_tokens, groups_per_rank, group_hidden_dim)
-                self._oproj_send_buf = torch.zeros(buf_shape, dtype=o_proj_input.dtype, device=o_proj_input.device)
-                self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
+                pool = getattr(self, "_oproj_buffer_pool", None)
+                if pool is None:
+                    pool = self._oproj_buffer_pool = OProjBufferPool()
+                self._oproj_send_buf, self._oproj_recv_buf = pool.get_exchange(
+                    buf_shape, o_proj_input.dtype, o_proj_input.device
+                )
             send = self._oproj_send_buf
             recv = self._oproj_recv_buf
             # In-place fill into the address-stable buffer: zero the padding
@@ -1669,16 +2367,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             send[:, :num_tokens].copy_(o_proj_input.transpose(1, 0))
             dist.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
             o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            # Quantization stays after all-to-all; communication buffers keep their input dtype.
+            o_proj_input = self._wo_a_bmm(o_proj_input)
             o_proj_input = o_proj_input.reshape(oproj_tp_size * exchange_num_tokens, -1)
             o_proj_output = self.wo_b(o_proj_input)
             # reduce_scatter via a raw dist collective into an address-stable
@@ -1687,26 +2377,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # at capture during ACL graph replay — the same reason all_to_all
             # and the embedding TP path use raw dist + static buffers.
             if not hasattr(self, "_oproj_rs_out_buf"):
-                self._oproj_rs_out_buf = torch.empty(
-                    (exchange_num_tokens, o_proj_output.shape[-1]),
-                    dtype=o_proj_output.dtype,
-                    device=o_proj_output.device,
+                self._oproj_rs_out_buf = self._oproj_buffer_pool.get_reduce_scatter(
+                    (exchange_num_tokens, o_proj_output.shape[-1]), o_proj_output.dtype, o_proj_output.device
                 )
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
         else:
-            # A5 BF16 wo_a is reshaped to [groups, hidden, rank] at load time,
-            # matching the A3 layout expected by npu_transpose_batchmatmul.
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            o_proj_input = self._wo_a_bmm(o_proj_input)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output
@@ -1736,16 +2413,27 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...] | None,
-        attn_metadata: DSAMetadataDict,
+        attn_metadata: DSAMetadataDict | None,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         output_padded = output
+        if self.turboquant is not None:
+            self.turboquant._initialize(hidden_states.device)
         o_proj_input_shape = self._get_o_proj_input_shape(attn_metadata)
         if attn_metadata is None:
-            # Profiling run: run o_proj on zero input so HCCL collectives are
-            # captured by the ACL graph.  Non-OTP just zeros the output.
+            # Profiling uses the full scheduler batch for other operators, but
+            # OTP only runs on decode graphs. Exercise its largest decode shape
+            # so the collective and projection scratch are accounted for.
             if oproj_tp_enable():
+                capacity = (
+                    self._oproj_send_buf.shape[1] if hasattr(self, "_oproj_send_buf") else get_potential_max_tokens()
+                )
+                profile_tokens = min(o_proj_input_shape[0], capacity)
+                output.zero_()
+                o_proj_input = hidden_states.new_zeros((profile_tokens, *o_proj_input_shape[1:]))
+                self._forward_o_proj(o_proj_input, output[:profile_tokens])
+            elif self.enable_pcp_o_proj_weight_sharding:
                 o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             else:
@@ -1768,7 +2456,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
         if actual_tokens == 0:
             output.zero_()
+            if oproj_tp_enable():
+                # Other OTP ranks may have active tokens and enter these
+                # collectives. Keep the empty rank in the same communication
+                # sequence using its already-zeroed projection input.
+                self._forward_o_proj(o_proj_input, output)
             notify_kv_cache_written(layer_name)
+            with attention_transfer_window():
+                pass
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
             return output
 
@@ -1877,10 +2572,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
 
             # swa exec kv
-            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
+            self._write_kv_cache(
                 swa_kv_cache,
                 kv,
                 slot_mapping,
+                quantize=False,
             )
 
         return q, qr, qr_pertoken_scale
@@ -1986,7 +2682,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
+            self._write_kv_cache(swa_kv_cache, kv, slot_mapping, quantize=False)
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -2064,10 +2760,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 compress_slot_mapping: torch.Tensor,
             ) -> None:
                 if compressed_kv.shape[0] > 0:
-                    get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
+                    self._write_kv_cache(
                         compress_kv_cache,
                         compressed_kv,
                         compress_slot_mapping,
+                        quantize=True,
                     )
 
             overlap_plan = IndexerOverlapPlan(
@@ -2098,10 +2795,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 metadata=layer_metadata.compressor,
             )
         if compressed_kv.shape[0] > 0:
-            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
+            self._write_kv_cache(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
+                quantize=True,
             )
         return None
 
@@ -2199,7 +2897,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
         record_attention_compute_start()
-        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        kv_plan = self.get_kv_plan()
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
@@ -2243,4 +2941,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
 
-        return attn_op(q, **attn_kwargs)[0]
+        if self.turboquant is not None:
+            q = self.turboquant.forward(q)
+        with attention_transfer_window():
+            result = attn_op(q, **attn_kwargs)[0]
+        return self.turboquant.inverse(result) if self.turboquant is not None else result

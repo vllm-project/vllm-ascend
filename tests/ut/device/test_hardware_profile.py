@@ -28,30 +28,42 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.FLA_GDN_PREFILL,
+        HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
+        HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.GRAPH_QKV_NORM_ROPE_FUSION,
         HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
-        HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.SCATTER_ND_CACHE_STORE,
+        HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES
+    | {
+        HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.NPU_TOP_K_TOP_P,
+    },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
-        HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+        HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
@@ -70,27 +82,39 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A5: frozenset(
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-            HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+            HardwareCapability.SCATTER_ND_CACHE_STORE,
+            HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
+            HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
             HardwareCapability.DSV4_COMPRESSED_CACHE,
+            HardwareCapability.DSV41_PACKED_CACHE,
+            HardwareCapability.ENGRAM_UNROTATED_GATE,
+            HardwareCapability.ENGRAM_MXFP8,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+            HardwareCapability.FLA_GDN_PREFILL,
             HardwareCapability.FP8_ATTENTION,
+            HardwareCapability.POOL_KEY_INDEXER_FP8,
+            HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
+            HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
             HardwareCapability.GRAPH_MULS_ADD_FUSION,
             HardwareCapability.GRAPH_NORM_QUANT_FUSION,
             HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
-            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
+            HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
-            HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+            HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+            HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
+            HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
-            HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+            HardwareCapability.NPU_TOP_K_TOP_P,
+            HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,
@@ -192,6 +216,20 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
     assert profile.capabilities == expected_capabilities
     for capability in HardwareCapability:
         assert profile.supports(capability) is (capability in expected_capabilities)
+
+
+@pytest.mark.parametrize(
+    "device_type,expected_min_query_len",
+    [
+        (AscendDeviceType.A2, 9),
+        (AscendDeviceType.A3, None),
+        (AscendDeviceType.A5, None),
+        (AscendDeviceType._310P, None),
+    ],
+)
+def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_query_len):
+    profile = get_hardware_profile(device_type)
+    assert profile.gdn_fixed_spec_recurrent_fallback_min_query_len == expected_min_query_len
 
 
 def test_current_hardware_profile_uses_device_config() -> None:

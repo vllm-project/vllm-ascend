@@ -14,3 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+
+
+def get_prebound_copy_sfa_slots() -> dict[str, int]:
+    """Return Copy-SFA row reservations made before PD KV transfer."""
+    if not has_kv_transfer_group():
+        return {}
+    connector = get_kv_transfer_group()
+    getter = getattr(connector, "get_copy_sfa_slot_bindings", None)
+    if getter is None:
+        return {}
+    return getter() or {}

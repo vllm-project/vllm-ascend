@@ -60,10 +60,10 @@ def test_build_round_robin_topk_rejects_invalid_shape(kwargs, message):
 
 def test_get_force_eplb_topk_reuses_cached_table():
     moe_comm_method = _make_moe_comm_method()
-    context = SimpleNamespace(moe_comm_method=moe_comm_method)
     topk_ids = torch.empty((2, 2), dtype=torch.int32)
 
-    with patch.object(force_eplb, "get_forward_context", return_value=context):
+    extras = SimpleNamespace(moe_comm_method=moe_comm_method)
+    with patch.object(force_eplb, "_EXTRA_CTX", extras):
         first = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
         second = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
@@ -72,12 +72,20 @@ def test_get_force_eplb_topk_reuses_cached_table():
 
 
 def test_get_force_eplb_topk_returns_none_without_comm_method():
-    context = SimpleNamespace(moe_comm_method=None)
+    topk_ids = torch.empty((2, 2))
 
-    with patch.object(force_eplb, "get_forward_context", return_value=context):
-        result = force_eplb.get_force_eplb_topk(torch.empty((2, 2)), num_logical_experts=8)
+    extras = SimpleNamespace(moe_comm_method=None)
+    with patch.object(force_eplb, "_EXTRA_CTX", extras):
+        result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
     assert result is None
+
+
+def test_get_force_eplb_topk_requires_forward_context():
+    topk_ids = torch.empty((2, 2))
+
+    with pytest.raises(AssertionError, match="Forward context is not set"):
+        force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
 
 @pytest.mark.parametrize(

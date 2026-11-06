@@ -1,0 +1,7 @@
+pr: 18857
+entries:
+  - category: bugfix
+    text: >-
+      GLM-5.3-Flash now honors --mamba-ssm-cache-dtype bfloat16 for KDA recurrent
+      state storage, with consistent model cache sizing and layer allocation.
+      The default auto setting continues to use FP32 state.
