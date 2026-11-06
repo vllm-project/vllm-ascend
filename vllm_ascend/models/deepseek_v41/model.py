@@ -1899,6 +1899,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        c2_loaded_shards: dict[str, set[int]] = {}
 
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
@@ -1957,6 +1958,95 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             # a router bias for them. Skip it instead of raising a KeyError.
             if name.endswith(".gate.e_score_correction_bias") and name not in params_dict:
                 continue
+
+            # Resolve legacy C2 tensors using the actual registered parameter.
+            if name.endswith((".compressor.wkv.weight", ".compressor.wgate.weight")):
+                if is_pp_missing_parameter(name, self):
+                    continue
+                # C1 and unfused C2 keep their original checkpoint parameter names.
+                if name not in params_dict:
+                    compressor_path, projection_name, _ = name.rsplit(".", 2)
+                    shard_id = 0 if projection_name == "wkv" else 1
+                    try:
+                        compressor = self.get_submodule(compressor_path)
+                    except AttributeError as exc:
+                        raise RuntimeError(
+                            f"C2 loading failed: compressor module not found. "
+                            f"checkpoint_name={name}, module_path={compressor_path}"
+                        ) from exc
+                    # C1 and unfused C2 may have their parameters registered under
+                    # another canonical name because named_parameters() removes duplicates.
+                    is_fused_c2 = (
+                        getattr(compressor, "ratio", None) == 2
+                        and getattr(compressor, "_fuse_c2_proj", False)
+                    )
+
+                    if not is_fused_c2:
+                        linear = getattr(compressor, projection_name, None)
+                        param = getattr(linear, "weight", None)
+
+                        if param is None:
+                            raise RuntimeError(
+                                f"Original compressor projection is missing: "
+                                f"checkpoint_name={name}, "
+                                f"ratio={getattr(compressor, 'ratio', None)}, "
+                                f"projection={projection_name}, "
+                                f"module_children={list(compressor._modules.keys())}, "
+                                f"local_parameters={list(dict(compressor.named_parameters()).keys())}"
+                            )
+
+                        canonical_names = [
+                            key for key, value in params_dict.items()
+                            if value is param
+                        ]
+                        if len(canonical_names) != 1:
+                            raise RuntimeError(
+                                f"Original compressor parameter is not registered uniquely: "
+                                f"checkpoint_name={name}, "
+                                f"canonical_names={canonical_names}, "
+                                f"parameter_type={type(param).__name__}"
+                            )
+
+                        canonical_name = canonical_names[0]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(canonical_name)
+                        continue
+                    
+                    merged_linear = getattr(compressor, "wkv_gate", None)
+                    param = getattr(merged_linear, "weight", None) if merged_linear is not None else None
+                    registered_names = (
+                        [key for key, value in params_dict.items() if value is param]
+                        if param is not None else []
+                    )
+                    if len(registered_names) != 1:
+                        candidates = [key for key in params_dict if key.startswith(compressor_path + ".")]
+                        raise RuntimeError(
+                            f"C2 projection mapping failed: checkpoint_name={name}, "
+                            f"module_type={type(compressor).__name__}, "
+                            f"ratio={getattr(compressor, 'ratio', None)}, "
+                            f"fuse_enabled={getattr(compressor, '_fuse_c2_proj', None)}, "
+                            f"has_wkv_gate={merged_linear is not None}, "
+                            f"registered_names={registered_names}, local_parameters={candidates}"
+                        )
+                    fused_name = registered_names[0]
+                    if param.ndim != 2 or param.shape[0] % 2:
+                        raise ValueError(
+                            f"Invalid merged C2 parameter: {fused_name}, shape={tuple(param.shape)}"
+                        )
+                    width = param.shape[0] // 2
+                    expected_shape = (width, param.shape[1])
+                    if tuple(loaded_weight.shape) != expected_shape:
+                        raise ValueError(
+                            f"{name}: expected {expected_shape}, got {tuple(loaded_weight.shape)}"
+                        )
+                    with torch.no_grad():
+                        param.narrow(0, shard_id * width, width).copy_(loaded_weight)
+                    c2_loaded_shards.setdefault(fused_name, set()).add(shard_id)
+                    loaded_params.add(fused_name)
+                    continue
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
@@ -2107,6 +2197,12 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
+        # This loader consumes a complete checkpoint in one call.
+        for fused_name, shards in c2_loaded_shards.items():
+            if shards != {0, 1}:
+                raise ValueError(
+                    f"Incomplete C2 projection weights for {fused_name}: loaded shards {sorted(shards)}"
+                )
         return loaded_params
 
     @property

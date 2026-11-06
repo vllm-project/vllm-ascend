@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP32 C2 ring compressor, ratio-1 path, and fused RMS normalization."""
 
+import os
+
 import torch
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -18,17 +20,24 @@ class DeepseekV41Compressor(nn.Module):
         self.ratio = ratio
         self.width = config.head_dim
         dim = config.hidden_size
-        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.float32 if ratio == 2 else torch.bfloat16)
+        # Opt in on every worker before model construction; never toggle after capture.
+        self._fuse_c2_proj = ratio == 2 and os.getenv("VLLM_ASCEND_FUSE_V41_C2_PROJ", "0") == "1"
+        if self._fuse_c2_proj:
+            self.wkv_gate = nn.Linear(dim, 2 * self.width, bias=False, dtype=torch.float32)
+        else:
+            self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.float32 if ratio == 2 else torch.bfloat16)
         self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
-            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
+            if not self._fuse_c2_proj:
+                self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
+            projection_weight = self.wkv_gate.weight if self._fuse_c2_proj else self.wkv.weight
             # Allocate persistent output before memory profiling, so its footprint
             # is included in the cache budget rather than added after allocation.
             if vllm_config is not None:
                 capacity = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
                 self.register_buffer(
                     "_ring_pooled",
-                    torch.empty(capacity, self.width, dtype=torch.bfloat16, device=self.wkv.weight.device),
+                    torch.empty(capacity, self.width, dtype=torch.bfloat16, device=projection_weight.device),
                     persistent=False,
                 )
             # Standalone unfused-reference tests may supply pages explicitly.
@@ -45,6 +54,16 @@ class DeepseekV41Compressor(nn.Module):
                         head_size_v=0,
                     ),
                 )
+
+    def project_c2(self, hidden_states_fp32):
+        """Project C2 using one merged GEMM or the original two GEMMs."""
+        # getattr also supports reference fixtures constructed with __new__.
+        if not getattr(self, "_fuse_c2_proj", False):
+            return self.wkv(hidden_states_fp32), self.wgate(hidden_states_fp32)
+        projected = self.wkv_gate(hidden_states_fp32)
+        kv, score = projected.split(self.width, dim=-1)
+        # The existing Triton pool and ring-update kernels require row stride H.
+        return kv.contiguous(), score.contiguous()
 
     def prepare_ring_compressor(self, max_tokens, device):
         """Resolve ring-compressor hardware before capture."""
@@ -68,4 +87,6 @@ class DeepseekV41Compressor(nn.Module):
 
     def forward(self, x):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""
+        if self._fuse_c2_proj:
+            raise RuntimeError("Fused C2 requires project_c2() followed by pool_projected()")
         return self.norm(self.wkv(x))
