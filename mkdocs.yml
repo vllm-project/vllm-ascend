@@ -212,6 +212,11 @@ nav:
         - tutorials/models/index.md
         - tutorials/models/Qwen3-Dense.md
         - tutorials/models/Qwen-VL-Dense.md
+        - tutorials/models/Rex-Omni.md
+        - "Rex-Omni Optimization Case Study (中文)":
+            - tutorials/models/rex-omni/CASE_STUDY_V2.md
+            - tutorials/models/rex-omni/METHODOLOGY.md
+            - tutorials/models/rex-omni/REPORT.md
         - tutorials/models/Qwen3-30B-A3B.md
         - tutorials/models/Qwen3-235B-A22B.md
         - tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
