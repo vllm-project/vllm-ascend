@@ -430,6 +430,7 @@ def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):
         is_finished=lambda: False,
         use_structured_output=True,
         all_token_ids=[200],
+        _all_token_ids=[200],
         structured_output_request=SimpleNamespace(
             grammar=SimpleNamespace(validate_tokens=validate_grammar),
             reasoning_ended=False,

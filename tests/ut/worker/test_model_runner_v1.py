@@ -1070,6 +1070,7 @@ class TestDrafterMaxModelLen(unittest.TestCase):
 class TestAcceptedTokenSnapshot(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._use_flashinfer_replayssm = False
         runner.use_async_scheduling = True
         runner.speculative_config = object()
         runner.model_config = SimpleNamespace(is_hybrid=True)
