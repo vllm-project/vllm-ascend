@@ -194,64 +194,10 @@ class _HixlProducerServer(_RDTProducerServer):
         return buffer
 
     def rdt_produce_weights_batched(self, specs: list, consumer_id: int = 0, seq: int = -1):
-        """Serve one batched slice request over HIXL.
-
-        Waits until the specs' names are cached, then rendezvouses with the
-        other live sharers of this consumer's slot-sharing group. The last to
-        arrive replays each spec's op chain (pure views into cached tensors,
-        guarded by ALLOWED_OPS) and byte-packs the slices 16B-aligned into the
-        group's ring slot ``seq % nring``, mirroring the consumer's identical
-        layout; every sharer then returns that one packed blob, so R deployments
-        cost one pack and one slot instead of R. With a single deployment every
-        group is a singleton, so the arriving call is always its own packer and
-        this is the unshared serve path exactly.
-
-        ``seq`` is the caller's index in its pull stream to this producer, which
-        is what fixes the slot. Callers that want a single slice pass one spec
-        and read the blob back with that slice's dtype/shape.
-
-        Raises:
-            ValueError: ``seq`` was not supplied.
-
-        """
+        # Reuse upstream validation, rendezvous and failure propagation.
+        # Its virtual pack hook retains our NPU completion-before-publish rule.
         torch.npu.set_device(self._device_index)
-        needed = sorted({n for n, _ in specs})
-        if self._served_names is not None:
-            unserved = [n for n in needed if n not in self._served_names]
-            if unserved:
-                # Without this the cache wait below would block forever: this
-                # producer never gathers these names, so they can never arrive.
-                raise RuntimeError(
-                    f"pull routed to the wrong producer: {unserved[:3]} ({len(unserved)} names) are not served here"
-                )
-        with self._cache_cond:
-            self._wait_for(
-                lambda: not all(n in self._cache for n in needed),
-                f"{len(needed)} name(s) to be published",
-            )
-            if not all(n in self._cache for n in needed):
-                # _wait_for only gives up on a gather error (its own stall
-                # included), so the names are never coming.
-                raise RuntimeError(f"gather errored before {needed}: {self._gather_error!r}")
-
-        if seq < 0:
-            # The slot is derived from it, so a caller that does not send one
-            # cannot be served safely.
-            raise ValueError("rdt_produce_weights_batched requires the consumer's issue index `seq`")
-        gen, is_packer = self._join_share_group(consumer_id, seq)
-        if not is_packer:
-            blob = self._await_shared_pack(gen)
-        else:
-            try:
-                blob = self._pack_shared(gen, specs)
-            except BaseException as e:
-                self._fail_shared_pack(gen, e)
-                raise
-        # A served pull is the third of the four progress signals the stall
-        # watchdog reads (publish / produce / free / begin_sync): a long sync whose
-        # consumers pull steadily but slowly must never trip it.
-        with self._cache_cond:
-            self._note_progress_locked()
+        [blob] = super().rdt_produce_weights_batched(specs, consumer_id, seq)
         torch.npu.current_stream(self._serve_device).synchronize()
         return self._hixl.endpoint, blob.data_ptr(), blob.numel()
 
