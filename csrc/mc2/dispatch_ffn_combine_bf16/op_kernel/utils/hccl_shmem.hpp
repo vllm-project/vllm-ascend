@@ -220,8 +220,8 @@ public:
         
         uint64_t flag_offset = (m_segmentSize - MB_SIZE) + m_rank * stateOffset_;
         //uint64_t flag_offset = (m_segmentSize - MB_SIZE);
-        int vec_size = get_block_num();
-        int vec_id = get_block_idx();
+        int vec_size = AscendC::GetBlockNum();
+        int vec_id = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio());
  
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(RECV_SYNC_EVENT_ID);
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(SEND_SYNC_EVENT_ID);
@@ -244,8 +244,8 @@ public:
         AscendC::LocalTensor<uint32_t> gatherTmpTensor, AscendC::LocalTensor<float> statusSumOutTensor) {
 
         uint64_t flag_offset = (m_segmentSize - MB_SIZE);
-        int vec_size = get_block_num();
-        int vec_id = get_block_idx();
+        int vec_size = AscendC::GetBlockNum();
+        int vec_id = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio());
         uint32_t stateOffset_ =  STATE_OFFSET;
 
         uint32_t sendRankNum_ = m_rankSize / vec_size;

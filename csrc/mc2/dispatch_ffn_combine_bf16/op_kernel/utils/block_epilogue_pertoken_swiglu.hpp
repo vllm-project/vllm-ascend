@@ -159,9 +159,10 @@ public:
         uint32_t blockN = shapeC.column();
 
         uint32_t tileLoops = blockM;
-        uint32_t subblockIdx = get_block_idx() + get_subblockid() * get_block_num();
+        uint32_t subblockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+            AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
 
-        uint32_t subblockNum = get_block_num() * 2;
+        uint32_t subblockNum = AscendC::GetBlockNum() * 2;
         uint32_t moveDataCoreNum = subblockNum - epilogueCoreNum;
 
         if (subblockIdx < moveDataCoreNum) {
@@ -299,10 +300,11 @@ public:
         uint32_t blockN = shapeC.column();
 
         uint32_t tileLoops = blockM;
-        uint32_t subblockIdx = get_block_idx() + get_subblockid() * get_block_num();
+        uint32_t subblockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+            AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
         //uint32_t subblockIdx = get_block_idx() * 2 + get_subblockid();
 
-        uint32_t subblockNum = get_block_num() * 2;
+        uint32_t subblockNum = AscendC::GetBlockNum() * 2;
         uint32_t moveDataCoreNum = subblockNum - epilogueCoreNum;
 
         if (subblockIdx < moveDataCoreNum) {

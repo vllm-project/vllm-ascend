@@ -85,8 +85,9 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::Init(GM_ADDR permuted_tokens, GM_ADD
                                                  GM_ADDR unpermuted_tokens,
                                                  const MoeTokenUnpermuteTilingData *__restrict tiling_data)
 {
-    this->blockIdx = get_block_idx() + get_subblockid() * get_block_num();
-    this->blockNum = get_block_num() * get_subblockdim();
+    this->blockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+        AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
+    this->blockNum = AscendC::GetBlockNum() * AscendC::GetTaskRatio();
     if (blockIdx >= blockNum) {
         return;
     }

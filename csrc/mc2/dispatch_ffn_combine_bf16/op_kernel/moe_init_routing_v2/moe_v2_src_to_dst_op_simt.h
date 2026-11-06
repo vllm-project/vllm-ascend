@@ -58,7 +58,8 @@ template <typename TilingData>
 __aicore__ inline void MoeV2SrcToDstOpSimt::Init(GM_ADDR expandedRowIdx, GM_ADDR expandDstToSrcRow,
                                                  const TilingData *tilingData)
 {
-    this->blockIdx_ = get_block_idx() + get_subblockid() * get_block_num();
+    this->blockIdx_ = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+        AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
     this->coreNum_ = tilingData->coreNum;
     this->totalLength_ = tilingData->n * tilingData->k;
     this->srcToDstTilingData_ = &(tilingData->srcToDstComputeParamsOp);

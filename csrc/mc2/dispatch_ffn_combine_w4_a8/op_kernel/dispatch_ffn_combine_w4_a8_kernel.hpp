@@ -200,8 +200,9 @@ public:
         }
 
         if ASCEND_IS_AIV {
-            coreIdx = get_block_idx() + get_subblockid() * get_block_num();
-            coreNum = get_block_num() * get_subblockdim();
+            coreIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+                AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
+            coreNum = AscendC::GetBlockNum() * AscendC::GetTaskRatio();
         }
 
         initBuffer(params);
@@ -1081,7 +1082,7 @@ private:
         } else {
             uint32_t uboffset = 0;
             uint32_t aicCoreNum = coreNum / 2;
-            uint32_t aicCoreIdx = get_block_idx();
+            uint32_t aicCoreIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio());
             uint32_t sendRankNum_ = params.EP / aicCoreNum;
             uint32_t remainderRankNum = params.EP % aicCoreNum;
             if (aicCoreIdx < remainderRankNum) {
@@ -1114,7 +1115,7 @@ private:
         int32_t syncLoopIdx = 0;
         uint32_t startCoreIdx = 0;
         uint32_t aicCoreNum = coreNum / 2;
-        uint32_t aicCoreIdx = get_block_idx();
+        uint32_t aicCoreIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio());
         uint32_t aivSubCoreIdx = get_subblockid();
         uint32_t preSrcExpertSum = 0;
         uint32_t n2 = params.problemShape.k();

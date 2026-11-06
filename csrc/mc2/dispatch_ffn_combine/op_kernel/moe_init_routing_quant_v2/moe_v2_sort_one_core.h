@@ -112,7 +112,8 @@ template <typename TilingData>
 __aicore__ inline void MoeV2SortOneCore::Init(GM_ADDR expertIdx, GM_ADDR expertTokensCountOrCumsum,
                                               GM_ADDR expertTokensBeforeCapacity, GM_ADDR workspace,
                                               const TilingData* tilingData, TPipe* tPipe) {
-  this->blockIdx = get_block_idx() + get_subblockid() * get_block_num();
+  this->blockIdx = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+      AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
   this->tileLength = Align(tilingData->vbsComputeParamsOp.lastCorePerLoopElements, sizeof(int32_t));
   this->sortNum = Ceil(this->tileLength, ONE_REPEAT_SORT_NUM) * ONE_REPEAT_SORT_NUM;
   this->totalLength = tilingData->n * tilingData->k;
@@ -151,7 +152,7 @@ __aicore__ inline void MoeV2SortOneCore::Init(GM_ADDR expertIdx, GM_ADDR expertT
 }
 
 __aicore__ inline void MoeV2SortOneCore::Process() {
-  if (get_block_idx() + get_subblockid() * get_block_num() < 1) {
+  if ((AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) + AscendC::GetSubBlockIdx() * AscendC::GetBlockNum() < 1) {
     CopyIn();
     SortCompute();
     CopyOut();

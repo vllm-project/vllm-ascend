@@ -317,7 +317,8 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Init(GM_ADDR x, GM_ADDR exp
                                                           TPipe* tPipe) {
   this->gatherOutTilingData_ = &(tilingData->gatherOutComputeParamsOp);
   //this->blockIdx_ = GetBlockIdx();
-  this->blockIdx_ = get_block_idx() + get_subblockid() * get_block_num();
+  this->blockIdx_ = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+      AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
   this->k_ = tilingData->k;
   this->n_ = tilingData->n;
   this->cols_ = tilingData->cols;

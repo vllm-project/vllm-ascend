@@ -298,7 +298,8 @@ __aicore__ inline void MoeV2FullLoad<T>::Init(GM_ADDR x, GM_ADDR expertIdx, GM_A
 {
     this->gatherOutTilingData_ = &(tilingData->gatherOutComputeParamsOp);
     //this->blockIdx_ = GetBlockIdx();
-    this->blockIdx_ = get_block_idx() + get_subblockid() * get_block_num();
+    this->blockIdx_ = (AscendC::GetBlockIdx() / AscendC::GetTaskRatio()) +
+        AscendC::GetSubBlockIdx() * AscendC::GetBlockNum();
     this->n_ = tilingData->n;
     this->k_ = tilingData->k;
     this->cols_ = tilingData->cols;
