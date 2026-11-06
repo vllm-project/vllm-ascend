@@ -1,0 +1,4 @@
+pr: 21201
+entries:
+  - category: documentation
+    text: Added a Triton operator contribution guide covering deliverables, functionality, accuracy, performance, recompilation, and kernel integration.

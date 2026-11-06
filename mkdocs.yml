@@ -330,6 +330,7 @@ nav:
     - Contribution:
         - developer_guide/contribution/index.md
         - developer_guide/contribution/testing.md
+        - developer_guide/contribution/triton_operators.md
         - developer_guide/contribution/doc_writing.md
         - developer_guide/contribution/multi_node_test.md
         - developer_guide/contribution/nightly_ci_test.md
