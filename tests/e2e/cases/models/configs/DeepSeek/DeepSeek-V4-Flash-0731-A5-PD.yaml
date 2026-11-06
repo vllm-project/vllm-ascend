@@ -11,12 +11,6 @@
 #     RemotePDServer splits devices per instance (TP x PP x PCP x DP), so the
 #     per-rank-process style would be counted as 4 devices each (16 total).
 #   - kv ports stay distinct: prefill 30000, decode 30002 (engine_id 0/1).
-#   - --data-parallel-address / --data-parallel-rpc-port / --data-parallel-rank
-#     are dropped: single machine, single process per side.
-# NOTE: envs are shared by both engines. HCCL_OP_EXPANSION_MODE=CCU_SCHED and
-# VLLM_PREFIX_CACHE_RETENTION_INTERVAL were prefill-only in the multi-node
-# config; they are harmless for decode (prefix caching is disabled there) but
-# CCU_SCHED now also applies to decode — revisit if decode perf regresses.
 # ==========================================
 
 _envs: &envs
@@ -30,8 +24,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   TASK_QUEUE_ENABLE: "1"
   ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
-  HCCL_OP_EXPANSION_MODE: "CCU_SCHED"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
   PREFILL_PORT: "DEFAULT_PORT"
   DECODE_PORT: "DEFAULT_PORT"
   PROXY_PORT: "DEFAULT_PORT"

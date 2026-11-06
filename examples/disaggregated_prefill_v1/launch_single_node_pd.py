@@ -261,41 +261,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
 
     # Extra configs
-<<<<<<< HEAD
     p.add_argument("--additional-config", default=None, help="JSON string for --additional-config")
     p.add_argument(
         "--compilation-config",
         default='{"cudagraph_mode": "FULL_DECODE_ONLY"}',
         help="JSON string for --compilation-config (decode engine only)",
     )
-=======
-    p.add_argument("--additional-config", default=None, help='JSON string for --additional-config')
-    p.add_argument("--additional-config", default=None, help="JSON string for --additional-config")
-    p.add_argument(
-        "--compilation-config",
-        default='{"cudagraph_mode": "FULL_DECODE_ONLY"}',
-<<<<<<< HEAD
-        help="JSON string for --compilation-config (decode engine only)")
->>>>>>> 5221c4f (update)
-=======
-        help="JSON string for --compilation-config (decode engine only)",
-    )
->>>>>>> 4e5fb83 (update)
     p.add_argument("--hf-overrides", default=None, help="JSON string for --hf-overrides")
     p.add_argument(
         "--kv-connector",
         default="MooncakeConnectorV2",
-<<<<<<< HEAD
-<<<<<<< HEAD
         help="KV connector (MooncakeConnectorV2 or MooncakeConnectorV1)",
     )
-=======
-        help="KV connector (MooncakeConnectorV2 or MooncakeConnectorV1)")
->>>>>>> 5221c4f (update)
-=======
-        help="KV connector (MooncakeConnectorV2 or MooncakeConnectorV1)",
-    )
->>>>>>> 4e5fb83 (update)
     p.add_argument("--no-trust-remote-code", action="store_true")
 
     # Proxy
@@ -372,36 +349,18 @@ def main() -> int:
         processes.append(
             (
                 launch_process(
-<<<<<<< HEAD
                     prefill_cfg.build_command(), prefill_cfg.build_env(), str(log_dir / "prefill.log"), "prefill"
                 ),
                 "prefill",
-=======
-                 prefill_cfg.build_command(),prefill_cfg.build_env(),str(log_dir / "prefill.log"), "prefill"
-             ),
-             "prefill"
->>>>>>> 4e5fb83 (update)
             )
         )
         time.sleep(2)
         processes.append(
             (
                 launch_process(
-<<<<<<< HEAD
-<<<<<<< HEAD
                     decode_cfg.build_command(), decode_cfg.build_env(), str(log_dir / "decode.log"), "decode"
                 ),
                 "decode",
-=======
-                    decode_cfg.build_command(), decode_cfg.build_env(),str(log_dir / "decode.log"), "decode"
-                ),
-                "decode"
->>>>>>> 5221c4f (update)
-=======
-                    decode_cfg.build_command(), decode_cfg.build_env(), str(log_dir / "decode.log"), "decode"
-                ),
-                "decode",
->>>>>>> 4e5fb83 (update)
             )
         )
 
@@ -446,8 +405,6 @@ def main() -> int:
             print(f"\n  Proxy endpoint:  http://127.0.0.1:{args.proxy_port}/v1/chat/completions")
             print(f"  Health check:    http://127.0.0.1:{args.proxy_port}/healthcheck")
             print(
-<<<<<<< HEAD
-<<<<<<< HEAD
                 f"\n  Quick test:\n\n"
                 f"    curl http://127.0.0.1:{args.proxy_port}/v1/chat/completions \\\n"
                 f'        -H "Content-Type: application/json" \\\n'
@@ -455,22 +412,6 @@ def main() -> int:
                 f' "messages": [{{"role": "user", "content": "Hello!"}}],'
                 f' "max_completion_tokens": 64}}\'\n'
             )
-=======
-                  f"\n  Quick test:\n\n"
-                  f"    curl http://127.0.0.1:{args.proxy_port}/v1/chat/completions \\\n"
-                  f"        -H \"Content-Type: application/json\" \\\n"
-                  f"        -d '{{\"model\": \"{args.model}\","
-                  f" \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}],"
-                  f" \"max_completion_tokens\": 64}}'\n")
->>>>>>> 5221c4f (update)
-=======
-                f"\n  Quick test:\n\n"
-                f"    curl http://127.0.0.1:{args.proxy_port}/v1/chat/completions \\\n"
-                f"        -H \"Content-Type: application/json\" \\\n"
-                f"        -d '{{\"model\": \"{args.model}\","
-                f" \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}],"
-                f" \"max_completion_tokens\": 64}}'\n")
->>>>>>> 4e5fb83 (update)
         else:
             print(f"\n  Prefill: http://127.0.0.1:{args.prefill_port}/v1/chat/completions")
             print(f"  Decode:  http://127.0.0.1:{args.decode_port}/v1/chat/completions")
