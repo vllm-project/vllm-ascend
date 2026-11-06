@@ -69,12 +69,39 @@ variants:
     precision: bf16
     label: BF16 · Ascend A2 graph
     vram_minimum_gb: 3
-    description: Original 0.9B checkpoint on one Ascend 910B3. Context uses the checkpoint default; 16384 is the batch-token budget. Long-context inputs are not validated.
+    description: Original 0.9B checkpoint on one Ascend 910B3 or 910B4. Context uses the checkpoint default; 16384 is the batch-token budget. Long-context inputs are not validated.
     supported_hardware:
       - ascend_910b3
+      - ascend_910b4
     hardware_overrides:
       ascend_910b3:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2@sha256:6348403a0ebb19f52bc1b7497de1daeb6df0e4650f9051c169e47a011527a6c3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+          docker: true
+        extra_args:
+          - '--dtype'
+          - bfloat16
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--gpu-memory-utilization'
+          - '0.80'
+          - '--served-model-name'
+          - PaddlePaddle/PaddleOCR-VL
+          - PaddleOCR-VL-0.9B
+          - '--additional-config'
+          - '{"enable_cpu_binding":true}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+          ASCEND_RT_VISIBLE_DEVICES: '0'
+          TASK_QUEUE_ENABLE: '0'
+          CPU_AFFINITY_CONF: '1'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      ascend_910b4:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main@sha256:4b537a90f25f7d282927b49f474f9d8ecf61fd0bf556c28e9ec1ac54d48371c3
         docker_serve_command: vllm serve
         install:
           pip: false
@@ -103,6 +130,7 @@ meta:
   hardware:
     ascend_310p3: supported
     ascend_910b3: supported
+    ascend_910b4: supported
 guide_sections:
   ascend: |
     ## Ascend support and version scope
@@ -596,6 +624,38 @@ guide_sections:
     This A2 result does not validate the replacement `v0.30.0rc2-310p` image or
     replace the full-dataset accuracy and performance evidence above.
     Multi-node PD is not supported by this tutorial.
+
+    ### Current-main A2 supplement on 910B4
+
+    HiDevLab allocated a single 910B4 with 32 GB HBM on 2026-11-06, rather than
+    the historical 64 GB 910B3. Its separate restricted hardware option uses the
+    same BF16 graph/TP1, batch 16384 and memory-utilization 0.80 settings; the
+    checkpoint default context is not replaced by a 16384-token context cap.
+    The exposed physical device was davinci3, mapped to logical NPU 0 by this
+    environment. This does not validate 910B3, 910B2 or long-context inputs.
+
+    Native current-main serving used driver 25.5.2, CANN 9.2.1, Python 3.12.16,
+    vLLM source `5df63a7203cdb9328d824a27b682e77c7b9928be` and Ascend source
+    `d96c01e5c2266d6df061311e8966e096bc542f68`, with clean tracked trees.
+    Original recognition weights and every model file match the previous frozen
+    baseline. Sixteen requests passed: both aliases, four tasks and one warmup
+    plus one measured round. Content and stop reasons were checked. Startup,
+    inference and explicit frontend shutdown passed the ERROR/Traceback audit.
+
+    The exact shared document parser also passed the official PNG and the frozen
+    one-page PDF: both returned 31 layout blocks with checked content, bounds,
+    JSON and Markdown. All 55 recognition HTTP calls returned 200; server and
+    client log audits passed. Layout used the complete pinned CANN 8.0 image
+    below under PRoot 5.5.0, all blobs independently SHA256-verified, with
+    host-visible compiler paths and separate Paddle 3.2.0/custom-NPU 3.2.0,
+    PaddleOCR 3.3.2 and PaddleX 3.3.13. No driver or model code was changed.
+
+    The main registry tag resolved to index
+    `sha256:4b537a90f25f7d282927b49f474f9d8ecf61fd0bf556c28e9ec1ac54d48371c3`,
+    which the new 910B4 option pins. The platform did not expose the native
+    container image ID, so that lookup is recorded separately from its measured
+    source/package identity. No normal Docker CLI launch or future-main support
+    is claimed. Metadata remains supported rather than verified.
 
     ### Ascend references
 
