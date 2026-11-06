@@ -49,7 +49,10 @@ def test_int8_kpool_requires_a3_without_restricting_bf16(monkeypatch, device, dt
         tail_cache=SimpleNamespace(),
         topk_indices_buffer=None,
     )
-    if dtype == torch.int8 and device is not AscendDeviceType.A3:
+    if dtype == torch.int8 and device not in (
+        AscendDeviceType.A2,
+        AscendDeviceType.A3,
+    ):
         with pytest.raises(NotImplementedError, match="INT8.*Ascend A3"):
             Glm5NextKPoolIndexerBackend(indexer, qk_rope_head_dim=0)
     else:
