@@ -1,5 +1,0 @@
-pr: 21193
-entries:
-  - category: performance
-    text: Enabled device-side image preprocessing for Qwen4Exp and avoided redundant host/device transfers of Ascend vision attention sequence metadata.
-    model: qwen4-exp
