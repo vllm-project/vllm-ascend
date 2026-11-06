@@ -101,7 +101,7 @@ class AscendAttentionBackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
 
             return AscendAttentionDCPMetadataBuilder
-        return AscendAttentionMetadataBuilder
+        return AscendFIAMetadataBuilder
 
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -194,7 +194,8 @@ class AscendMetadata:
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
-    query_start_loc: torch.Tensor = None
+    # Legacy device boundaries for backends such as FA3; unused by FIA.
+    query_start_loc: torch.Tensor | None = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
 
@@ -328,6 +329,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         """
         return {}
 
+    def _build_query_start_loc(self, query_start_loc_cpu: torch.Tensor) -> torch.Tensor | None:
+        # Preserve the independent device copy for consumers such as FA3.
+        return query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+
     def build(
         self,
         common_prefix_len: int,
@@ -365,8 +370,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        query_start_loc = self._build_query_start_loc(query_start_loc_cpu)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         # vLLM main keeps speculative-decode request metadata at the real
@@ -513,6 +517,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+
+class AscendFIAMetadataBuilder(AscendAttentionMetadataBuilder):
+    """FIA consumes CPU query-length lists, not the legacy device copy."""
+
+    def _build_query_start_loc(self, query_start_loc_cpu: torch.Tensor) -> torch.Tensor | None:
+        # Keep actual_seq_lengths_q and query_start_loc_gpu unchanged. Skipping
+        # this unused copy also keeps it out of merged MTP draft decode graphs.
+        return None
 
 
 @dataclass(frozen=True, slots=True)
