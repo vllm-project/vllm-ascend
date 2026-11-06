@@ -3,6 +3,7 @@
 """CPU request lifecycle; only device operations and the external store are fake."""
 
 import ctypes
+import threading
 import time
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import torch
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
@@ -253,6 +255,8 @@ def test_raw_sequence_lifecycle(
     assert not pool.m_store.payloads
     assert isinstance(pool.kv_send_thread, KVCacheStoreSendingThread)
     assert isinstance(pool.kv_recv_thread, KVCacheStoreRecvingThread) == load_async
+    requires_load_wait = load_async or len(plan.kv_cache_groups) > 1
+    assert pool.requires_load_wait == requires_load_wait
     assert pool.hash_block_size == hash_size == (prefix_unit or 128)
     assert pool.cache_transfer_granularity == 128
     assert pool.use_eagle == (speculative_method is not None)
@@ -294,13 +298,14 @@ def test_raw_sequence_lifecycle(
                         for bid in block_ids[gid]:
                             tensor[bid].fill_(-7)
             worker.start_load_kv(SimpleNamespace() if output.total_num_scheduled_tokens else None)
-            if load_async and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            if requires_load_wait and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 assert output.total_num_scheduled_tokens == 0
-                deadline = time.monotonic() + 5
-                while not pool.kv_recv_thread.finished_requests:
-                    pool.kv_recv_thread.raise_if_failed()
-                    assert time.monotonic() < deadline, "asynchronous receive did not finish"
-                    time.sleep(0.001)
+                if load_async:
+                    deadline = time.monotonic() + 5
+                    while not pool.kv_recv_thread.finished_requests:
+                        pool.kv_recv_thread.raise_if_failed()
+                        assert time.monotonic() < deadline, "asynchronous receive did not finish"
+                        time.sleep(0.001)
             for req_meta in meta.requests:
                 if req_meta.load_spec is None or not req_meta.load_spec.can_load:
                     continue
@@ -454,3 +459,343 @@ def test_raw_sequence_lifecycle(
             client.ctx.term()
         server.close()
         server.ctx.term()
+
+
+@pytest.fixture
+def bulk_isolation_runtime(cache_layout, devices_and_store):
+    """Real scheduler/connector/cache pages; fake only model compute and Store I/O."""
+    plan, allocate = cache_layout
+    config = create_vllm_config(
+        max_num_seqs=4,
+        max_num_batched_tokens=512,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="AscendStoreConnector",
+            kv_role="kv_both",
+            kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
+            kv_connector_extra_config={"backend": "cpu", "load_async": False},
+        ),
+    )
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.cache_config.num_gpu_blocks = plan.num_blocks
+    plan.kv_transfer_config = config.kv_transfer_config
+    block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, plan)
+    caches = allocate()
+    worker.register_kv_caches(caches)
+    pool = worker.connector_worker
+    scheduler = Scheduler(
+        config, plan, StructuredOutputManager(config), block_size=block_size, hash_block_size=hash_size
+    )
+    runtime = SimpleNamespace(
+        config=config,
+        plan=plan,
+        worker=worker,
+        pool=pool,
+        scheduler=scheduler,
+        caches=caches,
+        hash_size=hash_size,
+        forwarded=[],
+        computed_pages=[],
+    )
+
+    def add(req_id, tokens, max_tokens=1):
+        request = Request(
+            request_id=req_id,
+            prompt_token_ids=tokens,
+            sampling_params=SamplingParams(max_tokens=max_tokens),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(hash_size, sha256),
+        )
+        scheduler.add_request(request)
+        return request
+
+    def prepare():
+        output = scheduler.schedule()
+        worker.handle_preemptions(output.kv_connector_metadata)
+        worker.bind_connector_metadata(output.kv_connector_metadata)
+        return output
+
+    def compute(output):
+        scheduled = [scheduler.requests[req_id] for req_id in output.num_scheduled_tokens]
+        for request in scheduled:
+            req_id = request.request_id
+            start = request.num_computed_tokens - output.num_scheduled_tokens[req_id]
+            end = request.num_computed_tokens
+            runtime.forwarded.append(req_id)
+            blocks = scheduler.kv_cache_manager.get_blocks(req_id).get_block_ids()
+            for gid, name, plane, tensor in cache_entries(plan, caches):
+                if not is_prefix_cacheable(plan.kv_cache_groups[gid].kv_cache_spec):
+                    continue
+                for index, bid in enumerate(blocks[gid]):
+                    if bid and start < (index + 1) * 128 <= end:
+                        value = payload_value(list(request.all_token_ids), (index + 1) * 128, name, plane)
+                        tensor[bid].fill_(value)
+                        runtime.computed_pages.append((req_id, tensor, bid, value))
+        result = create_model_runner_output(scheduled)
+        for index, request in enumerate(scheduled):
+            if request.num_computed_tokens < request.num_prompt_tokens:
+                result.sampled_token_ids[index] = []
+        return result
+
+    def finish(output, result, aggregator=None, peer_outputs=()):
+        worker.wait_for_save()
+        pool.handle_released_saves(output.kv_connector_metadata.released_req_ids)
+        transfer = worker.get_transfer_results(output.finished_req_ids)
+        result.kv_connector_output = KVConnectorOutput(
+            finished_sending=transfer.finished_sending,
+            finished_recving=transfer.finished_recving,
+            failed_recving=transfer.failed_recving,
+            kv_connector_worker_meta=worker.build_connector_worker_meta(),
+        )
+        if aggregator is not None:
+            result = aggregator.aggregate([result, *peer_outputs])
+        updates = scheduler.update_from_output(output, result)
+        worker.clear_connector_metadata()
+        return transfer, updates
+
+    def step():
+        output = prepare()
+        if output.has_sync_kv_loads:
+            worker.start_load_kv(SimpleNamespace())
+        result = compute(output)
+        if not output.has_sync_kv_loads:
+            worker.start_load_kv(SimpleNamespace() if output.total_num_scheduled_tokens else None)
+        transfer, updates = finish(output, result)
+        return output, transfer, updates
+
+    def run_until_finished(request):
+        for _ in range(12):
+            step()
+            if request.request_id not in scheduler.requests:
+                step()  # Consume the completed request's final released-ID notification.
+                return
+        pytest.fail(f"request did not finish: {request.request_id}")
+
+    runtime.add = add
+    runtime.prepare = prepare
+    runtime.compute = compute
+    runtime.finish = finish
+    runtime.step = step
+    runtime.run_until_finished = run_until_finished
+    assert len(plan.kv_cache_groups) > 1
+    assert pool.load_async is False
+    assert pool.requires_load_wait is True
+    assert pool.kv_recv_thread is None
+    assert scheduler.connector.connector_scheduler.requires_load_wait is True
+    assert worker.requires_mamba_state_copy_after_load is False
+    try:
+        yield runtime
+    finally:
+        pool.shutdown()
+        server = worker.lookup_server
+        server.running = False
+        client = scheduler.connector.connector_scheduler.client
+        if client is not None:
+            client.lookup(0, [], list(range(len(plan.kv_cache_groups))))
+            server.thread.join(timeout=5)
+            client.close()
+            client.ctx.term()
+        server.close()
+        server.ctx.term()
+
+
+@pytest.mark.parametrize("speculative_method", [None], indirect=True)
+@pytest.mark.parametrize("cache_layout", ["full-and-swa"], indirect=True)
+@pytest.mark.parametrize("failure_result", ["partial", "missing", "short", "partial-with-local-prefix"])
+def test_sync_bulk_load_failure_isolated_before_forward(bulk_isolation_runtime, monkeypatch, failure_result):
+    runtime = bulk_isolation_runtime
+    scheduler, worker, pool = runtime.scheduler, runtime.worker, runtime.pool
+    tokens = list(range(257))
+    producer = runtime.add("producer", tokens)
+    runtime.run_until_finished(producer)
+    assert pool.m_store.payloads
+    assert scheduler.reset_prefix_cache()
+    for _, _, _, tensor in cache_entries(runtime.plan, runtime.caches):
+        tensor.fill_(-3)
+    shared_local_prefix = failure_result == "partial-with-local-prefix"
+    if shared_local_prefix:
+        local_prefix = runtime.add("local-prefix", tokens[:129])
+        runtime.run_until_finished(local_prefix)
+    original_get = pool.m_store.get
+    injected: list[str] = []
+
+    def fail_one_group(keys, addrs, sizes):
+        if injected:
+            return original_get(keys, addrs, sizes)
+        failed = max(index for index, key in enumerate(keys) if "@group:1@" in key)
+        assert any("@group:0@" in key for key in keys)
+        for index, (key, row, lengths) in enumerate(zip(keys, addrs, sizes, strict=True)):
+            if index != failed:
+                assert original_get([key], [row], [lengths]) == [0]
+        injected.append(keys[failed])
+        results = [0] * len(keys)
+        results[failed] = -3007
+        if failure_result == "missing":
+            return None
+        if failure_result == "short":
+            return results[:-1]
+        return results
+
+    monkeypatch.setattr(pool.m_store, "get", fail_one_group)
+    bad = runtime.add("bad", tokens)
+    healthy_tokens = (tokens[:128] if shared_local_prefix else []) + list(range(1000, 1129))
+    healthy = runtime.add("healthy", healthy_tokens, max_tokens=2)
+    output = runtime.prepare()
+    assert bad.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert bad.request_id not in output.num_scheduled_tokens
+    assert healthy.request_id in output.num_scheduled_tokens
+    assert output.has_sync_kv_loads is False
+    assert bad.request_id in output.kv_connector_metadata.loading_req_ids
+    shared_pages = []
+    if shared_local_prefix:
+        bad_blocks = scheduler.kv_cache_manager.get_blocks(bad.request_id).get_block_ids()
+        healthy_blocks = scheduler.kv_cache_manager.get_blocks(healthy.request_id).get_block_ids()
+        assert bad_blocks[0][0] == healthy_blocks[0][0] != 0
+        for gid, _, _, tensor in cache_entries(runtime.plan, runtime.caches):
+            if gid == 0:
+                block_id = healthy_blocks[0][0]
+                shared_pages.append((tensor, block_id, tensor[block_id].clone()))
+        assert shared_pages
+        load_meta = next(meta for meta in output.kv_connector_metadata.requests if meta.req_id == bad.request_id)
+        assert load_meta.load_spec.vllm_cached_tokens == 128
+    result = runtime.compute(output)
+    worker.start_load_kv(SimpleNamespace())
+    assert injected
+    assert not any(req_id == bad.request_id for req_id in runtime.forwarded)
+    healthy_pages = [page for page in runtime.computed_pages if page[0] == healthy.request_id]
+    assert healthy_pages
+    assert all(torch.all(tensor[bid] == value) for _, tensor, bid, value in healthy_pages)
+    assert all(torch.equal(tensor[bid], before) for tensor, bid, before in shared_pages)
+    transfer, updates = runtime.finish(output, result)
+    assert transfer.failed_recving == transfer.finished_recving == {bad.request_id}
+    assert bad.status == RequestStatus.FINISHED_ERROR
+    assert bad.request_id not in scheduler.requests
+    assert healthy.request_id in scheduler.requests
+    assert any(
+        item.request_id == bad.request_id and not item.new_token_ids
+        for batch in updates.values()
+        for item in batch.outputs
+    )
+    runtime.run_until_finished(healthy)
+    assert healthy.status != RequestStatus.FINISHED_ERROR
+    third = runtime.add("after-failure", tokens)
+    runtime.run_until_finished(third)
+    assert third.status != RequestStatus.FINISHED_ERROR
+    assert third.request_id in runtime.forwarded
+    assert bad.request_id not in runtime.forwarded
+    assert pool.kv_send_thread._fatal_error is None
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize("speculative_method", [None], indirect=True)
+@pytest.mark.parametrize("cache_layout", ["full-and-swa"], indirect=True)
+def test_sync_bulk_load_cancel_retains_blocks_until_receive_completion(bulk_isolation_runtime, monkeypatch):
+    runtime = bulk_isolation_runtime
+    scheduler, worker, pool = runtime.scheduler, runtime.worker, runtime.pool
+    tokens = list(range(257))
+    producer = runtime.add("producer", tokens)
+    runtime.run_until_finished(producer)
+    assert scheduler.reset_prefix_cache()
+    request = runtime.add("cancel-during-load", tokens)
+    output = runtime.prepare()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert output.num_scheduled_tokens == {}
+    result = runtime.compute(output)
+    entered, release = threading.Event(), threading.Event()
+    original_get = pool.m_store.get
+    errors = []
+
+    def held_get(keys, addrs, sizes):
+        entered.set()
+        assert release.wait(timeout=5), "test did not release the in-flight store operation"
+        return original_get(keys, addrs, sizes)
+
+    def start_worker_load():
+        try:
+            worker.start_load_kv(None)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(pool.m_store, "get", held_get)
+    dispatch = threading.Thread(target=start_worker_load)
+    dispatch.start()
+    try:
+        assert entered.wait(timeout=5)
+        scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+        assert request.request_id in scheduler.requests
+        assert request.status == RequestStatus.FINISHED_ABORTED
+        assert any(
+            manager.req_to_blocks.get(request.request_id)
+            for manager in scheduler.kv_cache_manager.coordinator.single_type_managers
+        )
+    finally:
+        release.set()
+        dispatch.join(timeout=5)
+    assert not dispatch.is_alive()
+    assert not errors
+    transfer, _ = runtime.finish(output, result)
+    assert transfer.finished_recving == {request.request_id}
+    assert not transfer.failed_recving
+    assert request.request_id not in scheduler.requests
+    assert request.request_id not in runtime.forwarded
+    runtime.step()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize("speculative_method", [None], indirect=True)
+@pytest.mark.parametrize("cache_layout", ["full-and-swa"], indirect=True)
+def test_sync_bulk_load_failure_waits_for_all_worker_completions(bulk_isolation_runtime, monkeypatch):
+    runtime = bulk_isolation_runtime
+    scheduler, worker, pool = runtime.scheduler, runtime.worker, runtime.pool
+    tokens = list(range(257))
+    producer = runtime.add("producer", tokens)
+    runtime.run_until_finished(producer)
+    assert scheduler.reset_prefix_cache()
+    original_get = pool.m_store.get
+
+    def fail_one_group(keys, addrs, sizes):
+        result = original_get(keys, addrs, sizes)
+        result[-1] = -3007
+        return result
+
+    monkeypatch.setattr(pool.m_store, "get", fail_one_group)
+    bad = runtime.add("one-worker-failed", tokens)
+    healthy = runtime.add("healthy", list(range(1000, 1129)), max_tokens=3)
+    output = runtime.prepare()
+    assert bad.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert bad.request_id not in output.num_scheduled_tokens
+    result = runtime.compute(output)
+    worker.start_load_kv(SimpleNamespace())
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    peer = create_model_runner_output([])
+    peer.kv_connector_output = KVConnectorOutput()
+    transfer, _ = runtime.finish(output, result, aggregator, [peer])
+    assert transfer.failed_recving == transfer.finished_recving == {bad.request_id}
+    assert not result.kv_connector_output.failed_recving
+    assert not result.kv_connector_output.finished_recving
+    assert bad.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert bad.request_id in scheduler.requests
+    assert all(
+        manager.req_to_blocks.get(bad.request_id)
+        for manager in scheduler.kv_cache_manager.coordinator.single_type_managers
+    )
+
+    # The failing worker reports only once. A later completion from its peer
+    # must carry the retained failure through the real output aggregator.
+    output = runtime.prepare()
+    assert bad.request_id not in output.num_scheduled_tokens
+    result = runtime.compute(output)
+    worker.start_load_kv(SimpleNamespace())
+    peer = create_model_runner_output([])
+    peer.kv_connector_output = KVConnectorOutput(finished_recving={bad.request_id})
+    transfer, _ = runtime.finish(output, result, aggregator, [peer])
+    assert not transfer.failed_recving
+    assert not transfer.finished_recving
+    assert result.kv_connector_output.failed_recving == {bad.request_id}
+    assert result.kv_connector_output.finished_recving == {bad.request_id}
+    assert bad.status == RequestStatus.FINISHED_ERROR
+    assert bad.request_id not in scheduler.requests
+    assert bad.request_id not in runtime.forwarded
+    runtime.run_until_finished(healthy)
+    assert healthy.status != RequestStatus.FINISHED_ERROR
+    assert_scheduler_empty(scheduler)

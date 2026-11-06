@@ -1050,7 +1050,7 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (SimpleNamespace(request_id=req_id), []) for req_id in unfinished_ids}
     scheduler._preempted_req_ids = set()
-    scheduler._async_loading_req_ids = set()
+    scheduler._loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
     scheduler.retain_blocks_for_save = MagicMock()
@@ -1080,7 +1080,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
     scheduler._preempted_req_ids = set()
-    scheduler._async_loading_req_ids = set()
+    scheduler._loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock()
     output = SimpleNamespace(
@@ -1121,7 +1121,7 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
     scheduler._preempted_req_ids = set()
-    scheduler._async_loading_req_ids = set()
+    scheduler._loading_req_ids = set()
     scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
     scheduler.retain_blocks_for_save = MagicMock()
     output = SimpleNamespace(
@@ -1281,7 +1281,7 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
         scheduler.client = MagicMock()
         scheduler.client.reset.return_value = True
         scheduler._in_flight_save_blocks = InFlightSaveBlockTracker(1)
-        scheduler._async_loading_req_ids = set()
+        scheduler._loading_req_ids = set()
         scheduler._block_pool = None
         return scheduler
 
@@ -1318,23 +1318,23 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
 
     def test_reset_store_rejects_loading_while_blocks_held(self):
         scheduler = self._scheduler()
-        scheduler._async_loading_req_ids = {"req"}
+        scheduler._loading_req_ids = {"req"}
         self._bind_pool(scheduler, used=21)
         self.assertFalse(scheduler.reset_store())
         scheduler.client.reset.assert_not_called()
-        self.assertEqual(scheduler._async_loading_req_ids, {"req"})
+        self.assertEqual(scheduler._loading_req_ids, {"req"})
 
     def test_reset_store_clears_stale_ids_when_blocks_free(self):
         scheduler = self._scheduler()
-        scheduler._async_loading_req_ids = {"loading"}
+        scheduler._loading_req_ids = {"loading"}
         self._bind_pool(scheduler, used=1)
         self.assertTrue(scheduler.reset_store())
         scheduler.client.reset.assert_called_once_with()
-        self.assertEqual(scheduler._async_loading_req_ids, set())
+        self.assertEqual(scheduler._loading_req_ids, set())
 
     def test_reset_store_rejects_loading_without_block_pool(self):
         scheduler = self._scheduler()
-        scheduler._async_loading_req_ids = {"req"}
+        scheduler._loading_req_ids = {"req"}
         self.assertIsNone(scheduler._block_pool)
         self.assertFalse(scheduler.reset_store())
         scheduler.client.reset.assert_not_called()
@@ -1367,9 +1367,9 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
         for initial, finished, expected in cases:
             with self.subTest(finished=finished):
                 scheduler = self._make_scheduler()
-                scheduler._async_loading_req_ids = initial
+                scheduler._loading_req_ids = initial
                 scheduler.update_connector_output(KVConnectorOutput(finished_recving=finished))
-                self.assertEqual(scheduler._async_loading_req_ids, expected)
+                self.assertEqual(scheduler._loading_req_ids, expected)
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
@@ -1460,7 +1460,7 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     def test_finished_request_keeps_receive_registration_until_completion(self):
         scheduler = self._make_scheduler()
         scheduler._block_pool = None
-        scheduler._async_loading_req_ids = {"r1", "other"}
+        scheduler._loading_req_ids = {"r1", "other"}
         request = SimpleNamespace(request_id="r1")
         self.assertEqual(scheduler.request_finished(request, [1]), (False, None))
         output = SimpleNamespace(
@@ -1481,13 +1481,13 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
             with self.subTest(completed=completed):
                 scheduler = self._make_scheduler()
                 scheduler._block_pool = None
-                scheduler._async_loading_req_ids = {"r1", "r2"}
+                scheduler._loading_req_ids = {"r1", "r2"}
                 scheduler.update_connector_output(KVConnectorOutput(finished_recving=completed))
-                self.assertEqual(scheduler._async_loading_req_ids, {"r1", "r2"} - (completed or set()))
+                self.assertEqual(scheduler._loading_req_ids, {"r1", "r2"} - (completed or set()))
 
     def test_preempted_request_still_clears_receive_registration(self):
         scheduler = self._make_scheduler()
-        scheduler._async_loading_req_ids = {"r1", "other"}
+        scheduler._loading_req_ids = {"r1", "other"}
         output = SimpleNamespace(
             finished_req_ids=set(),
             preempted_req_ids={"r1"},
@@ -1498,12 +1498,12 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
 
     def test_receive_completion_preserves_pending_send_events(self):
         scheduler = self._make_scheduler()
-        scheduler._async_loading_req_ids = {"r1"}
+        scheduler._loading_req_ids = {"r1"}
         tracker = scheduler._in_flight_save_blocks
         tracker.sending_events = {7: 1}
         tracker.sending_blocks = {7: [1, 2, 3]}
         scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
-        self.assertFalse(scheduler._async_loading_req_ids)
+        self.assertFalse(scheduler._loading_req_ids)
         self.assertEqual(tracker.sending_events, {7: 1})
         self.assertEqual(tracker.sending_blocks, {7: [1, 2, 3]})
         scheduler._block_pool.free_blocks.assert_not_called()
@@ -1637,7 +1637,7 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         blocks = MagicMock()
         blocks.get_block_ids.return_value = [[0, 1]]
         scheduler.update_state_after_alloc(request, blocks, 32)
-        self.assertIn("r1", scheduler._async_loading_req_ids)
+        self.assertIn("r1", scheduler._loading_req_ids)
 
     def test_zero_external_tokens(self):
         scheduler = self._make_scheduler()

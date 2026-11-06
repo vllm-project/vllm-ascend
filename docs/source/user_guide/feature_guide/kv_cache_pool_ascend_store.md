@@ -1596,6 +1596,22 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
+For non-layerwise transfers (`use_layerwise=false`) with multiple KV cache groups,
+requests with external cache hits wait for load completion before they can enter
+model execution. This admission handshake also applies when `load_async=false`;
+the backend GET still runs synchronously on the worker thread. A successful load
+allows the request to run in a later scheduler step. A failed or incomplete load
+is reported for that request through `kv_load_failure_policy`, so healthy requests
+can continue without consuming the failed request's cache. Hybrid-model
+recomputation remains unsupported as described above.
+
+`load_async` continues to control background I/O, independently of this admission
+handshake. Single-group and layerwise transfer modes retain their existing
+scheduling behavior. Unexpected backend or transfer-thread exceptions, and a
+multi-group synchronous failure without the waiting protocol, retain their
+fatal-error behavior; this isolation covers backend-reported load failures,
+missing results, and incorrectly sized result lists.
+
 **NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG

@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    should_wait_for_kv_load,
     uses_hybrid_kv_cache,
 )
 
@@ -84,7 +85,8 @@ class BaseKVPoolScheduler(ABC):
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self.load_async = extra_config.get("load_async", False)
+        self.requires_load_wait = should_wait_for_kv_load(extra_config, use_layerwise, kv_cache_groups)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
         retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
@@ -128,7 +130,7 @@ class BaseKVPoolScheduler(ABC):
             "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
-        self._async_loading_req_ids: set[str] = set()
+        self._loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
 
@@ -318,7 +320,7 @@ class BaseKVPoolScheduler(ABC):
             self.use_layerwise,
         )
 
-        return need_to_allocate, self.load_async
+        return need_to_allocate, self.requires_load_wait
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         """Whether to process an external hit without allocating new blocks."""
@@ -384,8 +386,8 @@ class BaseKVPoolScheduler(ABC):
         )
 
         self.load_specs[request.request_id].can_load = True
-        if self.load_async:
-            self._async_loading_req_ids.add(request.request_id)
+        if self.requires_load_wait:
+            self._loading_req_ids.add(request.request_id)
         logger.debug(
             "KV pool load spec enabled req=%s num_external_tokens=%d vllm_cached=%d kvpool_cached=%d groups=%s",
             request.request_id,
@@ -616,11 +618,11 @@ class BaseKVPoolScheduler(ABC):
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
-            self._async_loading_req_ids.discard(req_id)
+            self._loading_req_ids.discard(req_id)
 
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
-            self._async_loading_req_ids.copy(),
+            self._loading_req_ids.copy(),
         )
 
         for request in scheduler_output.scheduled_new_reqs:
@@ -702,7 +704,7 @@ class BaseKVPoolScheduler(ABC):
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update requests whose external loads have finished."""
         if connector_output.finished_recving:
-            self._async_loading_req_ids.difference_update(connector_output.finished_recving)
+            self._loading_req_ids.difference_update(connector_output.finished_recving)
 
     def request_finished(
         self,
@@ -725,7 +727,7 @@ class BaseKVPoolScheduler(ABC):
 
     def reset_store(self) -> bool:
         """Drain the send queue and ``remove_all`` when no in-flight blocks are held."""
-        stale_ids = bool(self._async_loading_req_ids)
+        stale_ids = bool(self._loading_req_ids)
         # True when any block besides the null block is still held.
         if self._block_pool is None:
             blocks_still_referenced = True
@@ -735,11 +737,11 @@ class BaseKVPoolScheduler(ABC):
         if stale_ids and blocks_still_referenced:
             logger.error(
                 "AscendStore reset_store refused; blocks still referenced loading_req_ids=%s",
-                self._async_loading_req_ids,
+                self._loading_req_ids,
             )
             return False
         if stale_ids:
-            self._async_loading_req_ids.clear()
+            self._loading_req_ids.clear()
 
         if self.client is None:
             self.client = LookupKeyClient(self.vllm_config)

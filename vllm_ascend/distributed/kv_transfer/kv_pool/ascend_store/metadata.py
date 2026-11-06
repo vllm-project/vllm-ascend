@@ -24,6 +24,21 @@ def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
 
 
+def should_wait_for_kv_load(
+    extra_config: Mapping[str, Any], use_layerwise: bool, kv_cache_groups: Sequence[Any] | None
+) -> bool:
+    """Keep bulk multi-group loads out of a model's running request batch.
+
+    Request-level receive failures are handled while the scheduler waits for
+    remote KV. Use that handshake for multi-group bulk loads even when the
+    backend GET runs synchronously. This does not change the I/O thread mode.
+    Layerwise loads retain their existing per-layer synchronization protocol.
+    """
+    return not use_layerwise and (
+        bool(extra_config.get("load_async", False)) or (kv_cache_groups is not None and len(kv_cache_groups) > 1)
+    )
+
+
 @dataclass(frozen=True)
 class TPMismatchInfo:
     enabled: bool
