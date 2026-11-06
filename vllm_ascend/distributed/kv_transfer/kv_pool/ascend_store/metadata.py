@@ -14,12 +14,18 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend import envs
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
+
+
+# Legacy trackers have no save-window evidence. New trackers carry each group's
+# absolute token base and one of ZERO, WINDOW, or UNPROVABLE.
+_KVPOOL_UNSET: Any = object()
 
 
 @dataclass(frozen=True)
@@ -901,6 +907,16 @@ class RequestTracker:
 
     block_sizes: list[int] | None = None
 
+    # Per-group save window base (absolute token offset) and proof state.
+    # state in {"ZERO", "WINDOW", "UNPROVABLE"} per group; None => feature off.
+    save_window_base_by_group: list[int | None] | None = None
+    save_window_base_state: list[str] | None = None
+    # Absolute token cursor for window-mode saves. Committed one step late,
+    # based on scheduler eligibility, not a worker write acknowledgement.
+    save_window_start_token: int = 0
+    save_window_pending_token: int | None = None
+    save_window_last_can_save: bool = False
+
     def __init__(
         self,
         req_id: str,
@@ -919,6 +935,9 @@ class RequestTracker:
         last_layerwise_snapshot_end_token: int | None = None,
         last_layerwise_snapshot_block_index: int | None = None,
         last_layerwise_snapshot_start_block: int | None = None,
+        save_window_base_by_group: list[int | None] | None = None,
+        save_window_base_state: list[str] | None = None,
+        save_window_start_token: int = 0,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -938,6 +957,11 @@ class RequestTracker:
         self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
         self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
         self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
+        self.save_window_base_by_group = save_window_base_by_group
+        self.save_window_base_state = save_window_base_state
+        self.save_window_start_token = save_window_start_token
+        self.save_window_pending_token = None
+        self.save_window_last_can_save = False
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1054,6 +1078,10 @@ class ReqMeta:
         block_gvas_np: np.ndarray | None = None,
         block_gvas_by_group_np: list[np.ndarray] | None = None,
         gva_block_offset: int = 0,
+        save_block_ids_by_group_np: list[np.ndarray] | None = None,
+        save_block_gvas_by_group_np: list[np.ndarray] | None = None,
+        save_window_base_by_group: list[int | None] | None = None,
+        save_window_base_state: list[str] | None = None,
         load_block_gvas_np: np.ndarray | None = None,
         load_block_gvas_by_group_np: list[np.ndarray] | None = None,
         load_gva_block_offset: int = 0,
@@ -1095,6 +1123,10 @@ class ReqMeta:
         self.block_gvas_np = block_gvas_np
         self.block_gvas_by_group_np = block_gvas_by_group_np
         self.gva_block_offset = gva_block_offset
+        self.save_block_ids_by_group_np = save_block_ids_by_group_np
+        self.save_block_gvas_by_group_np = save_block_gvas_by_group_np
+        self.save_window_base_by_group = save_window_base_by_group
+        self.save_window_base_state = save_window_base_state
         self.load_block_gvas_np = load_block_gvas_np
         self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
         self.load_gva_block_offset = load_gva_block_offset
@@ -1132,6 +1164,13 @@ class ReqMeta:
     block_gvas_np: np.ndarray | None = None
     block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
+    # Aligned-save arrays. Each group array is padded with leading
+    # zeros up to its window base, so array index == absolute block number and
+    # gva_block_offset stays 0. None => feature off or not yet produced.
+    save_block_ids_by_group_np: list[np.ndarray] | None = None
+    save_block_gvas_by_group_np: list[np.ndarray] | None = None
+    save_window_base_by_group: list[int | None] | None = None
+    save_window_base_state: list[str] | None = None
     load_block_gvas_by_group_np: list[np.ndarray] | None = None
     partial_save_gva_per_group: list[int] = field(default_factory=list)
     partial_load_gva_per_group: list[int] = field(default_factory=list)
@@ -1214,11 +1253,58 @@ class ReqMeta:
         if skip_save and load_spec is None:
             return None
 
-        if not skip_save:
-            tracker.num_saved_tokens = max(
-                tracker.num_saved_tokens,
-                num_tokens_to_save,
+        # Decide, once per step, whether this request may save at all. Aligned
+        # saving needs a provable per-group window base; without it we
+        # must skip rather than let the range/array bases disagree.
+        _base_bg = getattr(tracker, "save_window_base_by_group", _KVPOOL_UNSET)
+        _state_bg = getattr(tracker, "save_window_base_state", None)
+        # partial_block_index is computed in the worker and cannot be kept
+        # aligned by the scheduler-side window, so refuse alignment in that deployment.
+        _p1_enabled = envs.VLLM_ASCEND_KVPOOL_WINDOW_BASE and not save_partial_block
+        if envs.VLLM_ASCEND_KVPOOL_WINDOW_BASE and save_partial_block:
+            logger.error_once(
+                "VLLM_ASCEND_KVPOOL_WINDOW_BASE is not supported when partial-block saves are "
+                "enabled (layerwise_offload=True); aligned save disabled."
             )
+
+        if _base_bg is _KVPOOL_UNSET or _state_bg is None:
+            _base_mode = "OFF"  # rollback / legacy object: keep previous path
+        elif all(s == "ZERO" for s in _state_bg):
+            _base_mode = "ZERO"  # table is the authoritative full table
+        elif any(s == "UNPROVABLE" for s in _state_bg):
+            _base_mode = "SKIP_UNPROVABLE"
+        elif any(s == "WINDOW" for s in _state_bg) and not _p1_enabled:
+            _base_mode = "SKIP_P1_OFF"
+        else:
+            _base_mode = "WINDOW_ALIGNED"
+
+        if envs.VLLM_ASCEND_KVPOOL_WINDOW_BASE_OBS:
+            logger.info(
+                "[KVPOOL-BASE] req=%s mode=%s state=%s base=%s table=%s p1=%d",
+                tracker.req_id,
+                _base_mode,
+                _state_bg,
+                None if _base_bg is _KVPOOL_UNSET else _base_bg,
+                [len(x) for x in tracker.allocated_block_ids_by_group],
+                1 if _p1_enabled else 0,
+            )
+
+        if not skip_save and _base_mode in ("SKIP_UNPROVABLE", "SKIP_P1_OFF"):
+            logger.warning(
+                "layerwise save skipped: mode=%s req=%s save_end_token=%d target=%d state=%s base=%s table=%s",
+                _base_mode,
+                tracker.req_id,
+                num_tokens_to_save,
+                target_token_len,
+                _state_bg,
+                _base_bg,
+                [len(x) for x in tracker.allocated_block_ids_by_group],
+            )
+            skip_save = True
+
+        if not skip_save:
+            if _base_mode != "WINDOW_ALIGNED":
+                tracker.num_saved_tokens = max(tracker.num_saved_tokens, num_tokens_to_save)
             if should_save_partial_block:
                 tracker.last_layerwise_snapshot_end_token = target_token_len
                 tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
@@ -1229,6 +1315,36 @@ class ReqMeta:
                 tracker.last_layerwise_snapshot_end_token = None
                 tracker.last_layerwise_snapshot_block_index = None
                 tracker.last_layerwise_snapshot_start_block = None
+
+        # Commit the window cursor one scheduler step late.
+        # A pending cursor is only folded into the committed cursor when the
+        # previous scheduler step was saveable. This is not a worker write
+        # acknowledgement; end-to-end retry needs write completion feedback.
+        if getattr(tracker, "save_window_pending_token", None) is not None:
+            if getattr(tracker, "save_window_last_can_save", False):
+                tracker.save_window_start_token = max(
+                    tracker.save_window_start_token, tracker.save_window_pending_token
+                )
+            tracker.save_window_pending_token = None
+        if _base_mode == "WINDOW_ALIGNED" and not skip_save:
+            _block_sizes = tracker.block_sizes or []
+            _per_group_end: list[int] = []
+            for _g, _ids in enumerate(tracker.allocated_block_ids_by_group):
+                _bs_g = _block_sizes[_g] if _g < len(_block_sizes) else 0
+                _base_g = _base_bg[_g] if _g < len(_base_bg) else 0
+                _base_blk = (_base_g // _bs_g) if (_base_g is not None and _bs_g) else 0
+                _per_group_end.append(min(num_tokens_to_save, (_base_blk + len(_ids)) * _bs_g))
+            tracker.save_window_pending_token = min(_per_group_end) if _per_group_end else None
+            tracker.save_window_last_can_save = True
+        else:
+            tracker.save_window_last_can_save = False
+
+        # Window mode must not advance num_saved_tokens (it tracks "saved from
+        # token 0"); the window has its own absolute cursor.
+        _emit_save_start_token = previous_saved_tokens
+        if _base_mode == "WINDOW_ALIGNED" and _base_bg:
+            _min_base = min(b for b in _base_bg if b is not None)
+            _emit_save_start_token = max(int(tracker.save_window_start_token or 0), _min_base)
 
         token_ids = None
         if tracker.token_ids:
@@ -1248,7 +1364,7 @@ class ReqMeta:
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
-            save_start_token=previous_saved_tokens,
+            save_start_token=_emit_save_start_token,
             block_ids_by_group=tracker.allocated_block_ids_by_group,
             can_save=not skip_save,
             load_spec=load_spec,
@@ -1268,6 +1384,8 @@ class ReqMeta:
             if hasattr(tracker, "block_gvas_by_group") and tracker.block_gvas_by_group
             else None,
             gva_block_offset=tracker.gva_block_offset,
+            save_window_base_by_group=None if _base_bg is _KVPOOL_UNSET else _base_bg,
+            save_window_base_state=_state_bg,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
         )
 
