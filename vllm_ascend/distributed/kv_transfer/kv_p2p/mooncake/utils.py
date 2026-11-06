@@ -106,7 +106,7 @@ class MooncakeMetaserverClient:
 
     def get_failed_requests(self) -> dict[str, bool]:
         """Return failed D requests and whether P dispatch can be ruled out."""
-        failed_requests = {}
+        failed_requests: dict[str, bool] = {}
         while True:
             try:
                 request_id, error, not_dispatched = self._results.get_nowait()

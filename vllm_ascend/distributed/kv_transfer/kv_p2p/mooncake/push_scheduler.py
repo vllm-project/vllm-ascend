@@ -123,6 +123,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 remote_num_external_tokens=num_external_tokens,
                 remote_worker_addresses=self._remote_worker_addresses,
             )
+            assert self.metaserver_client is not None
             self.metaserver_client.submit(request.request_id, params.get("metaserver"), message)
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
