@@ -241,21 +241,12 @@ class BaseKVPoolScheduler(ABC):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
-        exact_local_hit = getattr(request, "local_prefix_cache_hit_tokens", None)
-        if (
-            self.pool_cache_geometry.block_only
-            and self.pool_cache_geometry.core_hit_alignment < self.cache_transfer_granularity
-            and exact_local_hit is None
-        ):
-            # Older Core schedulers can round down before calling the connector.
-            # Without the exact hit, even a reported zero may hide a live tail.
-            logger.debug("AscendStore skips whole-page load without the exact local APC hit")
-            return 0, False
-        local_hit = max(num_computed_tokens, exact_local_hit) if isinstance(exact_local_hit, int) else num_computed_tokens
-        if self.pool_cache_geometry.block_only and local_hit % self.cache_transfer_granularity:
-            # An HBM prefix may end inside an externally stored page. A whole-page
-            # load could overwrite that live tail, so leave it entirely to Core.
-            logger.debug("AscendStore skips whole-page load after local hit %d", local_hit)
+        # Core passes the candidate load start and owns local-tail arbitration:
+        # it drops a local sub-block tail only if the remote hit strictly
+        # extends it. We still require the start to align to our transfer
+        # pages, which can be larger than Core's scheduler block.
+        if self.pool_cache_geometry.block_only and num_computed_tokens % self.cache_transfer_granularity:
+            logger.debug("AscendStore skips whole-page load from unaligned start %d", num_computed_tokens)
             return 0, False
 
         num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)

@@ -1959,7 +1959,11 @@ def test_layerwise_retry_discards_stale_load_spec(second_hit):
     assert load_spec is None or load_spec.kvpool_cached_tokens <= 768
 
 
-def test_block_only_uses_core_hash_and_keeps_unrounded_local_tail():
+@pytest.mark.parametrize(
+    ("local_start", "pool_end", "expected"),
+    [(0, 672, 640), (640, 640, 0), (640, 1312, 640), (640, 1920, 640), (672, 1920, 0)],
+)
+def test_block_only_uses_core_hash_and_whole_page_load_range(local_start, pool_end, expected):
     config = make_config(block_size=640, extra_config={"backend": "memcache", "pool_prefix_mode": "block_only"})
     config.cache_config.prefix_match_unit = 16
     group = KVCacheGroupSpec(
@@ -1969,17 +1973,22 @@ def test_block_only_uses_core_hash_and_keeps_unrounded_local_tail():
     scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=geometry)
     assert scheduler.hash_block_size == 32
     assert scheduler.cache_transfer_granularity == 640
-    scheduler._lookup_external_hit_tokens = MagicMock(return_value=1920)
-    request = SimpleNamespace(request_id="tail", num_tokens=1920, local_prefix_cache_hit_tokens=672)
+    scheduler._lookup_external_hit_tokens = MagicMock(return_value=pool_end)
+    request = SimpleNamespace(request_id="tail", num_tokens=1920)
     scheduler.load_specs["tail"] = LoadSpec(640, 1920, True)
-    assert scheduler.get_num_new_matched_tokens(request, 640) == (0, False)
-    assert "tail" not in scheduler.load_specs
-    scheduler._lookup_external_hit_tokens.assert_not_called()
-    request.local_prefix_cache_hit_tokens = None
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
-    scheduler._lookup_external_hit_tokens.assert_not_called()
-    request.local_prefix_cache_hit_tokens = 640
-    assert scheduler.get_num_new_matched_tokens(request, 640) == (640, False)
+    assert scheduler.get_num_new_matched_tokens(request, local_start) == (expected, False)
+    if local_start % 640:
+        scheduler._lookup_external_hit_tokens.assert_not_called()
+    else:
+        scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start)
+    if expected:
+        scheduler.update_state_after_alloc(request, MagicMock(), expected)
+        load_spec = scheduler.load_specs["tail"]
+        assert load_spec.vllm_cached_tokens == local_start
+        assert load_spec.kvpool_cached_tokens == local_start + expected
+        assert load_spec.can_load
+    else:
+        assert "tail" not in scheduler.load_specs
 
 
 @pytest.mark.parametrize("early_return", ["consumer", "short_prompt", "local_hit"])
