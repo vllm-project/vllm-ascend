@@ -59,6 +59,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.adaptive import glm_mtp_adaptive_query_len
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
@@ -515,6 +516,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec) -> int | None:
+        return glm_mtp_adaptive_query_len(vllm_config)
 
     def __init__(
         self,

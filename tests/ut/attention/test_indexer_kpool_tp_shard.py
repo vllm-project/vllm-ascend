@@ -153,6 +153,16 @@ def test_row_shard_slices_tile_rows_and_rebase_requests():
     assert covered[-1][1] == common.num_actual_tokens
 
 
+def test_row_shard_skips_device_allocated_draft_batches():
+    rows = MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK * 4
+    common = _common_metadata([rows], [rows * 25])
+    builder = _builder()
+    with patch(f"{MODULE}.get_tensor_model_parallel_rank", return_value=0):
+        assert builder._build_indexer_row_shard(common, graph_capture=False) is not None
+        common.has_adaptive_draft_tokens = True
+        assert builder._build_indexer_row_shard(common, graph_capture=False) is None
+
+
 def test_row_shard_rebases_a_request_cut_midway():
     """A single deep request split across two ranks reports, per rank, the
     visible length of the rank's last covered row -- never a truncated
