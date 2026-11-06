@@ -54,6 +54,7 @@ class AscendHiSparseBackend(HiSparseBackend):
 
     def check_available(self) -> None:
         from vllm_ascend.hisparse.resolver import _load_resolver
+        from vllm_ascend.hisparse.row_dma import install as install_row_dma
         from vllm_ascend.patch.worker.patch_hisparse_host_pool import install
         from vllm_ascend.utils import bootstrap_custom_op_env
 
@@ -72,6 +73,7 @@ class AscendHiSparseBackend(HiSparseBackend):
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
         _load_resolver()
+        install_row_dma(AscendHiSparseBackend)
 
     def allocate_private_host_pool(self, size: int) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm_ascend.hisparse.cache_ops import allocate_mapped_host
