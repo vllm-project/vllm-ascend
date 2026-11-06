@@ -14,6 +14,8 @@ from vllm_ascend.quantization.method_adapters import (
 )
 from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme
 
+MODULE = "vllm_ascend.quantization.method_adapters"
+
 
 def test_mx_scale_weight_loader_preserves_group_phase():
     weight_loader = MagicMock()
@@ -154,6 +156,14 @@ class TestAscendLinearMethod(TestBase):
         self.method.process_weights_after_loading(layer)
         self.mock_scheme.process_weights_after_loading.assert_called_once_with(layer)
 
+    def test_create_weights_validates_before_allocating(self):
+        self.mock_scheme.validate_weight_shapes.side_effect = ValueError("invalid shape")
+        layer = torch.nn.Module()
+        with self.assertRaisesRegex(ValueError, "invalid shape"):
+            self.method.create_weights(layer, 256, [192], 256, 1536, torch.bfloat16)
+        self.mock_scheme.validate_weight_shapes.assert_called_once_with(layer, 256, 1536, 256, [192])
+        self.mock_scheme.get_weight.assert_not_called()
+
     def test_apply_delegates_to_scheme(self):
         layer = MagicMock(spec=ColumnParallelLinear)
         x = torch.randn(4, 256)
@@ -242,16 +252,22 @@ class TestAscendFusedMoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
         self.assertEqual(layer.w2_weight_offset.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
 
-    def create_moe_weights(self):
+    def create_moe_weights(self, intermediate_size_per_partition=256):
         layer = torch.nn.Module()
         self.method.create_weights(
             layer,
             num_experts=8,
             hidden_size=128,
-            intermediate_size_per_partition=256,
+            intermediate_size_per_partition=intermediate_size_per_partition,
             params_dtype=torch.bfloat16,
         )
         return layer
+
+    def test_create_weights_validates_before_allocating(self):
+        self.mock_scheme.validate_weight_shapes.side_effect = ValueError("invalid shape")
+        with self.assertRaisesRegex(ValueError, "invalid shape"):
+            self.create_moe_weights(intermediate_size_per_partition=250)
+        self.mock_scheme.get_weight.assert_not_called()
 
     def test_apply_method(self):
         layer = torch.nn.Module()

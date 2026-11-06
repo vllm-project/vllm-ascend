@@ -1,0 +1,4 @@
+pr: 20826
+entries:
+  - category: bugfix
+    text: Fixed corrupted output for DeepSeek V4.1 Flash when the block size was left at its default instead of being passed explicitly.

@@ -159,6 +159,71 @@ class TestAscendFp8Config(TestBase):
         method = config.get_quant_method(MagicMock(spec=LinearBase), kda_name)
         self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
+    def test_glm53_flash_nested_prefix_mismatch_is_rescued_by_suffix_fallback(self):
+        # GLM-5.3-Flash lists flat checkpoint prefixes under modules_to_not_convert.
+        flat_entry = "model.layers.3.self_attn.indexer.wq_b"
+        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
+        config = self.build_config(ignored_layers=[flat_entry])
+
+        with patch("vllm_ascend.quantization.configs.fp8_config.logger") as mock_logger:
+            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
+            mock_logger.warning_once.assert_called_once()
+            self.assertIn(real_runtime_prefix, mock_logger.warning_once.call_args.args)
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_suffix_fallback_does_not_engage_when_exact_match_already_succeeds(self):
+        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
+        config = self.build_config(ignored_layers=[real_runtime_prefix])
+
+        with patch("vllm_ascend.quantization.configs.fp8_config.logger") as mock_logger:
+            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
+            mock_logger.warning_once.assert_not_called()
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_suffix_fallback_does_not_over_match_a_genuinely_quantized_layer(self):
+        config = self.build_config(ignored_layers=["model.layers.3.self_attn.indexer.wq_b"])
+        quantized_prefix = "language_model.model.layers.3.self_attn.q_b_proj"
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
+                return_value="block-fp8",
+            ),
+        ):
+            method = config.get_quant_method(MagicMock(spec=LinearBase), quantized_prefix)
+
+        self.assertEqual(method, "block-fp8")
+
+    def test_suffix_fallback_is_skipped_when_is_layer_skipped_has_no_match_mode(self):
+        def old_is_layer_skipped(prefix, ignored_layers, packed_modules_mapping):
+            return prefix in ignored_layers
+
+        flat_entry = "model.layers.3.self_attn.indexer.wq_b"
+        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
+        config = self.build_config(ignored_layers=[flat_entry])
+
+        with (
+            patch("vllm_ascend.quantization.configs.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
+            patch("vllm_ascend.quantization.configs.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
+                return_value="block-fp8",
+            ),
+        ):
+            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
+
+        self.assertEqual(method, "block-fp8")
+
     def test_ignored_moe_falls_back_to_unquantized(self):
         config = self.build_config(ignored_layers=["model.layers.0.mlp.experts"])
         moe_layer = MagicMock(spec=RoutedExperts)
