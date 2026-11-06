@@ -7,6 +7,9 @@ entries:
       (torch_npu.npu_all_gather_base_mm) and the reduce-scatter into the row
       GEMMs (torch_npu.npu_mm_reduce_scatter_base) for prefill-sized
       unquantized batches at TP size 2/4/8, overlapping the boundary
-      communication with the matmuls. Decode and unsupported configurations
-      keep the unfused layout with identical numerics; no new switch is
-      required.
+      communication with the matmuls. The fused kernels cannot be captured
+      into graphs, so `cudagraph_mode=FULL` is demoted to `FULL_DECODE_ONLY`
+      on eligible deployments: decode keeps its graphs (the projections fall
+      back to the unfused layout inside decode capture) and prefill runs the
+      fused path eagerly. Decode and unsupported configurations keep the
+      unfused layout with identical numerics; no new switch is required.

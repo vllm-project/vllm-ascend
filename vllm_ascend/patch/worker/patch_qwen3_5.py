@@ -72,13 +72,11 @@ def _pure_prefill_batch() -> bool:
             (meta for meta in attn_metadata.values() if hasattr(meta, "num_prefills") and hasattr(meta, "num_decodes")),
             None,
         )
-    if (
-        attn_metadata is None
-        or getattr(attn_metadata, "num_prefills", 0) == 0
-        or getattr(attn_metadata, "num_decodes", 0) != 0
-    ):
-        return False
-    return True
+    return bool(
+        attn_metadata is not None
+        and getattr(attn_metadata, "num_prefills", 0) > 0
+        and getattr(attn_metadata, "num_decodes", 0) == 0
+    )
 
 
 class DenseSpAllGatherMmOp(CustomColumnParallelOp):
@@ -100,7 +98,10 @@ class DenseSpAllGatherMmOp(CustomColumnParallelOp):
         tp_group = get_tp_group()
         backend = tp_group.device_group._get_backend(torch.device("npu"))
         self.hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
-        self.tp_size = tp_group.world_size
+        # Store the TP size under a private name: CustomLinearOp.tp_size is a
+        # read-only property, and apply()-time reads must not re-resolve the
+        # process group (tests patch only this module's get_tp_group).
+        self.fused_tp_size = tp_group.world_size
 
     def _can_fuse(self, input_: torch.Tensor) -> bool:
         weight = self.layer.weight
@@ -121,7 +122,7 @@ class DenseSpAllGatherMmOp(CustomColumnParallelOp):
                 input_.contiguous(),
                 self.layer.weight.t(),
                 self.hcom,
-                self.tp_size,
+                self.fused_tp_size,
                 bias=bias,
             )
         else:
@@ -153,7 +154,10 @@ class DenseSpMmReduceScatterOp(CustomRowParallelOp):
         tp_group = get_tp_group()
         backend = tp_group.device_group._get_backend(torch.device("npu"))
         self.hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
-        self.tp_size = tp_group.world_size
+        # Store the TP size under a private name: CustomLinearOp.tp_size is a
+        # read-only property, and apply()-time reads must not re-resolve the
+        # process group (tests patch only this module's get_tp_group).
+        self.fused_tp_size = tp_group.world_size
 
     def _can_fuse(self, input_parallel: torch.Tensor) -> bool:
         weight = self.layer.weight
@@ -170,14 +174,14 @@ class DenseSpMmReduceScatterOp(CustomRowParallelOp):
         input_parallel = self.get_input_parallel(input_)
         assert self.quant_method is not None
         if self._can_fuse(input_parallel):
-            sp_pad = (-input_parallel.shape[0]) % self.tp_size
+            sp_pad = (-input_parallel.shape[0]) % self.fused_tp_size
             if sp_pad:
                 input_parallel = F.pad(input_parallel, (0, 0, 0, sp_pad))
             output = DeviceOperator.npu_mm_reduce_scatter_base(
                 input_parallel,
                 self.layer.weight.t(),
                 self.hcom,
-                self.tp_size,
+                self.fused_tp_size,
                 reduce_op="sum",
             )
             if self.bias is not None and not self.skip_bias_add:

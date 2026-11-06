@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CompilationMode
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.ops import linear_op
@@ -98,18 +100,18 @@ def _make_layer(layer_type: str = "full_attention", mlp=None, upstream_sp: bool 
     layer.layer_type = layer_type
     layer.use_attn_reduce_scatter_for_moe = upstream_sp
     if layer_type == "linear_attention":
-        layer.linear_attn = SimpleNamespace(out_proj=SimpleNamespace(reduce_results=True))
+        layer.linear_attn = SimpleNamespace(out_proj=SimpleNamespace(reduce_results=True, custom_op=None))
     else:
         layer.self_attn = SimpleNamespace(
-            qkv_proj=SimpleNamespace(),
-            o_proj=SimpleNamespace(reduce_results=True),
+            qkv_proj=SimpleNamespace(custom_op=None),
+            o_proj=SimpleNamespace(reduce_results=True, custom_op=None),
         )
     layer.mlp = (
         mlp
         if mlp is not None
         else SimpleNamespace(
-            gate_up_proj=SimpleNamespace(),
-            down_proj=SimpleNamespace(reduce_results=True),
+            gate_up_proj=SimpleNamespace(custom_op=None),
+            down_proj=SimpleNamespace(reduce_results=True, custom_op=None),
         )
     )
     return layer
@@ -163,6 +165,17 @@ class _ForwardLayer(SimpleNamespace):
 
     def forward(self, hidden_states, residual, positions=None, **kwargs):
         return patch_qwen3_5.AscendQwen3_5DecoderLayer.forward(self, hidden_states, residual, positions, **kwargs)
+
+
+class _CallableProjection:
+    """Callable projection double: its forward dispatches to the installed
+    custom op, mirroring AscendColumn/RowParallelLinear.forward."""
+
+    def __init__(self, op):
+        self.custom_op = op
+
+    def __call__(self, input_):
+        return self.custom_op.apply(input_)
 
 
 def _make_forward_layer(layer_type: str = "full_attention", use_sp: bool = True, mlp=None):
@@ -642,7 +655,7 @@ class TestDenseSpLayerInitFusedOps:
     @pytest.fixture(autouse=True)
     def _init_env(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
-        monkeypatch.setattr(patch_qwen3_5, "enable_dense_sp", return_value=True)
+        monkeypatch.setattr(patch_qwen3_5, "enable_dense_sp", lambda vllm_config=None: True)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_base_mm", lambda *a, **k: None, raising=False)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", lambda *a, **k: None, raising=False)
 
@@ -650,17 +663,16 @@ class TestDenseSpLayerInitFusedOps:
         layer = _make_layer(layer_type)
         quant_method = UnquantizedLinearMethod()
         if layer_type == "linear_attention":
-            layer.linear_attn.out_proj.weight = torch.randn(4, 6, dtype=torch.bfloat16)
-            layer.linear_attn.out_proj.quant_method = quant_method
+            layer.linear_attn.out_proj = _make_row_proj(
+                torch.randn(4, 6, dtype=torch.bfloat16), quant_method=quant_method
+            )
         else:
-            layer.self_attn.qkv_proj.weight = torch.randn(6, 4, dtype=torch.bfloat16)
-            layer.self_attn.qkv_proj.quant_method = quant_method
-            layer.self_attn.o_proj.weight = torch.randn(4, 6, dtype=torch.bfloat16)
-            layer.self_attn.o_proj.quant_method = quant_method
-        layer.mlp.gate_up_proj.weight = torch.randn(6, 4, dtype=torch.bfloat16)
-        layer.mlp.gate_up_proj.quant_method = quant_method
-        layer.mlp.down_proj.weight = torch.randn(4, 6, dtype=torch.bfloat16)
-        layer.mlp.down_proj.quant_method = quant_method
+            layer.self_attn.qkv_proj = _make_column_proj(
+                torch.randn(6, 4, dtype=torch.bfloat16), quant_method=quant_method
+            )
+            layer.self_attn.o_proj = _make_row_proj(torch.randn(4, 6, dtype=torch.bfloat16), quant_method=quant_method)
+        layer.mlp.gate_up_proj = _make_column_proj(torch.randn(6, 4, dtype=torch.bfloat16), quant_method=quant_method)
+        layer.mlp.down_proj = _make_row_proj(torch.randn(4, 6, dtype=torch.bfloat16), quant_method=quant_method)
         return layer
 
     def test_full_attention_installs_all_four_fused_ops(self):
@@ -719,15 +731,13 @@ class TestFusedDecoderFlow:
             lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=1, num_decodes=0)),
         )
 
-    def _fused_column(self, out_features: int, in_features: int) -> SimpleNamespace:
+    def _fused_column(self, out_features: int, in_features: int) -> "_CallableProjection":
         proj = _make_column_proj(torch.randn(out_features, in_features, dtype=torch.float64))
-        proj.custom_op = patch_qwen3_5.DenseSpAllGatherMmOp(proj)
-        return proj
+        return _CallableProjection(patch_qwen3_5.DenseSpAllGatherMmOp(proj))
 
-    def _fused_row(self, out_features: int, in_features: int) -> SimpleNamespace:
+    def _fused_row(self, out_features: int, in_features: int) -> "_CallableProjection":
         proj = _make_row_proj(torch.randn(out_features, in_features, dtype=torch.float64))
-        proj.custom_op = patch_qwen3_5.DenseSpMmReduceScatterOp(proj)
-        return proj
+        return _CallableProjection(patch_qwen3_5.DenseSpMmReduceScatterOp(proj))
 
     def test_all_fused_layer_skips_decoder_collectives(self):
         gather_rows = []
@@ -810,3 +820,94 @@ class TestFusedDecoderFlow:
         assert k.shape[0] == 5
         assert v.shape[0] == 5
         assert out.shape[0] == 5
+
+
+class TestDenseSpGraphModeDemotion:
+    """Plain FULL also captures prefill batches, and the fused matmul-
+    collective projections cannot be captured into those graphs, so dense SP
+    demotes FULL to FULL_DECODE_ONLY: decode keeps its graphs (the fused ops
+    fall back inside decode capture) and prefill runs the fused path
+    eagerly."""
+
+    @staticmethod
+    def _make_mode_config(
+        *,
+        cudagraph_mode,
+        enforce_eager=False,
+        enable_flashcomm1=True,
+        quantization_config=None,
+    ):
+        # Unquantized default: no hf_quant_config and no per-config
+        # quantization_config on the (text) HF configs.
+        text_config = SimpleNamespace(model_type="qwen3_5_text", quantization_config=quantization_config)
+        return SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=cudagraph_mode,
+                mode=CompilationMode.VLLM_COMPILE,
+                splitting_ops=[],
+            ),
+            model_config=SimpleNamespace(
+                enforce_eager=enforce_eager,
+                is_encoder_decoder=False,
+                hf_quant_config=quantization_config,
+                hf_config=text_config,
+                hf_text_config=text_config,
+            ),
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+                use_sequence_parallel_moe=False,
+            ),
+            additional_config={} if enable_flashcomm1 is None else {"enable_flashcomm1": enable_flashcomm1},
+            speculative_config=None,
+        )
+
+    @staticmethod
+    def _run_update_compilation_modes(vllm_config):
+        from vllm_ascend.platform import _update_compilation_modes
+
+        ascend_config = SimpleNamespace(
+            ascend_compilation_config={},
+            xlite_graph_config=SimpleNamespace(enabled=False),
+        )
+        _update_compilation_modes(vllm_config, ascend_config)
+        return vllm_config.compilation_config.cudagraph_mode
+
+    def test_full_demoted_to_full_decode_only(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        mode = self._run_update_compilation_modes(self._make_mode_config(cudagraph_mode=CUDAGraphMode.FULL))
+        assert mode == CUDAGraphMode.FULL_DECODE_ONLY
+        assert mode.decode_mode() == CUDAGraphMode.FULL
+
+    def test_full_and_piecewise_keeps_piecewise_prefill(self, monkeypatch):
+        # Prefill runs the compiled pieces eagerly between the piecewise
+        # graphs, so the fused ops branch at runtime and keep the fusion.
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        mode = self._run_update_compilation_modes(
+            self._make_mode_config(cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE)
+        )
+        assert mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+    def test_quantized_checkpoint_keeps_full(self, monkeypatch):
+        # A quantized checkpoint never installs the fused projections, so
+        # its prefill batches may keep plain FULL graphs.
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        quant = SimpleNamespace(method="w8a8")
+        mode = self._run_update_compilation_modes(
+            self._make_mode_config(cudagraph_mode=CUDAGraphMode.FULL, quantization_config=quant)
+        )
+        assert mode == CUDAGraphMode.FULL
+
+    def test_no_flashcomm_keeps_full(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        mode = self._run_update_compilation_modes(
+            self._make_mode_config(cudagraph_mode=CUDAGraphMode.FULL, enable_flashcomm1=False)
+        )
+        assert mode == CUDAGraphMode.FULL
+
+    def test_enforce_eager_skips_the_demotion(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        mode = self._run_update_compilation_modes(
+            self._make_mode_config(cudagraph_mode=CUDAGraphMode.FULL, enforce_eager=True)
+        )
+        assert mode == CUDAGraphMode.FULL

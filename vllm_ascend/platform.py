@@ -55,6 +55,7 @@ from vllm_ascend.utils import (
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
+    enable_dense_sp,
     enable_sp,
 )
 
@@ -1244,6 +1245,45 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             cudagraph_mode,
         )
         compilation_config.cudagraph_mode = cudagraph_mode
+
+    # Dense-SP MC2 fusion cannot run inside FULL graphs: plain FULL also
+    # registers mixed-mode (prefill-shaped) keys, and prefill batches then
+    # replay graphs captured without the fused matmul-collective kernels —
+    # outputs stay correct but the fusion silently disappears. Demote to
+    # FULL_DECODE_ONLY so decode keeps its graphs (the fused projections
+    # already fall back to the unfused layout inside decode capture) and
+    # prefill runs eagerly, where the fusion is active.
+    if (
+        enable_dense_sp(vllm_config)
+        and compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        and not enforce_eager
+        and _is_unquantized_model_config(model_config)
+    ):
+        compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        logger.warning_once(
+            "enable_flashcomm1 dense sequence parallelism demotes cudagraph_mode FULL to "
+            "FULL_DECODE_ONLY: the fused matmul-collective projections cannot be captured "
+            "into prefill graphs, so prefill stays eager to keep the fusion active."
+        )
+
+
+def _is_unquantized_model_config(model_config) -> bool:
+    """Whether the checkpoint carries no quantization config.
+
+    Mirrors the dense-SP fused-op install guard (UnquantizedLinearMethod
+    over bf16/fp16 weights): a quantized checkpoint never installs the fused
+    projections, so its prefill batches may keep plain FULL graphs.
+    """
+    try:
+        if getattr(model_config, "hf_quant_config", None) is not None:
+            return False
+    except Exception:
+        pass
+    for attr in ("hf_config", "hf_text_config"):
+        hf_config = getattr(model_config, attr, None)
+        if hf_config is not None and getattr(hf_config, "quantization_config", None) is not None:
+            return False
+    return True
 
 
 def _setup_compile_backend(

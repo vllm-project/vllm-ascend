@@ -109,6 +109,16 @@ gather / GEMM / reduce-scatter layout with identical numerics. The GDN
 in-projections keep the decoder-level gather (it feeds several consumers
 inside the mixer core); their output projection still fuses.
 
+> [!NOTE]
+> **Graph mode.** The fused kernels cannot be captured into ACL graphs, and
+> plain `cudagraph_mode=FULL` would otherwise serve prefill batches from
+> graphs captured without them. Eligible deployments therefore demote
+> `FULL` to `FULL_DECODE_ONLY` at config time: decode keeps its graphs (the
+> projections fall back to the unfused layout inside decode capture) and
+> prefill runs the fused path eagerly. `FULL_AND_PIECEWISE` is untouched —
+> its prefill runs the compiled pieces eagerly between the piecewise graphs,
+> so the projections branch at runtime and the fusion stays active.
+
 ### Matmul reduce-scatter fusion
 
 On supported Ascend devices, enable `fuse_gemm_comms` to fuse a
