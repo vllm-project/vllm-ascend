@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -24,6 +23,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from zmq.constants import SocketOption, SocketType
+from zmq.error import Again
 
 from vllm_ascend.ascend_config import (
     get_ascend_config,
@@ -313,10 +314,10 @@ class MooncakeMetadataThread(threading.Thread):
 
     def run(self) -> None:
         try:
-            with zmq_ctx(zmq.ROUTER, self.address) as sock:
-                sock.setsockopt(zmq.SNDTIMEO, _METADATA_TIMEOUT_MS)
-                sock.setsockopt(zmq.RCVTIMEO, _METADATA_TIMEOUT_MS)
-                self.address = sock.getsockopt(zmq.LAST_ENDPOINT).decode()
+            with zmq_ctx(SocketType.ROUTER, self.address) as sock:
+                sock.setsockopt(SocketOption.SNDTIMEO, _METADATA_TIMEOUT_MS)
+                sock.setsockopt(SocketOption.RCVTIMEO, _METADATA_TIMEOUT_MS)
+                self.address = sock.getsockopt(SocketOption.LAST_ENDPOINT).decode()
                 self.ready_event.set()
                 self._run_busy_loop(sock)
         except Exception as exc:
@@ -330,7 +331,7 @@ class MooncakeMetadataThread(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 frames = sock.recv_multipart()
-            except zmq.Again:
+            except Again:
                 continue
             identity = frames[0]
             payload = [frame for frame in frames[1:] if frame]
