@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -1226,6 +1227,7 @@ def _register_m3_sparse_packed_modules(
         packed_modules_mapping["indexer_proj"] = ["index_q_proj", "index_k_proj"]
 
 
+@eager_break_during_capture
 def minimax_m3_sparse_forward(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -1258,6 +1260,7 @@ def minimax_m3_sparse_forward_fake(
     return
 
 
+@eager_break_during_capture
 def minimax_m3_fused_sparse_forward(
     qkv: torch.Tensor,
     positions: torch.Tensor,

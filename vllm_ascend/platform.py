@@ -1330,6 +1330,10 @@ def _setup_compile_backend(
         )
         # NOTE: Theoretically, we should also add this in the attention ops; the
         # class attribute may still hold the pre-modification value after spawn.
+        # MiniMax-M3 fused sparse attention writes the KV cache and reads slot
+        # metadata from the forward context. Keep this op outside piecewise
+        # pieces so it executes with the current forward context.
+        # FULL_DECODE_ONLY clears splitting_ops below and captures them whole.
         compilation_config.splitting_ops.extend(
             [
                 "vllm::mla_forward",
