@@ -15,7 +15,11 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import PreprocessType
-from vllm_ascend.hisparse.prefill import AscendHiSparsePrefillStagingPlan, build_hisparse_prefill_staging_plan
+from vllm_ascend.hisparse.prefill import (
+    AscendHiSparsePrefillStagingPlan,
+    build_hisparse_prefill_staging_plan,
+    stage_prefill_rows,
+)
 from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache
 
 # Bound the temporary D2D packing workspace independently of prefill length.
@@ -140,6 +144,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
+        self.hisparse_cache._ascend_prefill_layer_name = self.layer_name
         self._direct_prolog_slots: torch.Tensor | None = None
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
@@ -570,26 +575,25 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 )
             )
         if metadata.num_prefills:
-            host_cache = self.hisparse_cache.runtime.host_cache
-            staged, staged_table, req_ids = self.index_group.stage_prefill_rows(
-                self.index_group_index,
-                host_cache.view(-1, metadata.block_size, host_cache.shape[-1]),
-                metadata,
-            )
-            selected = logical[num_decode:]
-            block_ids = selected.clamp_min(0).to(torch.int64) // metadata.block_size
-            request_tables = staged_table[req_ids.to(torch.int64)]
-            physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
-            physical = physical + selected.clamp_min(0) % metadata.block_size
-            physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
-            outputs.append(
-                self._attention_physical(
-                    ql_nope[num_decode:],
-                    q_pe[num_decode:] if q_pe is not None else None,
-                    staged,
-                    physical,
+            staged, staged_table, req_ids, slot = stage_prefill_rows(self.index_group, self.index_group_index, metadata)
+            try:
+                selected = logical[num_decode:]
+                block_ids = selected.clamp_min(0).to(torch.int64) // metadata.block_size
+                request_tables = staged_table[req_ids.to(torch.int64)]
+                physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
+                physical = physical + selected.clamp_min(0) % metadata.block_size
+                physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
+                outputs.append(
+                    self._attention_physical(
+                        ql_nope[num_decode:],
+                        q_pe[num_decode:] if q_pe is not None else None,
+                        staged,
+                        physical,
+                    )
                 )
-            )
+            finally:
+                if slot is not None:
+                    slot.finish()
         if not outputs:
             return torch.zeros_like(ql_nope)
         result = torch.cat(outputs, dim=0) if len(outputs) > 1 else outputs[0]
