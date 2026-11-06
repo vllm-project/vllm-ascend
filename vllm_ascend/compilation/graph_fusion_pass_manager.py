@@ -71,3 +71,21 @@ class GraphFusionPassManager:
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))
+
+        allow_quant_comm = (
+            self.ascend_compilation_config.fuse_matmul_reduce_scatter
+            or self.ascend_compilation_config.fuse_all_gather_matmul
+        ) and profile.supports(HardwareCapability.GRAPH_QUANT_MATMUL_COMM_FUSION)
+        allow_all_reduce = self.ascend_compilation_config.fuse_matmul_all_reduce and profile.supports(
+            HardwareCapability.GRAPH_MM_ALL_REDUCE_FUSION
+        )
+        if allow_quant_comm or allow_all_reduce:
+            from .passes.matmul_comm_fusion_pass import MatmulCommFusionPass
+
+            self.passes.append(
+                MatmulCommFusionPass(
+                    config,
+                    allow_quant_comm=allow_quant_comm,
+                    allow_all_reduce=allow_all_reduce,
+                )
+            )
