@@ -140,6 +140,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
 def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
+    worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
     worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
     worker.model_runner = SimpleNamespace(model=model)
     worker._sleep_saved_buffers = {}

@@ -632,6 +632,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
         worker.model_runner = MagicMock()
         worker.model_runner.model.named_buffers.return_value = []
+        worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
         worker.sleep_wakeup_manager = MagicMock()
 
         worker.sleep()
@@ -868,6 +869,7 @@ class TestNPUWorker(TestBase):
             worker.parallel_config.distributed_executor_backend = "ray"
             worker.vllm_config = MagicMock()
             worker.vllm_config.kv_transfer_config = None
+            worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.5
 
@@ -2334,6 +2336,7 @@ class TestNPUWorker(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
             worker.model_runner = MagicMock()
 
             worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
@@ -2350,6 +2353,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
+        worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
         worker._weight_update_active = False
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()

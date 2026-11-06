@@ -40,6 +40,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 180
   tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 430
   tests/e2e/pull_request/one_card/lora/test_qwenvl_lora.py: 930
+  tests/e2e/pull_request/one_card/model_runner_v2/preload/test_preload.py: 1410
   tests/e2e/pull_request/one_card/model_runner_v2/test_deepseek_v2_lite_w8a8_basic.py: 210
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_dflash.py: 590
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_draft_model.py: 200

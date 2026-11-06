@@ -1,0 +1,8 @@
+pr: 19805
+entries:
+  - category: feature
+    text: >-
+      Added Ascend support for vllm preload and the ipc_cache load format, allowing
+      engines to reuse preloaded NPU weights through zero-copy IPC or copy mode.
+      Initial support covers non-quantized BF16 and FP16 dense text models on
+      Model Runner V2 with weight_nz_mode=0.
