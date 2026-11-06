@@ -8,8 +8,6 @@ Consumer sessions must drain and disconnect before producer shutdown.
 """
 
 import contextlib
-import threading
-import time
 import uuid
 
 import ray
@@ -41,86 +39,22 @@ class _HixlProducerServer(_RDTProducerServer):
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
         workers_per_replica: int = 0,
     ) -> None:
-        import gc
-
         torch.npu.set_device(device_index)
+        super().__init__(
+            num_rdt_buffers=num_rdt_buffers,
+            buffer_presize_gb=buffer_presize_gb,
+            gather_lookahead=gather_lookahead,
+            served_names=served_names,
+            stall_timeout_s=stall_timeout_s,
+            workers_per_replica=workers_per_replica,
+        )
+        # Upstream only constructs a CUDA device descriptor; no allocation or
+        # NIXL initialization occurs there. Replace it before serving requests.
         self._device_index = device_index
-        # name -> rebuilt NPU-IPC tensor (or view); guarded by _cache_cond.
-        self._cache: dict[str, torch.Tensor] = {}
-        self._cache_cond = threading.Condition()
-        self._gather_error: BaseException | None = None
-
-        # Monotonic stamp of the last forward step of the
-        # publish -> serve -> free loop. The waits below poll it instead of
-        # blocking forever, so a dead consumer fails the sync with a real error.
-        self._stall_timeout = float(stall_timeout_s)
-        self._last_progress = time.monotonic()
-
-        # Names this producer publishes, so a misrouted pull fails loudly
-        # instead of blocking forever in the cache wait. None = serve anything.
-        self._served_names = set(served_names) if served_names is not None else None
-
-        # Every live consumer signals free_group(gi) at every
-        # owner, once per sync; the group frees when the count reaches
-        # begin_sync's live total — one uniform target, no routed per-producer
-        # ones. Signals may precede the publish, which completes them.
-        self._live_count = 1
-        self._free_counts: dict[int, int] = {}
-        # gi -> the names this producer published for it (what release drops).
-        self._group_names: dict[int, list[str]] = {}
-
-        # Published-but-unfreed groups, plus freed ones not
-        # yet handed back. The memory gate lives in the ENGINE's gather loop; this
-        # side only accounts — free_group moves a group from _inflight_groups to
-        # _freed_pending, which the engine collects via wait_freed / end_sync to
-        # drop its storage refs. _lookahead is engine-enforced, unused here.
-        self._lookahead = max(0, gather_lookahead)
-        self._inflight_groups: list[int] = []
-        self._freed_pending: list[int] = []
-
-        # Ring of packed serve buffers, one ring per SLOT-SHARING GROUP (one
-        # consumer per group unless several deployments share); the slot within
-        # it is the consumer's ``seq % nring``.
-        self._nring = max(1, num_rdt_buffers)
-        self._serve_rings: dict[int, list[torch.Tensor | None]] = {}
-        self._serve_lock = threading.Lock()
-        # registerMem on a shared HIXL agent is not concurrency-safe; serialize.
-        self._reg_lock = threading.Lock()
-        self._buffer_presize = int(buffer_presize_gb * (1 << 30))
-        self._serve_device = torch.device("npu", self._device_index)
-
+        self._serve_device = torch.device("npu", device_index)
         self._hixl = HixlSession(self._serve_device)
         self._hixl_consumers: set[str] = set()
         self._hixl_closing = False
-
-        # Slot-sharing state, all guarded by _cache_cond, so the rendezvous
-        # waits ride the stall watchdog like every other wait here.
-        # ``_share_width`` = consumers per deployment; 0 means every group is a
-        # singleton and this degenerates to the unshared serve path.
-        self._share_width = max(0, int(workers_per_replica))
-        self._live_ids: set[int] | None = None
-        self._sharing_active = False
-        self._sharers: dict[int, frozenset] = {}  # group -> live members
-        self._gens: dict[int, dict] = {}  # group -> {seq: _SharedPack}
-        # group -> {cid: plan digest}. Init-time state, not cleared per sync: it
-        # is what proves the sharers of a group pull the same chunks.
-        self._plan_digests: dict[int, dict[int, str]] = {}
-
-        # (sharing group, ring idx, packed layout) ->
-        # (buffer data_ptr, destination views). Keyed on the buffer pointer too, so
-        # a ring regrow invalidates rather than writing into a freed buffer. See
-        # the serve path for why the layout, not the spec names, is the key.
-        self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
-        # [RDT-EXPORT-RING] handle -> rebuilt base. The trainer reuses buffers
-        # across groups, so the same handle arrives on many publishes; without
-        # this we reopen it every group. Cleared per sync so no IPC mapping into
-        # trainer memory outlives the sync that made it.
-        self._base_cache: dict[tuple, torch.Tensor] = {}
-
-        # Freeze the static post-init object graph so gen-2 GC never stops the
-        # world mid-serve, which shows up as serve stragglers.
-        gc.collect()
-        gc.freeze()
 
     def hixl_add_consumer(self, endpoint: str) -> None:
         with self._cache_cond:
