@@ -265,6 +265,7 @@ class DeepseekV41MoE(nn.Module):
         input_ids: torch.Tensor | None = None,
         hidden_states_fp32: torch.Tensor | None = None,
         already_sequence_parallel: bool = False,
+        hc_post_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -275,10 +276,13 @@ class DeepseekV41MoE(nn.Module):
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel and not already_sequence_parallel:
+            if hc_post_inputs is not None:
+                raise ValueError("fused FFN HcPost requires an already-sharded residual under sequence parallelism")
             hidden_states = sp_shard(hidden_states)
             if hidden_states_fp32 is not None:
                 hidden_states_fp32 = sp_shard(hidden_states_fp32)
 
+        expert_kwargs = {} if hc_post_inputs is None else {"hc_post_inputs": hc_post_inputs}
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoEFactory class
             router_input = hidden_states if hidden_states_fp32 is None else hidden_states_fp32
@@ -286,6 +290,7 @@ class DeepseekV41MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_input,
                 input_ids=input_ids,
+                **expert_kwargs,
             )
         else:
             # router_logits: (num_tokens, n_experts)
@@ -295,7 +300,12 @@ class DeepseekV41MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                **expert_kwargs,
             )
+
+        if hc_post_inputs is not None:
+            # The runner has already finalized the MoE output and HcPost.
+            return fused_moe_out
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
         if fused_moe_out_is_tuple:
@@ -819,6 +829,12 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=self.norm_eps)
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hc_mult = hc_mult = config.hc_mult
+        self.fuse_ffn_hc_post = (
+            get_ascend_config().enable_hc_post_fusion
+            and hc_mult == 4
+            and get_current_hardware_profile().supports(HardwareCapability.HC_POST_ADD_SEPARATE_ROUNDING)
+            and getattr(self.mlp.experts, "supports_hc_post_fusion", False)
+        )
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
         mix_hc = (2 + hc_mult) * hc_mult
@@ -910,13 +926,15 @@ class DeepseekV41DecoderLayer(nn.Module):
             attn_pre,
         )
         x, x_fp32 = self.rms_norm_cast(x)
+        hc_post_inputs = (residual, ffn_post, ffn_comb) if getattr(self, "fuse_ffn_hc_post", False) else None
         x = self.mlp(
             x,
             input_ids=input_ids,
             hidden_states_fp32=x_fp32,
             already_sequence_parallel=use_sequence_parallel,
+            **({"hc_post_inputs": hc_post_inputs} if hc_post_inputs is not None else {}),
         )
-        hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)
+        hidden_states = x if hc_post_inputs is not None else self.hc_post(x, residual, ffn_post, ffn_comb)
         return hidden_states, ffn_pre
 
 

@@ -425,6 +425,7 @@ class AscendConfig:
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
+            "enable_hc_post_fusion": false,
             "enable_kv_nz": false,
             "enable_mc2_hierarchy_comm": false,
             "enable_dsa_cp": false,
@@ -568,11 +569,15 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
+    # A3 DeepSeek-V4.1 shared/routed Add + FFN HcPost. Runtime collectives
+    # and unsupported tensor layouts retain the original unfused path.
+    enable_hc_post_fusion: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
