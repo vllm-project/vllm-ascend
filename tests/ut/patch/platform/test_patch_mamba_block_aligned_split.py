@@ -299,3 +299,27 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize("prefix_source", ["computed", "local", "external"])
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_consumer_chunk_after_prefix_keeps_alignment(prefix_source, use_eagle):
+    scheduler = _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=True)
+    scheduler.use_eagle = use_eagle
+    request = _request(
+        num_computed_tokens=128 if prefix_source == "computed" else 0, num_prompt_tokens=500, num_tokens=500
+    )
+    result = _mamba_block_aligned_split(
+        scheduler,
+        request,
+        num_new_tokens=200,
+        num_new_local_computed_tokens=128 if prefix_source == "local" else 0,
+        num_external_computed_tokens=128 if prefix_source == "external" else 0,
+    )
+    assert result == 128
+
+
+def test_consumer_without_eagle_keeps_final_token_alignment():
+    scheduler = _scheduler(is_kv_consumer=True)
+    scheduler.use_eagle = False
+    assert _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8) == 5
