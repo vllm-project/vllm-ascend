@@ -87,6 +87,17 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
+def reshape_wo_a_to_3d(weight: torch.Tensor, o_lora_rank: int) -> torch.Tensor:
+    """Group checkpoint rows as [groups, K, rank, ...] for wo_a BMM.
+
+    MX scales can retain their trailing pair dimension. Derive the group
+    count from the loaded shard so TP and OTP use the same transformation.
+    """
+    if o_lora_rank <= 0 or weight.shape[0] % o_lora_rank:
+        raise ValueError("wo_a output shard must contain complete o_lora_rank groups with a positive rank")
+    return weight.reshape(-1, o_lora_rank, *weight.shape[1:]).transpose(1, 2).contiguous()
+
+
 def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
     """Whether a GQA/MQA model enables both PCP and DCP."""
     return (
