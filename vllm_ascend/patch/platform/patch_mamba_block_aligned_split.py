@@ -37,6 +37,10 @@ import functools
 import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (
+    get_mamba_prefill_checkpoint_position,
+    is_mamba_prefill_checkpoint_valid,
+)
 from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -53,6 +57,40 @@ _EXPECTED_PARAMETERS = (
     "num_new_local_computed_tokens",
     "num_external_computed_tokens",
 )
+
+
+def _split_reusable_tail(
+    self, request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens, result
+):
+    """Fill the exact-PMU fallback only when upstream exports no checkpoint."""
+    if not self.mamba_partial_cache_hit:
+        return result
+    unit = self.hash_block_size
+    if request.num_prompt_tokens % unit:
+        return result
+    boundary = get_mamba_prefill_checkpoint_position(request.num_prompt_tokens, unit, False)
+    start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    # Do not alter decode/verifier windows or replay of generated tokens.
+    if request.num_tokens != request.num_prompt_tokens:
+        return result
+    # A backend-exported in-query checkpoint needs no extra forward pass.
+    if (
+        self.mamba_has_prefill_checkpoint_blocks
+        and start + num_new_tokens >= request.num_prompt_tokens
+        and is_mamba_prefill_checkpoint_valid(
+            query_start=start,
+            query_end=start + num_new_tokens,
+            checkpoint_position=boundary,
+            hash_block_size=unit,
+            mamba_block_size=self.cache_config.block_size,
+            checkpoint_alignment=self.mamba_prefill_checkpoint_alignment,
+        )
+    ):
+        return result
+    if start < boundary < start + result:
+        return boundary - start
+    return result
+
 
 _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
 
@@ -149,7 +187,7 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
-        return _original_mamba_block_aligned_split(
+        result = _original_mamba_block_aligned_split(
             self,
             request,
             num_new_tokens,
@@ -159,6 +197,14 @@ def _mamba_block_aligned_split(
     finally:
         for name, value in original_drop_values.items():
             setattr(self, name, value)
+    return _split_reusable_tail(
+        self,
+        request,
+        num_new_tokens,
+        num_new_local_computed_tokens,
+        num_external_computed_tokens,
+        result,
+    )
 
 
 current_parameters = tuple(inspect.signature(_original_mamba_block_aligned_split).parameters)
