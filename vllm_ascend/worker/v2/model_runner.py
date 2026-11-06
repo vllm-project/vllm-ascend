@@ -140,6 +140,9 @@ from vllm_ascend.worker.v2.utils import (
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
+    # Active only around the parent startup profile, after MC2 reservation.
+    _pcp_profile_num_tokens: int | None = None
+
     # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
     # backing allocation. Ascend MRV2 preserves that allocation and exposes
     # backend-specific views; MLA may use a page-strided fused/component view.
@@ -755,7 +758,12 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            super().profile_run(**profile_kwargs)
+            previous_budget = self._pcp_profile_num_tokens
+            self._pcp_profile_num_tokens = self._get_pcp_profile_num_tokens()
+            try:
+                super().profile_run(**profile_kwargs)
+            finally:
+                self._pcp_profile_num_tokens = previous_budget
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -1233,10 +1241,8 @@ class NPUModelRunner(GPUModelRunner):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
-        # Only shrink the main startup dummy, not MC2 reservation, capture or
-        # CPP profiling. Keep max_num_tokens global for upstream scheduling.
-        if is_profile and skip_attn and not uniform_decode and not profile_cpp and num_tokens == self.max_num_tokens:
-            num_tokens = self._get_pcp_profile_num_tokens()
+        if self._pcp_profile_num_tokens is not None:
+            num_tokens = self._pcp_profile_num_tokens
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
