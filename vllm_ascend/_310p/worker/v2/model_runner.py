@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
@@ -821,14 +822,19 @@ class NPUModelRunner310V2(NPUModelRunner):
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 
         # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
-        cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+        # vLLM #63373 removes `use_v2_model_runner` and always resolves MRV2.
+        resolve_cudagraph = self.compilation_config.resolve_cudagraph_mode_and_sizes
+        resolve_kwargs = {
+            "kv_cache_config": kv_cache_config,
+            "max_num_reqs": self.max_num_reqs,
+        }
+        if "use_v2_model_runner" in inspect.signature(resolve_cudagraph).parameters:
+            resolve_kwargs["use_v2_model_runner"] = True
+        cudagraph_mode = resolve_cudagraph(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            use_v2_model_runner=True,
-            kv_cache_config=kv_cache_config,
-            max_num_reqs=self.max_num_reqs,
-            **{},
+            **resolve_kwargs,
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
