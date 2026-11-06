@@ -586,8 +586,8 @@ class AscendPCPManager(PCPManager):
         return hidden_states, aux_hidden_states, global_batch
 
     def get_draft_input_buffers(
-        self, input_buffers: InputBuffers, num_tokens: int | None = None
-    ) -> InputBatch | InputBuffers | tuple[InputBatch | InputBuffers, torch.Tensor]:
+        self, input_buffers: InputBuffers, num_tokens: int
+    ) -> tuple[InputBatch | InputBuffers, torch.Tensor]:
         """Stage rank-local draft prefill inputs at the draft's own addresses.
 
         Draft graphs are captured against the speculator's input buffers,
@@ -598,9 +598,7 @@ class AscendPCPManager(PCPManager):
         """
         local_batch = self.draft_prefill_batch
         if local_batch is None:
-            if vllm_version_is("0.32.0"):
-                return input_buffers
-            return super().get_draft_input_buffers(input_buffers, num_tokens)  # type: ignore[call-arg]
+            return super().get_draft_input_buffers(input_buffers, num_tokens)
         num_staged_tokens = local_batch.num_tokens_after_padding
         self._draft_input_ids_stash[:num_staged_tokens].copy_(input_buffers.input_ids[:num_staged_tokens])
         self._draft_positions_stash[:num_staged_tokens].copy_(input_buffers.positions[:num_staged_tokens])
@@ -609,8 +607,6 @@ class AscendPCPManager(PCPManager):
         input_buffers.input_ids[:num_staged_tokens].copy_(local_batch.input_ids[:num_staged_tokens])
         input_buffers.positions[:num_staged_tokens].copy_(local_batch.positions[:num_staged_tokens])
         input_buffers.is_padding[:num_staged_tokens].copy_(local_batch.is_padding[:num_staged_tokens])
-        if vllm_version_is("0.32.0"):
-            return input_buffers
         return input_buffers, local_batch.is_padding
 
     def restore_draft_prefill(
