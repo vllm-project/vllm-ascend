@@ -1386,7 +1386,7 @@ def _cp_common():
 
 
 def test_dspark_v41_indices_keep_capture_addresses(runtime):
-    runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    runtime.speculative_config = SimpleNamespace(method="dspark", num_speculative_tokens=3)
     spec = AscendSlidingWindowMLASpec(
         block_size=128,
         num_kv_heads=1,
@@ -1412,7 +1412,7 @@ def test_dspark_v41_indices_keep_capture_addresses(runtime):
     assert second.ori_topk_length.data_ptr() == lengths_ptr
     assert not torch.equal(old_indices, second.ori_sparse_indices)
     assert second.ori_sparse_indices[0, 0, 0] == 129
-    assert first.ori_topk_length.tolist() == [131, 131, 131, 5]
+    assert first.ori_topk_length.tolist() == [[131], [131], [131], [5]]
 
 
 # --- SWA bounded replay: the read side's floor (vLLM #56227) ------------------

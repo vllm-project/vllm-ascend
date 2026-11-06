@@ -224,7 +224,7 @@ def builders(monkeypatch):
                 decode_context_parallel_size=dcp,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
-            speculative_config=None if decode_sharded else SimpleNamespace(num_speculative_tokens=5),
+            speculative_config=None if decode_sharded else SimpleNamespace(method="dspark", num_speculative_tokens=5),
             compilation_config=SimpleNamespace(
                 cudagraph_capture_sizes=graph_sizes,
                 cudagraph_mode=CUDAGraphMode.NONE if decode_sharded else CUDAGraphMode.FULL_DECODE_ONLY,

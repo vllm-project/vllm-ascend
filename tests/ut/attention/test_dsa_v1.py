@@ -39,6 +39,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAReqMetadata,
     OProjBufferPool,
     build_compressor_metadata_out,
+    build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -2931,3 +2932,107 @@ def test_o_proj_without_sharding_skips_buffers_and_collectives(otp_size):
     get_capacity.assert_not_called()
     all_to_all.assert_not_called()
     reduce_scatter.assert_not_called()
+
+
+@pytest.mark.parametrize("logical_indices", [False, True])
+def test_dspark_indices_preserve_physical_fallback(logical_indices):
+    indices_output = torch.empty((3, 1, 8), dtype=torch.int32)
+    lengths_output = torch.empty((3, 1) if logical_indices else (3,), dtype=torch.int32)
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([6], dtype=torch.int32),
+        num_decode_tokens=3,
+        index_width=8,
+        indices_output=indices_output,
+        use_logical_indices=logical_indices,
+        lengths_output=lengths_output,
+    )
+    assert indices is indices_output
+    assert lengths is lengths_output
+    expected = [0, 1, 2, 3, 4, 5] if logical_indices else [20, 21, 22, 23, 8, 9]
+    assert indices[:, 0].tolist() == [expected + [-1, -1]] * 3
+    if logical_indices:
+        # The top-k interface supplies a persistent [T, 1] length view.
+        assert lengths is lengths_output
+        assert lengths.shape == (3, 1)
+    else:
+        # Physical-slot callers retain the plain [T] lengths.
+        assert lengths.shape == (3,)
+    assert lengths.flatten().tolist() == [6] * 3
+
+
+@pytest.mark.parametrize("logical_indices", [False, True])
+def test_dspark_indices_preserve_buffer_destination(logical_indices):
+    indices_output = torch.empty((3, 1, 8), dtype=torch.int32)
+    lengths_output = torch.empty((3, 1) if logical_indices else (3,), dtype=torch.int32)
+    buffer = torch.full((5, 1, 8), -999, dtype=torch.int32)
+    seq_lens = torch.tensor([6], dtype=torch.int32)
+    for seq_len in (6, 7):
+        seq_lens.fill_(seq_len)
+        indices, lengths = build_dspark_swa_indices(
+            block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+            num_speculative_tokens=3,
+            window_size=4,
+            block_size=4,
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=seq_lens,
+            num_decode_tokens=3,
+            index_width=8,
+            buffer=buffer,
+            indices_output=indices_output,
+            lengths_output=lengths_output,
+            use_logical_indices=logical_indices,
+        )
+        positions = list(range(seq_len))
+        expected = positions if logical_indices else [([5, 2][p // 4] * 4 + p % 4) for p in positions]
+        expected += [-1] * (8 - seq_len)
+        assert indices[:, 0].tolist() == [expected] * 3
+        assert indices.data_ptr() == buffer.data_ptr()
+        assert indices.shape == (3, 1, 8)
+        assert lengths is lengths_output
+        assert lengths.flatten().tolist() == [seq_len] * 3
+        torch.testing.assert_close(indices_output, indices, rtol=0, atol=0)
+        assert torch.all(buffer[3:] == -999)
+
+
+@pytest.mark.parametrize("logical_indices", [False, True])
+def test_dspark_output_reuse_overwrites_sliding_window_and_padding(logical_indices):
+    indices_owner = torch.full((9, 1, 8), -999, dtype=torch.int32)
+    lengths_owner = torch.full((9, 1) if logical_indices else (9,), -999, dtype=torch.int32)
+    indices_output = indices_owner[1:6]
+    lengths_output = lengths_owner[1:6]
+    block_table = torch.tensor([[5, 2, 9], [8, 3, 1], [0, 0, 0]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2, 5, 5], dtype=torch.int32)
+    for seq_values in ([10, 7, 0], [7, 5, 0]):
+        indices, lengths = build_dspark_swa_indices(
+            block_table,
+            3,
+            4,
+            4,
+            query_start_loc,
+            torch.tensor(seq_values, dtype=torch.int32),
+            num_decode_tokens=5,
+            index_width=8,
+            indices_output=indices_output,
+            lengths_output=lengths_output,
+            use_logical_indices=logical_indices,
+        )
+        expected_rows, expected_lengths = [], []
+        for req, query_len in enumerate((2, 3, 0)):
+            start = max(seq_values[req] - query_len - 4, 0)
+            positions = list(range(start, seq_values[req]))
+            slots = positions if logical_indices else [int(block_table[req, p // 4]) * 4 + p % 4 for p in positions]
+            expected_rows.extend([slots + [-1] * (8 - len(slots))] * query_len)
+            expected_lengths.extend([len(slots)] * query_len)
+        assert indices is indices_output
+        assert lengths is lengths_output
+        assert indices[:, 0].tolist() == expected_rows
+        assert lengths.flatten().tolist() == expected_lengths
+        assert torch.all(indices_owner[:1] == -999)
+        assert torch.all(indices_owner[6:] == -999)
+        assert torch.all(lengths_owner[:1] == -999)
+        assert torch.all(lengths_owner[6:] == -999)

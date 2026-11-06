@@ -59,6 +59,8 @@ def make_builder(cls, ratio=0):
     builder.cu_seqlens_cmp_kv = torch.zeros(4, dtype=torch.int32)
     builder._zero_i32 = torch.zeros(1, dtype=torch.int32)
     builder.dspark_swa_indices_buffer = torch.empty((8, 1, 8), dtype=torch.int32)
+    builder.dspark_swa_topk_lengths_buffer = torch.zeros((8, 1), dtype=torch.int32)
+    builder._dspark_index_width = builder.dspark_swa_indices_buffer.shape[-1]
     builder.storage_block_size = 4
     builder.cache_group_key = "cache"
     builder.hadamard = None
@@ -127,6 +129,7 @@ class TestDSAMetadataBuilders(TestCase):
             patch.object(
                 dsa_v1,
                 "build_dspark_swa_indices",
+                autospec=True,
                 return_value=(torch.ones((2, 1, 8), dtype=torch.int32), None),
             )
         )
