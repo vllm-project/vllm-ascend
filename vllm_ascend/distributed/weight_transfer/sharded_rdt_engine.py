@@ -190,103 +190,16 @@ class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
         return dict(zip(pending.keys, pending.targets))
 
     def _ensure_proc_worker(self) -> None:
-        """Lazily create the per-slot events, the background NPU stream, the work
-        queue, and the single processing thread. Idempotent."""
-        if self._proc_thread is not None:
-            return
-        import queue
-        import threading
+        from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-        self._slot_read_done = [torch.npu.Event() for _ in range(self._ring_depth)]
-        # Generation handshake for the events above: the RPC thread counts items
-        # queued per slot, this thread counts records, and a pull may synchronize()
-        # only once done[slot] has caught up with queued[slot]. Without it the
-        # synchronize can bind to a stale record and pass, letting the next RDMA
-        # overwrite a slot under a pending scatter. See the doc's "The slot
-        # generation handshake".
-        self._slot_queued = [0] * self._ring_depth
-        self._slot_done = [0] * self._ring_depth
-        self._slot_cv = threading.Condition()
-        self._proc_stream = torch.npu.Stream(device=self.device)
-        self._proc_queue = queue.Queue()
-        self._proc_error = None
-        t = threading.Thread(target=self._proc_worker_loop, name="rdt-postprocess", daemon=True)
-        self._proc_thread = t
-        t.start()
-        self._quant_stream = torch.npu.Stream(device=self.device)
-        self._quant_queue = queue.Queue()
-        qt = threading.Thread(target=self._quant_worker_loop, name="rdt-quant", daemon=True)
-        self._quant_thread = qt
-        qt.start()
+        with torch_cuda_wrapper():
+            super()._ensure_proc_worker()
 
     def _process_item(self, item: "_ProcItem") -> None:
-        """Scatter-thread half: materialize this chunk's first-seen modules,
-        scatter its slices on the process stream, publish the slot, then hand the
-        modules it COMPLETES to the quant thread.
+        from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-        Mirrors ``_layerwise_process`` minus the loader replay. Once every scatter
-        reading ``item.slot`` is enqueued, records the slot's read-done event so
-        the RPC thread can block on it before overwriting the slot.
-        """
-        from vllm.model_executor.model_loader.reload.layerwise import (
-            LAYERWISE_INFO,
-        )
-        from vllm.model_executor.model_loader.reload.meta import materialize_layer
-
-        results = item.results
-        chunk = item.chunk
-        with (
-            torch.accelerator.device_index(self.device.index),
-            torch.npu.stream(self._proc_stream),
-            torch.device(self.device),
-        ):
-            # PASS 1 — slot readers: materialize the modules whose FIRST scatter
-            # is in this chunk (empty HF params, once per module by construction)
-            # then scatter this chunk's copies. The scatter copies are the ONLY
-            # reads of the receive buffer; quant and kernel-copy operate on the
-            # scattered params. Releasing the slot right after the scatters lets
-            # the NEXT chunk's RDMA overwrite the buffer while quant still runs.
-            try:
-                for layer in chunk.materialize:
-                    info = LAYERWISE_INFO.get(layer)
-                    if info is None or not info.can_load():
-                        raise RuntimeError(
-                            f"Baked replay: layer {type(layer).__name__} "
-                            "was not set up for reload this sync "
-                            "(start_weight_update must run before "
-                            "update_weights)."
-                        )
-                    materialize_layer(layer, info)
-                for sc in chunk.scatters:
-                    param = getattr(sc.layer, sc.param_name)
-                    # Through .data, exactly like default_weight_loader: params
-                    # that keep requires_grad=True (plain nn.Parameters like
-                    # GLM's router bias) reject an in-place copy through an
-                    # autograd view of the leaf.
-                    dst = param.data.as_strided(sc.shape, sc.stride, sc.offset)
-                    with torch._C.DisableTorchFunctionSubclass():
-                        dst.copy_(results[sc.src])
-                # All reads of this slot's buffer are now enqueued on the process
-                # stream; record + publish so the RPC thread can reuse the slot.
-                self._slot_read_done[item.slot].record(self._proc_stream)
-            finally:
-                # Publish even on error so the RPC thread's generation wait
-                # unblocks (the failure itself surfaces via _raise_proc_error).
-                self._mark_slot_done(item.slot)
-
-            # PASS 2 — param readers only: quant / kernel-copy / reset for the
-            # modules whose LAST scatter is in this chunk. Handed to the
-            # DEDICATED quant thread (own NPU stream, event-chained after this
-            # chunk's scatters) so it never delays this thread's next pass-1.
-            # Running it in order here stalls the RPC thread's slot handshake by
-            # ~0.5-0.75s/iter, since every group's quant delays the next publish.
-            if chunk.quant:
-                ready = torch.npu.Event()
-                ready.record(self._proc_stream)
-                if self._quant_queue is None:
-                    self._run_quant(chunk.quant, ready)
-                else:
-                    self._quant_queue.put((chunk.quant, ready))
+        with torch_cuda_wrapper():
+            super()._process_item(item)
 
     def _run_quant(self, layers: "list[Any]", ready: "torch.Event") -> None:
         from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
