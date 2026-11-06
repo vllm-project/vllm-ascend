@@ -176,4 +176,4 @@ class AscendHiSparseBackend(HiSparseBackend):
         super().gather_resident_rows(source, destination, row_ids)
 
     def swap_blocks_batch(self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor) -> None:
-        torch.ops._C_ascend.swap_blocks_batch(src, dst, sizes, 1)
+        torch.ops._C_ascend.swap_blocks_batch(src, dst, sizes, 1, prefer_small_async=True)

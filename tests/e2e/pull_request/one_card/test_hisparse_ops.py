@@ -29,39 +29,77 @@ def _require_mapped_host_device():
     AscendHiSparseBackend().check_available()
 
 
-def test_private_host_pool_retains_pinned_storage_for_dma_writeback():
+@pytest.mark.parametrize("descriptor_count", [0, 1, 2, 4, 16, 17, 312])
+@pytest.mark.parametrize("graph_producer", [False, True])
+def test_private_host_pool_retains_pinned_storage_for_dma_writeback(descriptor_count, graph_producer):
     from vllm.v1.hisparse import runtime
 
     backend = AscendHiSparseBackend()
     backend.check_available()
-    payload, registered = runtime.allocate_pinned_host_pool(32768)
+    capacity = max(32768, (descriptor_count + 1) * 2048)
+    payload, registered = runtime.allocate_pinned_host_pool(capacity)
+    graph = None
     try:
-        assert payload.numel() == 32768
+        assert payload.numel() == capacity
         assert payload.is_pinned() and registered.is_pinned()
         assert registered.data_ptr() % 4096 == 0
         mapping = registered._hisparse_registration
         assert mapping.address_of(payload[656:1312]) == mapping.device_ptr + 656
         assert payload.untyped_storage().data_ptr() == registered.untyped_storage().data_ptr()
-        source = torch.arange(32768, dtype=torch.int32, device="npu").to(torch.uint8)
+        cpu_source = torch.arange(capacity, dtype=torch.int32).to(torch.uint8)
+        source = cpu_source.to("npu")
+        staging = source.clone()
+        if graph_producer:
+            source.copy_(staging)
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                source.copy_(staging)
         stream = torch.npu.Stream()
+        source_offsets = [i * 2048 for i in range(descriptor_count)]
+        destination_offsets = [(descriptor_count - i - 1) * 2048 + 656 for i in range(descriptor_count)]
+        copy_sizes = [656 * (1 + i % 2) for i in range(descriptor_count)]
+        src = torch.tensor([source.data_ptr() + i for i in source_offsets], dtype=torch.int64, pin_memory=True)
+        dst = torch.tensor([payload.data_ptr() + i for i in destination_offsets], dtype=torch.int64, pin_memory=True)
+        sizes = torch.tensor(copy_sizes, dtype=torch.int64, pin_memory=True)
+        originals = tuple(t.clone() for t in (src, dst, sizes))
         for change in (1, 3, 7):
-            source.bitwise_xor_(change)
-            payload.fill_(-1)
-            src = torch.tensor([source.data_ptr(), source.data_ptr() + 8192], dtype=torch.int64)
-            dst = torch.tensor([payload.data_ptr() + 656, payload.data_ptr() + 16384], dtype=torch.int64)
-            sizes = torch.tensor([656, 1312], dtype=torch.int64)
-            stream.wait_stream(torch.npu.current_stream())
-            with stream:
-                backend.swap_blocks_batch(src, dst, sizes)
-                complete = torch.npu.Event()
-                complete.record()
-            complete.synchronize()
-            expected = torch.full((32768,), 255, dtype=torch.uint8)
-            expected[656:1312] = source[:656].cpu()
-            expected[16384:17696] = source[8192:9504].cpu()
-            torch.testing.assert_close(payload.view(torch.uint8), expected, rtol=0, atol=0)
+            cpu_source.bitwise_xor_(change)
+            staging.copy_(cpu_source, non_blocking=True)
+            if graph is None:
+                source.copy_(staging)
+            else:
+                graph.replay()
+            expected = torch.full((capacity,), 255, dtype=torch.uint8)
+            for source_offset, destination_offset, size in zip(source_offsets, destination_offsets, copy_sizes):
+                expected[destination_offset : destination_offset + size] = cpu_source[
+                    source_offset : source_offset + size
+                ]
+            for optimized in (False, True):
+                payload.fill_(-1)
+                stream.wait_stream(torch.npu.current_stream())
+                with stream:
+                    if optimized:
+                        backend.swap_blocks_batch(src, dst, sizes)
+                        if 0 < descriptor_count <= 16:
+                            # The queued command owns scalar descriptors even
+                            # after the caller reuses its CPU metadata bank.
+                            for descriptor in (src, dst, sizes):
+                                descriptor.zero_()
+                    else:
+                        # Existing callers keep the four-argument schema and
+                        # original API selection unless they opt in explicitly.
+                        torch.ops._C_ascend.swap_blocks_batch(src, dst, sizes, 1)
+                    complete = torch.npu.Event()
+                    complete.record()
+                complete.synchronize()
+                torch.testing.assert_close(payload.view(torch.uint8), expected, rtol=0, atol=0)
+                for descriptor, original in zip((src, dst, sizes), originals):
+                    descriptor.copy_(original)
     finally:
         torch.npu.synchronize()
+        if graph is not None:
+            graph.reset()
         backend.unpin_tensor(registered)
 
 
