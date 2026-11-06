@@ -23,6 +23,7 @@ import torch
 from torch._dynamo.backends.common import aot_autograd
 from vllm.config.vllm import set_current_vllm_config
 from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
 
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -583,6 +584,7 @@ class TestVocabParallelPlan(unittest.TestCase):
 class TestAscendLogitsProcessor(unittest.TestCase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.additional_config = {}
         self.mock_vllm_config.compilation_config.custom_ops = ["all"]
         self.mock_vllm_config.model_config = None
 
@@ -644,6 +646,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         lmhead = AscendParallelLMHead(
             num_embeddings=self.num_embeddings, embedding_dim=self.embedding_dim, prefix="lm_head"
         )
+        self.assertIsInstance(lmhead.quant_method, UnquantizedEmbeddingMethod)
         lmhead.quant_method = self.mock_quant_method
         lmhead.quant_method.apply = self.mock_quant_method.apply
         hidden_state = torch.randn(1, self.org_num_embeddings)
