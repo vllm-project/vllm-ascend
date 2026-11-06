@@ -101,10 +101,6 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/sparse_flash_mla.cmake)
-get_sparse_flash_mla_metadata_size(SMLA_METADATA_SIZE "${SOC_VERSION}" "${ASCEND_HOME_PATH}")
-message(STATUS "SparseFlashMLA metadata size: ${SMLA_METADATA_SIZE}")
-target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_SMLA_METADATA_SIZE=${SMLA_METADATA_SIZE})
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
