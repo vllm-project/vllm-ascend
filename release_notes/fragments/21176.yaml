@@ -1,0 +1,7 @@
+pr: 21176
+entries:
+  - category: bugfix
+    text: >-
+      Batch invariant mode now keeps the fused-infer-attention workspace query on the
+      batch-invariant kernel. Batch invariant combined with ACL graph capture no longer
+      fails with an EZ1010 workspace-size error on Ascend 950.
