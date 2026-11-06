@@ -120,8 +120,6 @@ def test_sync_layer_waits_establish_group_readiness_only_after_every_layer(runti
         for index, layer in enumerate(runtime.layer_groups):
             assert connector.wait_for_layer_load(layer) == "ready"
             assert runtime.state.blocks[0, 1].valid_end == (0 if index == 0 else 64)
-            runtime.write(layer, item.slot_mapping)
-            runtime.read(layer, item.block_tables, [65])
 
     forward = runtime.wrap_forward(runner, model, lambda: context)
 
@@ -131,30 +129,27 @@ def test_sync_layer_waits_establish_group_readiness_only_after_every_layer(runti
         poll(connector)
 
     runtime.wrap_execute(execute)(packet(meta, {"r": (64, 1)}))
-    assert not runtime.events and not runtime.state.loads
+    assert not runtime.events and (not runtime.state.loads)
     assert runtime.state.blocks[0, 1].valid_end == 65
 
 
-@pytest.mark.parametrize("wait_late", [False, True])
-def test_missing_or_late_layer_wait_cannot_be_hidden_by_another_layer(runtime, connector, wait_late):
+@pytest.mark.parametrize("wait_both", [False, True])
+def test_declared_group_load_requires_all_layer_wait_results(runtime, connector, wait_both):
     bind(runtime)
     meta = load_plan(runtime.state, end=64, is_async=False)
     runner = NS(input_batch=NS(req_ids=["r"]))
-    context = NS(cudagraph_runtime_mode="NONE")
+    item = metadata(torch.tensor([192]), torch.tensor([[1]]), [65])
+    context = NS(cudagraph_runtime_mode="NONE", attn_metadata={"layer0": item})
 
     def model(count):
-        runtime.write("layer0", torch.tensor([192]))
-        runtime.read("layer0", torch.tensor([[1]]), [65])
-        if wait_late:
+        if wait_both:
             connector.wait_for_layer_load("layer0")
         connector.wait_for_layer_load("layer1")
-        runtime.write("layer1", torch.tensor([192]))
-        runtime.read("layer1", torch.tensor([[1]]), [65])
 
     forward = runtime.wrap_forward(runner, model, lambda: context)
     runtime.wrap_execute(lambda output: (connector.start_load_kv(None), forward(1)))(packet(meta, {"r": (64, 1)}))
-    assert "load_layer_not_ready" in reasons(runtime)
-    assert runtime.state.blocks[0, 1].valid_end == (64 if wait_late else 0)
+    assert ("load_layer_not_ready" in reasons(runtime)) == (not wait_both)
+    assert runtime.state.blocks[0, 1].valid_end == (65 if wait_both else 0)
     assert not any(e["event"] == "guard.violation" for e in runtime.events)
 
 
@@ -221,7 +216,7 @@ def test_partial_block_failure_invalidates_the_whole_destination_block(runtime, 
     assert runtime.state.blocks[0, 1].valid_end == 0
 
 
-def test_start_exception_preserves_original_error_and_local_kv(runtime):
+def test_start_exception_preserves_original_error_and_local_kv(runtime, monkeypatch):
     runtime.state.bind({"pool_id": "pool", "requests": {"r": [[(1, 1), (2, 1)]]}})
     complete_load(runtime.state, end=128)
     source = Connector()
@@ -230,7 +225,7 @@ def test_start_exception_preserves_original_error_and_local_kv(runtime):
     def fail(*args):
         raise error
 
-    source.start_load_kv = fail
+    monkeypatch.setattr(source, "start_load_kv", fail)
     runtime._connector = runtime.subject.ConnectorGuard(runtime, source)
     meta = load_plan(runtime.state, end=192, start=128)
     with pytest.raises(RuntimeError) as raised:
@@ -316,30 +311,14 @@ def test_only_explicit_replay_allows_overwriting_a_loaded_tail(runtime, replay, 
     runner = NS(input_batch=NS(req_ids=["r"]))
 
     def model(count):
-        for layer in runtime.layer_groups:
-            runtime.write(layer, item.slot_mapping)
-            runtime.read(layer, item.block_tables, [128])
+        pass
 
     forward = runtime.wrap_forward(runner, model, lambda: context)
     runtime.wrap_execute(lambda output: forward(1))(packet(scheduled={"r": (127, 1)}, replay=meta if replay else None))
     if replay:
-        assert runtime.state.blocks[0, 1].valid_end == 128 and not runtime.events
+        assert runtime.state.blocks[0, 1].valid_end == 128 and (not runtime.events)
     else:
         assert "overwrite_valid_prefix" in reasons(runtime)
-
-
-def test_replay_does_not_legalize_a_read_before_the_recomputed_write(runtime):
-    bind(runtime, computed=128)
-    replay = load_plan(runtime.state, end=128, start=127)
-    runner = NS(input_batch=NS(req_ids=["r"]))
-
-    def model(count):
-        runtime.read("layer0", torch.tensor([[1]]), [128])
-        runtime.write("layer0", torch.tensor([255]))
-
-    forward = runtime.wrap_forward(runner, model, lambda: NS(cudagraph_runtime_mode="NONE"))
-    runtime.wrap_execute(lambda output: forward(1))(packet(scheduled={"r": (127, 1)}, replay=replay))
-    assert "read_unwritten_range" in reasons(runtime)
 
 
 def test_post_forward_async_completion_does_not_legalize_an_earlier_read(runtime, connector):
@@ -350,11 +329,12 @@ def test_post_forward_async_completion_does_not_legalize_an_earlier_read(runtime
     runner = NS(input_batch=NS(req_ids=["r"]))
 
     def model(count):
-        runtime.read("layer0", torch.tensor([[1]]), [64])
-        poll(connector)  # V2 polls inside its forward scope.
+        poll(connector)
         assert runtime.state.blocks[0, 1].valid_end == 0
 
-    forward = runtime.wrap_forward(runner, model, lambda: NS(cudagraph_runtime_mode="NONE"))
+    item = metadata(torch.tensor([-1]), torch.tensor([[1]]), [64])
+    context = NS(cudagraph_runtime_mode="NONE", attn_metadata={"layer0": item})
+    forward = runtime.wrap_forward(runner, model, lambda: context)
     runtime.wrap_execute(lambda output: forward(1))(packet())
     assert "read_unwritten_range" in reasons(runtime)
     assert runtime.state.blocks[0, 1].valid_end == 64
@@ -435,12 +415,10 @@ def test_v2_receive_only_completion_then_authorized_last_token_replay(adapter, c
     replay = {**meta, "token_start": 127}
 
     def execute(output):
-        item = prepare(adapter, ["r"], [255], [[1]], [128], mode)["layer0"]
-        runtime.write("layer0", item.slot_mapping)
-        runtime.read("layer0", item.block_tables, [128])
+        prepare(adapter, ["r"], [255], [[1]], [128], mode)
 
     adapter.wrap_execute(execute)(packet(scheduled={"r": (127, 1)}, replay=replay))
-    assert runtime.state.blocks[0, 1].valid_end == 128 and not runtime.events
+    assert runtime.state.blocks[0, 1].valid_end == 128 and (not runtime.events)
 
 
 def test_v2_async_submission_can_follow_execute_in_sample_tokens(adapter, connector):
@@ -450,19 +428,16 @@ def test_v2_async_submission_can_follow_execute_in_sample_tokens(adapter, connec
     meta = load_plan(runtime.state, "loading", end=64)
 
     def execute(output):
-        item = prepare(adapter, ["running"], [128], [[1]], [1])["layer0"]
-        runtime.write("layer0", item.slot_mapping)
-        runtime.read("layer0", item.block_tables, [1])
+        prepare(adapter, ["running"], [128], [[1]], [1])
         return "awaiting sampling"
 
     assert adapter.wrap_execute(execute)(packet(meta, {"running": (0, 1)})) == "awaiting sampling"
-    assert runtime._connector.staged == [meta] and not runtime.events
-    # Actual MRV2 post_forward runs from sample_tokens, outside execute_model.
+    assert runtime._connector.staged == [meta] and (not runtime.events)
     connector.start_load_kv(None)
     connector.result.finished_recving = {"loading"}
     poll(connector)
     assert runtime.state.blocks[0, 2].valid_end == 64
-    assert not runtime.state.loads and not runtime.events
+    assert not runtime.state.loads and (not runtime.events)
 
 
 def test_v2_unsubmitted_load_is_rejected_at_the_real_post_forward_boundary(adapter, connector):

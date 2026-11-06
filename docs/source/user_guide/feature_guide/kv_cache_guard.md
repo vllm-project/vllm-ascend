@@ -2,7 +2,7 @@
 
 KV Guard diagnoses address mappings that can cause cross-request writes,
 prefix overwrites, or reads from invalid KV ranges. It compares scheduled
-destinations with execution metadata and observed operator arguments.
+destinations with the runner's final execution metadata, once per KV cache group.
 The feature is disabled by default and supports adapted dense PA and MLA
 attention paths in Model Runner V1 and V2.
 
@@ -62,7 +62,7 @@ slot of every scheduled token from those bindings and the actual batch order.
 | Logical block order | A request reads its own blocks in the wrong logical order. |
 | Initialized prefix | A read extends into unwritten data, or a write overwrites a valid prefix. |
 | Reserved storage | A write targets the null block instead of negative-slot padding. |
-| Collection completeness | A scheduled write, binding, layer, or current graph plan is missing. |
+| Collection completeness | A scheduled write, binding, cache group, or current graph plan is missing. |
 
 Each tracked block stores an allocation generation, a valid prefix length, and
 request owners. A zero prefix is unwritten; a positive prefix N makes `[0, N)`
@@ -107,19 +107,19 @@ full-model incident.
 
 | Path | Audit evidence and boundary |
 | --- | --- |
-| Eager | Ordered per-layer operator arguments, with adapted metadata plans where applicable. |
-| FULL replay | The current execution's final attention metadata, inspected after forward and graph parameter update calls. Captured or previous-step plans are not reused as evidence. |
-| Runner V1 | Bind before `execute_model`; collect through the existing forward context and attention hooks. |
+| Eager and FULL replay | One final metadata record per KV cache group, inspected after forward and graph parameter updates. Captured or previous-step plans are not reused as evidence. |
+| Runner V1 | Bind before `execute_model`; collect metadata through the existing forward context. |
 | Runner V2 | Bind before execute; obtain actual batch IDs and metadata after `model_state.prepare_attn`; audit at the end of execute. Persistent request-state indices are not batch positions. |
 | Dummy/profile execution | Check writes against existing KV state; ignore discarded scratch reads. |
 | Runner V2 startup capture | Require empty request/cache state; do not audit CPU metadata inside device graph capture. |
 
-Canonical FULL plans can prepare a CPU validity transaction while the final
-metadata copies complete. The transaction is committed only when every actual
-plan exactly matches the independent scheduler-derived plan and the tracked
-state is unchanged. Other plans and suspected violations use the complete audit.
-This optimization preserves the audit and failure boundary, including its
-device-completion wait.
+Eager and FULL use the same checker. The runner selects one nonempty layer
+metadata record for each cache group; it does not record or compare individual
+layers' accesses. Only write-target block state is copied for the audit;
+read-only block state is shared under the state lock. Validity is committed
+only after checking the independent scheduler-derived plan and confirming the
+write-target allocations are unchanged. Async snapshots still freeze every
+step's selected metadata and wait for its copy before returning results.
 
 Live or cache-preserving Runner V2 recapture is rejected, including pending
 receives. Normal FULL replay remains audited. Allocator and kernel block
@@ -134,10 +134,12 @@ this name and the legacy `MooncakeConnector` name pass the guard's connector che
 The shared load adapter is not an expansion of this connector support list;
 other backends still require end-to-end validation before enabling them.
 
-The guard validates metadata and observed arguments. It does not inspect kernel
-memory instructions, verify KV numerical values, or detect a kernel writing to
-another address despite correct arguments. It cannot prevent or undo submitted
-writes, prove transport byte integrity, or guarantee model output correctness.
+The guard validates the declared metadata plan. It does not instrument attention
+operators, detect per-layer argument differences or actual operator ordering,
+inspect kernel memory instructions, or verify KV numerical values. Correct
+metadata cannot establish that an operator used those addresses. The guard
+cannot prevent or undo submitted writes, prove transport byte integrity, or
+guarantee model output correctness.
 
 ## Read the logs
 
@@ -154,20 +156,20 @@ Runner V2 may submit async loads during `sample_tokens` post-forward cleanup.
 Load submission and completion are checked at the connector cleanup boundary,
 after the separately audited `execute_model` forward.
 
-Fields identify the layer, request, pool, cache group, block, allocation
-generation, and relevant slot or range when available. Repeated failures are
+Plan violations use `evidence=execution_plan` and identify the request, pool,
+cache group, block, allocation generation, and relevant slot or range when
+available. Connector readiness gaps may identify a missing layer wait;
+attention accesses are not recorded per layer. Repeated failures are
 deduplicated with bounded state. Routine validity transitions are not logged.
 
 ## Validation and performance
 
 The focused CPU suite exercises allocation generations, ownership, shared
-prefixes, exact destinations, read/write order, graph metadata freshness,
+prefixes, exact destinations, declared read/write ranges, graph metadata freshness,
 failure latching, and the V1/V2 adapters:
 
 ```bash
-pytest -q tests/ut/debug/test_kv_guard.py \
-  tests/ut/debug/test_kv_guard_runtime.py tests/ut/debug/test_kv_guard_v2.py \
-  tests/ut/debug/test_kv_guard_loads.py
+pytest -q --confcutdir=tests/ut/debug tests/ut/debug
 ```
 
 The single-card service regression starts separate disabled and enabled servers,
@@ -179,7 +181,7 @@ pytest -q tests/e2e/pull_request/one_card/test_kv_cache_guard.py
 ```
 
 CPU mocks establish checker behavior, not NPU execution correctness. Before
-merge, record current-revision hardware runs for V1/V2 eager and FULL, prefix
+merge, prioritize current-revision hardware runs for V2 eager and FULL, prefix
 reuse, observed preemption, Mooncake where used, and controlled fault injection.
 The service regression does not itself prove that a preemption or prefix-cache
 hit occurred; collect those metrics separately. Historical V1 results do not
@@ -193,9 +195,9 @@ commands, and logs in the validation report. Do not infer device synchronization
 cost from CPU checker timings.
 
 The scheduler sends changed block/generation tables and compact request ranges.
-Expected token slots are temporary and shared across layers in a cache group;
+Expected token slots are temporary and derived once per cache group;
 the guard stores no persistent token history, KV snapshots, or content hashes.
-Metadata transfers and access-pattern checks are deduplicated, but enabled mode
+Metadata transfers are deduplicated, but enabled mode
 can still synchronize device metadata to CPU. Measure deployment overhead.
 
 ## Implementation guide and patch lifecycle
@@ -206,7 +208,7 @@ can still synchronize device metadata to CPU. Measure deployment overhead.
 | `vllm_ascend/debug/kv_guard_config.py` | Validated per-engine options shared by the scheduler and workers. |
 | `vllm_ascend/debug/kv_guard_runtime.py` | Shared V1/V2 installation, scheduler binding, evidence collection, audit, and conservative state commit. Includes the V2 batch and capture adapter. |
 | `vllm_ascend/patch/platform/patch_kv_guard.py` | Conditional scheduler allocation and request-binding instrumentation. |
-| Runner and attention implementations | Existing execution boundaries and ordered eager access arguments. |
+| Runner implementations | Existing execution boundaries and one final metadata record per cache group. Attention implementations are unchanged. |
 | Mooncake receiver | Success/failure validity callbacks after receive completion and reformatting. |
 
 Both runners use one `GuardRuntime` and one address-checking state machine.

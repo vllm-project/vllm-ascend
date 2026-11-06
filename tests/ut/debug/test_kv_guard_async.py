@@ -17,19 +17,16 @@ def deferred_forward(runtime, mode="FULL", slot=147):
     bind(runtime, computed=19)
     runtime._defer_audit = True
     runtime._scheduled = {"r": (19, 1)}
-    slots, table, lengths = torch.tensor([slot]), torch.tensor([[1]]), torch.tensor([20])
+    slots, table, lengths = (torch.tensor([slot]), torch.tensor([[1]]), torch.tensor([20]))
     item = metadata(slots, table, lengths)
     runner = NS(input_batch=NS(req_ids=["r"]))
     context = NS(cudagraph_runtime_mode=mode, attn_metadata=dict.fromkeys(runtime.layer_groups, item))
 
     def forward(count):
-        if mode != "FULL":
-            for layer in runtime.layer_groups:
-                runtime.write(layer, slots)
-                runtime.read(layer, table, lengths)
+        pass
 
     runtime.wrap_forward(runner, forward, lambda: context)(1)
-    return slots, table, lengths
+    return (slots, table, lengths)
 
 
 @pytest.mark.parametrize("mode", ["FULL", "NONE"])
@@ -173,8 +170,10 @@ def test_output_reader_and_next_forward_finish_only_once(runtime, failure):
     assert calls == [True] and pending._complete is None
 
 
-def test_snapshot_keeps_missing_layer_coverage(runtime):
-    bind(runtime)
+def test_snapshot_keeps_missing_group_coverage(runtime):
+    runtime.state.configure({0: 128, 1: 128})
+    runtime.layer_groups = {"layer0": 0, "layer1": 1}
+    runtime.state.bind({"pool_id": "pool", "requests": {"r": [[(1, 1)], [(2, 1)]]}})
     runtime._defer_audit = True
     runtime._scheduled = {"r": (0, 1)}
     item = metadata(torch.tensor([128]), torch.tensor([[1]]), torch.tensor([1]))
@@ -182,8 +181,12 @@ def test_snapshot_keeps_missing_layer_coverage(runtime):
     context = NS(cudagraph_runtime_mode="FULL", attn_metadata={"layer0": item})
     runtime.wrap_forward(runner, lambda count: None, lambda: context)(1)
     runtime._finish_pending()
-    assert runtime.state.blocks[0, 1].valid_end == 0
-    assert any(event.get("reason") == "metadata_write_mapping_missing:layer1" for event in runtime.events)
+    assert runtime.state.blocks[0, 1].valid_end == 1
+    assert runtime.state.blocks[1, 2].valid_end == 0
+    assert any(
+        event.get("reason") == "metadata_write_mapping_missing" and event.get("group_id") == 1
+        for event in runtime.events
+    )
 
 
 @pytest.mark.parametrize("mode", ["FULL", "NONE"])
@@ -200,12 +203,9 @@ def test_frozen_read_evidence_cannot_be_repaired_by_the_next_preparation(runtime
     context = NS(cudagraph_runtime_mode=mode, attn_metadata=dict.fromkeys(runtime.layer_groups, item))
 
     def forward(count):
-        if mode != "FULL":
-            for layer in runtime.layer_groups:
-                runtime.write(layer, slots)
-                runtime.read(layer, table, lengths)
+        pass
 
     runtime.wrap_forward(runner, forward, lambda: context)(1)
-    table[0, 0], lengths[0] = 1, 20
+    table[0, 0], lengths[0] = (1, 20)
     runtime._finish_pending()
     assert any(event.get("reason") == reason for event in runtime.events)

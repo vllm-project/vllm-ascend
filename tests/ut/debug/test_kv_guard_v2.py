@@ -74,9 +74,6 @@ def test_sorted_v2_batch_uses_batch_ids_instead_of_request_state_indices(adapter
 
     def execute(output):
         prepare(adapter, ["B", "A"], [256, 257, 128], [[2], [1]], [2, 1], mode)
-        if mode == "NONE":
-            runtime.write("layer0", torch.tensor([256, 257, 128]))
-            runtime.read("layer0", torch.tensor([[2], [1]]), [2, 1])
         return "unchanged"
 
     assert adapter.wrap_execute(execute)(packet) == "unchanged"
@@ -99,11 +96,8 @@ def test_v2_full_replay_observes_current_metadata_after_parameter_update(adapter
 
     def execute(output):
         item = prepare(adapter, ["r"], [128, -1], [[1], [0]], [1, 0], "FULL")["layer0"]
-        # Replay/parameter updates mutate the same buffers after collection.
         item.slot_mapping[0] = 256
         item.block_tables[0, 0] = 2
-        runtime.write("layer0", torch.tensor([128]))
-        assert runtime._accesses == []
         return "replayed"
 
     assert adapter.wrap_execute(execute)(packet) == "replayed"
@@ -179,7 +173,6 @@ def test_v2_profile_without_attention_and_positional_flags_preserve_arguments(ad
 def test_v2_failed_forward_does_not_commit_writes_or_leak_scope(adapter):
     def execute(output):
         prepare(adapter, ["r"], [128], [[1]], [1])
-        adapter.runtime.write("layer0", torch.tensor([128]))
         raise RuntimeError("original failure")
 
     with pytest.raises(RuntimeError, match="original failure"):

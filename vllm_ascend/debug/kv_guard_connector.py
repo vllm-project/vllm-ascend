@@ -139,7 +139,7 @@ class ConnectorGuard:
         return invalid
 
     def _target_blocks(self, meta: dict) -> set[int]:
-        targets = set()
+        targets: set[int] = set()
         for group, refs in enumerate(meta["block_table"]):
             size = self.state.group_sizes[group]
             first, last = meta["token_start"] // size, (meta["token_end"] + size - 1) // size

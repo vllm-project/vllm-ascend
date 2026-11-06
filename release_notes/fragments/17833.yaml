@@ -7,6 +7,8 @@ entries:
       by default and configured per engine through additional_config.kv_guard_config
       (enabled and action). Both runners share one checker, which can log failures
       or stop returning worker results after a violation or incomplete audit.
+      The runner collects one final metadata plan per KV cache group; attention
+      operators are unchanged and per-layer accesses are not recorded.
   - category: bugfix
     text: >-
       KV guard no longer treats a consumer's computed-token count as proof of
@@ -25,4 +27,4 @@ entries:
     text: >-
       Ordinary async generation with one model worker defers KV guard validation to output consumption
       or the next forward boundary, allowing address metadata copies to overlap
-      model execution while retaining every step's access checks.
+      model execution while retaining every step's metadata-plan checks.
