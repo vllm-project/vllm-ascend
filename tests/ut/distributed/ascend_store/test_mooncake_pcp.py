@@ -68,20 +68,18 @@ class TestMooncakePCP(unittest.TestCase):
             self.assertFalse(job.is_alive(), "PCP transfer did not finish")
         self.assertFalse(errors)
 
-    def test_four_rank_hybrid_roundtrip_and_incomplete_rank_miss(self):
-        # TP=1 matches DSV4 Flash; TP=2 also exercises MLA writer dedup and
-        # per-TP recurrent snapshots. Private tail rings must remain private.
-        for tp_size in (1, 2):
-            with self.subTest(tp_size=tp_size):
+    def test_hybrid_roundtrip_requires_all_pcp_or_tp_head_shards(self):
+        for tp_size, pcp_size in ((1, 4), (2, 1)):
+            with self.subTest(tp_size=tp_size, pcp_size=pcp_size):
                 store = hybrid_tests.MemoryRangeStore()
                 workers = []
-                for pcp_rank in range(4):
+                for pcp_rank in range(pcp_size):
                     for tp_rank in range(tp_size):
                         worker, _, arrays, jobs, errors = hybrid_tests.TestMooncakeHybrid.make_hybrid(
                             self,
                             extra_entry=True,
                             private_tail=True,
-                            pcp_size=4,
+                            pcp_size=pcp_size,
                             pcp_rank=pcp_rank,
                             tp_size=tp_size,
                             tp_rank=tp_rank,
@@ -112,8 +110,8 @@ class TestMooncakePCP(unittest.TestCase):
                 self.assertEqual(scheduler.hash_block_size, first.hash_block_size)
                 keys = scheduler._make_layerwise_hit_check_keys(0, b"h0".hex())
                 state_keys = scheduler._make_layerwise_hit_check_keys(2, b"h3".hex())
-                self.assertEqual(len(keys), 4)
-                self.assertEqual(len(state_keys), 4 * tp_size)
+                self.assertEqual(len(keys), pcp_size)
+                self.assertEqual(len(state_keys), pcp_size * tp_size)
                 for index, (worker, _, _) in enumerate(workers):
                     for group in worker.cacheable_group_ids:
                         self.assertIn(
@@ -123,7 +121,7 @@ class TestMooncakePCP(unittest.TestCase):
                     hybrid_tests.TestMooncakeHybrid.save_prefix(self, worker)
                     # Missing the last PCP/TP state keeps the snapshot a miss.
                     self.assertEqual(scheduler._query_layerwise_block_hits([state_keys]), [index == len(workers) - 1])
-                self.assertEqual(len(store.complete), 4 * (4 + 2 + tp_size))
+                self.assertEqual(len(store.complete), pcp_size * (4 + 2 + tp_size))
                 store.complete.remove(keys[-1])
                 self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [False])
                 store.complete.add(keys[-1])

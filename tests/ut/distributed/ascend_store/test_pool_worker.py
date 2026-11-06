@@ -193,6 +193,35 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_single_mamba_group_uses_pcp_state_shards(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.attn"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((8,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ]
+        )
+        for use_layerwise in (False, True):
+            with self.subTest(use_layerwise=use_layerwise):
+                worker = make_worker(
+                    self,
+                    kv_cache_config=plan,
+                    num_layers=1,
+                    use_layerwise=use_layerwise,
+                    pcp_size=2,
+                    pcp_rank=1,
+                )
+                self.assertFalse(worker.use_hybrid)
+                self.assertEqual(worker.sharded_mamba_group_ids, {0})
+                self.assertEqual(worker.metadata[0].head_or_tp_rank, 1)
+                self.assertEqual(worker.get_group_tp_size(0), 2)
+
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
         draft_names = [f"draft.layers.{index}.attn" for index in range(4, 6)]

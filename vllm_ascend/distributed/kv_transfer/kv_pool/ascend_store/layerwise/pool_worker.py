@@ -588,6 +588,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._transfer_threads_started = True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        if self.use_recoverssm:
+            kv_caches = self._recoverssm_store_caches(kv_caches)
         draft_names = set(getattr(self, "_dspark_draft_layer_names", ()))
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         target_caches = (
@@ -757,7 +759,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
         return self.layerwise_keys.make_full_key(
-            group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank, self.pcp_rank
+            group_id,
+            block_hash_hex,
+            self.metadata[group_id].head_or_tp_rank,
+            self.pp_rank,
+            self.pcp_rank,
+            use_joint_tp_pcp_rank=group_id in self.sharded_mamba_group_ids,
         )
 
     def _make_layerwise_partial_key(

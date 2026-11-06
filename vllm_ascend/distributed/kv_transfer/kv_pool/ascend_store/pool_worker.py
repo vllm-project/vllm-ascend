@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     get_block_hashes,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -219,6 +220,7 @@ class BaseKVPoolWorker(ABC):
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config, self.tp_size, self.pcp_size)
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
@@ -332,6 +334,8 @@ class BaseKVPoolWorker(ABC):
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            if group_id in self.sharded_mamba_group_ids:
+                group_tp_rank = self.tp_rank * self.pcp_size + self.pcp_rank
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
@@ -1020,6 +1024,8 @@ class BaseKVPoolWorker(ABC):
             return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
+        if kv_cache_group_id in self.sharded_mamba_group_ids:
+            return self.tp_size * self.pcp_size
         if self.group_uses_align_state[kv_cache_group_id]:
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
@@ -1037,7 +1043,7 @@ class BaseKVPoolWorker(ABC):
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # PCP replicas share keys; expand only the physical KV partitions.
+        # Expand head partitions; replicas of the same partition share a key.
         expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
@@ -1350,6 +1356,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.group_uses_align_state,
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
+                sharded_mamba_group_ids=self.sharded_mamba_group_ids,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()

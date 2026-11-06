@@ -72,6 +72,7 @@ def _mock_scheduler_clients():
 @pytest.mark.parametrize("dspark", [False, True])
 def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_replica(dspark):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     target_keys = ["target-pp0-rank0", "target-pp1-rank0"]
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
@@ -81,7 +82,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
     scheduler.layerwise_max_transfer_blocks = 0
 
     keys = scheduler._make_layerwise_hit_check_keys(0, "block-hash")
-    scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(0, "block-hash", 1)
+    scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(0, "block-hash", 1, False)
     expected_draft = [f"dspark-prefix-v1@draft-contract@pp1@tp{rank}@block-hash" for rank in range(4)] if dspark else []
     assert keys == target_keys + expected_draft
     scheduler.store_scheduler = SimpleNamespace(batch_is_readable=MagicMock(return_value=[True] * len(keys)))
@@ -97,6 +98,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
 @pytest.mark.parametrize("draft_only", [False, True])
 def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_target_keys(draft_only):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
@@ -111,7 +113,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
     if draft_only:
         scheduler.layerwise_keys.make_hit_check_keys.assert_not_called()
     else:
-        scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(3, "block-hash", 1)
+        scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(3, "block-hash", 1, False)
     scheduler.store_scheduler = SimpleNamespace(batch_is_readable=MagicMock(return_value=[True] * len(keys)))
     assert scheduler._query_layerwise_block_hits([keys]) == [True]
     for missing_key in range(len(keys)):
@@ -124,6 +126,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
 @pytest.mark.parametrize("mode", ["dspark", "reuse"])
 def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     # A fresh key list per call: _make_layerwise_hit_check_keys extends the
     # returned list in place when dspark joint keys are active, so a shared
     # return_value would accumulate draft keys across lookups.
@@ -281,6 +284,7 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
     assert scheduler.num_speculative_blocks_by_group == (
         {} if num_speculative_blocks is None else {1: num_speculative_blocks}
     )
+    assert scheduler.sharded_mamba_group_ids == ({1} if num_speculative_blocks is not None else set())
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):
