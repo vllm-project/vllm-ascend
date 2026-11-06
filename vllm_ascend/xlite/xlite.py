@@ -252,8 +252,8 @@ class XliteModelBase(ABC):
         Returns:
             bool: True if the tensor is in NZ format, False otherwise.
         """
-        format = torch_npu.get_npu_format(t)
-        return format == torch_npu.Format.FRACTAL_NZ
+        format = torch_npu.get_npu_format(t)  # type: ignore[attr-defined]
+        return format == torch_npu.Format.FRACTAL_NZ  # type: ignore[attr-defined]
 
     @staticmethod
     def all_tensors_zero(tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None) -> bool:
@@ -371,15 +371,28 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.attn_type = AttnMHA
         xlite_config.scoring_func = ScoringFuncSoftmax
         xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
-        max_m = vllm_config.scheduler_config.max_num_batched_tokens
-        if not get_ascend_config().xlite_graph_config.full_mode:
-            # decode-sized token budget: max_num_seqs * (1 + num_speculative_tokens) instead of max_num_batched_tokens
-            n_spec_tokens = getattr(vllm_config.speculative_config, "num_speculative_tokens", 0)
-            max_m = min(max_m, vllm_config.scheduler_config.max_num_seqs * (n_spec_tokens + 1))
-        xlite_config.max_m = (max_m + tp_size - 1) // tp_size * tp_size  # round up to nearest multiple of tp_size
-        xlite_config.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         xlite_config.max_seq_len = vllm_config.model_config.max_model_len
         xlite_config.block_size = vllm_config.cache_config.block_size
+
+        # configure runtime token budgets between xlite full/decode-only modes with respect to speculative decoding
+        # NOTE: for profiling runs (e.g., graph capturing), the following configurations might need further adjustments
+        scheduler_config, spec_config = vllm_config.scheduler_config, vllm_config.speculative_config
+        max_num_active_seqs = getattr(scheduler_config, "max_num_active_seqs", None) or scheduler_config.max_num_seqs
+        xlite_config.max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        xlite_config.num_spec_tokens = num_spec_tokens = spec_config.num_speculative_tokens if spec_config else 0
+        draft_slots = spec_config.max_num_new_slots_for_drafting if spec_config else 0
+        max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+        max_num_scheduled_tokens = scheduler_config.max_num_scheduled_tokens or max_num_batched_tokens
+        max_num_scheduled_tokens = min(max_num_scheduled_tokens, max_num_batched_tokens)
+        if get_ascend_config().xlite_graph_config.full_mode:
+            max_m = max_num_batched_tokens  # all request must confine to this budget per forward pass
+        else:
+            # xlite only handles decode batches - drafter's additional slots consume the same scheduler input budget
+            max_m = max(
+                min(n * (num_spec_tokens + 1), max_num_scheduled_tokens, max_num_batched_tokens - n * draft_slots)
+                for n in range(1, max_num_active_seqs + 1)
+            )
+        xlite_config.max_m = (max_m + tp_size - 1) // tp_size * tp_size  # round up to nearest multiple of tp_size
 
         rope_parameters = getattr(hf_config, "rope_parameters", {})
         xlite_config.deepstack_num_level = len(getattr(self.hf_vision_config, "deepstack_visual_indexes", []))
@@ -744,7 +757,6 @@ class XliteWrapper:
         """
         self.npu_runner: XliteModelRunner = npu_runner
         self.npu_runnable: nn.Module = npu_runner.fallback_model
-        self.npu_update_stream: torch.npu.Stream | None = getattr(npu_runner, "update_stream", None)
         self.device = device
         # `full_mode` only sizes the token budget (see the comment in `StandardXliteModel._build_config`).
         self.full_mode: bool = get_ascend_config().xlite_graph_config.full_mode
@@ -852,11 +864,6 @@ class XliteWrapper:
                 )
             return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
-        # sync the device streams to avoid stale D2H copies in metadata preparation
-        curr_stream = torch.npu.current_stream()
-        if self.npu_update_stream is not None and self.npu_update_stream != curr_stream:
-            curr_stream.wait_stream(self.npu_update_stream)
-
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         num_actual_tokens = attn_metadata_router.num_actual_tokens
         seq_lens = attn_metadata_router.seq_lens
@@ -884,6 +891,7 @@ class XliteWrapper:
         # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
         h = self.hidden_states[:num_tokens]
         input_ids = cast(torch.Tensor, input_ids)
+        curr_stream = torch.npu.current_stream().npu_stream  # type: ignore[attr-defined]
         if inputs_embeds is None or inputs_embeds.size(0) == 0:
             self.xlite_model.forward(
                 rt=self.xlite_rt,
@@ -892,7 +900,7 @@ class XliteWrapper:
                 kv_cache=self.kv_caches,
                 freqs_cis=self.freq_cis,
                 output=h,
-                curr_stream=curr_stream.npu_stream,
+                curr_stream=curr_stream,
             )
         else:
             inputs_embeds = inputs_embeds[:num_actual_tokens]
@@ -907,7 +915,7 @@ class XliteWrapper:
                 kv_cache=self.kv_caches,
                 freqs_cis=self.freq_cis,
                 output=h,
-                curr_stream=curr_stream.npu_stream,
+                curr_stream=curr_stream,
                 deepstack_input=xlite_deepstack_input_embeds,
             )
             if deepstack_input_embeds and callable(
