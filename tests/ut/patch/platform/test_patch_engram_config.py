@@ -93,8 +93,7 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
         ("model_config", "architecture", "UnsupportedModel", "non-empty n-gram"),
         ("engram_config", "embedding_across_dp", True, "embedding_across_dp"),
         ("parallel_config", "tensor_parallel_size", 16, "TP=1/2/4/8"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=DCP"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=DCP"),
+        ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
         ("parallel_config", "data_parallel_size", 1, "dp_shared_memory requires"),
         ("parallel_config", "enable_elastic_ep", True, "elastic EP"),
         ("load_config", "load_format", "pt", "indexed safetensors"),
@@ -124,3 +123,11 @@ def test_platform_leaves_non_engram_models_alone(engram_config):
     engram_config.model_config.architecture = "OtherModel"
     _validate_engram_config(engram_config)
     assert engram_config.engram_config is None
+
+
+def test_engram_allows_pipeline_parallelism(engram_config):
+    from vllm_ascend.platform import _validate_engram_config
+
+    engram_config.use_v2_model_runner = True
+    engram_config.parallel_config.pipeline_parallel_size = 4
+    _validate_engram_config(engram_config)

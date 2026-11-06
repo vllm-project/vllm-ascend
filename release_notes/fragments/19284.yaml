@@ -1,0 +1,6 @@
+pr: 19284
+entries:
+  - category: feature
+    text: Added experimental DeepSeek V4.1 pipeline parallelism on Model Runner V2 with arbitrary contiguous, nonempty layer partitions, incremental cache and selection transport, PCP, DSpark speculative decoding and target Decode graphs.
+    model: deepseek-v4.1
+    hardware: [A3]

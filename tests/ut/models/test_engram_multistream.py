@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.models.utils import PPMissingLayer
 
 from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.engram import embedding, parallel
@@ -52,6 +53,9 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: calls.append(("retain", stream.name)))
     monkeypatch.setattr(model_mod, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(model_mod, "get_forward_context", lambda: context)
+    monkeypatch.setattr(
+        model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1)
+    )
     return calls, context, aux
 
 
@@ -70,6 +74,38 @@ def make_model():
         SimpleNamespace(engram=SimpleNamespace(embed_tokens=SimpleNamespace(n_hash_cols=4, dim=2))) for _ in range(3)
     ]
     return model
+
+
+def test_pp_engram_buffers_only_cover_locally_owned_tables(runtime):
+    model = make_model()
+    model.layers[1] = PPMissingLayer()
+    assert model.local_engram_layer_ids == (2,)
+    result = model.prime_engram_v2_graph_inputs(4)
+    assert set(result["engram_lookups"]) == {2}
+    assert set(result["engram_pending"]) == {2}
+
+
+def test_pp_engram_uses_global_hash_slot_for_the_local_table(runtime, monkeypatch):
+    model = make_model()
+    model.layers[1] = PPMissingLayer()
+    table = model.layers[2].engram.embed_tokens
+    table.dp_size = table.tp_size = 1
+    table.embed_gathered = Mock(side_effect=lambda hashes, count: hashes.unsqueeze(-1).expand(-1, -1, 2))
+    hashes = torch.stack((torch.full((2, 4), 11), torch.full((2, 4), 22)), dim=1)
+    model.engram_hash = Mock(use_slot_cache=False)
+    model.engram_hash.ensure_cache.return_value = True
+    model.engram_hash.return_value = hashes
+    monkeypatch.setattr(model_mod, "gather_engram_hashes", lambda values, **kwargs: values)
+    monkeypatch.setattr(model_mod, "engram_dead_mask", lambda values, *args: torch.zeros_like(values, dtype=torch.bool))
+    lookups, mask = model.prepare_engram(
+        torch.tensor([12, 13]),
+        torch.arange(2),
+        lookback_token_ids=torch.zeros((1, 1), dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 2]),
+    )
+    assert set(lookups) == {2}
+    torch.testing.assert_close(lookups[2], torch.full((2, 8), 22))
+    torch.testing.assert_close(mask, torch.ones(2, dtype=torch.bool))
 
 
 def test_graph_events_are_reused_per_descriptor_and_primed_only_at_capture(runtime):
@@ -294,6 +330,7 @@ def test_sp_row_copy_waits_for_its_table(runtime, monkeypatch):
             return hidden[:, 0]
 
     model.layers = [Layer(1), Layer(2)]
+    model.start_layer, model.end_layer = 0, len(model.layers)
     monkeypatch.setattr(model_mod, "sp_shard", shard)
     monkeypatch.setattr(model_mod, "sp_all_gather", lambda values: torch.cat((values, values)))
     monkeypatch.setattr(model_mod.envs, "VLLM_MOE_SKIP_PADDING", False)
