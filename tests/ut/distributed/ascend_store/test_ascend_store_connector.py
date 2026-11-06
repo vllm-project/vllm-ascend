@@ -27,6 +27,7 @@ import pytest
 from zmq.error import ZMQError
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from tests.ut.distributed.ascend_store import test_request_lifecycle as lifecycle
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
@@ -36,6 +37,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 
 # isort: on
+
+
+# Reuse the byte-copy lifecycle fixtures for connector-level integration.
+byte_pooling_session = lifecycle.byte_pooling_session
+devices_and_store = lifecycle.devices_and_store
 
 
 class TestKVPoolWorkerConstruction(unittest.TestCase):
@@ -139,6 +145,29 @@ def test_lookup_server_protocol_results_and_cleanup(scenario, monkeypatch):
         assert not server.thread.is_alive()
         assert server.socket.closed and server.ctx.closed
         assert client.socket.closed and client.ctx.closed
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "strided"])
+def test_layerwise_kv_both_roundtrip_preserves_bytes(byte_pooling_session, layout):
+    session = byte_pooling_session(layout=layout, use_layerwise=True)
+    producer = session.new_request("layer-producer", list(range(256)))
+    old_blocks = []
+    session.run(producer, lambda output: old_blocks.extend(session.block_ids(producer)))
+    assert session.backend.payloads
+    session.clear_local_cache()
+    consumer = session.new_request("layer-consumer", list(range(257)))
+    restored = []
+
+    def verify_loaded(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(consumer, 256)
+                restored.extend(session.block_ids(consumer)[:2])
+
+    session.run(consumer, verify_loaded)
+    assert len(restored) == 2 and restored != old_blocks[-2:]
+    assert session.backend.loads
+    assert [start for req_id, start, _ in session.computed if req_id == consumer.request_id] == [256]
 
 
 class TestLookupKeyServer(unittest.TestCase):

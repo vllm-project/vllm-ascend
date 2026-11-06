@@ -36,6 +36,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSl
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -167,6 +168,9 @@ def cache_layout(request, speculative_method):
 @pytest.fixture
 def devices_and_store(monkeypatch):
     monkeypatch.setattr(MemoryBackend, "payloads", {})
+    monkeypatch.setattr(LayerwiseMemoryBackend, "committed", set())
+    for registry in (backend_map, pool_worker.backend_map):
+        monkeypatch.setitem(registry, "cpu-layerwise", {"path": __name__, "name": "LayerwiseMemoryBackend"})
     monkeypatch.setitem(backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
     # The mock-dependency bootstrap may reload the registry during collection.
     monkeypatch.setitem(pool_worker.backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
@@ -199,7 +203,7 @@ def payload_value(tokens, end, name, plane):
 class BytePoolingSession:
     """Drive real scheduler/connector/transfer paths; only model compute is synthetic."""
 
-    def __init__(self, layout="strided", load_async=False, use_v2=True, num_blocks=16):
+    def __init__(self, layout="strided", load_async=False, use_v2=True, num_blocks=16, use_layerwise=False):
         self.block_size = 128
         self.scale = 2 if layout == "segmented" else 1
         rows = self.block_size // self.scale
@@ -218,7 +222,11 @@ class BytePoolingSession:
                 kv_role="kv_both",
                 kv_load_failure_policy="recompute",
                 kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-                kv_connector_extra_config={"backend": "cpu", "load_async": load_async},
+                kv_connector_extra_config={
+                    "backend": "cpu-layerwise" if use_layerwise else "cpu",
+                    "load_async": load_async,
+                    "use_layerwise": use_layerwise,
+                },
             ),
         )
         assert config.use_v2_model_runner is use_v2
@@ -300,15 +308,27 @@ class BytePoolingSession:
                 sending |= done_sending
                 recving |= done_recving
         scheduled = output.num_scheduled_tokens.get(request.request_id, 0) if request else 0
-        if before_compute is not None:
+        if before_compute is not None and not self.worker.use_layerwise:
             before_compute(output)
         if scheduled:
             end = request.num_computed_tokens
             start = end - scheduled
             self.computed.append((request.request_id, start, end))
-            for index, name, plane, view in self.block_views(request):
-                if start < (index + 1) * self.block_size <= end:
-                    view.copy_(self.expected_bytes(request, index, name, plane, view.shape))
+            if self.worker.use_layerwise:
+                for name in self.caches:
+                    self.worker.wait_for_layer_load(name)
+                    for index, block_name, plane, view in self.block_views(request):
+                        if block_name == name and start < (index + 1) * self.block_size <= end:
+                            view.copy_(self.expected_bytes(request, index, name, plane, view.shape))
+                    self.worker.save_kv_layer(name, self.caches[name], None)
+            else:
+                for index, name, plane, view in self.block_views(request):
+                    if start < (index + 1) * self.block_size <= end:
+                        view.copy_(self.expected_bytes(request, index, name, plane, view.shape))
+        if before_compute is not None and self.worker.use_layerwise:
+            # All layers have now consumed their loads. Computation only writes
+            # scheduled suffix pages, so cached prefix bytes remain independent.
+            before_compute(output)
         self.worker.wait_for_save()
         # Match the model runner: collect completions after submitting saves.
         done_sending, done_recving = self.worker.get_finished(output.finished_req_ids)
@@ -348,6 +368,65 @@ class BytePoolingSession:
     def close(self):
         self.worker.shutdown()
         self.scheduler.connector.shutdown()
+
+
+class LayerwiseMemoryBackend(MemoryBackend):
+    """Block-key leaf storage; real production layouts supply every byte offset."""
+
+    layerwise_data_plane = "block_key"
+    committed: set[str] = set()
+
+    @classmethod
+    def bind_layerwise_keys(cls, **kwargs):
+        return MooncakeBackend.bind_layerwise_keys(**kwargs)
+
+    def validate_layerwise_support(self):
+        pass
+
+    def batch_is_readable(self, keys):
+        return [key in self.committed for key in keys]
+
+    def batch_put_start(self, keys, sizes):
+        for key, size in zip(keys, sizes, strict=True):
+            if key not in self.payloads:
+                self.payloads[key] = [bytearray(size)]
+            assert len(self.payloads[key][0]) == size
+        return [0] * len(keys)
+
+    def batch_copy_put(self, keys, all_buffers, all_sizes, all_dst_offsets):
+        for key, buffers, sizes, offsets in zip(keys, all_buffers, all_sizes, all_dst_offsets, strict=True):
+            target = self.payloads[key][0]
+            for addr, size, offset in zip(buffers, sizes, offsets, strict=True):
+                self.check_address(addr, size)
+                assert 0 <= offset <= offset + size <= len(target)
+                target[offset : offset + size] = ctypes.string_at(addr, size)
+        return [0] * len(keys)
+
+    def batch_commit(self, keys):
+        self.committed.update(keys)
+        return [0] * len(keys)
+
+    def batch_revoke(self, keys):
+        for key in keys:
+            self.payloads.pop(key, None)
+            self.committed.discard(key)
+        return [0] * len(keys)
+
+    def batch_get_start(self, keys):
+        return [0 if key in self.committed else 1 for key in keys]
+
+    def batch_copy_get(self, keys, all_buffers, all_sizes, all_src_offsets):
+        for key, buffers, sizes, offsets in zip(keys, all_buffers, all_sizes, all_src_offsets, strict=True):
+            source = self.payloads[key][0]
+            for addr, size, offset in zip(buffers, sizes, offsets, strict=True):
+                self.check_address(addr, size)
+                assert 0 <= offset <= offset + size <= len(source)
+                ctypes.memmove(addr, bytes(source[offset : offset + size]), size)
+            self.loads.append(key)
+        return [0] * len(keys)
+
+    def batch_get_end(self, keys):
+        return 0
 
 
 @pytest.fixture
