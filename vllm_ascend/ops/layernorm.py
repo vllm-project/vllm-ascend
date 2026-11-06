@@ -91,8 +91,10 @@ class AscendRMSNorm(RMSNorm):
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
             else:
+                # Under VLLM_BATCH_INVARIANT, batch_invariant.py patches npu_add_rms_norm
+                # for bitwise batch invariance; bias is added elementwise below.
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
-                if self.bias_loaded:
+                if self.bias is not None:
                     x.add_(self.bias)
             return x, residual
 
