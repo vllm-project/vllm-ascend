@@ -6,9 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -87,33 +87,52 @@ def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_startup_dummy_keeps_global_limits_on_success_and_failure(fail):
+def test_profile_caller_selects_budget_without_mutating_limits(fail):
     runner = make_runner(requests=512)
-    runner.adaptive_verification = None
-    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
-    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
-    runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())
-    runner._finalize_dump_data = Mock()
-    seen = []
-
-    def parent(self, num_tokens, *args, **kwargs):
-        seen.append(num_tokens)
-        assert self.max_num_tokens == 16384
-        assert self.max_num_reqs == 512
-        if fail:
-            raise RuntimeError("profile failed")
-        return num_tokens
-
-    with patch.object(GPUModelRunner, "_dummy_run", parent):
+    runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+    runner.get_model = Mock()
+    runner._dummy_run = Mock()
+    runner._profile_with_num_tokens = Mock(side_effect=RuntimeError("profile failed") if fail else None)
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=4096),
+        patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=MoECommType.MC2),
+        patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+    ):
         if fail:
             with pytest.raises(RuntimeError, match="profile failed"):
-                runner._dummy_run(16384, skip_attn=True, is_profile=True, skip_eplb=True)
-            assert seen == [2048]
+                runner.profile_run(randomize_inputs=True)
         else:
-            assert runner._dummy_run(16384, skip_attn=True, is_profile=True, skip_eplb=True) == 2048
-            # Independent MC2 reservation and graph dummies retain their shape.
-            assert runner._dummy_run(4096, skip_attn=True, is_profile=True, skip_eplb=True) == 4096
-            assert runner._dummy_run(16384, is_profile=True, skip_eplb=True) == 16384
-            assert runner._dummy_run(16384, skip_attn=True, skip_eplb=True) == 16384
+            runner.profile_run(randomize_inputs=True)
+    runner._dummy_run.assert_called_once_with(
+        4096, skip_attn=True, skip_eplb=True, is_profile=True, randomize_inputs=True
+    )
+    runner._profile_with_num_tokens.assert_called_once_with(2048, randomize_inputs=True)
     assert runner.max_num_tokens == 16384
     assert runner.max_num_reqs == 512
+
+
+@pytest.mark.parametrize("pooling", [False, True])
+def test_explicit_profile_passes_tokens_and_preserves_sampling_cleanup(pooling):
+    runner = make_runner()
+    runner.vllm_config.aux_output_config = SimpleNamespace(enabled=False)
+    runner.supports_mm_inputs = False
+    runner.is_last_pp_rank = True
+    runner.pooling_runner = object() if pooling else None
+    hidden, sample = object(), object()
+    runner._dummy_run = Mock(return_value=(hidden, sample))
+    runner._dummy_sampler_run = Mock()
+    runner._dummy_pooler_run = Mock()
+    runner.reset_encoder_cache = Mock()
+    with patch("torch.accelerator.synchronize") as sync:
+        runner._profile_with_num_tokens(1024, randomize_inputs=True)
+    runner._dummy_run.assert_called_once_with(1024, skip_attn=True, is_profile=True, randomize_inputs=True)
+    if pooling:
+        runner._dummy_pooler_run.assert_called_once_with(hidden)
+        runner._dummy_sampler_run.assert_not_called()
+    else:
+        runner._dummy_sampler_run.assert_called_once_with(sample)
+        runner._dummy_pooler_run.assert_not_called()
+    sync.assert_called_once_with()
+    runner.reset_encoder_cache.assert_called_once_with()
+    assert runner.max_num_tokens == 16384

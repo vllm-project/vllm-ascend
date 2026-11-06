@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 import inspect
 import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -755,7 +756,11 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            super().profile_run(**profile_kwargs)
+            profile_tokens = self._get_pcp_profile_num_tokens()
+            if profile_tokens == self.max_num_tokens:
+                super().profile_run(**profile_kwargs)
+            else:
+                self._profile_with_num_tokens(profile_tokens, **profile_kwargs)
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -1196,6 +1201,34 @@ class NPUModelRunner(GPUModelRunner):
             self.speculator = previous_speculator
             self.max_num_reqs = previous_max_num_reqs
 
+    def _profile_with_num_tokens(self, num_tokens: int, randomize_inputs: bool = False) -> None:
+        """Upstream profile orchestration with an explicit dummy token count.
+
+        Keep the model/drafter execution in _dummy_run unchanged. Upstream
+        profile_run has no token-count argument, so mirror only its encoder,
+        sampler and cleanup orchestration here.
+        """
+        if self.vllm_config.aux_output_config.enabled:
+            self.aux_output_connector = vllm_model_runner.get_aux_output_connector(self.model, self.vllm_config)
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            mm_config = self.model_config.multimodal_config
+            if mm_config is not None and not mm_config.skip_mm_profiling:
+                budget = vllm_model_runner.MultiModalBudget(self.vllm_config, self.mm_registry, enable_cache=False)
+                self.model_state.encoder_runner.profile_encoder_cache(budget.get_dummy_encoder_profile_inputs(), budget)
+        hidden_states, sample_hidden_states = self._dummy_run(
+            num_tokens, skip_attn=True, is_profile=True, randomize_inputs=randomize_inputs
+        )
+        if self.is_last_pp_rank:
+            assert sample_hidden_states is not None
+            if self.pooling_runner is None:
+                self._dummy_sampler_run(sample_hidden_states)
+            else:
+                self._dummy_pooler_run(hidden_states)
+        torch.accelerator.synchronize()
+        del hidden_states, sample_hidden_states
+        self.reset_encoder_cache()
+        gc.collect()
+
     def _get_pcp_profile_num_tokens(self) -> int:
         """Keep replicated draft requests when profiling PCP-local prefill.
 
@@ -1233,10 +1266,6 @@ class NPUModelRunner(GPUModelRunner):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
-        # Only shrink the main startup dummy, not MC2 reservation, capture or
-        # CPP profiling. Keep max_num_tokens global for upstream scheduling.
-        if is_profile and skip_attn and not uniform_decode and not profile_cpp and num_tokens == self.max_num_tokens:
-            num_tokens = self._get_pcp_profile_num_tokens()
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
