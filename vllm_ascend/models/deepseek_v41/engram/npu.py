@@ -182,8 +182,17 @@ class HostUvaBuffer:
             self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
             rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
-                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
-            self._registered = True
+                # A5 (Ascend950DT) rejects explicit registration of
+                # aclrtMallocHost memory with rc=507899 because the allocation
+                # is already mapped to the device address space.  Fall back to
+                # retrieving the device pointer directly; skip unregister in
+                # close() since no registration was performed.
+                logger.warning(
+                    "aclrtHostRegisterV2 failed: rc=%d size=%d; "
+                    "trying direct device pointer on A5", rc, size)
+                self._registered = False
+            else:
+                self._registered = True
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
@@ -302,6 +311,7 @@ class SharedUvaBuffer:
         self.shm = None
         self.tensor = None
         self.ptrs = None
+        self._registered = False
         self.pointer = ctypes.c_void_p()
 
         cpu_group = group.cpu_group
@@ -333,11 +343,17 @@ class SharedUvaBuffer:
             _madvise_hugepage(self.shm, size)
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
-                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
-            # Registration succeeded: from here on the mapping owes exactly one
-            # aclrtHostUnregister, and close() must keep the owner until it
-            # returns success.  ``pointer`` is therefore set only
-            # after the registration it has to undo exists.
+                # A5 (Ascend950DT) may reject explicit registration with
+                # rc=507899.  Fall back to direct device pointer retrieval;
+                # skip unregister in close() since no registration was done.
+                logger.warning(
+                    "aclrtHostRegisterV2 failed for shared Engram: rc=%d size=%d; "
+                    "trying direct device pointer on A5", rc, size)
+                self._registered = False
+            else:
+                self._registered = True
+            # pointer is set regardless: close() uses _registered to decide
+            # whether unregister is owed.
             self.pointer = address_of_mapping
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
@@ -390,9 +406,11 @@ class SharedUvaBuffer:
         if self.pointer is not None and self.pointer.value:
             if self.ptrs is not None and self.ptrs.device.type == "npu":
                 torch.npu.synchronize()
-            rc = self.lib.aclrtHostUnregister(self.pointer)
-            if rc:
-                raise RuntimeError(f"aclrtHostUnregister failed for shared Engram: rc={rc}")
+            if self._registered:
+                rc = self.lib.aclrtHostUnregister(self.pointer)
+                if rc:
+                    raise RuntimeError(f"aclrtHostUnregister failed for shared Engram: rc={rc}")
+                self._registered = False
         self.pointer = ctypes.c_void_p()
         self.tensor = None
         self.ptrs = None
