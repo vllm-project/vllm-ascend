@@ -3,17 +3,14 @@
 # mypy: ignore-errors
 """Triton-free MRV2 sample ops for 310P.
 
-Reuses the PyTorch reference ``apply_top_k_top_p`` from mainline: 310P has no
-``torch_npu.npu_top_k_top_p``, and the mainline name is dispatched by build-time
-device type, which is not reliable for this package.
+Reuses the shared ``apply_top_k_top_p`` hardware-capability dispatch, just
+like other Ascend devices.
 """
 
 from vllm_ascend._310p.worker.v2.sample.logprob import gather_logprobs
 from vllm_ascend._310p.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend._310p.worker.v2.sample.temperature import apply_temperature
-from vllm_ascend.worker.v2.sample.apply_top_k_top_p import _apply_top_k_top_p_pytorch
-
-apply_top_k_top_p = _apply_top_k_top_p_pytorch
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p
 
 __all__ = [
     "apply_min_p",

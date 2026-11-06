@@ -14,8 +14,7 @@ def _apply_top_k_top_p_npu(  # type: ignore[misc]
     # ``has_topp_only_rows`` only selects the split top-p Triton pipeline upstream;
     # the fused operator handles top-p-only rows natively.
     #
-    # NOTE: TopKtopPSampleV2 takes ``(logits, p, k)`` with ``p`` whose dtype matches ``logits``;
-    # it is absent on 310P.
+    # NOTE: TopKtopPSampleV2 takes ``(logits, p, k)`` with ``p`` whose dtype matches ``logits``.
     if k is None and p is None:
         return logits
     return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
