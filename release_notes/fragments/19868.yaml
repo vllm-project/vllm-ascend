@@ -1,0 +1,6 @@
+pr: 19868
+entries:
+  - category: feature
+    text: Added experimental MRv2 DSV4 complete-prefill pipeline balancing with bounded activation buffers and movable layer boundaries. Requires the matching shared vLLM runtime and supports eager PP2 with tensor parallelism and one output token per request.
+    model: DeepSeek-V4
+    hardware: [A3]
