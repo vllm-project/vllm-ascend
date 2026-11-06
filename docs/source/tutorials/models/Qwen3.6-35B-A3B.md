@@ -285,11 +285,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     export OPENBLAS_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
 
-    # Reduce memory fragmentation and avoid out-of-memory errors.
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
 
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
@@ -339,7 +334,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
-      --host 127.0.0.1 \
+      --host 0.0.0.0 \
       --port 8080 \
       --tensor-parallel-size 2 \
       --gpu-memory-utilization 0.90 \
@@ -409,18 +404,6 @@ to download [AI-ModelScope/MMMU](https://modelscope.cn/datasets/AI-ModelScope/MM
 | ------- | ------ | ---- | -------- | --------------------- |
 | mmmu | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
 | gpqa | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
-
-### 7.2 Using Language Model Evaluation Harness
-
-Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for installation and usage details. When using online serving, set `base_url` to the endpoint started in [Section 5](#5-online-service-deployment).
-
-```shell
-lm_eval \
-  --model local-completions \
-  --model_args model=qwen3.6,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
-  --tasks gsm8k \
-  --output_path ./
-```
 
 ## 8 Performance Evaluation
 
