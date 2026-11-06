@@ -87,11 +87,15 @@ def test_facade_delegates_worker_methods_and_metadata() -> None:
     assert connector.get_transfer_results(set()) is results
     connector.connector_worker.get_transfer_results.assert_called_once_with()
     assert connector.get_block_ids_with_load_errors() == {10}
-    assert connector.get_handshake_metadata() is connector.connector_worker.xfer_handshake_metadata
+    assert connector.get_handshake_metadata() is connector.connector_worker.get_handshake_metadata.return_value
+    connector.connector_worker.get_handshake_metadata.assert_called_once_with()
     connector.connector_worker.start_load_kv.assert_called_once_with(connector._connector_metadata)
 
 
-def test_pull_connector_selects_implementation_by_role() -> None:
+@pytest.mark.parametrize(
+    "connector_cls, prefix", [(MooncakePullConnector, "MooncakePull"), (MooncakePushConnector, "MooncakePush")]
+)
+def test_connector_selects_implementation_by_role(connector_cls, prefix) -> None:
     config = MagicMock()
     config.kv_transfer_config.engine_id = "engine"
     config.kv_transfer_config.kv_role = "kv_producer"
@@ -106,22 +110,24 @@ def test_pull_connector_selects_implementation_by_role() -> None:
         patch.object(MooncakeBaseConnector, "__init__", initialize_base),
         patch.object(
             connector_module,
-            "MooncakePullConnectorScheduler",
+            f"{prefix}ConnectorScheduler",
             return_value=MagicMock(),
         ) as scheduler_cls,
         patch.object(
             connector_module,
-            "MooncakePullConnectorWorker",
+            f"{prefix}ConnectorWorker",
             return_value=MagicMock(),
         ) as worker_cls,
     ):
-        scheduler_connector = MooncakePullConnector(config, KVConnectorRole.SCHEDULER, kv_cache_config)
-        worker_connector = MooncakePullConnector(config, KVConnectorRole.WORKER, kv_cache_config)
+        scheduler_connector = connector_cls(config, KVConnectorRole.SCHEDULER, kv_cache_config)
+        worker_connector = connector_cls(config, KVConnectorRole.WORKER, kv_cache_config)
 
     assert scheduler_connector.connector_scheduler is scheduler_cls.return_value
     assert worker_connector.connector_worker is worker_cls.return_value
 
-
-def test_push_connector_is_explicitly_unimplemented() -> None:
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        MooncakePushConnector(MagicMock(), KVConnectorRole.SCHEDULER, MagicMock())
+    assert scheduler_connector.connector_worker is None
+    assert worker_connector.connector_scheduler is None
+    scheduler_cls.assert_called_once_with(config, "engine", kv_cache_config)
+    worker_cls.assert_called_once_with(config, "engine", kv_cache_config)
+    scheduler_connector.shutdown()
+    scheduler_cls.return_value.shutdown.assert_called_once_with()

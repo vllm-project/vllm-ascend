@@ -1,0 +1,7 @@
+pr: 20940
+entries:
+  - category: feature
+    text: >-
+      Added the experimental MooncakePushConnector for Ascend Mooncake V2
+      layerwise KV push transfers with the Ascend layerwise proxy, asynchronous metaserver notification
+      and PCP/TP routing. MooncakeConnectorV2 continues to use the pull path.

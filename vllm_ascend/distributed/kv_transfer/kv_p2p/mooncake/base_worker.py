@@ -22,9 +22,11 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -36,6 +38,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_ci
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakePPTransferMetadata,
     MooncakeTransferMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
@@ -101,7 +104,215 @@ def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tenso
     return rope.storage_offset() - nope.storage_offset() == nope_block_elems
 
 
-class MooncakeBaseConnectorWorker:
+class MooncakeTransferAddressMixin:
+    """Direction-independent local/remote address calculation."""
+
+    # Supplied by the worker and its registered cache descriptors.
+    tp_rank: int
+    tp_size: int
+    pcp_rank: int
+    pcp_size: int
+    layer_names: list[str]
+    kv_caches_base_addr: list[list[int]]
+    block_shapes: list[list[tuple[int, ...]]]
+    block_strides: list[list[int]]
+    block_lens: list[list[int]]
+
+    def _append_mamba_transfer_addresses(
+        self,
+        spec: MambaSpec,
+        remote_pcp_rank: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+        transfer_entries_by_layer: dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+        remote_metadata: MooncakePPTransferMetadata,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+    ) -> None:
+        """Append a replicated Mamba state or one producer PCP/TP head shard."""
+        tp_replicated = getattr(spec, "tp_replicated", False)
+        remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
+        local_rank = self.tp_rank * self.pcp_size + self.pcp_rank
+        local_size = self.pcp_size * self.tp_size
+        remote_rank = remote_tp_rank * len(remote_metadata.metadata_by_pcp_rank) + remote_pcp_rank
+        remote_size = len(remote_metadata.metadata_by_pcp_rank) * remote_tp_size
+        larger_tp_size = max(local_size, remote_size)
+        smaller_tp_size = min(local_size, remote_size)
+        if smaller_tp_size <= 0 or (not tp_replicated and larger_tp_size % smaller_tp_size != 0):
+            raise ValueError(
+                f"Mooncake Mamba TP sizes must have an integer ratio, got local={local_size}, remote={remote_size}"
+            )
+        tp_ratio = larger_tp_size // smaller_tp_size
+        if tp_replicated:
+            rank_offset = 0
+        elif remote_size >= local_size:
+            rank_offset = remote_rank % tp_ratio
+            if remote_rank // tp_ratio != local_rank:
+                raise ValueError(f"Mooncake Mamba remote TP {remote_rank} does not belong to local TP {local_rank}")
+        else:
+            rank_offset = local_rank % tp_ratio
+            if local_rank // tp_ratio != remote_rank:
+                raise ValueError(f"Mooncake Mamba local TP {local_rank} does not belong to remote TP {remote_rank}")
+
+        for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
+            local_base_addrs = self.kv_caches_base_addr[local_layer_index]
+            remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
+            local_shapes = self.block_shapes[local_layer_index]
+            remote_shapes = remote_metadata.block_shapes[remote_layer_index]
+            if not (
+                len(local_base_addrs)
+                == len(remote_base_addrs)
+                == len(local_shapes)
+                == len(remote_shapes)
+                == len(spec.dtypes)
+            ):
+                raise ValueError(
+                    f"Mooncake Mamba cache metadata count mismatch for layer {self.layer_names[local_layer_index]!r}"
+                )
+
+            for cache_index, (local_base_addr, remote_base_addr) in enumerate(zip(local_base_addrs, remote_base_addrs)):
+                local_block_stride = self.block_strides[local_layer_index][cache_index]
+                remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
+                local_block_len = self.block_lens[local_layer_index][cache_index]
+                remote_block_len = remote_metadata.block_lens[remote_layer_index][cache_index]
+                local_shape = local_shapes[cache_index]
+                remote_shape = remote_shapes[cache_index]
+
+                address_slices: list[tuple[int, int, int]]
+                if tp_replicated:
+                    if local_shape != remote_shape or local_block_len != remote_block_len:
+                        raise ValueError(
+                            f"Mooncake replicated Mamba metadata mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, 0, local_block_len)]
+                elif local_size == remote_size:
+                    if remote_rank != local_rank or local_block_len != remote_block_len:
+                        raise ValueError(
+                            f"Mooncake Mamba equal-TP metadata mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, 0, local_block_len)]
+                elif cache_index == 0 and len(local_shape) == len(remote_shape) == 2:
+                    if local_shape[0] != remote_shape[0]:
+                        raise ValueError(
+                            f"Mooncake Mamba conv row mismatch for layer {self.layer_names[local_layer_index]!r}: "
+                            f"local={local_shape}, remote={remote_shape}"
+                        )
+                    dtype_size = torch.tensor([], dtype=spec.dtypes[cache_index]).element_size()
+                    mamba_type = spec.mamba_type
+                    local_projection_widths: tuple[int, ...]
+                    remote_projection_widths: tuple[int, ...]
+                    if mamba_type == MambaAttentionBackendEnum.MAMBA1:
+                        local_projection_widths = (local_shape[1],)
+                        remote_projection_widths = (remote_shape[1],)
+                    elif mamba_type in (MambaAttentionBackendEnum.MAMBA2, MambaAttentionBackendEnum.GDN_ATTN):
+                        if len(local_shapes) < 2 or len(remote_shapes) < 2:
+                            raise ValueError(
+                                f"Mooncake {mamba_type.name} conv transfer requires a temporal state shape"
+                            )
+                        local_state_shape = local_shapes[1]
+                        remote_state_shape = remote_shapes[1]
+                        local_state_width = local_state_shape[0] * local_state_shape[1]
+                        remote_state_width = remote_state_shape[0] * remote_state_shape[1]
+                        local_remainder = local_shape[1] - local_state_width
+                        remote_remainder = remote_shape[1] - remote_state_width
+                        if local_remainder <= 0 or remote_remainder <= 0 or local_remainder % 2 or remote_remainder % 2:
+                            raise ValueError(
+                                f"Mooncake {mamba_type.name} conv shape cannot be decomposed: "
+                                f"local={local_shape}, remote={remote_shape}, "
+                                f"local_state={local_state_shape}, remote_state={remote_state_shape}"
+                            )
+                        if mamba_type == MambaAttentionBackendEnum.MAMBA2:
+                            local_projection_widths = (
+                                local_state_width,
+                                local_remainder // 2,
+                                local_remainder // 2,
+                            )
+                            remote_projection_widths = (
+                                remote_state_width,
+                                remote_remainder // 2,
+                                remote_remainder // 2,
+                            )
+                        else:
+                            local_projection_widths = (
+                                local_remainder // 2,
+                                local_remainder // 2,
+                                local_state_width,
+                            )
+                            remote_projection_widths = (
+                                remote_remainder // 2,
+                                remote_remainder // 2,
+                                remote_state_width,
+                            )
+                    else:
+                        raise NotImplementedError(
+                            f"Mooncake unequal-TP conv transfer does not support Mamba type {mamba_type!r}"
+                        )
+                    if (
+                        sum(local_projection_widths) != local_shape[1]
+                        or sum(remote_projection_widths) != remote_shape[1]
+                    ):
+                        raise ValueError(
+                            f"Mooncake Mamba conv projections do not match cache shapes for layer "
+                            f"{self.layer_names[local_layer_index]!r}: local={local_shape}, remote={remote_shape}"
+                        )
+
+                    address_slices = []
+                    local_projection_offset = 0
+                    remote_projection_offset = 0
+                    for local_projection_width, remote_projection_width in zip(
+                        local_projection_widths, remote_projection_widths
+                    ):
+                        if remote_size > local_size:
+                            if local_projection_width != remote_projection_width * tp_ratio:
+                                raise ValueError("Mooncake Mamba conv projection TP ratio mismatch")
+                            local_slice_offset = local_projection_offset + rank_offset * remote_projection_width
+                            remote_slice_offset = remote_projection_offset
+                            transfer_width = remote_projection_width
+                        else:
+                            if remote_projection_width != local_projection_width * tp_ratio:
+                                raise ValueError("Mooncake Mamba conv projection TP ratio mismatch")
+                            local_slice_offset = local_projection_offset
+                            remote_slice_offset = remote_projection_offset + rank_offset * local_projection_width
+                            transfer_width = local_projection_width
+                        for row_index in range(local_shape[0]):
+                            address_slices.append(
+                                (
+                                    (row_index * local_shape[1] + local_slice_offset) * dtype_size,
+                                    (row_index * remote_shape[1] + remote_slice_offset) * dtype_size,
+                                    transfer_width * dtype_size,
+                                )
+                            )
+                        local_projection_offset += local_projection_width
+                        remote_projection_offset += remote_projection_width
+                elif remote_size > local_size:
+                    if local_block_len != remote_block_len * tp_ratio:
+                        raise ValueError(
+                            f"Mooncake Mamba state TP ratio mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(rank_offset * remote_block_len, 0, remote_block_len)]
+                else:
+                    if remote_block_len != local_block_len * tp_ratio:
+                        raise ValueError(
+                            f"Mooncake Mamba state TP ratio mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, rank_offset * local_block_len, local_block_len)]
+
+                for _, local_block_ids, remote_block_ids in transfer_entries:
+                    for local_block_id, remote_block_id in zip(local_block_ids, remote_block_ids):
+                        local_block_addr = local_base_addr + local_block_id * local_block_stride
+                        remote_block_addr = remote_base_addr + remote_block_id * remote_block_stride
+                        for local_inner_offset, remote_inner_offset, transfer_len in address_slices:
+                            src_list.append(local_block_addr + local_inner_offset)
+                            dst_list.append(remote_block_addr + remote_inner_offset)
+                            length_list.append(transfer_len)
+
+
+class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
     """Worker implementation shared by Mooncake transfer modes."""
 
     def __init__(
@@ -162,6 +373,10 @@ class MooncakeBaseConnectorWorker:
         self.xfer_stats = MooncakeKVConnectorStats()
 
         logger.info("Initializing Mooncake worker %s", engine_id)
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """Return the registered cache descriptor for either transfer mode."""
+        return self.xfer_handshake_metadata
 
     def _build_kv_cache_spec_mappings(self) -> None:
         """Flatten group specs and map each layer to its group and spec.
