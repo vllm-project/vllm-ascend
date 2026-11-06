@@ -10,6 +10,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
+import vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils as rejection_utils
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
@@ -641,3 +642,63 @@ def test_entropy_verify_reduces_all_vocab_blocks(has_draft_logits):
     assert (sampled[counts == 2, 0] == 0).all()
     # Ensure these draws would expose a reduction that uses only the first block.
     assert np.any(expected != reference(_entropy_thresholds(p[:, :1], 1.0, 1.0)))
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("draft_lengths", [(5,), (1, 5)])
+@pytest.mark.parametrize("vocab_size", [17, 8193])
+@torch.inference_mode()
+def test_block_verification_rejects_zero_probability_drafts(monkeypatch, draft_lengths, vocab_size):
+    """The last request must not accept drafts masked out by the target.
+
+    Poison only the residual workspace so a missing write cannot be hidden by
+    allocator contents. This exercises the real upstream kernel and NPU sampler.
+    """
+    kernel = rejection_utils._compute_local_residual_mass_kernel
+
+    class PoisonResidualWorkspace:
+        def __getitem__(self, grid):
+            def launch(workspace, *args, **kwargs):
+                workspace.fill_(float("nan"))
+                return kernel[grid](workspace, *args, **kwargs)
+
+            return launch
+
+    monkeypatch.setattr(rejection_utils, "_compute_local_residual_mass_kernel", PoisonResidualWorkspace())
+    device = "npu"
+    num_reqs = len(draft_lengths)
+    num_speculative_steps = max(draft_lengths)
+    row_counts = torch.tensor([n + 1 for n in draft_lengths], dtype=torch.int32)
+    num_logits = int(row_counts.sum())
+    # Disjoint support: the target always emits 0, while every draft proposes 1.
+    target_logits = torch.full((num_logits, vocab_size), float("-inf"), device=device)
+    target_logits[:, 0] = 0.0
+    draft_logits = torch.full(
+        (num_reqs, num_speculative_steps, vocab_size), float("-inf"), dtype=torch.bfloat16, device=device
+    )
+    draft_logits[:, :, 1] = 0.0
+    cu_num_logits = torch.cat([torch.zeros(1, dtype=torch.int32), row_counts.cumsum(0).to(torch.int32)]).to(device)
+    expanded_idx_mapping = torch.arange(num_reqs, dtype=torch.int32).repeat_interleave(row_counts).to(device)
+    expanded_local_pos = torch.cat([torch.arange(n + 1, dtype=torch.int32) for n in draft_lengths]).to(device)
+
+    sampled, num_sampled = rejection_sample(
+        target_logits=target_logits,
+        draft_logits=draft_logits,
+        draft_sampled=torch.ones(num_logits, dtype=torch.int64, device=device),
+        cu_num_logits=cu_num_logits,
+        pos=torch.arange(num_logits, dtype=torch.int32, device=device),
+        idx_mapping=torch.arange(num_reqs, dtype=torch.int32, device=device),
+        expanded_idx_mapping=expanded_idx_mapping,
+        expanded_local_pos=expanded_local_pos,
+        temperature=torch.ones(num_reqs, device=device),
+        seed=torch.arange(num_reqs, dtype=torch.int64, device=device),
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=True,
+        use_entropy_verify=False,
+    )
+    # Exactly one target token per request; no draft has nonzero target mass.
+    assert num_sampled.cpu().tolist() == [1] * num_reqs
+    assert sampled[:, 0].cpu().tolist() == [0] * num_reqs
