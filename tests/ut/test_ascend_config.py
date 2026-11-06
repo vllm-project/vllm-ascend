@@ -881,6 +881,23 @@ class TestAscendConfig(TestBase):
         self.assertIsNot(first_ascend_config, second_ascend_config)
         self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
 
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_disabled_lmhead_tp_allows_batch_sharded_sampling(self, mock_fix_incompatible_config):
+        for size in (0, 1, 2):
+            with self.subTest(size=size):
+                clear_ascend_config()
+                config = VllmConfig()
+                config.model_config.is_moe = True
+                config.parallel_config.enable_batch_sharded_sampling = True
+                config.additional_config = {"finegrained_tp_config": {"lmhead_tensor_parallel_size": size}}
+                if size > 1:
+                    with self.assertRaisesRegex(ValueError, "enable_batch_sharded_sampling is incompatible"):
+                        init_ascend_config(config)
+                else:
+                    result = init_ascend_config(config)
+                    self.assertEqual(result.finegrained_tp_config.lmhead_tensor_parallel_size, size)
+
 
 class TestShortRequestFirstConfig(TestBase):
     def test_default_is_disabled(self):
@@ -1409,6 +1426,35 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
+
+    def test_disabled_finegrained_tp_sizes_allow_dense_models(self):
+        for size in (0, 1):
+            with self.subTest(size=size):
+                config = FinegrainedTPConfig(
+                    **{
+                        f"{component}_tensor_parallel_size": size
+                        for component in ("oproj", "mlp", "lmhead", "embedding")
+                    }
+                )
+                vc = self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE)
+                vc.model_config.is_moe = False
+                vc.parallel_config.tensor_parallel_size = 2
+                vc.parallel_config.prefill_context_parallel_size = 2
+                vc.kv_transfer_config = None
+                config._validate_preconditions(vc)
+
+    def test_enabled_finegrained_tp_sizes_keep_validation(self):
+        for component in ("oproj", "mlp", "lmhead", "embedding"):
+            with self.subTest(component=component):
+                config = FinegrainedTPConfig(**{f"{component}_tensor_parallel_size": 2})
+                vc = self._oproj_tp_vllm_config()
+                vc.model_config.is_moe = False
+                with self.assertRaisesRegex(AssertionError, "only for MOE models"):
+                    config._validate_preconditions(vc)
+                vc.model_config.is_moe = True
+                vc.parallel_config.data_parallel_size = 3
+                with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):
+                    config._validate_preconditions(vc)
 
 
 class TestUpstreamConfigCompatibility(TestBase):
