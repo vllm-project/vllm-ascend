@@ -238,7 +238,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
         # parameters required for kv pool and Mooncake
         export PYTHONHASHSEED=0
         export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         if [ "$ROLE" == "prefill" ]; then
             KV_ROLE="kv_producer"
@@ -385,7 +384,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     # parameters required for kv pool and Mooncake
     export PYTHONHASHSEED=0
     export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     echo "Starting vLLM on Series: $HARDWARE_SERIES"
 
