@@ -209,6 +209,9 @@ are not interchangeable.
 | `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
 | `--reasoning-parser` | Separates reasoning from the final answer. Use the parser in the selected example (`glm47` or `glm45`); do not infer it from the tool-call parser name. |
 
+All serving examples below explicitly use Model Runner V2 with
+`VLLM_USE_V2_MODEL_RUNNER=1`.
+
 ### 5.1 Context Below 1M
 
 <a id="glm-950-preparation"></a>
@@ -248,6 +251,8 @@ variable in the selected script. Use the same checkpoint path on all nodes.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
+
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-W4A4C8-mxfp4 \
       --host 0.0.0.0 \
       --port 8000 \
@@ -268,7 +273,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       --reasoning-parser glm47 \
       --kv-cache-dtype fp8 \
       --attention_config.indexer_kv_dtype fp8 \
-      --additional-config '{"enable_flashcomm1": true, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}'
+      --additional-config '{"enable_flashcomm1": true, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true}'
     ```
 
     **Key Parameter Descriptions — 950DT products**
@@ -299,6 +304,8 @@ variable in the selected script. Use the same checkpoint path on all nodes.
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
+
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port 8000 \
@@ -320,7 +327,7 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
+      --additional-config '{"enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -411,7 +418,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export VLLM_USE_FASTOKENS=1
 
     export VLLM_DISABLE_COMPILE_CACHE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -440,7 +447,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
       --speculative-config '{"num_speculative_tokens": 5,"method": "deepseek_mtp", "enforce_eager":true}' \
       --kv-cache-dtype fp8 \
       --attention_config.indexer_kv_dtype fp8 \
-      --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+      --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
     ```
 
     ###### node 1
@@ -498,7 +505,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export VLLM_USE_FASTOKENS=1
 
     export VLLM_DISABLE_COMPILE_CACHE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -527,7 +534,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
       --speculative-config '{"num_speculative_tokens": 5,"method": "deepseek_mtp", "enforce_eager":true}' \
       --kv-cache-dtype fp8 \
       --attention_config.indexer_kv_dtype fp8 \
-      --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+      --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
       --headless
     ```
 
@@ -557,7 +564,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     - `--speculative-config` enables `deepseek_mtp` with five speculative
       tokens and an eager draft. `--enforce-eager` also keeps the main
       engine in eager mode.
-    - `--additional-config` enables DSA CP, FlashComm1, CPU binding and
+    - `--additional-config` enables FlashComm1, CPU binding and
       `enable_fused_mc2: 1`. Both PP nodes use the same configuration.
 
 === "A3 series"
@@ -592,6 +599,8 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_MLAPO=1
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
+
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
@@ -621,7 +630,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
+        --additional-config '{"enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -649,6 +658,8 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export HCCL_BUFFSIZE=400
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_MLAPO=1
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
@@ -680,7 +691,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
-        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}' \
+        --additional-config '{"enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}' \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -719,7 +730,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export CPU_AFFINITY_CONF=1
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
@@ -746,7 +757,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
         --additional-config '{
-            "enable_dsa_cp": true,
             "scheduler_config": {"enable_balance_scheduling": true},
             "ascend_compilation_config": {"fuse_muls_add": true},
             "multistream_overlap_shared_expert": true,
@@ -787,7 +797,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export CPU_AFFINITY_CONF=1
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
@@ -816,7 +826,6 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --kv-cache-dtype int8 \
         --attention_config.indexer_kv_dtype int8 \
         --additional-config '{
-            "enable_dsa_cp": true,
             "scheduler_config": {"enable_balance_scheduling": true},
             "ascend_compilation_config": {"fuse_muls_add": true},
             "multistream_overlap_shared_expert": true,
@@ -872,7 +881,7 @@ is deprecated); `fuse_muls_add` belongs under `ascend_compilation_config`.
 - `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
-- `VLLM_USE_V2_MODEL_RUNNER=0`: Selects the V1 model runner for the A2 examples.
+- `VLLM_USE_V2_MODEL_RUNNER=1`: Selects Model Runner V2 for all serving examples on this page.
 
 **KV cache configuration:**
 
@@ -1025,7 +1034,7 @@ layerwise setting and topology.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -1074,7 +1083,7 @@ layerwise setting and topology.
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}'
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}'
             ```
 
         2. Prefill PP rank 1 (P1 and P3)
@@ -1132,7 +1141,7 @@ layerwise setting and topology.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -1181,7 +1190,7 @@ layerwise setting and topology.
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}' \
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}' \
               --headless
             ```
 
@@ -1233,7 +1242,7 @@ layerwise setting and topology.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -1392,7 +1401,7 @@ layerwise setting and topology.
       on Decode, with base KV ports `30000` and `30300`, respectively.
       The connector describes each Prefill instance as DP1/PP2/TP8 and
       the shared Decode group as DP16/TP1.
-    - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 2`.
+    - Prefill enables FlashComm1 and `enable_fused_mc2: 2`.
       Decode enables MLAPO. Both roles enable shared-expert multistream
       overlap, prefix caching and recomputation scheduling.
     - `enable_fused_mc2: 2` selects MegaMoE when `cann_ops_transformer`
@@ -1550,7 +1559,7 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -1588,7 +1597,6 @@ layerwise setting and topology.
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
                 --additional-config '{
-                    "enable_dsa_cp":true,
                     "enable_fused_mc2": 2,
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
@@ -1640,7 +1648,7 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -1678,7 +1686,6 @@ layerwise setting and topology.
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
                 --additional-config '{
-                    "enable_dsa_cp":true,
                     "enable_fused_mc2": 2,
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
@@ -1730,7 +1737,7 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
             export LOCAL_WORLD_SIZE=16
@@ -1816,7 +1823,7 @@ layerwise setting and topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
             export LOCAL_WORLD_SIZE=16
@@ -1946,7 +1953,7 @@ layerwise setting and topology.
       tokens with an eager draft model, and `FULL_DECODE_ONLY` graph mode.
       `recompute_scheduler_enable=true` allows recomputation scheduling.
     - Both roles retain chunked prefill, async scheduling, seed 1024, and
-      memory utilization 0.92. Prefill enables prefix caching, DSA CP,
+      memory utilization 0.92. Prefill enables prefix caching,
       FlashComm1, `enable_fused_mc2=2`, and `enable_shared_expert_dp=true`.
       Non-pooled Decode disables prefix caching and NPU graph/static-kernel
       compilation with shared-expert multistream overlap, without fused MC2.
@@ -1975,7 +1982,7 @@ layerwise setting and topology.
     P0 exposes the only Prefill API on port 8077; P1-P3 are headless.
     Decode exposes ports 10010-10013 on each node. Prefill uses the `mp`
     executor with `--nnodes 4`; Decode uses a launcher to start one TP2
-    engine per DP rank. Both roles pin the V1 model runner and use int8
+    engine per DP rank. Both roles pin the V2 model runner and use int8
     attention and indexer KV caches. This deployment uses pipeline parallelism
     (PP4); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
 
@@ -2097,7 +2104,7 @@ layerwise setting and topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export CPU_AFFINITY_CONF=1
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
@@ -2136,7 +2143,7 @@ layerwise setting and topology.
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
-      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
+      --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true,"ascend_compilation_config":{"fuse_muls_add":true}}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
@@ -2192,7 +2199,7 @@ layerwise setting and topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export CPU_AFFINITY_CONF=1
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
@@ -2332,7 +2339,7 @@ layerwise setting and topology.
 
     Both roles use a 200,000-token maximum length, memory utilization 0.92,
     and three MTP tokens. Prefill uses eager mode, an 8,192-token batch budget,
-    64 sequences, DSA CP, and FlashComm1. Decode uses a 256-token
+    64 sequences, and FlashComm1. Decode uses a 256-token
     batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
     and recomputation scheduling.
 
@@ -2474,7 +2481,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_USE_FASTOKENS=1
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
             export VLLM_PP_LAYER_PARTITION="42,36"
 
@@ -2542,7 +2549,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 }' \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
             ```
 
         2. Prefill node 1
@@ -2596,7 +2603,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_USE_FASTOKENS=1
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
             export VLLM_PP_LAYER_PARTITION="42,36"
 
@@ -2664,7 +2671,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 }' \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
               --headless
             ```
 
@@ -2715,7 +2722,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export ASCEND_RT_VISIBLE_DEVICES=$1
             export VLLM_USE_FASTOKENS=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -2874,7 +2881,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     - `MMC_LOCAL_CONFIG_PATH` selects each node's MemCache configuration.
       Prepare the backend before starting the engines and verify shared
       pool reuse through its hit/load metrics.
-    - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 1`.
+    - Prefill enables FlashComm1 and `enable_fused_mc2: 1`.
       Decode enables MLAPO and shared-expert multistream overlap.
       Both roles enable recomputation scheduling.
 
@@ -2947,7 +2954,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -2990,7 +2997,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
                 --additional-config '{
-                    "enable_dsa_cp":true,
                     "enable_fused_mc2": 2,
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
@@ -3061,7 +3067,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export VLLM_USE_FASTOKENS=1
             export VLLM_PP_LAYER_PARTITION="42,36"
@@ -3104,7 +3110,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
                 --additional-config '{
-                    "enable_dsa_cp":true,
                     "enable_fused_mc2": 2,
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
@@ -3175,7 +3180,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -3287,7 +3292,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -3590,7 +3595,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
     export VLLM_PP_LAYER_PARTITION="20,20,20,18"
     export PYTHONHASHSEED=0
@@ -3628,7 +3633,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enforce-eager \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
+      --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
       --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
@@ -3662,9 +3667,8 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       "${SERVER_ROLE_ARGS[@]}"
     ```
 
-    The Prefill script keeps `--no-async-scheduling` together with the V1
-    runner and `profiling_chunk_config.enabled=true`. Enabling async
-    scheduling with this combination is rejected by the runtime.
+    The Prefill script keeps `--no-async-scheduling` together with the V2
+    runner and `profiling_chunk_config.enabled=true`.
 
     PP headless workers may fail with
     `Mooncake worker requires a local DP rank`. The pooled Prefill instance
@@ -3716,7 +3720,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
@@ -3940,7 +3944,7 @@ Select the tab that matches your deployment hardware.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -3960,7 +3964,6 @@ Select the tab that matches your deployment hardware.
             --max-model-len 1046576 \
             --safetensors-load-strategy 'prefetch' \
             --additional-config '{
-                "enable_dsa_cp":true,
                 "enable_fused_mc2": 1,
                 "enable_flashcomm1": true,
                 "enable_kvpp": true
@@ -4038,7 +4041,7 @@ Select the tab that matches your deployment hardware.
 
             export VLLM_DISABLE_COMPILE_CACHE=1
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -4152,7 +4155,7 @@ Select the tab that matches your deployment hardware.
       on Decode, with base KV ports `30000` and `30200`, respectively.
       Both roles declare Prefill DP2/TP8 and Decode DP2/TP8.
     - Both roles use FP8 attention and indexer KV caches and
-      `enable_fused_mc2: 1`. Prefill also enables DSA CP, FlashComm1 and
+      `enable_fused_mc2: 1`. Prefill also enables FlashComm1 and
       prefix caching.
 
 === "A3 series"
@@ -4228,7 +4231,7 @@ Select the tab that matches your deployment hardware.
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4250,7 +4253,6 @@ Select the tab that matches your deployment hardware.
                 --max-model-len 1048576 \
                 --safetensors-load-strategy 'prefetch' \
                 --additional-config '{
-                    "enable_dsa_cp": true,
                     "enable_fused_mc2": 2,
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
@@ -4326,7 +4328,7 @@ Select the tab that matches your deployment hardware.
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4348,7 +4350,6 @@ Select the tab that matches your deployment hardware.
                 --max-model-len 1048576 \
                 --safetensors-load-strategy 'prefetch' \
                 --additional-config '{
-                    "enable_dsa_cp": true,
                     "enable_fused_mc2": 2,
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
@@ -4424,7 +4425,7 @@ Select the tab that matches your deployment hardware.
             export ASCEND_RT_VISIBLE_DEVICES="$1"
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4519,7 +4520,7 @@ Select the tab that matches your deployment hardware.
             export ASCEND_RT_VISIBLE_DEVICES="$1"
 
             export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
-            export VLLM_USE_V2_MODEL_RUNNER=0
+            export VLLM_USE_V2_MODEL_RUNNER=1
 
             export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
             export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
@@ -4651,7 +4652,7 @@ Select the tab that matches your deployment hardware.
     - PCP remains 1, while DCP is 16 on Prefill and 4 on Decode.
       `--cp-kv-cache-interleave-size 128` and int8 attention/indexer KV caches
       are configured on both roles.
-    - Prefill enables chunked prefill, prefix caching, async scheduling, DSA CP,
+    - Prefill enables chunked prefill, prefix caching, async scheduling,
       FlashComm1, fused MC2 mode 2 and shared-expert DP. Decode explicitly disables
       prefix caching, enables recomputation scheduling and shared-expert
       multistream overlap, and selects NpuGraphEx/StaticKernel through
@@ -4821,9 +4822,9 @@ request; reserve output tokens within the 1,048,576-token context limit.
 
 ### 9.3 TurboQuant KV Cache for GLM-5.2 and GLM-5.3
 
-Use a build of the selected 0.30 maintenance branch containing the packed
-SFA TurboQuant support. This SFA path supports model runner V1; it does
-not require switching the V1 reference deployments to runner V2.
+Use a build of the selected vLLM-Ascend version containing packed
+SFA TurboQuant support for Model Runner V2. Keep
+`VLLM_USE_V2_MODEL_RUNNER=1` when enabling this cache format.
 Use `--dtype bfloat16` on A2/A3 and disable xLite graph mode.
 
 `--kv-cache-dtype turboquant_4bit_nc` replaces the int8 attention KV cache
