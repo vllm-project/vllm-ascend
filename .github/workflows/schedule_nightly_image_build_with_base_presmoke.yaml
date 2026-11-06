@@ -59,7 +59,7 @@ on:
         default: 'full'
         description: "Matrix shape for the nightly test image: 'full' builds both architectures; 'release' builds ubuntu arm64 only. Dependency versions always come from the Dockerfiles."
       should_push:
-        required: false
+        required: true
         type: boolean
         default: false
         description: "If true, login to SWR and push built images."
