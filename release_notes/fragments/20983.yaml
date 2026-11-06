@@ -1,0 +1,7 @@
+pr: 20983
+entries:
+  - category: bugfix
+    text: >-
+      Fixed sleep and wake-up handling of failed ACL memory copies so valid model weights are
+      retained and copy errors are reported. Successful copies now pass the destination
+      capacity in bytes.
