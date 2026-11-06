@@ -6,6 +6,7 @@ from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
+from vllm_ascend.core.kv_cache_interface import uses_large_page_allocator
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_pool_bytes_per_block,
@@ -17,6 +18,11 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     def _get_pool_bytes_per_block(self, vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]) -> int | None:
+        # Ascend accounts these layouts per block, but the large-page allocator
+        # plans a pool of whole pages instead, so its accounting belongs to
+        # vLLM.
+        if uses_large_page_allocator(vllm_config.cache_config):
+            return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         # GLM allocates main MLA/KDA and compressed-indexer/tail pages in
         # separate device tensors. The default one-backing probe cannot infer
         # their combined physical block cost from unequal tensor sizes.
