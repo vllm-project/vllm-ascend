@@ -194,13 +194,14 @@ def test_worker_constructor_and_shutdown_release_in_order(monkeypatch, pin_ops, 
     ],
 )
 def test_tiering_chooses_pinning_scope_from_layout(monkeypatch, replicated, extra, pin_enabled):
+    monkeypatch.setattr(npu_mod.cpu_spec, "_all_workers_barrier", Mock())
     monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 3), raising=False)
     region = object()
     worker_factory = Mock(return_value=object())
     monkeypatch.setattr(npu_mod, "SharedOffloadRegion", Mock(return_value=region))
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", worker_factory)
     spec = npu_mod.NPUTieringOffloadingSpec.__new__(npu_mod.NPUTieringOffloadingSpec)
-    spec.config = SimpleNamespace(parallel=SimpleNamespace(world_size=2))
+    spec.config = SimpleNamespace(parallel=SimpleNamespace(world_size=2, rank=1))
     spec.extra_config = extra
     spec.replicated_layout = replicated
     spec._engine_id = "pin-options"
