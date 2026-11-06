@@ -69,9 +69,33 @@ request owners. A zero prefix is unwritten; a positive prefix N makes `[0, N)`
 readable; an invalid prefix prevents subsequent reads from being accepted.
 Completed loads and contiguous appends establish readable prefixes. Completion
 and preemption release ownership while preserving reusable cached prefixes.
-Physical clearing, block copies, and completed Mooncake receives update validity
-at their existing lifecycle boundaries. Failed receives invalidate their
-destinations without changing the connector's completion and drain protocol.
+The scheduler's computed-token count describes a consumer's read requirement;
+it does not establish validity. A same-step prefix producer must first supply
+legal write evidence, while an already valid prefix still rejects overwrites.
+Physical clearing, block copies, and completed receives update validity at their
+existing lifecycle boundaries. The scheduler records external-load destinations,
+allocation generations, and logical token ranges when slots are allocated,
+including requests that are still waiting and have no scheduled tokens.
+Connector transport offsets are not interpreted as initialized-prefix lengths.
+
+The common connector methods provide completion evidence. Async receive results
+authorize later forwards. Sync loads become readable for a cache group only
+after its required layer waits; a missing wait reports incomplete coverage.
+FULL replay without observable sync-load completion also reports incomplete
+coverage. No extra connector polling or device waits are introduced.
+Failed loads discard only their destination blocks, preserving untouched local
+prefix blocks. A failed transfer can have overwritten the beginning of a partial
+destination block, so that entire block must be recomputed.
+Block failures remain attached to their submission until its completion is
+drained, even if the connector reports failures and completion in different steps.
+Completions must match the submission snapshot and current allocation. Reusing
+a request ID while its old receive is outstanding reports incomplete coverage,
+because the connector's request-ID-only result cannot distinguish both loads.
+Known old submissions may drain after cancellation without changing a new
+allocation or treating cancellation itself as a guard failure.
+Framework-authorized prefix replay truncates the specified validity range before
+write auditing; an ordinary prefix overwrite still fails. Transport drain and
+completion results are returned unchanged.
 
 For example, with block size 128 and a loaded 19-token prefix in block 1, the
 next token should write slot 147. A dummy write to slot 142 overwrites offset 14;
@@ -90,6 +114,13 @@ full-model incident.
 | Dummy/profile execution | Check writes against existing KV state; ignore discarded scratch reads. |
 | Runner V2 startup capture | Require empty request/cache state; do not audit CPU metadata inside device graph capture. |
 
+Canonical FULL plans can prepare a CPU validity transaction while the final
+metadata copies complete. The transaction is committed only when every actual
+plan exactly matches the independent scheduler-derived plan and the tracked
+state is unchanged. Other plans and suspected violations use the complete audit.
+This optimization preserves the audit and failure boundary, including its
+device-completion wait.
+
 Live or cache-preserving Runner V2 recapture is rejected, including pending
 receives. Normal FULL replay remains audited. Allocator and kernel block
 coordinates must match.
@@ -98,6 +129,10 @@ The guard explicitly rejects CP, DBO, speculation, encoder/decoder execution,
 sliding or circular caches, other compressed or state-cache semantics, unknown
 attention implementations, and connectors other than Mooncake. These paths
 require their own validity rules before they can be supported.
+The Ascend block-transfer implementation is registered as `MooncakeConnectorV1`;
+this name and the legacy `MooncakeConnector` name pass the guard's connector check.
+The shared load adapter is not an expansion of this connector support list;
+other backends still require end-to-end validation before enabling them.
 
 The guard validates metadata and observed arguments. It does not inspect kernel
 memory instructions, verify KV numerical values, or detect a kernel writing to
@@ -115,6 +150,10 @@ Logs use the `[KV_GUARD]` prefix:
 - `guard.coverage_gap`: required evidence was missing, so the audit was
   incomplete. This is not a successful check or an exemption from validation.
 
+Runner V2 may submit async loads during `sample_tokens` post-forward cleanup.
+Load submission and completion are checked at the connector cleanup boundary,
+after the separately audited `execute_model` forward.
+
 Fields identify the layer, request, pool, cache group, block, allocation
 generation, and relevant slot or range when available. Repeated failures are
 deduplicated with bounded state. Routine validity transitions are not logged.
@@ -127,7 +166,8 @@ failure latching, and the V1/V2 adapters:
 
 ```bash
 pytest -q tests/ut/debug/test_kv_guard.py \
-  tests/ut/debug/test_kv_guard_runtime.py tests/ut/debug/test_kv_guard_v2.py
+  tests/ut/debug/test_kv_guard_runtime.py tests/ut/debug/test_kv_guard_v2.py \
+  tests/ut/debug/test_kv_guard_loads.py
 ```
 
 The single-card service regression starts separate disabled and enabled servers,

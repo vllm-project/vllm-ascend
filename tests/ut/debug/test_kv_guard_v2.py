@@ -8,12 +8,13 @@ from typing import Any
 import pytest
 import torch
 
+from . import complete_load, load_plan
 from .test_kv_guard_runtime import bind, metadata
 from .test_kv_guard_runtime import runtime_fixture as runtime_fixture
 
 
-@pytest.fixture
-def adapter(runtime):
+@pytest.fixture(name="adapter")
+def adapter_fixture(runtime):
     subject = runtime.subject
     impl = type("AscendAttentionBackendImpl", (), {})()
     runtime.config = NS(
@@ -190,6 +191,7 @@ def test_v2_failed_forward_does_not_commit_writes_or_leak_scope(adapter):
 def test_v2_clears_then_copies_after_physical_update(adapter):
     runtime = adapter.runtime
     runtime.state.bind({"pool_id": "pool", "requests": {"r": [[(1, 1), (2, 1)]]}, "scheduled_requests": {"r": (4, 0)}})
+    complete_load(runtime.state, end=4)
     packet = NS(new_block_ids_to_zero=[2], kv_cache_block_copies=[NS(src_block_id=1, dst_block_id=2)])
     order = []
     clear, copy = runtime.zero_blocks, runtime.copy_blocks
@@ -312,11 +314,51 @@ def test_v2_keyword_calls_preserve_upstream_parameter_names(adapter):
 
     adapter.wrap_execute(execute)(scheduler_output=message())
     adapter.wrap_update(lambda output: "unchanged")(scheduler_output=NS())
+
+
+@pytest.mark.parametrize("async_output", [False, True])
+def test_v2_output_is_guarded_after_the_forward_scope_submits_its_audit(adapter, async_output):
+    runtime = adapter.runtime
+    runtime._defer_audit = True
+    consumed = []
+    result = NS(get_output=lambda: consumed.append(True)) if async_output else "result"
+
+    def execute(output):
+        prepare(adapter, ["r"], [128], [[1]], [1], "FULL")
+        return result
+
+    output = adapter.wrap_execute(execute)(message())
+    if async_output:
+        assert runtime.state.blocks[0, 1].valid_end == 0
+        output.get_output()
+        assert consumed == [True]
+    assert runtime.state.blocks[0, 1].valid_end == 1
+    assert not runtime.events
+
+
+@pytest.mark.parametrize("flag", ["dummy_run", "is_profile"])
+def test_v2_synthetic_execution_drains_the_real_pending_audit_first(adapter, flag):
+    runtime = adapter.runtime
+    runtime._defer_audit = True
+
+    def real(output):
+        prepare(adapter, ["r"], [128], [[1]], [1], "FULL")
+
+    adapter.wrap_execute(real)(message())
+    assert runtime.state.blocks[0, 1].valid_end == 0
+
+    def synthetic(output, **kwargs):
+        assert runtime.state.blocks[0, 1].valid_end == 1
+        prepare(adapter, ["dummy"], [-1], [[0]], [1], "FULL")
+
+    adapter.wrap_execute(synthetic)(message(), **{flag: True})
+    assert not runtime.events
     assert adapter.runtime.state.blocks[0, 1].valid_end == 1
     assert not adapter.runtime.events
 
 
 def test_v2_pending_receive_also_blocks_graph_recapture(adapter):
-    adapter.runtime.state.load({"request_id": "incoming", "local_block_ids": [[1]], "num_computed_tokens": 19})
+    adapter.runtime.state.bind({"pool_id": "pool", "requests": {"incoming": [[(1, 1)]]}})
+    adapter.runtime.state.begin_load(load_plan(adapter.runtime.state, "incoming"))
     with pytest.raises(ValueError, match="recapture is unsupported"):
         adapter.wrap_capture(lambda: pytest.fail("capture must not run"))()

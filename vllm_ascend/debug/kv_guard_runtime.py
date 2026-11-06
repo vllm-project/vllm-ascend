@@ -14,12 +14,17 @@ from __future__ import annotations
 import functools
 from collections import OrderedDict
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass, replace
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any, cast
 
+import torch
+
 from vllm_ascend.debug.kv_guard import INVALID_PREFIX, KVGuard
 from vllm_ascend.debug.kv_guard_config import KVGuardConfig
+from vllm_ascend.debug.kv_guard_connector import ConnectorGuard
 
 _MAX_REPORT_KEYS = 1024
 
@@ -52,6 +57,29 @@ class KVGuardError(RuntimeError):
     """Stop returning model results after a violation or incomplete audit."""
 
 
+class _PendingAudit:
+    """One snapshot, consumed once by the output reader or next forward."""
+
+    def __init__(self, complete: Any):
+        self._complete = complete
+        self._lock = Lock()
+        self._done = False
+        self._error: BaseException | None = None
+
+    def finish(self) -> None:
+        with self._lock:
+            if not self._done:
+                try:
+                    self._complete()
+                except BaseException as exc:
+                    self._error = exc
+                finally:
+                    self._complete = None
+                    self._done = True
+            if self._error is not None:
+                raise self._error
+
+
 class GuardRuntime:
     def __init__(self, vllm_config: Any):
         from vllm.logger import logger
@@ -73,6 +101,14 @@ class GuardRuntime:
         self._failure: str | None = None
         self.action = KVGuardConfig.from_vllm_config(vllm_config).action
         self._runner_adapter: _V2RunnerAdapter | None = None
+        self._host_buffers: list[Any] = []
+        self._copy_event: Any = None
+        self._connector: ConnectorGuard | None = None
+        self._recomputes: list[dict] = []
+        self._unready_load_groups: set[int] = set()
+        self._defer_audit = False
+        self._pending: _PendingAudit | None = None
+        self._deferred_state: list[tuple[Any, tuple]] = []
 
     def _check_failure(self) -> None:
         if self.action == "raise" and self._failure is not None:
@@ -85,31 +121,32 @@ class GuardRuntime:
     def report(self, event: str, **fields: Any) -> None:
         failed = event in ("guard.violation", "guard.coverage_gap")
         if failed:
-            if self._failure is None:
-                self._failure = str(fields.get("reason", event))
-            key = (
-                event,
-                *(
-                    fields.get(name)
-                    for name in (
-                        "operation",
-                        "reason",
-                        "pool_id",
-                        "group_id",
-                        "block_id",
-                        "alloc_epoch",
-                        "layer",
-                        "request_id",
-                    )
-                ),
-                tuple(fields.get("request_ids", ())),
-            )
-            if key in self._reported:
-                self._reported.move_to_end(key)
-                return
-            self._reported[key] = None
-            if len(self._reported) > _MAX_REPORT_KEYS:
-                self._reported.popitem(last=False)
+            with self.state._lock:
+                if self._failure is None:
+                    self._failure = str(fields.get("reason", event))
+                key = (
+                    event,
+                    *(
+                        fields.get(name)
+                        for name in (
+                            "operation",
+                            "reason",
+                            "pool_id",
+                            "group_id",
+                            "block_id",
+                            "alloc_epoch",
+                            "layer",
+                            "request_id",
+                        )
+                    ),
+                    tuple(fields.get("request_ids", ())),
+                )
+                if key in self._reported:
+                    self._reported.move_to_end(key)
+                    return
+                self._reported[key] = None
+                if len(self._reported) > _MAX_REPORT_KEYS:
+                    self._reported.popitem(last=False)
         payload = " ".join(f"{key}={value}" for key, value in fields.items())
         log = self.logger.error if failed else self.logger.info
         log("[KV_GUARD] %s %s", event, payload)
@@ -128,7 +165,7 @@ class GuardRuntime:
                 getattr(parallel, "prefill_context_parallel_size", 1) != 1,
                 getattr(parallel, "decode_context_parallel_size", 1) != 1,
                 getattr(parallel, "enable_dbo", False),
-                transfer is not None and transfer.kv_connector != "MooncakeConnector",
+                transfer is not None and transfer.kv_connector not in ("MooncakeConnector", "MooncakeConnectorV1"),
             )
         )
         sizes = {}
@@ -161,15 +198,28 @@ class GuardRuntime:
                 "(CP, DBO, speculation, encoder/decoder, connector)"
             )
         self.state.configure(sizes)
+        self._defer_audit = (
+            bool(getattr(getattr(config, "scheduler_config", None), "async_scheduling", False))
+            and transfer is None
+            # Pooling bypasses sample_tokens; non-reply workers may discard outputs.
+            and getattr(runner, "is_pooling_model", None) is False
+            and getattr(parallel, "tensor_parallel_size", None) == 1
+            and getattr(parallel, "pipeline_parallel_size", None) == 1
+            and hasattr(runner, "sample_tokens")
+        )
         if self._runner_adapter is not None:
             self._runner_adapter.configure()
         self.report("guard.enabled", failure_action=self.action)
 
     def write(self, layer: str, slots: Any, token_offset: int = 0) -> None:
+        if self._phase == "forward" and self._connector is not None and self._connector.sync:
+            self._connector.check_ready(layer)
         if self._phase is not None and not self._full_graph:
             self._accesses.append(WriteAccess(layer, slots, token_offset))
 
     def read(self, layer: str, table: Any, lengths: Any, starts: Any = None, request_offset: int = 0) -> None:
+        if self._phase == "forward" and self._connector is not None and self._connector.sync:
+            self._connector.check_ready(layer)
         if self._phase is not None and not self._full_graph and table is not None:
             self._accesses.append(ReadAccess(layer, table, lengths, starts, request_offset))
 
@@ -265,7 +315,174 @@ class GuardRuntime:
             query_ends.append(len(slots))
         return ExpectedAccess(slots, query_ends, tables, lengths)
 
+    def _preview_append(self, runner: Any, expected: dict[int, ExpectedAccess]) -> Any:
+        """Prepare a silent, unpublished canonical WRITE-then-READ transaction."""
+        baseline, proposed, bindings = {}, {}, {}
+        with self.state._lock:
+            pool = self.state.pool_id
+            for group_id, plan in expected.items():
+                size = self.state.group_sizes[group_id]
+                intervals: dict[int, list[tuple[int, int]]] = {}
+                for row, request in enumerate(runner.input_batch.req_ids):
+                    groups = self.state.requests[request]
+                    bindings[request] = tuple(tuple(refs) for refs in groups)
+                    refs = groups[group_id]
+                    for block_id, epoch in refs[: len(plan.tables[row])]:
+                        key = group_id, block_id
+                        block = self.state.blocks.get(key)
+                        if (
+                            block_id == 0
+                            or block is None
+                            or epoch != block.epoch
+                            or block.valid_end == INVALID_PREFIX
+                            or request not in block.owners
+                        ):
+                            return None
+                        baseline[key] = block.epoch, block.valid_end, frozenset(block.owners)
+                    computed, count = self._scheduled[request]
+                    for logical in range(computed // size, (computed + count - 1) // size + 1):
+                        block_id, _ = refs[logical]
+                        start = max(computed, logical * size) - logical * size
+                        end = min(computed + count, (logical + 1) * size) - logical * size
+                        intervals.setdefault(block_id, []).append((start, end))
+                for block_id, spans in intervals.items():
+                    key = group_id, block_id
+                    cursor = baseline[key][1]
+                    for start, end in sorted(spans):
+                        if start != cursor:
+                            return None
+                        cursor = end
+                    proposed[key] = cursor
+                for row, length in enumerate(plan.lengths):
+                    for logical, block_id in enumerate(plan.tables[row]):
+                        key = group_id, block_id
+                        if min(size, length - logical * size) > proposed.get(key, baseline[key][1]):
+                            return None
+        return pool, baseline, proposed, bindings
+
+    def _try_fast_audit(self, runner: Any) -> bool:
+        """Exact final metadata equality permits committing a precomputed state.
+
+        shortcut: only canonical FULL plans; other plans retain the ordered audit.
+        """
+        if (
+            self._phase != "forward"
+            or not self._full_graph
+            or self._scheduled is None
+            or self._missing_groups
+            or self._unready_load_groups
+            or not self._metadata
+            or self._metadata.keys() != self.layer_groups.keys()
+        ):
+            return False
+        request_ids = list(runner.input_batch.req_ids)
+        if not request_ids or len(set(request_ids)) != len(request_ids):
+            return False
+        expected: dict[int, ExpectedAccess] = {}
+        inputs, checks, seen = {}, [], set()
+        for layer, item in self._metadata.items():
+            group_id = self.layer_groups[layer]
+            if (group_id, id(item)) in seen:
+                continue
+            seen.add((group_id, id(item)))
+            if group_id not in expected:
+                plan = self._expected_write_plan(runner, group_id)
+                if plan is None:
+                    return False
+                expected[group_id] = plan
+            plan = expected[group_id]
+            accesses = self._metadata_accesses(layer, item)
+            if len(accesses) != 2 or self._missing_groups:
+                return False
+            write, read = accesses
+            slots, table, lengths = write.slots, read.table, read.lengths
+            if not all(
+                isinstance(value, torch.Tensor) and value.dtype in (torch.int32, torch.int64)
+                for value in (slots, table, lengths)
+            ):
+                return False
+            rows, columns = len(request_ids), max(map(len, plan.tables), default=0)
+            if (
+                slots.ndim != 1
+                or slots.numel() != len(plan.slots)
+                or lengths.shape != (rows,)
+                or table.ndim != 2
+                or table.shape[0] < rows
+                or table.shape[1] < columns
+                or any(value.device.type not in ("cpu", "npu") for value in (slots, table, lengths))
+            ):
+                return False
+            keys = []
+            for value in (slots, lengths, table[:rows, :columns]):
+                key = str(value.device), value.dtype, self._identity(value)
+                inputs.setdefault(key, value)
+                keys.append(key)
+            checks.append((plan, keys))
+
+        # Enqueue every copy before the CPU-only preview. No device values are
+        # inspected until the event, at the original post-forward audit point.
+        copied = {}
+        event = None
+        recorded = False
+        try:
+            for index, (key, value) in enumerate(inputs.items()):
+                if value.device.type == "cpu":
+                    copied[key] = self._list(value)
+                    continue
+                if self._copy_event is None:
+                    self._copy_event = torch.npu.Event()
+                event = self._copy_event
+                if index >= len(self._host_buffers):
+                    self._host_buffers.extend([None] * (index + 1 - len(self._host_buffers)))
+                host = self._host_buffers[index]
+                if host is None or host.shape != value.shape or host.dtype != value.dtype:
+                    host = torch.empty(value.shape, dtype=value.dtype, device="cpu", pin_memory=True)
+                    self._host_buffers[index] = host
+                host.copy_(value, non_blocking=True)
+                copied[key] = host
+            if event is not None:
+                event.record(torch.npu.current_stream())
+                recorded = True
+            candidate = self._preview_append(runner, expected)
+        finally:
+            if event is not None:
+                # A partial enqueue failure must also drain outstanding DMA.
+                if not recorded:
+                    event.record(torch.npu.current_stream())
+                event.synchronize()
+        if candidate is None:
+            return False
+        values = {key: value.tolist() if isinstance(value, torch.Tensor) else value for key, value in copied.items()}
+        for plan, (slots, lengths, table) in checks:
+            if (
+                values[slots] != plan.slots
+                or values[lengths] != plan.lengths
+                or any(row[: len(want)] != want for row, want in zip(values[table], plan.tables))
+            ):
+                return False
+        pool, baseline, proposed, bindings = candidate
+        with self.state._lock:
+            unchanged = self.state.pool_id == pool and all(
+                tuple(tuple(refs) for refs in self.state.requests.get(request, ())) == groups
+                for request, groups in bindings.items()
+            )
+            for key, before in baseline.items():
+                block = self.state.blocks.get(key)
+                unchanged = (
+                    unchanged
+                    and block is not None
+                    and (block.epoch, block.valid_end, frozenset(block.owners)) == before
+                )
+            if not unchanged:
+                self.gap("allocation_changed_during_access_audit")
+                return True
+            for key, valid in proposed.items():
+                self.state.blocks[key].valid_end = valid
+        return True
+
     def _audit(self, runner: Any) -> None:
+        if self._try_fast_audit(runner):
+            return
         phase = self._phase
         assert phase is not None
         # FULL requires this replay's final metadata. Never reuse a captured
@@ -295,6 +512,8 @@ class GuardRuntime:
             group_id = self.layer_groups.get(layer)
             if group_id is None:
                 self.gap(f"unbound_access_layer:{layer}")
+                continue
+            if group_id in self._unready_load_groups:
                 continue
             actual = observed.get(layer, [])
             if observed and not actual and not self._full_graph:
@@ -446,6 +665,137 @@ class GuardRuntime:
             self._missing_groups = set(self.layer_groups.values())
             self.gap(f"metadata_collection_failed:{type(exc).__name__}")
 
+    def _finish_pending(self) -> None:
+        if self._pending is not None:
+            self._pending.finish()
+            self._pending = None
+        operations, self._deferred_state = self._deferred_state, []
+        for operation, args in operations:
+            operation(*args)
+        self._check_failure()
+
+    def _snapshot_audit(self, runner: Any) -> None:
+        """Freeze final evidence now; wait only at an output/forward boundary."""
+        assert self._pending is None
+        job = copy(self)
+        job._scheduled = None if self._scheduled is None else dict(self._scheduled)
+        job._missing_groups = set(self._missing_groups)
+        job._unready_load_groups = set(self._unready_load_groups)
+        job.report, job.gap, job._check_failure = self.report, self.gap, self._check_failure
+        job._scratch = KVGuard(job._emit_scratch)
+        frozen_runner = SimpleNamespace(input_batch=SimpleNamespace(req_ids=list(runner.input_batch.req_ids)))
+        copies: dict[Any, Any] = {}
+        event = None
+        device_copies = 0
+
+        def freeze(value):
+            nonlocal event, device_copies
+            if isinstance(value, torch.Tensor):
+                key = value.device, value.dtype, self._identity(value)
+                if key not in copies:
+                    if value.device.type == "cpu":
+                        host = value.clone()
+                    else:
+                        if self._copy_event is None:
+                            self._copy_event = torch.npu.Event()
+                        event = self._copy_event
+                        index = device_copies
+                        device_copies += 1
+                        if index >= len(self._host_buffers):
+                            self._host_buffers.append(None)
+                        host = self._host_buffers[index]
+                        if host is None or host.shape != value.shape or host.dtype != value.dtype:
+                            host = torch.empty(value.shape, dtype=value.dtype, device="cpu", pin_memory=True)
+                            self._host_buffers[index] = host
+                        host.copy_(value, non_blocking=True)
+                    copies[key] = host
+                return copies[key]
+            if isinstance(value, (list, tuple)):
+                return [freeze(item) for item in value]
+            return value
+
+        try:
+            job._accesses = [
+                WriteAccess(access.layer, freeze(access.slots), access.token_offset)
+                if isinstance(access, WriteAccess)
+                else ReadAccess(
+                    access.layer,
+                    freeze(access.table),
+                    freeze(access.lengths),
+                    freeze(access.starts),
+                    access.request_offset,
+                )
+                for access in self._accesses
+            ]
+            observed = {access.layer for access in self._accesses}
+            items, job._metadata = {}, {}
+            for layer, item in self._metadata.items():
+                if not self._full_graph and layer in observed:
+                    job._metadata[layer] = None  # Only coverage is used when operator arguments were observed.
+                    continue
+                key = id(item)
+                if key not in items:
+                    slots = self._field(item, "slot_mapping")
+                    count = getattr(item, "num_actual_tokens", None)
+                    if slots is not None and count is not None:
+                        slots = slots[:count]
+                    items[key] = SimpleNamespace(
+                        slot_mapping=freeze(slots),
+                        block_tables=freeze(self._field(item, "block_tables", "block_table", "block_table_tensor")),
+                        seq_lens=freeze(self._field(item, "seq_lens_gpu", "seq_lens", "seq_lens_list", "seq_lens_cpu")),
+                    )
+                job._metadata[layer] = items[key]
+            if event is not None:
+                event.record(torch.npu.current_stream())
+        except Exception:
+            if event is not None:
+                # Even a partially failed snapshot must drain before buffer reuse.
+                event.record(torch.npu.current_stream())
+                event.synchronize()
+            raise
+
+        def complete():
+            with torch.inference_mode():
+                try:
+                    if event is not None:
+                        event.synchronize()
+                    job._audit(frozen_runner)
+                except Exception as exc:
+                    self.gap(f"access_audit_failed:{type(exc).__name__}")
+                self._check_failure()
+
+        self._pending = _PendingAudit(complete)
+
+    def _guard_output(self, output: Any) -> Any:
+        self._check_failure()
+        pending = self._pending
+        if pending is None:
+            return output
+        get_output = getattr(output, "get_output", None)
+        if get_output is None:
+            pending.finish()
+            self._check_failure()
+            return output
+
+        @functools.wraps(get_output)
+        def checked():
+            pending.finish()
+            self._check_failure()
+            return get_output()
+
+        try:
+            output.get_output = checked
+        except (AttributeError, TypeError):
+            pending.finish()
+        return output
+
+    def wrap_sample(self, sample: Any):
+        @functools.wraps(sample)
+        def observed(*args, **kwargs):
+            return self._guard_output(sample(*args, **kwargs))
+
+        return observed
+
     @contextmanager
     def forward_scope(
         self, runner: Any, *, phase: str, metadata: Any = None, full_graph: bool = False, required: bool = True
@@ -459,16 +809,30 @@ class GuardRuntime:
             yield
             if required or self._metadata or self._accesses:
                 try:
-                    self._audit(runner)
+                    if phase == "forward" and self._connector is not None:
+                        self._connector.before_audit()
+                    if phase == "forward":
+                        for meta in self._recomputes:
+                            self.state.recompute(meta)
+                        self._recomputes = []
+                    if self._defer_audit and phase == "forward" and self._connector is None:
+                        self._snapshot_audit(runner)
+                    else:
+                        self._audit(runner)
                 except Exception as exc:
                     self.gap(f"access_audit_failed:{type(exc).__name__}")
             self._check_failure()
         finally:
             self._phase = None
+            if self._connector is not None:
+                self._connector.commit_completions()
+                if self._connector.post_forward_complete:
+                    self._connector.finish_step()
 
     def wrap_forward(self, runner: Any, forward: Any, get_context: Any):
         @functools.wraps(forward)
         def observed(num_tokens, *args, **kwargs):
+            self._finish_pending()
             context = get_context()
             context._kv_guard = self
             with self.forward_scope(
@@ -491,6 +855,8 @@ class GuardRuntime:
                 self._check_failure()
                 return result
             for request_id, groups in binding["requests"].items():
+                if request_id not in binding.get("scheduled_requests", {}):
+                    continue  # Receive-only bindings are not runner batch entries.
                 actual = runner.requests.get(request_id)
                 expected = [[block for block, _ in refs] for refs in groups]
                 if actual is None or [list(g) for g in actual.block_ids] != expected:
@@ -506,10 +872,12 @@ class GuardRuntime:
         return observed
 
     @contextmanager
-    def execute_scope(self, output: Any, *, bind: bool = True):
+    def execute_scope(self, output: Any, *, bind: bool = True, finish_connector: bool = True):
         """Share scheduler binding and cleanup across both runner versions."""
         self._check_failure()
         self._scheduled = None
+        self._unready_load_groups.clear()
+        self._recomputes = []
         if bind:
             binding = getattr(output, "_ascend_kv_guard_context", None)
             if binding is not None:
@@ -518,7 +886,22 @@ class GuardRuntime:
                 uninitialized.update(
                     copy.dst_block_id for copy in (getattr(output, "kv_cache_block_copies", None) or ())
                 )
-                self.state.bind({**binding, "uninitialized_block_ids": uninitialized})
+                context = {**binding, "uninitialized_block_ids": uninitialized}
+                if self._pending is not None:
+                    self._deferred_state.append((self.state.bind, (context,)))
+                else:
+                    self.state.bind(context)
+                self._recomputes = binding.get("recompute_ranges", [])
+                if self._connector is None and getattr(self.config, "kv_transfer_config", None) is not None:
+                    from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+
+                    if has_kv_transfer_group():
+                        self._connector = ConnectorGuard(self, get_kv_transfer_group())
+                loads = binding.get("loads", [])
+                if self._connector is not None:
+                    self._connector.stage(loads)
+                elif loads:
+                    self.gap("load_connector_missing")
                 self._scheduled = binding.get("scheduled_requests")
                 if self._scheduled is None:
                     self.gap("scheduler_write_plan_missing")
@@ -527,18 +910,29 @@ class GuardRuntime:
         try:
             self._check_failure()
             yield
+            self._check_failure()
         finally:
+            if self._deferred_state:
+                self._finish_pending()  # Receive-only, idle and failed steps may never enter a forward.
+            if self._connector is not None and finish_connector:
+                self._connector.finish_step()
             self._scheduled = None
+            self._recomputes = []
+        self._check_failure()
 
     def wrap_execute(self, execute: Any):
         @functools.wraps(execute)
         def observed(output, *args, **kwargs):
             with self.execute_scope(output):
-                return execute(output, *args, **kwargs)
+                result = execute(output, *args, **kwargs)
+                return self._guard_output(result) if result is not None else result
 
         return observed
 
     def zero_blocks(self, block_ids: list[int]) -> None:
+        if self._pending is not None:
+            self._deferred_state.append((self.zero_blocks, (list(block_ids),)))
+            return
         with self.state._lock:
             for group_id in self.state.group_sizes:
                 for block_id in block_ids:
@@ -555,6 +949,9 @@ class GuardRuntime:
         self._check_failure()
 
     def copy_blocks(self, copies: Any) -> None:
+        if self._pending is not None:
+            self._deferred_state.append((self.copy_blocks, (list(copies),)))
+            return
         with self.state._lock:
             for copy in copies:
                 if copy.dst_block_id == 0:
@@ -570,15 +967,6 @@ class GuardRuntime:
                 ]
                 self.state.copy_blocks(group_id, pairs)
         self._check_failure()
-
-    def transfer(self, event: str, meta: dict[str, Any]) -> None:
-        try:
-            if event == "load":
-                self.state.load(meta)
-            else:
-                self.state.fail_load(meta["request_id"])
-        except Exception as exc:
-            self.gap(f"load_hook_failed:{type(exc).__name__}")
 
 
 def get_guard(vllm_config: Any) -> GuardRuntime | None:
@@ -613,6 +1001,7 @@ class _V2RunnerAdapter:
         def observed(input_batch, cudagraph_mode, *args, **kwargs):
             metadata = prepare(input_batch, cudagraph_mode, *args, **kwargs)
             if self.runtime._phase is not None:
+                self.runtime._finish_pending()
                 self.input_batch = SimpleNamespace(req_ids=list(input_batch.req_ids[: input_batch.num_reqs]))
                 self._prepared = True
                 self.runtime._full_graph = "FULL" in str(cudagraph_mode)
@@ -641,20 +1030,22 @@ class _V2RunnerAdapter:
             required = bool(scheduler_output.total_num_scheduled_tokens) and not (
                 profile and flags.get("skip_attn_for_dummy_run")
             )
+            if dummy or profile:
+                self.runtime._finish_pending()
             self.input_batch = SimpleNamespace(req_ids=[])
             self._prepared = False
 
             # Synthetic dummy/profile outputs have no scheduler binding, but
             # their writes must still be checked against the shared live KV state.
             with (
-                self.runtime.execute_scope(scheduler_output, bind=not (dummy or profile)),
+                self.runtime.execute_scope(scheduler_output, bind=not (dummy or profile), finish_connector=False),
                 self.runtime.forward_scope(self, phase=phase, required=required),
             ):
                 result = execute(scheduler_output, *args, **kwargs)
                 if phase == "forward" and required and not self._prepared:
                     self.runtime.gap("v2_attention_metadata_missing")
                     self.runtime._missing_groups.update(self.runtime.layer_groups.values())
-                return result
+            return self.runtime._guard_output(result) if result is not None else result
 
         return observed
 
@@ -680,7 +1071,7 @@ class _V2RunnerAdapter:
             with self.runtime.state._lock:
                 if (
                     self.runtime.state.requests
-                    or self.runtime.state.pending_loads
+                    or self.runtime.state.loads
                     or any(block.valid_end != 0 for block in self.runtime.state.blocks.values())
                 ):
                     raise ValueError(
@@ -711,4 +1102,6 @@ def install_guard(runner: Any) -> GuardRuntime | None:
         cast(Any, runner)._model_forward = runtime.wrap_forward(runner, runner._model_forward, get_forward_context)
         cast(Any, runner).execute_model = runtime.wrap_execute(runner.execute_model)
         cast(Any, runner)._update_states = runtime.wrap_update(runner, runner._update_states)
+    if hasattr(runner, "sample_tokens"):
+        cast(Any, runner).sample_tokens = runtime.wrap_sample(runner.sample_tokens)
     return runtime

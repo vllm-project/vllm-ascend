@@ -13,6 +13,8 @@ from typing import Any, cast
 import pytest
 import torch
 
+from . import complete_load
+
 ROOT = Path(__file__).parents[3]
 
 
@@ -39,6 +41,8 @@ def runtime_fixture(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm_ascend.debug.kv_guard_config", options)
     state = load("guard_runtime_state", "vllm_ascend/debug/kv_guard.py")
     monkeypatch.setitem(sys.modules, "vllm_ascend.debug.kv_guard", state)
+    connector = load("guard_connector_subject", "vllm_ascend/debug/kv_guard_connector.py")
+    monkeypatch.setitem(sys.modules, "vllm_ascend.debug.kv_guard_connector", connector)
     subject = load("guard_runtime_subject", "vllm_ascend/debug/kv_guard_runtime.py")
     logger = ModuleType("vllm.logger")
     cast(Any, logger).logger = logging.Logger("guard-test")
@@ -64,6 +68,8 @@ def bind(runtime, request="r", block=1, computed=0):
     runtime.state.bind(
         {"pool_id": "pool", "requests": {request: [[(block, 1)]]}, "scheduled_requests": {request: (computed, 0)}}
     )
+    if computed:
+        complete_load(runtime.state, request, computed)
 
 
 def test_access_hooks_validate_case4_without_kv_copy_or_hash(runtime):
@@ -133,7 +139,7 @@ def test_receive_only_step_binds_before_execute_and_cleans_finished(runtime):
         _ascend_kv_guard_context={"pool_id": "pool", "requests": {"r": [[(1, 1)]]}, "scheduled_requests": {"r": (0, 0)}}
     )
     runtime.wrap_execute(lambda message: None)(output)
-    runtime.transfer("load", {"request_id": "r", "local_block_ids": [[1]], "num_computed_tokens": 19})
+    complete_load(runtime.state)
     assert runtime.state.blocks[0, 1].valid_end == 19
     runtime.wrap_execute(lambda message: None)(
         NS(_ascend_kv_guard_context={"requests": {}, "released_request_ids": ["r"], "scheduled_requests": {}})
@@ -460,6 +466,115 @@ def test_final_metadata_is_read_after_forward_parameter_updates_and_copied_once(
     assert runtime.state.blocks[0, 1].valid_end == 1
     assert len(copies) == 3 and len(set(copies)) == 3
     assert not any(e["event"] in ("guard.violation", "guard.coverage_gap") for e in runtime.events)
+
+
+@pytest.mark.parametrize(
+    "slots, table, lengths, use_fast",
+    [
+        ([128, 129], [[1]], [2], True),
+        ([129, 128], [[1]], [2], False),
+        ([128, 128], [[1]], [2], False),
+        ([128, 129], [[2]], [2], False),
+        ([128, 129], [[1]], [1], False),
+        ([128, 129], [[1]], [3], False),
+    ],
+)
+def test_full_fast_and_complete_audits_agree(runtime, slots, table, lengths, use_fast):
+    outcomes = []
+    for enabled in (False, True):
+        guard = runtime.subject.GuardRuntime(NS(additional_config={"kv_guard_config": {"enabled": True}}))
+        events = []
+        guard.state.emit = lambda event, events=events, **fields: events.append({"event": event, **fields})
+        guard.gap = lambda reason, events=events, **fields: events.append(
+            {"event": "guard.coverage_gap", "reason": reason, **fields}
+        )
+        guard.state.configure({0: 128})
+        guard.layer_groups = {"layer0": 0, "layer1": 0}
+        guard.state.bind({"pool_id": "pool", "requests": {"r": [[(1, 1)]]}})
+        guard._scheduled = {"r": (0, 2)}
+        item = metadata(torch.tensor(slots), torch.tensor(table), torch.tensor(lengths))
+        context = NS(cudagraph_runtime_mode="FULL", attn_metadata=dict.fromkeys(guard.layer_groups, item))
+        runner = NS(input_batch=NS(req_ids=["r"]))
+        hits = []
+        original = guard._try_fast_audit
+
+        def attempt(runner, original=original, enabled=enabled, hits=hits):
+            used = original(runner) if enabled else False
+            hits.append(used)
+            return used
+
+        guard._try_fast_audit = attempt
+        guard.wrap_forward(runner, lambda count: None, lambda context=context: context)(2)
+        assert hits == [enabled and use_fast]
+        outcomes.append((guard.state.blocks, events))
+    assert outcomes[0] == outcomes[1]
+
+
+def test_fast_candidate_waits_for_final_values_and_does_not_commit_during_preview(runtime, monkeypatch):
+    bind(runtime)
+    runtime._scheduled = {"r": (0, 1)}
+    item = metadata(torch.tensor([-1]), torch.tensor([[1]]), torch.tensor([0]))
+    context = NS(cudagraph_runtime_mode="FULL", attn_metadata=dict.fromkeys(runtime.layer_groups, item))
+    runner = NS(input_batch=NS(req_ids=["r"]))
+    preview = runtime._preview_append
+    seen = []
+
+    def staged(runner, plan):
+        assert item.slot_mapping.tolist() == [128]
+        result = preview(runner, plan)
+        assert runtime.state.blocks[0, 1].valid_end == 0
+        seen.append(result)
+        return result
+
+    monkeypatch.setattr(runtime, "_preview_append", staged)
+    monkeypatch.setattr(runtime._scratch, "observe", lambda *args: pytest.fail("normal plan unexpectedly fell back"))
+
+    def forward(count):
+        assert not seen
+        item.slot_mapping[0], item.seq_lens[0] = 128, 1
+
+    runtime.wrap_forward(runner, forward, lambda: context)(1)
+    assert len(seen) == 1 and runtime.state.blocks[0, 1].valid_end == 1
+
+
+def test_fast_candidate_is_discarded_when_state_changes(runtime, monkeypatch):
+    bind(runtime)
+    runtime._scheduled = {"r": (0, 1)}
+    item = metadata(torch.tensor([128]), torch.tensor([[1]]), torch.tensor([1]))
+    context = NS(cudagraph_runtime_mode="FULL", attn_metadata=dict.fromkeys(runtime.layer_groups, item))
+    runner = NS(input_batch=NS(req_ids=["r"]))
+    preview = runtime._preview_append
+
+    def changed(runner, plans):
+        candidate = preview(runner, plans)
+        runtime.state.blocks[0, 1].epoch = 2
+        return candidate
+
+    monkeypatch.setattr(runtime, "_preview_append", changed)
+    runtime.wrap_forward(runner, lambda count: None, lambda: context)(1)
+    assert runtime.state.blocks[0, 1].valid_end == 0
+    assert any(event.get("reason") == "allocation_changed_during_access_audit" for event in runtime.events)
+
+
+def test_fast_preview_error_retains_complete_overwrite_diagnostic(runtime):
+    bind(runtime, computed=1)
+    runtime._scheduled = {"r": (0, 1)}
+    item = metadata(torch.tensor([128]), torch.tensor([[1]]), torch.tensor([1]))
+    context = NS(cudagraph_runtime_mode="FULL", attn_metadata=dict.fromkeys(runtime.layer_groups, item))
+    runtime.wrap_forward(NS(input_batch=NS(req_ids=["r"])), lambda count: None, lambda: context)(1)
+    event = next(event for event in runtime.events if event.get("reason") == "overwrite_valid_prefix")
+    assert event["offsets"] == [0] and event["valid_end"] == 1
+    assert event["evidence"] == "execution_plan" and event["layer"] == "layer0"
+
+
+def test_fast_missing_layer_cannot_advance_validity(runtime):
+    bind(runtime)
+    runtime._scheduled = {"r": (0, 1)}
+    item = metadata(torch.tensor([128]), torch.tensor([[1]]), torch.tensor([1]))
+    context = NS(cudagraph_runtime_mode="FULL", attn_metadata={"layer0": item})
+    runtime.wrap_forward(NS(input_batch=NS(req_ids=["r"])), lambda count: None, lambda: context)(1)
+    assert runtime.state.blocks[0, 1].valid_end == 0
+    assert any(event["event"] == "guard.coverage_gap" for event in runtime.events)
 
 
 def test_current_full_graph_metadata_ignores_operator_callbacks(runtime):
@@ -866,6 +981,7 @@ def test_shared_prefix_read_and_tail_append_remain_legal(runtime):
             "scheduled_requests": {"A": (128, 1), "B": (128, 1)},
         }
     )
+    complete_load(runtime.state, "A", 128)
     runtime._scheduled = {"A": (128, 1), "B": (128, 1)}
     runner = NS(input_batch=NS(req_ids=["B", "A"]))
     context = NS(cudagraph_runtime_mode="NONE")

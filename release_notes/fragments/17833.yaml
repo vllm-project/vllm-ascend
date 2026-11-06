@@ -7,3 +7,22 @@ entries:
       by default and configured per engine through additional_config.kv_guard_config
       (enabled and action). Both runners share one checker, which can log failures
       or stop returning worker results after a violation or incomplete audit.
+  - category: bugfix
+    text: >-
+      KV guard no longer treats a consumer's computed-token count as proof of
+      initialized cache bytes. Same-step shared-prefix writes are checked against
+      recorded validity, which continues to reject overwrites of valid prefixes.
+      External-load readiness now uses submission-time logical ranges and
+      allocation generations rather than transport-local computed-token offsets.
+      Failed loads preserve unaffected local prefixes, and explicit framework
+      tail replay is distinguished from an illegal prefix overwrite.
+      Failed-block records are retained across connector polls until receive
+      completion, and the registered Ascend MooncakeConnectorV1 name is accepted.
+      Runner V2 async loads are finalized at connector cleanup, including when
+      submission is deferred from execute_model to sample_tokens.
+      Cancelled submissions can drain without modifying a later allocation.
+  - category: performance
+    text: >-
+      Ordinary async generation with one model worker defers KV guard validation to output consumption
+      or the next forward boundary, allowing address metadata copies to overlap
+      model execution while retaining every step's access checks.

@@ -5262,7 +5262,7 @@ def test_unused_remote_ports_are_notified_once_by_primary_receiver(primary, has_
 
 @pytest.mark.parametrize("awaiting_kvs", [False, True])
 @pytest.mark.parametrize("transfer_failed", [False, True])
-def test_guard_receive_callback_preserves_completion_contract(awaiting_kvs, transfer_failed):
+def test_receive_completion_contract_is_preserved(awaiting_kvs, transfer_failed):
     receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
     receiver._is_failed_recv_request = MagicMock(side_effect=[False, transfer_failed])
     receiver._transfer_kv_cache_all_groups = MagicMock()
@@ -5277,7 +5277,6 @@ def test_guard_receive_callback_preserves_completion_contract(awaiting_kvs, tran
     receiver.request_queue = MagicMock()
     receiver._send_done_signal_to_free_remote_port = MagicMock()
     receiver._send_done_recv_signal = MagicMock()
-    receiver._kv_guard = MagicMock()
     meta = {
         "request_id": "r",
         "remote_request_id": "remote-r",
@@ -5288,7 +5287,6 @@ def test_guard_receive_callback_preserves_completion_contract(awaiting_kvs, tran
         "awaiting_kvs": awaiting_kvs,
     }
     receiver._handle_request(meta)
-    receiver._kv_guard.transfer.assert_called_once_with("error" if transfer_failed else "load", meta)
     if transfer_failed:
         receiver._reformat_pending_kv_caches.assert_not_called()
     else:

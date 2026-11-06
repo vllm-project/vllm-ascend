@@ -33,7 +33,7 @@ class KVGuard:
         self.pool_id: str | None = None
         self.blocks: dict[tuple[int, int], Block] = {}
         self.requests: dict[str, BlockTable] = {}
-        self.pending_loads: dict[str, dict[str, Any]] = {}
+        self.loads: dict[str, dict[str, Any]] = {}
         self.group_sizes: dict[int, int] = {}
         self._lock = threading.RLock()
 
@@ -60,8 +60,7 @@ class KVGuard:
             if pool != self.pool_id:
                 self.blocks.clear()
                 self.requests.clear()
-                if self.pool_id is not None:
-                    self.pending_loads.clear()
+                self.loads.clear()
                 self.pool_id = pool
             for request_id in context.get("released_request_ids", ()):
                 for group, refs in enumerate(self.requests.pop(request_id, ())):
@@ -69,7 +68,7 @@ class KVGuard:
                         block = self.blocks.get((group, block_id))
                         if block is not None:
                             block.owners.discard(request_id)
-                self.pending_loads.pop(request_id, None)
+                self.loads.pop(request_id, None)
             for request_id, groups in context.get("requests", {}).items():
                 keys = {(group, block) for group, refs in enumerate(groups) for block, _ in refs}
                 for group, refs in enumerate(self.requests.get(request_id, ())):
@@ -78,10 +77,8 @@ class KVGuard:
                         if key not in keys and key in self.blocks:
                             self.blocks[key].owners.discard(request_id)
                 self.requests[request_id] = groups
-                computed = context.get("scheduled_requests", {}).get(request_id, (0, 0))[0] or 0
                 for group, refs in enumerate(groups):
-                    size = self.group_sizes[group]
-                    for logical, (block_id, epoch) in enumerate(refs):
+                    for block_id, epoch in refs:
                         if block_id == 0:
                             continue
                         if epoch <= 0:
@@ -101,63 +98,102 @@ class KVGuard:
                             block = Block(epoch)
                             self.blocks[key] = block
                         block.owners.add(request_id)
-                        valid = min(size, max(0, computed - logical * size))
-                        # Reuse may establish validity, but never revive a tainted
-                        # allocation or a destination awaiting a physical copy.
-                        if (
-                            valid
-                            and block.valid_end == 0
-                            and block_id not in context.get("uninitialized_block_ids", ())
-                        ):
-                            block.valid_end = valid
-                pending = self.pending_loads.pop(request_id, None)
-                if pending is not None:
-                    self._load(pending)
+                        # A consumer's computed prefix is a read requirement,
+                        # not evidence that this allocation has been written.
+            for meta in context.get("loads", ()):
+                self.begin_load(meta)
 
-    def load(self, meta: dict[str, Any]) -> None:
+    def begin_load(self, meta: dict[str, Any]) -> None:
+        """Register the scheduler's submission snapshot, before any receive."""
         with self._lock:
-            if meta["request_id"] not in self.requests or not self.group_sizes:
-                self.pending_loads[meta["request_id"]] = {
-                    key: meta[key] for key in ("request_id", "local_block_ids", "num_computed_tokens") if key in meta
-                }
-            else:
-                self._load(meta)
+            if meta["pool_id"] != self.pool_id or meta["request_id"] not in self.requests:
+                self.emit("guard.coverage_gap", reason="load_binding_missing", request_id=meta["request_id"])
+                return
+            if not 0 <= meta["token_start"] < meta["token_end"]:
+                self.emit("guard.coverage_gap", reason="load_range_invalid", request_id=meta["request_id"])
+                return
+            self.loads[meta["request_id"]] = {**meta, "block_table": [list(refs) for refs in meta["block_table"]]}
 
-    def _load(self, meta: dict[str, Any]) -> None:
+    def _range_targets(self, meta: dict[str, Any], group_ids=None, block_ids=None):
         request_id = meta["request_id"]
-        expected = {
-            (group, block): (logical, epoch)
-            for group, refs in enumerate(self.requests.get(request_id, ()))
-            for logical, (block, epoch) in enumerate(refs)
-        }
-        for group, ids in enumerate(meta.get("local_block_ids", ())):
-            for block_id in ids:
+        if meta["pool_id"] != self.pool_id:
+            self.emit("guard.coverage_gap", reason="stale_pool_event", request_id=request_id)
+            return
+        current = self.requests.get(request_id, ())
+        for group, refs in enumerate(meta["block_table"]):
+            if group_ids is not None and group not in group_ids:
+                continue
+            size = self.group_sizes[group]
+            first = meta["token_start"] // size
+            last = (meta["token_end"] + size - 1) // size
+            for logical, (block_id, epoch) in enumerate(refs[first:last], first):
+                start = max(0, meta["token_start"] - logical * size)
+                end = min(size, meta["token_end"] - logical * size)
+                if start >= end or (block_ids is not None and block_id not in block_ids):
+                    continue
                 key = group, block_id
-                ref, block = expected.get(key), self.blocks.get(key)
-                if ref is None or block is None or request_id not in block.owners:
-                    self._violation(key, block, "load", "unowned_destination", request_id=request_id)
-                    continue
-                logical, epoch = ref
-                if block.epoch != epoch:
+                block = self.blocks.get(key)
+                if block is not None and block.epoch != epoch:
                     self._violation(key, block, "load", "stale_allocation_epoch", request_id=request_id)
-                    continue
-                computed = meta.get("num_computed_tokens")
-                if computed is None:
-                    self.emit(
-                        "guard.coverage_gap", reason="load_valid_length_missing", group_id=group, block_id=block_id
-                    )
-                    continue
-                size = self.group_sizes[group]
-                block.valid_end = min(size, max(0, computed - logical * size))
+                elif (
+                    block is None
+                    or group >= len(current)
+                    or logical >= len(current[group])
+                    or current[group][logical] != (block_id, epoch)
+                    or request_id not in block.owners
+                ):
+                    self._violation(key, block, "load", "unowned_destination", request_id=request_id)
+                else:
+                    yield key, block, start, end
 
-    def fail_load(self, request_id: str) -> None:
+    def _active_load(self, meta: dict[str, Any]) -> bool:
+        active = self.loads.get(meta["request_id"])
+        if active == meta:
+            return True
+        self.emit(
+            "guard.coverage_gap", reason="stale_load_completion", request_id=meta["request_id"], load_id=meta["load_id"]
+        )
+        return False
+
+    def load(self, meta: dict[str, Any], *, group_ids=None, block_ids=None, finish: bool = True) -> None:
+        """Only a completed, matching submission can establish readable ranges."""
         with self._lock:
-            self.pending_loads.pop(request_id, None)
-            for group, refs in enumerate(self.requests.get(request_id, ())):
-                for block_id, epoch in refs:
-                    block = self.blocks.get((group, block_id))
-                    if block is not None and block.epoch == epoch:
-                        block.valid_end = INVALID_PREFIX
+            if not self._active_load(meta):
+                return
+            for key, block, start, end in self._range_targets(meta, group_ids, block_ids):
+                if block.valid_end == INVALID_PREFIX:
+                    self.emit("guard.coverage_gap", reason="load_destination_tainted", group_id=key[0], block_id=key[1])
+                    continue
+                if start > block.valid_end:
+                    self.emit("guard.coverage_gap", reason="load_prefix_missing", group_id=key[0], block_id=key[1])
+                    continue
+                block.valid_end = max(block.valid_end, end)
+            if finish:
+                self.finish_load(meta)
+
+    def finish_load(self, meta: dict[str, Any]) -> None:
+        with self._lock:
+            if self.loads.get(meta["request_id"]) == meta:
+                self.loads.pop(meta["request_id"])
+
+    def fail_load(self, meta: dict[str, Any], *, block_ids=None, finish: bool = True) -> None:
+        with self._lock:
+            if not self._active_load(meta):
+                return
+            for _, block, _, _ in self._range_targets(meta, block_ids=block_ids):
+                # A block transfer can overwrite its local prefix before failing.
+                # Untouched local blocks stay valid; failed targets can be recomputed.
+                if block.valid_end != INVALID_PREFIX:
+                    block.valid_end = 0
+            if finish:
+                self.finish_load(meta)
+
+    def recompute(self, meta: dict[str, Any]) -> None:
+        """Truncate only a framework-authorized replay, before auditing writes."""
+        with self._lock:
+            for _, block, start, _ in self._range_targets(meta):
+                if block.valid_end != INVALID_PREFIX:
+                    block.valid_end = min(block.valid_end, start)
 
     def clear(self, group_id: int, block_id: int) -> None:
         with self._lock:

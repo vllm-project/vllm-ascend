@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from . import complete_load, load_plan
+
 spec = importlib.util.spec_from_file_location(
     "kv_guard_subject", Path(__file__).parents[3] / "vllm_ascend/debug/kv_guard.py"
 )
@@ -34,6 +36,8 @@ def bind(guard, request="r", computed=0, epoch=1, pool="pool", ids=(1,)):
             "scheduled_requests": {request: (computed, 0)},
         }
     )
+    if computed:
+        complete_load(guard, request, computed)
 
 
 def access(guard, slots=(), length=0, ids=(1,), request_ids=("r",), phase="forward"):
@@ -57,6 +61,50 @@ def test_partial_fill_seal_and_read(guard):
     assert not violations(guard)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_step_prefix_consumer_cannot_prevalidate_producers_write(guard, reverse):
+    items = [("producer", [[(1, 1), (2, 1)]]), ("consumer", [[(1, 1), (3, 1)]])]
+    guard.bind(
+        {
+            "pool_id": "pool",
+            "requests": dict(reversed(items) if reverse else items),
+            "scheduled_requests": {"producer": (0, 256), "consumer": (128, 128)},
+        }
+    )
+    assert guard.blocks[0, 1].valid_end == 0
+    guard.observe(
+        [
+            {
+                "group_id": 0,
+                "slots": list(range(128, 384)) + list(range(384, 512)),
+                "block_table": [[1, 2], [1, 3]],
+                "seq_lens": [256, 256],
+            }
+        ],
+        ["producer", "consumer"],
+        "forward",
+    )
+    assert not violations(guard)
+    assert all(guard.blocks[0, block].valid_end == 128 for block in (1, 2, 3))
+
+
+def test_computed_without_write_evidence_does_not_make_unknown_prefix_readable(guard):
+    guard.bind({"requests": {"r": [[(1, 1)]]}, "scheduled_requests": {"r": (128, 0)}})
+    access(guard, (), 128)
+    assert violations(guard)[-1]["reason"] == "read_unwritten_range"
+
+
+def test_recorded_prefix_survives_release_and_same_epoch_reuse(guard):
+    bind(guard)
+    access(guard, range(128, 256), 128)
+    guard.bind({"released_request_ids": ["r"]})
+    guard.bind({"requests": {"next": [[(1, 1)]]}, "scheduled_requests": {"next": (128, 0)}})
+    access(guard, (), 128, request_ids=("next",))
+    assert not violations(guard)
+    access(guard, [128], 128, request_ids=("next",))
+    assert violations(guard)[0]["reason"] == "overwrite_valid_prefix"
+
+
 def test_unknown_read_and_skipped_write(guard):
     bind(guard)
     access(guard, (), 1)
@@ -68,7 +116,7 @@ def test_unknown_read_and_skipped_write(guard):
 
 def test_case4_loaded_prefix_dummy_write_then_dirty_read_without_tensors(guard):
     bind(guard)
-    guard.load({"request_id": "r", "local_block_ids": [[1]], "num_computed_tokens": 19})
+    complete_load(guard)
     assert guard.blocks[0, 1].valid_end == 19
     access(guard, [142], 1, request_ids=(), phase="dummy")
     dirty_write = violations(guard)[0]
@@ -112,26 +160,28 @@ def test_shared_prefix_and_finished_request(guard):
 def test_cache_lookup_does_not_revive_tainted_same_epoch(guard):
     bind(guard, computed=19)
     access(guard, [142], phase="dummy", request_ids=())
-    bind(guard, request="prefix-hit", computed=19)
+    guard.bind({"requests": {"prefix-hit": [[(1, 1)]]}, "scheduled_requests": {"prefix-hit": (19, 0)}})
     assert guard.blocks[0, 1].valid_end == subject.INVALID_PREFIX
 
 
-def test_load_before_scheduler_binding_and_failed_load(guard):
-    guard.load({"request_id": "r", "local_block_ids": [[1]], "num_computed_tokens": 19})
+def test_unregistered_completion_cannot_establish_validity(guard):
     bind(guard)
-    assert not guard.pending_loads
-    assert guard.blocks[0, 1].valid_end == 19
-    guard.fail_load("r")
-    access(guard, (), 19)
-    assert violations(guard)[-1]["reason"] == "read_invalid_block"
-
-
-def test_pending_load_never_applied_to_different_request(guard):
-    guard.load({"request_id": "old", "local_block_ids": [[1]], "num_computed_tokens": 19})
-    bind(guard, request="new", epoch=2)
+    guard.load(load_plan(guard))
     assert guard.blocks[0, 1].valid_end == 0
+    access(guard, (), 19)
+    assert violations(guard)[-1]["reason"] == "read_unwritten_range"
+    assert any(e.get("reason") == "stale_load_completion" for e in guard.events)
+
+
+def test_old_completion_never_applied_to_different_request(guard):
+    bind(guard, request="old")
+    meta = load_plan(guard, "old")
+    guard.begin_load(meta)
     guard.bind({"released_request_ids": ["old"]})
-    assert not guard.pending_loads
+    bind(guard, request="new", epoch=2)
+    guard.load(meta)
+    assert guard.blocks[0, 1].valid_end == 0
+    assert not guard.loads
 
 
 def test_no_per_token_state_log_and_negative_padding(guard):
@@ -157,6 +207,7 @@ def test_group_pool_and_allocation_isolation(guard):
     guard.configure({0: 128, 1: 128})
     bind(guard, computed=19)
     guard.bind({"pool_id": "pool", "requests": {"r2": [[], [(1, 1)]]}, "scheduled_requests": {"r2": (7, 0)}})
+    complete_load(guard, "r2", 7)
     assert guard.blocks[0, 1].valid_end == 19
     assert guard.blocks[1, 1].valid_end == 7
     bind(guard, pool="new-pool")
@@ -222,9 +273,11 @@ def test_copying_an_empty_prefix_does_not_make_bytes_readable(guard):
     assert violations(guard)[-1]["reason"] == "read_unwritten_range"
 
 
-def test_replaced_pool_drops_old_pending_loads(guard):
+def test_replaced_pool_drops_old_loads(guard):
     bind(guard)
-    guard.load({"request_id": "next", "local_block_ids": [[1]], "num_computed_tokens": 19})
+    meta = load_plan(guard)
+    guard.begin_load(meta)
     bind(guard, request="next", pool="replacement")
-    assert not guard.pending_loads
+    guard.load(meta)
+    assert not guard.loads
     assert guard.blocks[0, 1].valid_end == 0
