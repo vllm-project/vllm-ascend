@@ -121,6 +121,26 @@ This is functional integration, with no throughput or latency improvement claim.
 Hardware validation used DeepSeek-V4.1-Flash with hidden size 5120, 384 experts,
 top-k 6, a 4096-token batch budget, and native W4A8 MXFP expert computation.
 
+For that exact BF16 EP8 configuration, the pinned wheel's size hint reserves
+4,617,928,704 bytes (4.30078125 GiB) per rank; its default 1 GiB physical pages
+round the workspace allocation to 5 GiB per rank. Same-shape layers reuse this
+allocation. Payload outputs and expert activations are allocated separately.
+
+This budget was checked against the pinned EP8 rank-return layout. All 8 ranks
+can route all 6 expert slots for all 4096 tokens to one destination rank,
+requiring 196,608 expanded rows (1,920 MiB of BF16 hidden data). Rank dedup
+eliminates cross-rank gather rows. The largest combine half then needs about
+2,200.48 MiB including return/output storage and controls; the fixed equal
+halves require 4.30078125 GiB after alignment. Thus the current allocation fits
+that worst-case layout, although the generic four-times-average size hint is
+not a universal worst-case guarantee for other shapes or EP sizes.
+
+Balanced-route CPU layout calculations fit about 1.02 GiB before physical-page
+rounding (2 GiB with the current page policy). That is workload-dependent and
+must not replace the current budget without a load bound and hardware tests.
+The capacity audit used CPU route references and layout checks; it did not run
+a new full-batch hotspot NPU test or establish a smaller safe runtime budget.
+
 <span id="runtime_guard"></span>**runtime_guard**
 
 Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
