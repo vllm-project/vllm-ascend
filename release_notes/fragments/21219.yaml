@@ -1,0 +1,4 @@
+pr: 21219
+entries:
+  - category: bugfix
+    text: Fixed repetition penalty and bad-word handling under async scheduling with speculative decoding by synchronizing the previous step's draft token ids before the rejection sampler runs.
