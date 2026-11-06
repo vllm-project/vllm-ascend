@@ -1404,7 +1404,19 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 
 === "A3 series"
 
-    Keep the A3 model configuration from Section 5.2. Use the endpoints and resource values set above to edit the copied HCCS configuration:
+    Keep the A3 model configuration from Section 5.2. The following resource values come from the A3 deployment configuration, with 16 DRAM-enabled LocalServices and two SSD-backed loop devices:
+
+    ```bash
+    export MEMCACHE_SSD_PATHS="/dev/loop0:/dev/loop1"
+    export MEMCACHE_WORLD_SIZE=256
+    export MEMCACHE_DRAM_SIZE=10GB
+    export MEMCACHE_MAX_DRAM_SIZE=1024GB
+    export MEMCACHE_UBS_IO_MEM_GB=10
+    export MEMCACHE_DEVICE_COUNT=16
+    export MEMCACHE_FORCE_NEW_DISK=true
+    ```
+
+    Replace `/dev/loop0:/dev/loop1` with the actual container device paths and map both devices separately in the Section 4.3 Docker command. These values apply to this A3 example; each LocalService allocates `10GB` of pool DRAM and `10` GB for UBS IO, and `force_new_disk=true` reinitializes SSD cache storage at startup.
 
     In the copied `${MEMCACHE_CONFIG_DIR}/mmc-local.conf`, edit the following keys:
 
@@ -1451,6 +1463,8 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     export MMC_META_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
+
+    In each Prefill and Decode terminal, first apply the library exports and A2/A3 common exports from the beginning of Section 5.4, followed by the A3-specific exports above. Exports set in one terminal are not automatically available in another.
 
     After its configured ports are listening (`ss -lntp`), run the matching Section 5.2 Prefill and Decode commands in separate terminals, replacing only `--kv-transfer-config` with the arguments above. Keep all other model parameters unchanged. Complete the Section 5.2 API checks, start its Proxy, then perform the cache-reuse checks below.
 
@@ -1557,6 +1571,8 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 
     **Prefill:**
 
+    In the Prefill terminal, first apply the library exports at the beginning of Section 5.4 and the **Set the service environment** block above, then run the following commands.
+
     ```bash
     export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -1592,6 +1608,8 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     Wait for the Prefill API on port `8247` to become ready, then start Decode in a new terminal.
 
     **Decode:**
+
+    In the Decode terminal, first apply the library exports at the beginning of Section 5.4 and the **Set the service environment** block above, then run the following commands.
 
     ```bash
     export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf"
@@ -1850,7 +1868,25 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+After the service is ready, run this basic text benchmark in a separate terminal. The example targets the A2/A3 colocated service in Section 5.1; for another deployment, use its API address and served model name from [Section 6](#6-functional-verification) and its matching checkpoint for `--model`.
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+vllm bench serve \
+    --backend openai-chat \
+    --base-url http://127.0.0.1:8088 \
+    --endpoint /v1/chat/completions \
+    --model Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+    --served-model-name qwen3.8-flash-next \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 128 \
+    --num-prompts 100 \
+    --max-concurrency 8 \
+    --ignore-eos
+```
+
+Confirm that all requests succeed, then record throughput, TTFT, and TPOT from the benchmark summary. These request lengths and concurrency are a starting example; use the same workload when comparing deployments. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
