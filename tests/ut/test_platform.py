@@ -2050,6 +2050,34 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_rejects_mooncake_v1_kv_both(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(
+            kv_connector="MooncakeConnectorV1",
+            kv_role="kv_both",
+            engine_id="engine0",
+        )
+        vllm_config.scheduler_config = MagicMock()
+
+        from vllm_ascend import platform
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            pytest.raises(ValueError, match=r"MooncakeConnectorV1 does not support kv_role='kv_both'"),
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
     def test_check_and_update_config_rejects_multinode_dyntra_lb_decoder(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
