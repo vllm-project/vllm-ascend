@@ -1,5 +1,5 @@
 test_name: "DeepSeek-V4.1-Flash-w8a8-PD-MRV2"
-model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+model: "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8"
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: external
@@ -14,20 +14,21 @@ config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
-    dp_size_local: 2
+    dp_size: 4
+    dp_size_local: 4
     dp_rank_start: 0
-    tp_size: 2
+    tp_size: 1
     cp_size: 4
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 8
-    dp_size_local: 8
+    dp_size: 16
+    dp_size_local: 16
     dp_rank_start: 0
-    tp_size: 2
+    tp_size: 1
+    cp_size: 1
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
@@ -36,13 +37,14 @@ env_common: &env_common
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_RPC_TIMEOUT: "3600000"
-  VLLM_ENGINE_READY_TIMEOUT_S: "360000"
+  VLLM_ENGINE_READY_TIMEOUT_S: "36000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "204"
   HCCL_CONNECT_TIMEOUT: "120"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  LD_LIBRARY_PATH: "$LD_LIBRARY_PATH:/usr/local/lib/"
   https_proxy: ""
   http_proxy: ""
   all_proxy: ""
@@ -60,7 +62,7 @@ env_prefill: &env_prefill
 
 env_decode: &env_decode
   <<: *env_common
-  HCCL_BUFFSIZE: "1800"
+  HCCL_BUFFSIZE: "4096"
 
 templates:
   - node_index: 0
@@ -91,7 +93,7 @@ templates:
       - --max-num-batched-tokens
       - "8192"
       - --max-num-seqs
-      - "32"
+      - "16"
       - --speculative-config
       - '{"num_speculative_tokens": 5, "method": "dspark"}'
       - --trust-remote-code
@@ -104,22 +106,21 @@ templates:
       - --tool-call-parser
       - "deepseek_v41"
       - --enable-auto-tool-choice
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 32}'
       - --safetensors-load-strategy
       - "lazy"
       - --gpu-memory-utilization
-      - "0.92"
+      - "0.9"
       - --quantization
       - "ascend"
       - --enforce-eager
+      - --swa-bounded-replay
       - --enable-prefix-caching
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": false, "multistream_overlap_shared_expert": false}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 2}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
 
   - node_index: 1
     envs:
@@ -139,19 +140,22 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "400"
+      - "512"
       - --max-num-seqs
-      - "32"
+      - "72"
       - --async-scheduling
       - --block-size
       - "128"
       - --no-enable-prefix-caching
+      - --no-swa-bounded-replay
       - --trust-remote-code
       - --tokenizer-mode
       - "deepseek_v41"
@@ -160,8 +164,6 @@ templates:
       - --tool-call-parser
       - "deepseek_v41"
       - --enable-auto-tool-choice
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 16}'
       - --safetensors-load-strategy
       - "lazy"
       - --gpu-memory-utilization
@@ -169,11 +171,11 @@ templates:
       - --quantization
       - "ascend"
       - --speculative-config
-      - '{"num_speculative_tokens": 5, "method": "dspark", "enforce_eager": true}'
+      - '{"num_speculative_tokens": 5, "method": "dspark"}'
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 2}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
