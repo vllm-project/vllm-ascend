@@ -494,36 +494,71 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
 @patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True)
 def test_publish_lmhead_tp_step_capacity(_lmhead_tp_enable):
     """``_publish_lmhead_tp_step_capacity`` must derive the per-step target
-    capacity from ``execute_model_state.dp_sync.num_reqs`` (the group-agreed
-    request count) times ``decode_query_len``, and refresh it every step."""
+    capacity from ``execute_model_state.dp_sync_state.num_reqs`` (the
+    group-agreed request count) times ``decode_query_len``, and refresh it
+    every step."""
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
     runner._lmhead_tp_step_capacity_value = 99  # stale from a previous step
 
     # Fresh DP sync: num_reqs=3 -> capacity 3 * 2 = 6 (replaces stale 99).
     runner.execute_model_state = SimpleNamespace(
-        dp_sync=SimpleNamespace(num_reqs=3),
+        dp_sync_state=SimpleNamespace(num_reqs=3),
     )
     runner._publish_lmhead_tp_step_capacity()
     assert runner._lmhead_tp_step_capacity() == 6
 
     # A next step with a different req count must refresh, not keep 6.
     runner.execute_model_state = SimpleNamespace(
-        dp_sync=SimpleNamespace(num_reqs=2),
+        dp_sync_state=SimpleNamespace(num_reqs=2),
     )
     runner._publish_lmhead_tp_step_capacity()
     assert runner._lmhead_tp_step_capacity() == 4
 
     # No DP sync this step: keep the previously published value (4), do not
     # overwrite it or fall back to static.
-    runner.execute_model_state = SimpleNamespace(dp_sync=None)
+    runner.execute_model_state = SimpleNamespace(dp_sync_state=None)
     runner._publish_lmhead_tp_step_capacity()
     assert runner._lmhead_tp_step_capacity() == 4
 
     # No DP sync and nothing ever published -> static bound.
     runner2 = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
-    runner2.execute_model_state = SimpleNamespace(dp_sync=None)
+    runner2.execute_model_state = SimpleNamespace(dp_sync_state=None)
     runner2._publish_lmhead_tp_step_capacity()
     assert runner2._lmhead_tp_step_capacity() == 16
+
+
+@patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True)
+def test_publish_reads_real_execute_model_state_field(_lmhead_tp_enable):
+    """The publish reads ``execute_model_state`` by attribute name, so the
+    name must match upstream's real ``ExecuteModelState`` NamedTuple
+    (``dp_sync_state``). A drift here returns None on every call and silently
+    kills the target dynamic capacity while every rank agrees on the static
+    bound (no crash, no failed mocked test) — so this test locks the wiring
+    against the real class instead of a mirror mock."""
+    from vllm.v1.worker.gpu.dp_utils import DPSyncState
+    from vllm.v1.worker.gpu.model_runner import ExecuteModelState
+
+    runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # static cap 16
+    # num_reqs=5 must differ from the static bound (16) so a field-name miss
+    # that silently falls back to static cannot pass this test.
+    sync = DPSyncState(
+        num_tokens_across_dp=torch.tensor([10, 6, 10, 10]),
+        uniform_token_count=None,
+        eager=True,
+        num_reqs=5,
+    )
+    state = ExecuteModelState._make(
+        [None] * len(ExecuteModelState._fields)
+    )._replace(dp_sync_state=sync)
+    assert "dp_sync_state" in ExecuteModelState._fields  # wiring precondition
+    runner.execute_model_state = state
+    runner._publish_lmhead_tp_step_capacity()
+    assert runner._lmhead_tp_step_capacity() == 5 * 2  # num_reqs * decode_query_len
+
+    # Same state without the sync: keeps the published value (10), not static.
+    runner.execute_model_state = state._replace(dp_sync_state=None)
+    runner._publish_lmhead_tp_step_capacity()
+    assert runner._lmhead_tp_step_capacity() == 10
 
 
 def test_sample_uses_step_capacity():
@@ -931,7 +966,7 @@ def test_publish_converts_stashed_request_count_on_bootstrap():
     the publish must convert the synced rows to the head basis."""
     spec = _make_speculator()
     spec.model = SimpleNamespace(lm_head=SimpleNamespace())
-    spec._lmhead_tp_uniform_num_reqs = 4  # dp_sync.num_reqs of this round
+    spec._lmhead_tp_uniform_num_reqs = 4  # dp_sync_state.num_reqs of this round
 
     sync = torch.tensor([16, 16], dtype=torch.int32)
     with _spec_lmhead(True):
@@ -994,7 +1029,7 @@ def _patch_ar_context(name):
 
 def test_propose_stashes_dp_agreed_request_count():
     """The propose override must stash the round's DP-agreed request count
-    (``dp_sync.num_reqs`` -- identical on every rank, padded to the bucket
+    (``dp_sync_state.num_reqs`` -- identical on every rank, padded to the bucket
     request count in FULL mode) behind the request-scaled draft syncs, and
     must leave the stash unset for replicated drafts (global-token syncs)
     and sync-less rounds, whose publish keeps the raw-sync behavior."""

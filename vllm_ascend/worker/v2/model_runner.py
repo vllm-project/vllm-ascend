@@ -1153,19 +1153,24 @@ class NPUModelRunner(GPUModelRunner):
         """Publish the per-step target lmhead-TP capacity from the DP sync.
 
         ``execute_model`` calls this after ``super().execute_model`` returns.
-        When ``execute_model_state.dp_sync`` holds a fresh DP-synced request
-        count (``DPSyncState.num_reqs``, identical on every DP rank; includes
-        request padding in FULL graph), the target capacity is
+        When ``execute_model_state.dp_sync_state`` holds a fresh DP-synced
+        request count (``DPSyncState.num_reqs``, identical on every DP rank;
+        includes request padding in FULL graph), the target capacity is
         ``num_reqs * decode_query_len`` and replaces any previous value. When no
         fresh DP sync is available this step (e.g. an idle dummy run that did
         not re-sync), the previously published value is kept so a busy rank's
         value is inherited; only when nothing was ever published is the static
         ``max_num_reqs * decode_query_len`` bound used as a fallback.
+
+        The field is read by name (``dp_sync_state``) matching upstream's
+        ``ExecuteModelState``; a name drift here silently disables the target
+        dynamic capacity (the regression test constructs the real NamedTuple
+        to lock the wiring).
         """
         if not lmhead_tp_enable():
             return
         state = self.execute_model_state
-        dp_sync = getattr(state, "dp_sync", None) if state is not None else None
+        dp_sync = getattr(state, "dp_sync_state", None) if state is not None else None
         num_reqs = None
         if dp_sync is not None:
             num_reqs = getattr(dp_sync, "num_reqs", None)
