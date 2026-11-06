@@ -66,7 +66,10 @@ cpu_ut_leaked = sorted(cpu_ut_files & existing_et_keys)
 # ============================================================
 # 3. Correctness of runner_mapping
 # ============================================================
-all_expanded_files = e2e_files | ut_files
+# Routing applies to every e2e target, not just the pull-request suites:
+# curated/nightly suites (``curated_tests`` -> ``--curated``) are routed
+# through the same ``runner_mapping`` patterns. Validate against all of them.
+all_expanded_files = {str(f) for f in Path("tests/e2e").rglob("test_*.py")} | ut_files
 rm_errors: list[str] = []
 for pattern_str, runner_config in sorted(_rm.items()):
     try:

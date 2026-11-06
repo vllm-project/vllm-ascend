@@ -47,6 +47,8 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
+  pr-single-node-ops:
+    - tests/e2e/nightly/single_node/ops/singlecard_ops/
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -103,6 +105,12 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
   - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
+  # Temporarily skipped: the A5 build does not register the ``attn_res_fwd``
+  # custom op yet; re-enable once the A5 csrc build is fixed.
+  - tests/e2e/nightly/single_node/ops/singlecard_ops/test_attn_res_fwd.py
+  # Temporarily skipped: not adapted to vllm main's ``DraftLogitsCache`` API
+  # (a raw logits tensor is rejected); re-enable after updating the test.
+  - tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dflash_candidate_sampler.py
 
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
@@ -110,6 +118,10 @@ accuracy_tests:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  # Nightly single-node ops tests — routed to a placeholder partition.
+  # The actual A3/A5 label is forced via --runner-label-override in pr_test.yaml.
+  tests/e2e/nightly/single_node/ops/singlecard_ops:
+    default: a3-2
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2
