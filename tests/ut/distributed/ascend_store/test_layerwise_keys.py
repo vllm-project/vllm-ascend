@@ -13,7 +13,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -163,6 +163,32 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(ValueError, "align-state"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=cache,
+                model_name="model",
+                use_hybrid=True,
+                grouped_block_size=[16],
+            )
+
+    def test_dcp_rejects_sliding_window_groups(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        cache = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.swa"],
+                    SlidingWindowSpec(
+                        block_size=16,
+                        sliding_window=16,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype="uint8",
+                    ),
+                )
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "sliding-window"):
             MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=cache,

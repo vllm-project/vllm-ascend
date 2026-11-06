@@ -168,6 +168,6 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --kv-transfer-config '{...}'
     ```
 
-- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and recurrent/align-state cache groups are not supported with DCP. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and sliding-window or recurrent/align-state cache groups are not supported with DCP. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

@@ -11,7 +11,7 @@ from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -127,25 +127,31 @@ def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
 
 
 def validate_dcp_groups(kv_cache_config: Any) -> None:
-    """Reject cache groups whose keys cannot be written per DCP shard.
+    """Reject cache groups that upstream vLLM cannot shard across DCP.
 
-    Recurrent/align-state caches are sharded across TP but not across DCP:
-    only the TP owner writes a state page, so requiring one object per DCP
-    rank would demand keys that no rank owns.
+    Sliding-window caches have no DCP support in vLLM's KV cache memory
+    planning, prefix-cache lookup, or manager. Recurrent/align-state caches
+    are sharded across TP but not across DCP: only the TP owner writes a
+    state page, so requiring one object per DCP rank would demand keys that
+    no rank owns.
     """
     if kv_cache_config is None:
         return
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
         specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-        if any(
-            isinstance(sub_spec, MambaSpec) and getattr(sub_spec, "mamba_cache_mode", None) == "align"
-            for sub_spec in specs
-        ):
-            raise ValueError(
-                "Mooncake layerwise DCP does not support recurrent/align-state cache groups; "
-                "disable DCP or use a cache layout without recurrent state."
-            )
+        for sub_spec in specs:
+            if isinstance(sub_spec, SlidingWindowSpec):
+                raise ValueError(
+                    "Mooncake layerwise DCP does not support sliding-window cache groups "
+                    "(including DeepSeek-V4 SWA/compressor caches); disable DCP or use a "
+                    "full-attention cache layout."
+                )
+            if isinstance(sub_spec, MambaSpec) and getattr(sub_spec, "mamba_cache_mode", None) == "align":
+                raise ValueError(
+                    "Mooncake layerwise DCP does not support recurrent/align-state cache groups; "
+                    "disable DCP or use a cache layout without recurrent state."
+                )
 
 
 def group_block_size_signature(group) -> tuple[int, ...]:

@@ -181,9 +181,11 @@ rank stores and reads only its own context shard. Keys append
 and `DCP=1` keys remain unchanged. A prefix block is reported as a cache hit
 only after every PP stage and DCP rank has committed it.
 
-PCP and DCP cannot be enabled together for layerwise pooling. Cache groups
-backed by recurrent/align-state state are not supported with DCP; see the
-[hybrid attention guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
+PCP and DCP cannot be enabled together for layerwise pooling. DCP requires
+full-attention cache groups: upstream vLLM does not support DCP for
+sliding-window caches, so models with sliding-window or recurrent/align-state
+groups (for example DeepSeek-V4 SWA/compressor caches) must keep DCP disabled.
+See the [hybrid attention guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
 
 ### Use Cached Prefixes
 
