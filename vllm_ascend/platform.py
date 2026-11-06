@@ -38,6 +38,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 # isort: off
 from vllm_ascend.utils import (
@@ -698,8 +699,12 @@ class NPUPlatform(Platform):
         if not vllm_config.use_v2_model_runner:
             return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
-        # is_draft_model will be removed later, so we set it to False temporarily.
-        is_draft_model = False
+        # Export the legacy flag for compatibility. MegaMoE eligibility reads
+        # the draft topology recorded on DSpark's private config directly.
+        is_draft_model = (
+            isinstance(getattr(vllm_config.model_config, "_ascend_draft_moe_topology", None), tuple)
+            or getattr(vllm_config.model_config, "runner_type", None) == "draft"
+        )
         # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
         is_draft_model_prefill = False
         sinks = False
@@ -732,6 +737,12 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            is_draft_model=is_draft_model,
+            draft_moe_quant_type=(
+                getattr(vllm_config.speculative_config.draft_model_config, "draft_moe_quant_type", QuantType.NONE)
+                if is_draft_model
+                else QuantType.NONE
+            ),
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 

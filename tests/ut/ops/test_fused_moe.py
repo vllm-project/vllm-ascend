@@ -776,14 +776,20 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
         router._compute_routing(hidden_states, router_logits, torch.int32)
 
 
-@pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
+@pytest.mark.parametrize("image_sentinel_lo", [0, 129257, 129264])
 @pytest.mark.parametrize("renormalize", [True, False])
-def test_vision_router_preserves_reference_routing_without_native_vision(monkeypatch, image_sentinel_lo, renormalize):
-    input_ids = torch.tensor([-1, image_sentinel_lo], dtype=torch.int32)
+@pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
+def test_vision_router_preserves_reference_routing_without_native_vision(
+    monkeypatch, image_sentinel_lo, renormalize, input_dtype
+):
+    # A zero-based sentinel is a boundary case: replacing padding -1 with 0
+    # would incorrectly turn the text row into an image row. No hash table
+    # exists here, so input IDs are compared with sentinels, never indexed.
+    input_ids = torch.tensor([-1, image_sentinel_lo], dtype=input_dtype)
     hidden_states = torch.randn(2, 4)
-    router_logits = torch.randn(2, 4, dtype=torch.float32)
-    text_bias = torch.randn(4, dtype=torch.float32)
-    bias_vl = torch.randn(4, dtype=torch.bfloat16)
+    router_logits = torch.tensor([[0.2, 0.4, 0.6, 0.8], [0.8, 0.6, 0.4, 0.2]])
+    text_bias = torch.tensor([4.0, 3.0, 0.0, 0.0])
+    bias_vl = torch.tensor([0.0, 0.0, 3.0, 4.0], dtype=torch.bfloat16)
     prepare_finalize = SimpleNamespace(all_gather_input_ids=MagicMock(side_effect=lambda value: value))
     monkeypatch.setattr(
         fused_topk_router_module,
@@ -2902,6 +2908,69 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         gate=gate,
         shared_experts=shared_experts,
     )
+
+
+@pytest.mark.parametrize("projection", ["gate_up_proj", "down_proj"])
+@pytest.mark.parametrize("parameter", ["weight", "weight_scale"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_mega_moe_shared_weights_fall_back_when_parameter_is_missing_or_none(projection, parameter, missing):
+    layer = SimpleNamespace(
+        act_fn=type("SiluAndMul", (), {})(),
+        gate_up_proj=SimpleNamespace(weight=torch.ones(2, 2), weight_scale=torch.ones(2, 2)),
+        down_proj=SimpleNamespace(weight=torch.ones(2, 2), weight_scale=torch.ones(2, 2)),
+    )
+    module = getattr(layer, projection)
+    if missing:
+        delattr(module, parameter)
+    else:
+        setattr(module, parameter, None)
+    shared = SimpleNamespace(
+        quant_type=QuantType.W4A8MXFP,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
+        swiglu_limit=0.0,
+        lora_context=None,
+        _mega_moe_weights=None,
+        moe_config=SimpleNamespace(tp_group=SimpleNamespace(world_size=1)),
+        layer=layer,
+    )
+    assert AscendSharedExperts.get_mega_moe_weights(shared) is None
+    assert shared._mega_moe_weights is None
+
+
+@pytest.mark.parametrize("overlap_enabled", [False, True])
+def test_shared_runner_forces_event_return_before_mega_moe_fusion(monkeypatch, overlap_enabled):
+    monkeypatch.setattr(AscendMoERunner, "_can_overlap_sp_shared_with", lambda *args: False)
+    shared_layer = object()
+    runner = _stub_moe_runner_init(monkeypatch, shared_experts=shared_layer)
+    # This contract does not depend on shared-expert stream overlap.
+    runner.ascend_shared_experts.multistream_overlap = overlap_enabled
+    assert runner.routed_experts.return_with_event is True
+    runner.routed_experts.quant_type = QuantType.W4A8MXFP
+    runner.routed_experts.dynamic_eplb = False
+    runner.routed_experts.mix_placement = False
+    runner.routed_experts.global_redundant_expert_num = 0
+    shared_weights = object()
+    runner.ascend_shared_experts.get_mega_moe_weights = lambda: shared_weights
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
+    context = SimpleNamespace(
+        moe_comm_type=MoECommType.FUSED_MC2,
+        moe_comm_method=SimpleNamespace(supports_fused_shared_experts=lambda: True),
+    )
+    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", context)
+    states = torch.ones(2, 4)
+    combined = states * 3
+
+    def routed_forward(**kwargs):
+        assert kwargs["shared_experts"] is shared_weights
+        if runner.routed_experts.return_with_event:
+            return combined, RoutedMoEMilestones(shared_experts_fused=True)
+        return combined
+
+    runner.routed_experts.forward_impl = routed_forward
+    shared_out, routed_out = runner._forward_with_fused_shared_experts(states, states, states, None)
+    torch.testing.assert_close(shared_out, combined)
+    torch.testing.assert_close(routed_out, torch.zeros_like(combined))
 
 
 def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):

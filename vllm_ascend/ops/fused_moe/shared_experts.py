@@ -31,6 +31,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
@@ -124,24 +125,138 @@ class AscendSharedExperts:
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
+        self._mega_moe_weights: MoEWeights | None = None
 
-        if self.multistream_overlap:
-            # Wrap the quant_method's process_weights_after_loading to validate that
-            # splitting shared expert computation (gate_up projection, activation,
-            # then down projection) yields identical results to integrated
-            # computation after weight loading.
-            original_process_weights = quant_method.process_weights_after_loading
+        # Clear contiguous shared-weight copies after an RL weight reload, and
+        # validate split execution when multistream overlap is enabled.
+        original_process_weights = quant_method.process_weights_after_loading
 
-            @wraps(original_process_weights)
-            def wrapped_process_weights(*args, **kwargs):
-                result = original_process_weights(*args, **kwargs)
+        @wraps(original_process_weights)
+        def wrapped_process_weights(*args, **kwargs):
+            result = original_process_weights(*args, **kwargs)
+            self._mega_moe_weights = None
+            if self.multistream_overlap:
                 self.validate_consistency()
-                return result
+            return result
 
-            quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+        quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
+
+    def get_mega_moe_weights(self) -> MoEWeights | None:
+        """Return a cached per-expert MXFP payload for one shared expert.
+
+        MegaMoE returns routed and shared contributions as one tensor, so the
+        shared weights must be replicated whenever TP has more than one rank.
+        The first integration intentionally supports one shared expert; wider
+        merged MLPs need gate/up reordering before they can be represented as
+        multiple MegaMoE experts. FP8 tensors are made contiguous once when
+        their linear-kernel layout cannot be passed directly to MegaMoE.
+        """
+
+        if self.quant_type not in (QuantType.W4A8MXFP, QuantType.W8A8MXFP):
+            return None
+        if self.swiglu_alpha != 1.0 or self.swiglu_beta != 0.0:
+            return None
+        if getattr(self.layer.act_fn, "limit", self.swiglu_limit) != self.swiglu_limit:
+            return None
+        if has_lora(self.lora_context):
+            return None
+
+        cached_weights = getattr(self, "_mega_moe_weights", None)
+        if cached_weights is not None:
+            return cached_weights
+
+        tp_size = self.moe_config.tp_group.world_size
+        if tp_size > 1 and not self.weights_replicated:
+            return None
+        if getattr(self.layer, "expert_gate", None) is not None:
+            return None
+        if not type(self.layer.act_fn).__name__.startswith("SiluAndMul"):
+            return None
+
+        gate_up_proj = self.layer.gate_up_proj
+        down_proj = self.layer.down_proj
+        if getattr(gate_up_proj, "bias", None) is not None or getattr(down_proj, "bias", None) is not None:
+            return None
+        required_attrs = (
+            (gate_up_proj, "weight"),
+            (gate_up_proj, "weight_scale"),
+            (down_proj, "weight"),
+            (down_proj, "weight_scale"),
+        )
+        if any(getattr(module, name, None) is None for module, name in required_attrs):
+            return None
+
+        hidden_size = self.moe_config.hidden_dim
+        intermediate_hidden = self.moe_config.intermediate_size_per_partition
+        weight_dtypes = {gate_up_proj.weight.dtype, down_proj.weight.dtype}
+        if weight_dtypes == {torch.float8_e4m3fn}:
+            shared_quant_type = QuantType.W8A8MXFP
+            weight_pack_factor = 1
+        elif weight_dtypes == {torch.uint8}:
+            shared_quant_type = QuantType.W4A8MXFP
+            weight_pack_factor = 2
+        else:
+            return None
+
+        # Match the routed per-expert list layout: each weight is 2D and
+        # each E8M0 scale is 3D, with two 32-value blocks in the trailing dim.
+        expected_shapes = {
+            "w1": (2 * intermediate_hidden, hidden_size // weight_pack_factor),
+            "w2": (hidden_size, intermediate_hidden // weight_pack_factor),
+            "w1_scale": (2 * intermediate_hidden, (hidden_size + 63) // 64, 2),
+            "w2_scale": (hidden_size, (intermediate_hidden + 63) // 64, 2),
+        }
+        # Reject merged or TP-sharded layouts before allocating contiguous
+        # copies, so the standalone fallback allocates no extra device memory.
+        if gate_up_proj.weight.ndim != 2 or down_proj.weight.ndim != 2:
+            return None
+        if gate_up_proj.weight_scale.ndim != 3 or down_proj.weight_scale.ndim != 3:
+            return None
+        actual_shapes = {
+            "w1": tuple(reversed(gate_up_proj.weight.shape)),
+            "w2": tuple(reversed(down_proj.weight.shape)),
+            "w1_scale": (
+                gate_up_proj.weight_scale.shape[1],
+                gate_up_proj.weight_scale.shape[0],
+                gate_up_proj.weight_scale.shape[2],
+            ),
+            "w2_scale": (
+                down_proj.weight_scale.shape[1],
+                down_proj.weight_scale.shape[0],
+                down_proj.weight_scale.shape[2],
+            ),
+        }
+        if actual_shapes != expected_shapes:
+            return None
+        shared_weights = MoEWeights(
+            w1=[gate_up_proj.weight.transpose(-1, -2).contiguous()],
+            w2=[down_proj.weight.transpose(-1, -2).contiguous()],
+            w1_scale=[gate_up_proj.weight_scale.transpose(-3, -2).contiguous()],
+            w2_scale=[down_proj.weight_scale.transpose(-3, -2).contiguous()],
+            quant_type=shared_quant_type,
+        )
+        actual_shapes = {
+            "w1": tuple(shared_weights.w1[0].shape),
+            "w2": tuple(shared_weights.w2[0].shape),
+            "w1_scale": tuple(shared_weights.w1_scale[0].shape),
+            "w2_scale": tuple(shared_weights.w2_scale[0].shape),
+        }
+        if actual_shapes != expected_shapes:
+            return None
+        tensors = (
+            shared_weights.w1[0],
+            shared_weights.w2[0],
+            shared_weights.w1_scale[0],
+            shared_weights.w2_scale[0],
+        )
+        if any(not tensor.is_contiguous() for tensor in tensors):
+            return None
+
+        self._mega_moe_weights = shared_weights
+        return self._mega_moe_weights
 
     def validate_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""

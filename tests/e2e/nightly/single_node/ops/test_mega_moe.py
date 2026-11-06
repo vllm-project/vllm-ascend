@@ -121,6 +121,7 @@ def main():
     # Instantiate only the integration endpoint: no model runner or checkpoint is
     # required. The unit tests separately cover FusedMC2CommImpl.__init__ binding.
     comm = object.__new__(FusedMC2CommImpl)
+    comm._mega_moe_tokens_per_rank = max(a.tokens)
     comm.mega_moe = mega
     comm.mega_moe_symm_buffer = buffer
     comm.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
