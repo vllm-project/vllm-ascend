@@ -1131,18 +1131,23 @@ def _uses_single_raw_mla_cache(
 
 
 def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
-    """Keep Gemma 4's budget and the V2 runner on the same dense layout.
+    """Keep supported full/sliding layouts on one shared dense allocation.
 
     Equal physical pages let full and sliding-window groups overlay the same
     pool even when their head dimensions and tokens per block differ. Keep
     specialized/quantized caches and distributed transfer on their existing
-    allocation paths. Limit this regression fix to Gemma 4 so other models
-    retain their existing allocation behavior.
+    allocation paths. Besides Gemma 4, enable this for explicitly configured
+    draft KV windows so their target and draft groups share the block pool.
     """
     model_config = getattr(vllm_config, "model_config", None)
     text_config = getattr(model_config, "hf_text_config", None)
     if getattr(text_config, "model_type", None) != "gemma4_text":
-        return False
+        try:
+            uses_draft_kv_window = getattr(get_ascend_config(), "draft_kv_window", None) is not None
+        except RuntimeError:
+            uses_draft_kv_window = False
+        if not uses_draft_kv_window:
+            return False
     if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
         return False
     specs = tuple(specs)
@@ -1251,7 +1256,7 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     attn_layers: dict[str, AttentionLayerBase] | None = None
-    # Gemma 4 full/sliding groups share one pool while retaining contiguous
+    # Supported full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
     if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
         return allocate_shared_attention_kv_cache(
