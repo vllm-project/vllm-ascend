@@ -58,7 +58,7 @@ def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
         config={
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
-            "global_segment_size": "5GB",
+            "global_segment_size": "2GB",  # was "5GB"; fabric mem mounts after HBM reservation
             "local_buffer_size": "5GB",
             "preferred_segment": False,
             "prefer_alloc_in_same_node": True,
@@ -99,7 +99,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             dtype="auto",
             tensor_parallel_size=4,
             enable_expert_parallel=True,
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.85,  # was 0.9; leave HBM for the fabric-mem segment
             quantization="ascend",
             tokenizer_mode="deepseek_v4",
             block_size=128,
