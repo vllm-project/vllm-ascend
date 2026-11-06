@@ -6,6 +6,28 @@ Variables are defined in the 'extra' section of mkdocs.yml.
 
 from pathlib import Path
 
+import regex as re
+
+
+def _is_release_version(version):
+    """Return True when the Read the Docs version slug denotes a release.
+
+    RTD publishes release branches as plain branches (READTHEDOCS_VERSION_TYPE
+    is "branch", not "tag"), so READTHEDOCS_VERSION_TYPE cannot be used to spot
+    an official release. The version slug itself can. Depending on how the RTD
+    version was created the slug is one of:
+
+      - "v0.30.0"            (short slug, matches the public /en/v0.30.0/ URL)
+      - "releases-v0.30.0"   (auto-created from the branch, "/" replaced by "-")
+      - "releases/v0.30.0"   (raw branch name)
+
+    Release candidates ("releases/v0.30.0rc2") are not official releases and
+    must not match: the trailing "rc..." suffix fails the fullmatch.
+    "latest" (main) and PR-number slugs never match.
+    """
+    return bool(re.fullmatch(r"(?:releases[/-])?v\d+\.\d+\.\d+", str(version or "").strip()))
+
+
 # UI string translations keyed by DOCS_LANG. Injected into config.extra.i18n
 # in define_env() so override templates (e.g. docs/overrides/main.html) can
 # read them via config.extra.i18n[config.extra.docs_lang]. The macros
@@ -13,16 +35,28 @@ from pathlib import Path
 # override templates, hence the detour through config.extra.
 UI_STRINGS = {
     "en": {
-        "banner_preview": "You are viewing the latest developer preview docs.",
+        # Banner shown on the latest (main) developer-preview build, linking
+        # to the official release docs.
+        "banner_preview": "You are viewing the latest developer preview documentation.",
         "banner_link": "Click here",
-        "banner_suffix": "to view docs for the latest stable release ({version}).",
+        "banner_suffix": "to access the official release version ({version}) documentation.",
+        # Banner shown on an official release build, linking back to the
+        # latest developer-preview (main) docs.
+        "banner_release_preview": (
+            "You are currently viewing the documentation for the official release version ({version})."
+        ),
+        "banner_release_suffix": "to access the latest developer preview documentation.",
         "btn_report": "report issue",
         "aria_report": "Report a documentation issue",
     },
     "zh": {
+        # 最新（main）开发者预览版构建上展示的提示框，链接到正式发布版本文档。
         "banner_preview": "您正在查看最新的开发者预览版文档。",
         "banner_link": "点击此处",
-        "banner_suffix": "查看最新稳定版（{version}）的文档。",
+        "banner_suffix": "可访问正式发布版本（{version}）文档。",
+        # 正式发布版本构建上展示的提示框，链接回最新的开发者预览版（main）文档。
+        "banner_release_preview": "您正在查看正式发布版本({version})的文档。",
+        "banner_release_suffix": "可访问最新的开发者预览版文档。",
         "btn_report": "反馈问题",
         "aria_report": "报告文档问题",
     },
@@ -54,11 +88,20 @@ def define_env(env):
     # to config.extra. See module docstring for the rationale.
     config = env.variables.get("config")
     if config is not None:
+        # Derive is_release from the RTD version slug rather than from
+        # DOCS_IS_RELEASE: RTD publishes release branches as normal branches
+        # (READTHEDOCS_VERSION_TYPE="branch"), so the tag-only check in
+        # tools/rtd_build.sh never marks a release branch as a release.
+        config.extra["is_release"] = _is_release_version(config.extra.get("rtd_version"))
         stable_version = env.variables["stable_vllm_ascend_version"]
+        # The current build's own version (e.g. v0.30.0 on a release branch).
+        # Used by the release banner to identify the docs being viewed.
+        release_version = env.variables["vllm_ascend_version"]
         config.extra["i18n"] = {
             language: {
                 **strings,
                 "banner_suffix": strings["banner_suffix"].format(version=stable_version),
+                "banner_release_preview": strings["banner_release_preview"].format(version=release_version),
             }
             for language, strings in UI_STRINGS.items()
         }

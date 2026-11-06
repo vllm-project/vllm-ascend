@@ -27,6 +27,12 @@
   <a href="https://docs.vllm.ai/projects/ascend/{{ 'zh-cn' if config.extra.docs_lang == 'zh' else 'en' }}/{{ config.extra.stable_vllm_ascend_version }}">{{ t.banner_link }}</a>
   {{ t.banner_suffix }}
 </div>
+{% else %}
+<div class="md-announce">
+  {{ t.banner_release_preview }}
+  <a href="https://docs.vllm.ai/projects/ascend/{{ 'zh-cn' if config.extra.docs_lang == 'zh' else 'en' }}/latest">{{ t.banner_link }}</a>
+  {{ t.banner_release_suffix }}
+</div>
 {% endif %}
 
 {% set lang_path = "/zh-cn/" if config.extra.docs_lang == "zh" else "/en/" %}
