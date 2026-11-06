@@ -586,7 +586,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             key_lengths,
             block_table=table,
         )
-        logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes))
+        logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes), scope="process")
         return output
 
     def _execute_sparse_flash_attention_process(
