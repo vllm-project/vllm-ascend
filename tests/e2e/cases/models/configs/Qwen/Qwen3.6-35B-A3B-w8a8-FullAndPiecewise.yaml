@@ -23,7 +23,7 @@
         - "--port"
         - "$SERVER_PORT"
         - "--tokenizer"
-        - "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+        - "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8"
         - "--trust-remote-code"
         - "--quantization"
         - "ascend"
