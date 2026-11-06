@@ -56,7 +56,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache, get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -588,12 +588,19 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        shared_mla_rope: MLARopeMetadataCache | None = None,
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=common_attn_metadata.pcp_context),
+            lambda: self._build(
+                common_attn_metadata,
+                draft_index=None,
+                pcp_context=common_attn_metadata.pcp_context,
+                shared_mla_rope=shared_mla_rope,
+            ),
         )
         if (
             self.use_pcp
@@ -647,6 +654,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int | None = None,
         pcp_context: Any | None = None,
+        *,
+        shared_mla_rope: MLARopeMetadataCache | None = None,
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -676,6 +685,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         if self.nope:
             cos, sin = None, None
+        elif shared_mla_rope is not None and draft_index is None:
+            cos, sin = shared_mla_rope.get(common_attn_metadata.positions, input_positions)
         else:
             cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
 

@@ -148,6 +148,46 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
 
 
+class MLARopeMetadataCache:
+    """Share a persistent RoPE slice across compatible builders in one forward."""
+
+    def __init__(self) -> None:
+        self._positions: torch.Tensor | None = None
+        self._num_tokens = 0
+        self._value: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    @staticmethod
+    def _uses_persistent_buffers(value: tuple[torch.Tensor, torch.Tensor]) -> bool:
+        cos, sin = value
+        return (
+            _cos_mla is not None
+            and _sin_mla is not None
+            and cos.numel() > 0
+            and sin.numel() > 0
+            and cos.device == _cos_mla.device
+            and sin.device == _sin_mla.device
+            and cos.data_ptr() == _cos_mla.data_ptr()
+            and sin.data_ptr() == _sin_mla.data_ptr()
+        )
+
+    def get(self, positions: torch.Tensor, input_positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = input_positions.shape[0]
+        if (
+            self._positions is positions
+            and self._num_tokens == num_tokens
+            and self._value is not None
+            and self._uses_persistent_buffers(self._value)
+        ):
+            return self._value
+        value = get_cos_and_sin_mla(input_positions, use_cache=True)
+        self._positions = positions
+        self._num_tokens = num_tokens
+        # Preserve the original fallback for absent, empty or mismatched graph
+        # buffers. Only slices of the stable destinations may be reused.
+        self._value = value if self._uses_persistent_buffers(value) else None
+        return value
+
+
 def _record_cos_sin_cache(cos_sin_cache):
     global _cos_sin_cache
     if _cos_sin_cache is not None:

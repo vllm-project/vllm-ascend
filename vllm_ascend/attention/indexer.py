@@ -36,7 +36,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache, get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
 from vllm_ascend.utils import (
@@ -928,6 +928,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         buffer_key: object,
         use_cached_rope: bool,
         copy_rope: bool,
+        *,
+        shared_mla_rope: MLARopeMetadataCache | None = None,
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -953,7 +955,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope)
+        if shared_mla_rope is not None and use_cached_rope:
+            cos, sin = shared_mla_rope.get(common_attn_metadata.positions, input_positions)
+        else:
+            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope)
         cos = cos[:num_input_tokens]
         sin = sin[:num_input_tokens]
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]

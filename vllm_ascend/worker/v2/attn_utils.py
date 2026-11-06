@@ -109,6 +109,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
+from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -501,6 +502,7 @@ def build_attn_metadata(
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
     common_metadata_callback=None,
+    reuse_hisparse_mla_rope: bool = False,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -546,6 +548,30 @@ def build_attn_metadata(
         num_input_tokens = num_tokens
     if num_actual_reqs is None:
         num_actual_reqs = num_reqs
+
+    rope_builders: tuple[type, ...] = ()
+    if (
+        reuse_hisparse_mla_rope
+        and full_graph_mode
+        and not for_cudagraph_capture
+        and not offload_dummy
+        and positions is not None
+        and pcp_context is None
+        and dcp_local_seq_lens is None
+        and parallel_config is not None
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and model_specific_attn_metadata is None
+        and common_metadata_callback is None
+        and not draft_layer_names
+        and copy_sfa_draft_index is None
+        and not copy_sfa_restore_tails
+    ):
+        from vllm_ascend.attention.indexer import AscendHiSparseIndexerMetadataBuilder
+        from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder
+
+        rope_builders = (AscendHiSparseMetadataBuilder, AscendHiSparseIndexerMetadataBuilder)
+    shared_mla_rope = None
 
     # positions will not be used directly in graph modes, so it is saft to create it here.
     if positions is None:
@@ -672,6 +698,14 @@ def build_attn_metadata(
                 if not for_cudagraph_capture and model_specific_attn_metadata is not None
                 else {}
             )
+            if type(attn_metadata_builder) in rope_builders and not getattr(attn_metadata_builder, "nope", False):
+                if shared_mla_rope is None:
+                    shared_mla_rope = MLARopeMetadataCache()
+                attn_metadata_extra_kwargs["shared_mla_rope"] = shared_mla_rope
+            else:
+                # An unrelated builder may update the same persistent RoPE
+                # storage. Share only within runs of known compatible builders.
+                shared_mla_rope = None
             if is_dsa_builder:
                 # DSA cache groups share request-level metadata during replay.
                 attn_metadata_extra_kwargs.update(

@@ -561,9 +561,16 @@ class AscendModelState(DefaultModelState):
             copy_sfa_restore_tails=restore_copy_sfa_tails,
             draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
             common_metadata_callback=(
-                lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
-                if self.decoder_replay is not None
-                else None
+                self._decoder_replay_common_metadata.__setitem__ if self.decoder_replay is not None else None
+            ),
+            reuse_hisparse_mla_rope=(
+                self.vllm_config.attention_config.hisparse_config is not None
+                and cudagraph_mode == CUDAGraphMode.FULL
+                and not for_capture
+                and not input_batch.is_dummy
+                # MTP verification can be classified as ChunkedPrefill even
+                # with no requests actually in prefill.
+                and not input_batch.is_prefilling_np[:num_actual_reqs].any()
             ),
         )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
