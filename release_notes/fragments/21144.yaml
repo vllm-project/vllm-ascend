@@ -1,0 +1,6 @@
+pr: 21144
+entries:
+  - category: feature
+    text: Enabled piecewise graph execution for context-parallel (PCP) prefill on DSA attention, so prefill and mixed batches replay captured pieces instead of running eagerly while full-graph request padding stays separate from piecewise token padding.
+  - category: bugfix
+    text: Context-parallel graph capture now verifies across the CP ranks that every rank captured the same graph set, so a rank that captures different pieces fails fast with per-rank details instead of hanging on the first replay step.

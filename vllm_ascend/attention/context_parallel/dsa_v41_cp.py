@@ -16,6 +16,7 @@ from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_shard
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
+from vllm_ascend.attention.context_parallel.graph_spec import CPGraphSpec
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41AttentionMetadataBuilder,
     AscendDSAV41FoldedIndexMetadataBuilder,
@@ -151,8 +152,13 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         # DualChunkSwap doubles prefill rows; decode graphs also pad requests.
         max_reqs = vllm_config.scheduler_config.max_num_seqs
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
         graph_reqs = max(capture_sizes, default=0)
+        if cudagraph_mode.has_piecewise_cudagraphs() and not cudagraph_mode.has_full_cudagraphs():
+            # Piecewise capture pads tokens, not requests, so the compile sizes
+            # bound request capacity only through max_num_reqs.
+            graph_reqs = min(graph_reqs, max_reqs)
         self._resize_request_buffers(self, max(self._request_capacity_factor * max_reqs, graph_reqs) + 1)
         self._resize_request_buffers(self._global_builder, max(max_reqs, graph_reqs) + 1)
 
@@ -280,7 +286,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     def _prepare_graph_pcp_context(
         self,
         pcp_context,
-        full_graph_mode: bool,
+        graph_spec: CPGraphSpec,
     ):
         """Prepare graph-stable V4.1 tensors without changing the PCP batch layout."""
         global_batch = pcp_context.global_batch
@@ -290,7 +296,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         # must cover every padded row. Other modes run the DSA cache update
         # with the actual token extent, and compact indices avoid restoring
         # placeholder rows that would be trimmed before the cache write anyway.
-        num_restore_tokens = global_batch.num_tokens_after_padding if full_graph_mode else num_actual_tokens
+        num_restore_tokens = global_batch.num_tokens_after_padding if graph_spec.is_full else num_actual_tokens
         # Use the preallocated buffer to keep the address fixed for graph replay.
         hidden_restore_idx = self._hidden_restore_idx_buffer[:num_restore_tokens]
         hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
@@ -345,6 +351,17 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     ) -> AscendDSAV41Metadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
+        # Resolve the graph contract once and keep the legacy ``full_graph_mode``
+        # keyword consistent for the DSA V4.1 builders underneath.
+        graph_spec = kwargs.pop("graph_spec", None)
+        if not isinstance(graph_spec, CPGraphSpec):
+            full_graph = bool(kwargs.get("full_graph_mode", False))
+            graph_spec = CPGraphSpec.from_runtime(
+                self.vllm_config.compilation_config.cudagraph_mode,
+                full_graph=full_graph,
+                capturing=full_graph,
+            )
+        kwargs["full_graph_mode"] = graph_spec.is_full
         if not uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp):
             # Without a PCP context the batch runs replicated on every rank,
             # like a PCP=1 model (e.g. a replicated draft decode), so build the
@@ -360,7 +377,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         # Query overrides do not change PCP request layout. Query-dependent
         # outputs are scoped separately by the base metadata builder.
         shared = batch_shared.setdefault(("v41_pcp_specialized", id(self.vllm_config), None), {})
-        full_graph_mode = bool(kwargs.get("full_graph_mode", False))
+        full_graph_mode = graph_spec.is_full
         signature = (
             common_attn_metadata.num_reqs,
             common_attn_metadata.num_input_tokens,
@@ -384,7 +401,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             prepared_context = shared.get("pcp_context")
             if prepared_context is None:
                 prepared_context = self._pcp_context_owner._prepare_graph_pcp_context(
-                    pcp_context, full_graph_mode=full_graph_mode
+                    pcp_context, graph_spec=graph_spec
                 )
                 shared["pcp_context"] = prepared_context
             pcp_context = prepared_context
@@ -394,7 +411,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                 global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
                     pcp_context, pcp_cache_group_idx, common_attn_metadata
                 )
-                if full_graph_mode:
+                if graph_spec.is_full:
                     global_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
                         global_common, pcp_context.global_batch.num_reqs
                     )
@@ -410,7 +427,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         local_common = self._build_local_common_attn_metadata(
             pcp_context, common_attn_metadata, pcp_cache_group_idx, has_prefill
         )
-        if full_graph_mode:
+        if graph_spec.is_full:
             offsets = shared.get("local_graph_offsets")
             if offsets is None:
                 local_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(

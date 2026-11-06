@@ -1699,6 +1699,7 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     builder._pcp_rank = 1
     builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
     builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=None))
 
     raw_slot_mapping = torch.arange(6, dtype=torch.int64)
     hidden_restore_idx = torch.arange(5, dtype=torch.int64)
@@ -1836,6 +1837,7 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
     builder._pcp_rank = 1
     builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
     builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=None))
 
     global_slot_mappings = (
         torch.tensor([[10, 11, 12, 13]], dtype=torch.int64)

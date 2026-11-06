@@ -9,6 +9,7 @@ import torch
 
 from vllm_ascend.attention.context_parallel import dsa_cp
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl, AscendDSAPCPMetadataBuilder
+from vllm_ascend.attention.context_parallel.graph_spec import CPGraphMode, CPGraphSpec
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
@@ -19,6 +20,9 @@ class TestAscendDSAPCPMetadataBuilderWithoutContext:
         builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
         builder._is_decode_sharded = True
         builder.use_pcp = True
+        # The graph contract falls back to the runtime mode when no explicit
+        # ``graph_spec`` is supplied, so the builder needs its config.
+        builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=None))
         common = SimpleNamespace(
             pcp_context=None, pcp_cache_group_idx=None, slot_mapping=torch.zeros(1), num_input_tokens=1
         )
@@ -71,7 +75,8 @@ class TestAscendDSAPCPGraphPadding:
             hidden_restore_idx=hidden_restore_idx,
         )
 
-        prepared = builder._prepare_graph_pcp_context(pcp_context, full_graph_mode=full_graph_mode)
+        graph_spec = CPGraphSpec(mode=CPGraphMode.FULL if full_graph_mode else CPGraphMode.NONE)
+        prepared = builder._prepare_graph_pcp_context(pcp_context, graph_spec=graph_spec)
 
         assert prepared.hidden_restore_idx.shape[0] == expected_num_tokens
         assert torch.equal(prepared.hidden_restore_idx[:6], hidden_restore_idx)
