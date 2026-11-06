@@ -243,6 +243,9 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.group_block_size = [128, 128]
         scheduler.group_compress_ratio = [4, 1]
         scheduler._reqs_need_send = {}
+        scheduler._reqs_need_recv = {}
+        scheduler._reqs_in_batch = set()
+        scheduler.kv_cache_config = types.SimpleNamespace(kv_cache_groups=[MagicMock(), MagicMock()])
         scheduler.block_size = 128
         scheduler.engine_id = "engine"
         scheduler.side_channel_host = "127.0.0.1"
@@ -250,6 +253,54 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.tp_size = 1
         scheduler.multi_nodes_meta_mapping = {}
         return scheduler
+
+    def test_request_finished_rejected_remote_prefill_enqueues_empty_recv(self):
+        scheduler = self._make_scheduler()
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(129)),
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "do_remote_decode": False,
+                "remote_block_ids": ([10], [30, 31]),
+                "remote_engine_id": "prefill",
+                "remote_request_id": "prefill-req1",
+                "remote_host": "192.0.2.1",
+                "remote_port": 31000,
+            },
+            status=RequestStatus.FINISHED_ABORTED,
+        )
+
+        delay_free, params = scheduler.request_finished_all_groups(request, ([], []))
+
+        self.assertFalse(delay_free)
+        self.assertIsNone(params)
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
+        self.assertEqual(scheduler._reqs_need_recv["req1"], (request, ([], []), 0))
+
+        metadata = scheduler.build_connector_meta(MagicMock())
+        recv = metadata.requests["req1"]
+        self.assertEqual(recv.local_block_ids, ([], []))
+        self.assertEqual(recv.num_external_tokens, 0)
+        self.assertEqual(recv.remote_request_id, "prefill-req1")
+        self.assertEqual(recv.remote_block_ids, ([10], [30, 31]))
+        self.assertEqual((recv.remote_host, recv.remote_port), ("192.0.2.1", 31000))
+        self.assertFalse(scheduler.build_connector_meta(MagicMock()).requests)
+
+    def test_request_finished_after_alloc_preserves_pending_receive(self):
+        scheduler = self._make_scheduler()
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(129)),
+            kv_transfer_params={"do_remote_prefill": False, "do_remote_decode": False},
+            status=RequestStatus.FINISHED_ABORTED,
+        )
+        pending = (request, ([20], [40, 41]), 128)
+        scheduler._reqs_need_recv["req1"] = pending
+
+        self.assertEqual(scheduler.request_finished_all_groups(request, ([], [])), (False, None))
+
+        self.assertIs(scheduler._reqs_need_recv["req1"], pending)
 
     def test_compute_transfer_block_ids_trims_swa_groups(self):
         scheduler = self._make_scheduler()
