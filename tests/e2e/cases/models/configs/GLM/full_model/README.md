@@ -1,9 +1,18 @@
 # GLM-5.3 Weekly PD coverage
 
-These 12 full-checkpoint cases implement the first Weekly coverage batch on
+These nine full-checkpoint cases implement the first Weekly coverage batch on
 main: A3 W8A8C8, A5 W8A8C8 and A5 W4A4C8, each with `ALL-PREFILL`,
-`ALL-DECODE`, `ALL-E2E` and `ACCURACY`. They retain all 78 layers and real
+`ALL-DECODE` and `ALL-E2E`. Each E2E case also runs GPQA once after performance.
+They retain all 78 layers and real
 weights. Nightly, reduced-layer cases and **1M are outside this scope**.
+
+Standalone `ACCURACY` configurations and matrix entries are removed. Their
+deployment settings matched E2E exactly, so both checks share one service
+lifecycle while keeping separate benchmark results and gates. Performance
+runs before GPQA to avoid accuracy requests warming the performance workload.
+PREFILL remains separate because D uses fused MC2 mode 1; DECODE remains
+separate because P enables prefix caching. Each hardware/quantization family
+evaluates GPQA once, with no duplicate accuracy job.
 
 ## Recipe sources and migration
 
@@ -34,7 +43,7 @@ A5 PCP8 is an adaptation of the A3 PCP recipe and needs hardware validation.
   disables it for TP1; it is not claimed as an effective optimization.
 - D uses MTP5, recompute scheduling and `FULL_DECODE_ONLY`. For the
   PREFILL-dominated case it uses fused MC2 mode 1, following the RP3 script.
-  DECODE/E2E/ACCURACY instead use shared-expert overlap and `npugraph_ex`.
+  DECODE/E2E instead use shared-expert overlap and `npugraph_ex`.
   A3 enables static kernels; A5 disables static/super kernels and uses MLAPO
   and LM-head TP8, following the platform-specific tutorial settings.
 - A3 retains the PCP reference's scheduler settings: P batch tokens 16384,
@@ -57,7 +66,7 @@ not this PD GPQA stack.
 The A3 performance cases use the ordinary PD rows 104, 124 and 135 from the
 `A3_发布` sheet in `测试-推理解决方案26.2.0性能一览表 (2).xlsx`.
 Row 124 selects the low-latency DECODE point. Each YAML contains one warmup
-and one measured workload. Existing `ALL-*` dispatch names are retained;
+and one measured workload; E2E then runs GPQA. Existing `ALL-*` dispatch names are retained;
 for A3 they now cover only the selected 16K comparison point, not all lengths.
 4K, 64K, 128K, pooling, dedicated datasets and 1M are outside this A3 batch.
 
@@ -114,7 +123,7 @@ DECODE as a 100%-prefix-hit workload. PREFILL remains a prefill-dominated
 request through PD; its one output token cannot measure TPOT. Throughput is
 collected without a regression gate until measured baselines are available.
 
-ACCURACY runs GPQA with maximum output 65536, temperature 1.0, top-p 0.95
+The final `acc_gpqa` benchmark in each E2E case uses maximum output 65536, temperature 1.0, top-p 0.95
 and concurrency 32. The provisional floor 86.92 is the existing A3 reference
 91.92 minus five points; it is not an official tolerance or an A5 measurement.
 Calibrate each quantization before enabling this as a regression gate.
@@ -124,18 +133,18 @@ scoring protocol and is not implemented by these GPQA cases.
 ## Dispatch and commissioning
 
 The A3 cases join the existing Weekly matrix. A dedicated Weekly-A5 workflow
-runs the eight A5 cases sequentially and uses `KUBECONFIG_A5_B64`. The workflow
+runs the six A5 cases sequentially and uses `KUBECONFIG_A5_B64`. The workflow
 supports manual dispatch and the existing authorized `/weekly` route, without
 activating legacy A5 single-node cases. It must land on main before that route
 can dispatch it by filename. This change adds no new timer schedule.
 
-Start with E2E and GPQA for A3 W8A8C8, then A5 W8A8C8 and A5 W4A4C8. After
+Start with the combined E2E/GPQA case for A3 W8A8C8, then A5 W8A8C8 and A5 W4A4C8. After
 startup, memory, transfer and accuracy checks pass, run PREFILL and DECODE
 for each platform. Authorized maintainers can select an individual entry:
 
 ```text
 /weekly GLM-5.3-W8A8C8-A3-ALL-E2E
-/weekly GLM-5.3-W8A8C8-A5-ACCURACY
+/weekly GLM-5.3-W8A8C8-A5-ALL-E2E
 /weekly GLM-5.3-W4A4C8-A5-ALL-DECODE
 ```
 

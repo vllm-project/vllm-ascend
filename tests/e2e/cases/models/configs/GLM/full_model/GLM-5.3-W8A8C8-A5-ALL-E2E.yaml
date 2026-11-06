@@ -400,3 +400,16 @@ benchmarks:
     batch_size: 16
     request_rate: 0
     tpot_threshold: 50
+  # GPQA runs once after performance on the same service deployment.
+  # Provisional floor: A3 reference 91.92 minus 5; A5 calibration is pending.
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    temperature: 1.0
+    top_p: 0.95
+    batch_size: 32
+    baseline: 86.92
+    verify_mode: ge

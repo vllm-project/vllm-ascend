@@ -34,10 +34,6 @@ a3:
         size: 4
         config_file_path: GLM-5.3-W8A8C8-A3-ALL-E2E.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W8A8C8-A3-ACCURACY
-        size: 4
-        config_file_path: GLM-5.3-W8A8C8-A3-ACCURACY.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
       - name: Qwen3.5-397B-w8a8-PD
         config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
@@ -410,10 +406,6 @@ a5:
         size: 4
         config_file_path: GLM-5.3-W8A8C8-A5-ALL-E2E.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W8A8C8-A5-ACCURACY
-        size: 4
-        config_file_path: GLM-5.3-W8A8C8-A5-ACCURACY.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
       - name: GLM-5.3-W4A4C8-A5-ALL-PREFILL
         size: 4
         config_file_path: GLM-5.3-W4A4C8-A5-ALL-PREFILL.yaml
@@ -425,8 +417,4 @@ a5:
       - name: GLM-5.3-W4A4C8-A5-ALL-E2E
         size: 4
         config_file_path: GLM-5.3-W4A4C8-A5-ALL-E2E.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W4A4C8-A5-ACCURACY
-        size: 4
-        config_file_path: GLM-5.3-W4A4C8-A5-ACCURACY.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM/full_model
