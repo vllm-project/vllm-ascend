@@ -298,6 +298,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
+    # TODO: Remove this helper and build_draft_attn_metadatas once tiling
+    # eliminates replay-time metadata rebuilding. The rebuild currently needs
+    # this count because it cannot access the effective num_reqs from upstream propose().
     @contextmanager
     def _draft_metadata_request_count(self, num_reqs: int):
         previous = getattr(self, "_draft_metadata_num_reqs", None)
