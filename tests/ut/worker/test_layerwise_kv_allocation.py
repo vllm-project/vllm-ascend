@@ -45,7 +45,11 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)
+            KVCacheGroupSpec(
+                layer_names=names,
+                kv_cache_spec=spec,
+                reuse_layer_names=frozenset(name for name in names if reuse and name != main_names[0]),
+            )
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
     )

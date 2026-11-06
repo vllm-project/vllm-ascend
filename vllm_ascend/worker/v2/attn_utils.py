@@ -87,6 +87,7 @@ from vllm_ascend.core.kv_cache_interface import (
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
@@ -106,6 +107,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     QSA_MAIN,
     QSA_RAW,
     build_qwen4_kv_cache_layout,
+    declare_qwen4_reuse,
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
@@ -418,7 +420,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
 
-    return kv_cache_spec
+    return declare_qwen4_reuse(kv_cache_spec)
 
 
 def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup]]) -> ParallelConfig | None:
@@ -1239,7 +1241,11 @@ def _allocate_kv_cache(
     )
     if qwen4_cache_layout is not None:
         backing = _allocate_int8_cache_tensor(
-            qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
+            next(
+                tensor.size
+                for tensor in kv_cache_config.kv_cache_tensors
+                if qwen4_cache_layout.owner(tensor.layers[0]).role not in (PLE, HIDDEN)
+            ),
             alignment,
             device,
         )
@@ -1775,6 +1781,14 @@ def _reshape_kv_cache_v2(
                 if not isinstance(raw_slab, torch.Tensor):
                     raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
                 slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
+                reuse_layout = get_layerwise_layout(kv_cache_config)
+                if reuse_layout is not None and reuse_layout.has_layer_reuse:
+                    descriptor = next(t for t in kv_cache_config.kv_cache_tensors if layer_name in t.layers)
+                    if owner.role not in (PLE, HIDDEN):
+                        region_name = qwen4_cache_layout.region_name_for_owner(layer_name)
+                        layer_offset = descriptor.offset + descriptor.layers.index(layer_name) * descriptor.layer_stride
+                        slot_offset = layer_offset - qwen4_cache_layout.region(region_name).offset
+
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
                     region = qwen4_cache_layout.region("r0")

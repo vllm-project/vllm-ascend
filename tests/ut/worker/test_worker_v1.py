@@ -15,6 +15,18 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from tests.ut.base import TestBase
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import (
+    cache as reuse_cache,
+)
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import (
+    names as reuse_names,
+)
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import (
+    runtime as reuse_runtime,
+)
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import (
+    spec as reuse_spec,
+)
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
@@ -113,49 +125,6 @@ class TestNPUWorker(TestBase):
         self.distributed_init_method = "tcp://localhost:12345"
         self.is_driver_worker = False
 
-    def test_layer_reuse_memory_factor_merges_main_components(self):
-        from vllm_ascend.core.kv_cache_interface import (
-            AscendMLAAttentionSpec,
-            AscendSFAIndexerCacheSpec,
-        )
-        from vllm_ascend.worker.worker import NPUWorker
-
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.model_config = MagicMock()
-        worker.parallel_config = MagicMock()
-        worker.model_config.get_num_layers.return_value = 6
-        main_spec = AscendMLAAttentionSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=8,
-            dtype=torch.int8,
-            cache_sparse_sfa_c8=True,
-        )
-        indexer_spec = AscendSFAIndexerCacheSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=4,
-            dtype=torch.int8,
-            scale_dim=1,
-            scale_dtype=torch.float16,
-            cache_sparse_li_c8=True,
-        )
-        specs = {
-            **{f"model.layers.{layer}.self_attn.attn": main_spec for layer in range(6)},
-            **{f"model.layers.{layer}.self_attn.indexer.k_cache": indexer_spec for layer in (1, 2, 4)},
-        }
-
-        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
-            specs,
-            {"layerwise_num_shared_buffers": 2},
-        )
-
-        expected_logical_bytes = 6 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        # Both reused slots contain indexer layers; the independent slot does not.
-        expected_physical_bytes = 3 * main_spec.page_size_bytes + 2 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (6, 3))
-        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
-
     def test_engram_group_initialization_preserves_target_config(self):
         from vllm.config import get_current_vllm_config, set_current_vllm_config
 
@@ -204,129 +173,6 @@ class TestNPUWorker(TestBase):
                         ascend_init.assert_called_once_with(worker.parallel_config, engram_config)
                     self.assertIs(get_current_vllm_config(), config)
 
-    def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
-        from vllm_ascend.core.kv_cache_interface import (
-            AscendMLAAttentionSpec,
-            AscendSFAIndexerCacheSpec,
-        )
-        from vllm_ascend.worker.worker import NPUWorker
-
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.model_config = MagicMock()
-        worker.parallel_config = MagicMock()
-        worker.model_config.get_num_layers.return_value = 6
-        main_spec = AscendMLAAttentionSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=8,
-            dtype=torch.int8,
-            cache_sparse_sfa_c8=True,
-        )
-        indexer_spec = AscendSFAIndexerCacheSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=4,
-            dtype=torch.int8,
-            scale_dim=1,
-            scale_dtype=torch.float16,
-            cache_sparse_li_c8=True,
-        )
-        # A/B-mixed with MTP: layers 0,1,4 have main + indexer; layers 2,3,5 and MTP are
-        # main-only. Main is shared by all reused layers; indexer only by A-class layers.
-        specs = {
-            **{f"model.layers.{layer}.self_attn.attn": main_spec for layer in range(6)},
-            **{f"model.layers.{layer}.self_attn.indexer.k_cache": indexer_spec for layer in (0, 1, 4)},
-            "model.mtp.0.self_attn.attn": main_spec,
-        }
-
-        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
-            specs,
-            {"layerwise_num_shared_buffers": 2},
-        )
-
-        # Layer 0 independent; reused layers split into buffers [1,3,5] and [2,4,6] -> 3
-        # main tensors. Each reused buffer holds an A-class layer (1 and 4), so indexer is
-        # counted once per buffer: independent + both reused == 3 indexer slots.
-        expected_logical_bytes = 7 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        expected_physical_bytes = 3 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (7, 3))
-        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
-
-    def test_layer_reuse_budget_keeps_dspark_pages_persistent(self):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.model_config = MagicMock()
-        worker.parallel_config = MagicMock()
-        worker.model_config.get_num_layers.return_value = 6
-        target = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.int8)
-        draft = MLAAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
-        draft_names = {f"draft.model.layers.{layer}.self_attn.attn" for layer in range(5)}
-        specs = {
-            **{f"model.layers.{layer}.self_attn.attn": target for layer in range(6)},
-            **{name: draft for name in draft_names},
-        }
-
-        _, _, factor = worker._get_layerwise_kv_cache_memory_info(
-            specs, {"layerwise_num_shared_buffers": 2}, excluded_layer_names=draft_names
-        )
-
-        logical = 6 * target.page_size_bytes + 5 * draft.page_size_bytes
-        physical = 3 * target.page_size_bytes + 5 * draft.page_size_bytes
-        self.assertEqual(factor, logical / physical)
-        # The planner must advertise exactly the bytes its target scratch and
-        # five persistent draft allocations will consume, not target-only reuse.
-        self.assertEqual(logical / factor, physical)
-
-    def test_incomplete_layer_layout_does_not_scale_memory_budget(self):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.model_config = MagicMock()
-        worker.parallel_config = MagicMock()
-        worker.model_config.get_num_layers.return_value = 4
-        specs = {
-            "model.layers.0.self_attn.attn": MagicMock(),
-            "model.layers.1.self_attn.attn": MagicMock(),
-        }
-
-        memory_info = worker._get_layerwise_kv_cache_memory_info(
-            specs,
-            {
-                "layerwise_num_shared_buffers": 1,
-                "layerwise_independent_layers": [],
-            },
-        )
-
-        self.assertEqual(memory_info, (2, 2, 1.0))
-
-    def test_no_reuse_does_not_scale_layerwise_memory_layout(self):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.model_config = MagicMock()
-        worker.parallel_config = MagicMock()
-        worker.model_config.get_num_layers.return_value = 2
-        spec = FullAttentionSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=8,
-            head_size_v=8,
-            dtype=torch.int8,
-        )
-        specs = {
-            "model.layers.0.self_attn.attn": spec,
-            "model.layers.1.self_attn.attn": spec,
-            "model.mtp.0.self_attn.attn": spec,
-        }
-
-        memory_info = worker._get_layerwise_kv_cache_memory_info(
-            specs,
-            {"layerwise_num_shared_buffers": 3},
-        )
-
-        self.assertEqual(memory_info, (3, 3, 1.0))
-
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -348,7 +194,7 @@ class TestNPUWorker(TestBase):
             )
         ]
         worker = NPUWorker.__new__(NPUWorker)
-        worker.vllm_config = SimpleNamespace()
+        worker.vllm_config = SimpleNamespace(kv_transfer_config=None)
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
 
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
@@ -2577,3 +2423,142 @@ class TestKVPPWorkerBudget(TestBase):
 
         create_plan.assert_called_once_with(worker.vllm_config, specs, 2)
         self.assertIs(worker._kvpp_cache_allocation_plan, allocation_plan)
+
+
+class TestLayerwisePhysicalBudget(unittest.TestCase):
+    def test_reuse_budget_waits_for_engine_layout_resolution(self):
+        from vllm_ascend.worker import worker as worker_module
+
+        specs = dict.fromkeys(reuse_names(), reuse_spec())
+        worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+        worker.vllm_config = reuse_runtime()
+        worker.vllm_config.cache_config = CacheConfig()
+        worker.vllm_config.speculative_config = None
+        worker.model_runner = SimpleNamespace(get_kv_cache_spec=lambda: specs)
+        ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+
+        def memory_info(*args, **kwargs):
+            # Mirror the upstream planner's precondition instead of permitting
+            # an unresolved layout through a mocked grouping implementation.
+            worker.vllm_config.cache_config.get_resolved_kv_cache_layout()
+            return 6, 2, 1.0
+
+        with (
+            patch.object(worker_module.KVPPConfig, "from_vllm_config", return_value=SimpleNamespace(size=1)),
+            patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
+            patch.object(worker, "_get_layerwise_kv_cache_memory_info", side_effect=memory_info) as plan,
+            patch.object(worker_module, "get_kv_cache_groups", return_value=[object()]),
+            patch(
+                "vllm_ascend.patch.platform.patch_kv_cache_utils._has_ascend_multi_allocation_kv_cache_layout",
+                return_value=True,
+            ),
+        ):
+            self.assertIs(worker.get_kv_cache_spec(), specs)
+            plan.assert_not_called()
+            worker.set_kv_cache_layout("BLNHC", 1)
+            self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(1024), 1024)
+            plan.assert_called_once()
+            self.assertEqual(worker._gva_layerwise_memory_info, (6, 2, 1.0))
+
+    def memory_info(self, config, excluded=()):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = reuse_runtime()
+        worker.model_config = worker.vllm_config.model_config
+        worker.parallel_config = worker.vllm_config.parallel_config
+        specs = {
+            name: spec for group in config.kv_cache_groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        }
+        with (
+            patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=config.kv_cache_groups),
+            patch(
+                "vllm_ascend.patch.platform.patch_kv_cache_utils._orig_get_kv_cache_config_from_groups",
+                return_value=config,
+            ),
+        ):
+            return worker._get_layerwise_kv_cache_memory_info(
+                specs,
+                worker.vllm_config.kv_transfer_config.kv_connector_extra_config,
+                excluded_layer_names=set(excluded),
+            )
+
+    def test_shared_backing_regions_use_same_cost_as_allocator(self):
+        members = reuse_names()
+        config = reuse_cache(dict.fromkeys(members, reuse_spec()))
+        self.assertEqual(self.memory_info(config), (6, 2, 3.0))
+
+    def test_independent_tensors_do_not_advertise_nonexistent_savings(self):
+        members = reuse_names()
+        config = reuse_cache(dict.fromkeys(members, reuse_spec()), [[name] for name in members])
+        self.assertEqual(self.memory_info(config), (6, 6, 1.0))
+
+    def test_shared_descriptor_budget_counts_backing_once(self):
+        members = reuse_names()
+        config = reuse_cache(dict.fromkeys(members, reuse_spec()), [members[:3], members[3:]])
+        for index, tensor in enumerate(config.kv_cache_tensors):
+            tensor.backing_id = "bank"
+            tensor.size = 6 * 3 * 32
+            tensor.offset = index * 3 * 3 * 32
+        self.assertEqual(self.memory_info(config), (6, 2, 3.0))
+
+    def test_persistent_draft_storage_is_counted_once(self):
+        members = reuse_names()
+        draft = "draft.model.layers.0.attn"
+        config = reuse_cache(
+            {**dict.fromkeys(members, reuse_spec()), draft: reuse_spec(False)},
+            [members, [draft]],
+        )
+        self.assertEqual(self.memory_info(config, [draft])[2], 7 / 3)
+
+    def test_excluded_explicit_request_is_an_error(self):
+        members = reuse_names()
+        config = reuse_cache(dict.fromkeys(members, reuse_spec()))
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            self.memory_info(config, [members[2]])
+
+    def test_physical_pool_budget_uses_common_placement_without_double_scaling(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+            apply_layerwise_kv_cache_plan,
+        )
+        from vllm_ascend.worker.worker import NPUWorker
+
+        # Ordinary attention specs exercise the capability, without a model
+        # name or a model-specific layout in the worker.
+        members = reuse_names()
+        specs = dict.fromkeys(members, reuse_spec())
+        config = reuse_cache(specs, n=1)
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = reuse_runtime()
+        worker.vllm_config.cache_config = SimpleNamespace(num_gpu_blocks_override=4096)
+        worker.model_config = worker.vllm_config.model_config
+        worker.parallel_config = worker.vllm_config.parallel_config
+        extra = worker.vllm_config.kv_transfer_config.kv_connector_extra_config
+        apply_layerwise_kv_cache_plan(config, worker.vllm_config)
+
+        def place(probe_config, groups, budget):
+            self.assertIsNot(probe_config, worker.vllm_config)
+            self.assertIsNot(probe_config.cache_config, worker.vllm_config.cache_config)
+            self.assertIsNone(probe_config.cache_config.num_gpu_blocks_override)
+            self.assertEqual(worker.vllm_config.cache_config.num_gpu_blocks_override, 4096)
+            self.assertEqual(budget, 64)
+            self.assertIs(groups, config.kv_cache_groups)
+            return config
+
+        with (
+            patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=config.kv_cache_groups),
+            patch(
+                "vllm_ascend.patch.platform.patch_kv_cache_utils._has_ascend_multi_allocation_kv_cache_layout",
+                return_value=True,
+            ),
+            patch("vllm_ascend.patch.platform.patch_kv_cache_utils._ascend_pool_bytes_per_block", return_value=64),
+            patch(
+                "vllm_ascend.patch.platform.patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups",
+                side_effect=place,
+            ) as placement,
+        ):
+            self.assertEqual(worker._get_layerwise_kv_cache_memory_info(specs, extra), (6, 2, 1.0))
+            placement.assert_called_once()
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                worker._get_layerwise_kv_cache_memory_info(specs, extra, excluded_layer_names={members[2]})
+        self.assertEqual(worker.vllm_config.cache_config.num_gpu_blocks_override, 4096)
