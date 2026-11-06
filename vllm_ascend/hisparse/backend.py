@@ -5,9 +5,14 @@
 from __future__ import annotations
 
 import importlib
+from functools import cache, wraps
+from hashlib import sha256
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
+from vllm.config import get_current_vllm_config_or_none
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.hisparse.backend import HiSparseBackend
 
 if TYPE_CHECKING:
@@ -46,6 +51,48 @@ def capture_aware_stream(stream: torch.Stream) -> torch.Stream:
     if stream.device.type != "npu" or isinstance(stream, _CaptureAwareStream):
         return stream
     return _CaptureAwareStream(stream.stream_id, stream.device_index, stream.device_type)
+
+
+@cache
+def _has_follower_prefetch_contract() -> bool:
+    from vllm.v1.hisparse import runtime
+
+    return (
+        sha256(Path(runtime.__file__).read_bytes()).hexdigest()
+        == "16e33814eb5d6b44093429fbb74aaf436e8994b11b43b07d1c39851baf563759"
+    )
+
+
+def _enable_multi_token_prefetch(runtime: HiSparseRuntime) -> None:
+    """Reuse Core follower staging without changing its KV write classification.
+
+    Remove this adapter when Core exposes independent follower eligibility.
+    """
+    original = runtime._resolve_and_stage_group
+    if getattr(original, "_ascend_multi_token_prefetch", False):
+        return
+
+    @wraps(original)
+    def resolve_and_stage(*, resident, **kwargs):
+        original(resident=resident, **kwargs)
+        if (
+            resident.decode_batch
+            or resident.num_decode_tokens <= 0
+            or resident.num_decode_tokens != resident.num_actual_tokens
+            or any(handle.draft_layer for handle in resident.index_group_caches)
+        ):
+            return
+        group = runtime.index_group
+        with group.copy_stream:
+            for follower in group.followers:
+                follower._swap_rows(kwargs["shared_rows"])
+                if follower._layer_ready_event is None:
+                    follower._layer_ready_event = torch.Event()
+                follower._layer_ready_event.record(group.copy_stream)
+                follower._swap_staged = True
+
+    resolve_and_stage._ascend_multi_token_prefetch = True
+    runtime._resolve_and_stage_group = resolve_and_stage
 
 
 class AscendHiSparseBackend(HiSparseBackend):
@@ -141,6 +188,17 @@ class AscendHiSparseBackend(HiSparseBackend):
                 torch.arange(workspace.max_rows + 1, dtype=torch.int32, device=runtime.device),
                 torch.full((1,), attention_view.shape[0], dtype=torch.int32, device=runtime.device),
             )
+            if runtime is group.leader:
+                config = get_current_vllm_config_or_none()
+                if (
+                    config is not None
+                    and config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+                    and config.speculative_config is not None
+                    and config.speculative_config.method == "mtp"
+                    and group.followers
+                    and _has_follower_prefetch_contract()
+                ):
+                    _enable_multi_token_prefetch(runtime)
         return HiSparseNPUOps(
             mapping,
             workspace,
