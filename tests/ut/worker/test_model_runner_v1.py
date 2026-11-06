@@ -1125,7 +1125,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             kwargs["num_accepted_tokens_cpu_tensor"][:3].copy_(kwargs["num_accepted_tokens_gpu"][:3])
 
         with patch(
-            "vllm_ascend.worker.v1.model_runner.mamba_utils.postprocess_mamba_align_gpu",
+            "vllm_ascend.worker.v1.model_runner.postprocess_mamba_align",
             side_effect=postprocess,
         ):
             runner._update_states_after_model_execute(

@@ -185,6 +185,10 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.ops.triton.v1.spec_decode.ngram import triton_ngram_spec_decode
+from vllm_ascend.patch.worker.patch_v1.patch_mamba_utils import (
+    postprocess_mamba_align,
+    stage_mamba_postprocess_inputs,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.utils import (
@@ -1045,7 +1049,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
-            mamba_utils.postprocess_mamba_align_gpu(
+            postprocess_mamba_align(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
@@ -2548,7 +2552,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
                     if mamba_bufs.postprocess_align is not None:
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
+                        stage_mamba_postprocess_inputs(
                             mamba_bufs.postprocess_align,
                             scheduler_output,
                             self.input_batch.req_ids,

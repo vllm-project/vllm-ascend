@@ -1,4 +1,4 @@
 pr: 21005
 entries:
   - category: dependency
-    text: Advanced the verified vLLM main baseline to 69d27bf8 with matching graph, speculative decoding, weight-loading, and KV offload compatibility while retaining v0.33.0 release support.
+    text: Advanced the verified vLLM main baseline to ba15685a with matching graph, speculative decoding, weight-loading, and KV offload compatibility while retaining v0.33.0 release support.
