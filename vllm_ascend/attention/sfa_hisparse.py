@@ -526,12 +526,16 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return torch.cat(outputs, dim=0) if len(outputs) > 1 else outputs[0]
 
     def _try_c8_resident_prefill(self, query, query_rope, logical_topk, metadata, query_ends, key_lengths):
+        num_decodes = metadata.num_decodes
+        num_decode_tokens = metadata.num_decode_tokens
+        num_prefill_tokens = metadata.num_actual_tokens - num_decode_tokens
         if (
             not self.enable_sparse_sfa_c8
-            or metadata.num_decodes
             or metadata.hisparse_for_capture
             or query_rope is None
-            or not (query.shape[0] == logical_topk.shape[0] == metadata.num_actual_tokens)
+            or num_prefill_tokens <= 0
+            or metadata.num_reqs != num_decodes + metadata.num_prefills
+            or not (query.shape[0] == logical_topk.shape[0] == num_prefill_tokens)
         ):
             return None
         cache = self.hisparse_cache
@@ -567,9 +571,12 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or storage.size(0) <= (view.cache.size(0) - 1) * page_stride
         ):
             return None
-        table = cache.block_table.index_select(0, state_indices[: metadata.num_reqs].to(torch.long))
+        table = cache.block_table.index_select(0, state_indices[num_decodes : metadata.num_reqs].to(torch.long))
         table.clamp_min_(0).mul_(page_stride)
-        return super()._execute_sparse_flash_attention_process(
+        if num_decodes:
+            query_ends = query_ends[num_decodes:] - num_decode_tokens
+            key_lengths = key_lengths[num_decodes:]
+        output = super()._execute_sparse_flash_attention_process(
             query,
             query_rope,
             (storage.unsqueeze(2),),
@@ -579,6 +586,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             key_lengths,
             block_table=table,
         )
+        logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes))
+        return output
 
     def _execute_sparse_flash_attention_process(
         self,
@@ -601,12 +610,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # Decode's resolver already masks graph padding from this same device
         # scalar. Keep that validation at the producer of physical indices.
         self.index_group.set_logical_topk_ready(self.index_group_index)
-        if metadata.num_prefills and not metadata.num_decodes:
-            resident = self._try_c8_resident_prefill(
-                ql_nope, q_pe, logical, metadata, actual_seq_lengths_query, actual_seq_lengths_key
-            )
-            if resident is not None:
-                return resident
         outputs = []
         num_decode = metadata.num_decode_tokens
         if num_decode:
@@ -637,25 +640,27 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 )
             )
         if metadata.num_prefills:
-            staged, staged_table, req_ids, slot = stage_prefill_rows(self.index_group, self.index_group_index, metadata)
-            try:
-                selected = logical[num_decode:]
-                block_ids = selected.clamp_min(0).to(torch.int64) // metadata.block_size
-                request_tables = staged_table[req_ids.to(torch.int64)]
-                physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
-                physical = physical + selected.clamp_min(0) % metadata.block_size
-                physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
-                outputs.append(
-                    self._attention_physical(
-                        ql_nope[num_decode:],
-                        q_pe[num_decode:] if q_pe is not None else None,
-                        staged,
-                        physical,
-                    )
+            query = ql_nope[num_decode:]
+            query_rope = q_pe[num_decode:] if q_pe is not None else None
+            prefill_output = self._try_c8_resident_prefill(
+                query, query_rope, logical[num_decode:], metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            )
+            if prefill_output is None:
+                staged, staged_table, req_ids, slot = stage_prefill_rows(
+                    self.index_group, self.index_group_index, metadata
                 )
-            finally:
-                if slot is not None:
-                    slot.finish()
+                try:
+                    selected = logical[num_decode:]
+                    block_ids = selected.clamp_min(0).to(torch.int64) // metadata.block_size
+                    request_tables = staged_table[req_ids.to(torch.int64)]
+                    physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
+                    physical = physical + selected.clamp_min(0) % metadata.block_size
+                    physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
+                    prefill_output = self._attention_physical(query, query_rope, staged, physical)
+                finally:
+                    if slot is not None:
+                        slot.finish()
+            outputs.append(prefill_output)
         if not outputs:
             return torch.zeros_like(ql_nope)
         result = torch.cat(outputs, dim=0) if len(outputs) > 1 else outputs[0]
