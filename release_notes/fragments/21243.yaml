@@ -1,0 +1,4 @@
+pr: 21243
+entries:
+  - category: bugfix
+    text: DeepSeek V4.1 now reports a clear error for unsupported KV cache block sizes instead of raising a bare KeyError during cache construction.

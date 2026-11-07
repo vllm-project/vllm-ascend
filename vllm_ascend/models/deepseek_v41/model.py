@@ -567,7 +567,10 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
-        block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
+        entry = DSV4_BLOCK_SIZES.get(cache_config.block_size)
+        if entry is None:
+            raise ValueError(f"DeepSeek V4.1 only supports block sizes 32, 64, and 128; got {cache_config.block_size}.")
+        block_size = entry[0][1]
         spec = make_swa_cache_spec(
             block_size=block_size,
             window_size=window_size,
