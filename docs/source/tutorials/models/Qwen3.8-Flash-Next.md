@@ -864,7 +864,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
 === "950DT products"
 
-    This W4A8-MXFP deployment uses eight devices on one 950DT products host. Prefill and decode each use TP2 × DP2, with one command per role managing both DP replicas behind a single API endpoint. MooncakeConnectorV2 transfers KV cache between the two roles.
+    This W4A8-MXFP deployment uses eight devices on one 950DT products host. Prefill and decode each use TP2 × DP2 without pipeline parallelism, with one command per role managing both DP replicas behind a single API endpoint. MooncakeConnectorV2 transfers KV cache between the two roles.
 
     | Setting | Prefill | Decode |
     | --- | --- | --- |
@@ -1029,7 +1029,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 
     **Service Verification:**
 
-    Check that both APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
+    Check the startup logs for TP2 × DP2 on each role, `cudagraph_mode=NONE` on Prefill, and `FULL_DECODE_ONLY` with static kernels on Decode. Check that both APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
 
     ```bash
     local_ip="<LOCAL_SERVICE_IP>"
@@ -1065,7 +1065,7 @@ Prepare the runtime from Section 4 and follow the [Mooncake installation guide](
 - Prefill enables prefix caching, which automatically selects Mamba cache mode `align` from the default `none`, and uses `cudagraph_mode=NONE`; static kernels are disabled. Its validated MTP configuration leaves `enforce_eager` unset, inheriting the model setting; graph capture remains disabled by `cudagraph_mode=NONE`.
 - Decode enables prefix caching, `FULL_DECODE_ONLY`, static kernels, and recompute scheduling; MTP sets `enforce_eager=false` to allow graph execution.
 - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
-- Both roles use three MTP draft tokens.
+- Both roles use three MTP draft tokens and `VLLM_ENGINE_READY_TIMEOUT_S=4800` for engine startup; model execution uses `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000`.
 - Both roles use `HCCL_BUFFSIZE=8192` and `ASCEND_BUFFER_POOL=0:0`. The validated configuration separates Prefill and Decode HCCL base ports (62000/63000) and NPU socket ranges (61400–61499/61500–61599).
 - Keep Mooncake DP2/TP2 declarations consistent with the services. The proxy connects to Prefill on port 8088 and Decode on port 8092. Keep the configured KV base ports at 30000 and 30100; the connector applies rank offsets internally.
 - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
@@ -1906,11 +1906,13 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-basic-pd-separation-deployment):
+The colocated examples and the optional Function Calling setup in [Section 5.2](#52-basic-pd-separation-deployment) use the following options:
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
 ```
+
+The 950DT products pooling commands in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool) already enable Function Calling with `qwen3_coder`; retain that parser when verifying this deployment.
 
 Send a request containing the available tools and set `tool_choice` to `auto`:
 
@@ -2070,7 +2072,7 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | 950DT products | Prefill (three-tier pooling) | 0–3 | 2 × 1 × 2 | 262144 | 64 | 4096 |
 | 950DT products | Decode (three-tier pooling) | 4–7 | 2 × 1 × 2 | 262144 | 64 | 4096 |
 
-Pair the P/D rows for your hardware. A2 uses two eight-device hosts; A3 uses one 16-device host. P runs eagerly; D enables static kernels.
+Pair the P/D rows for your hardware. A2 uses two eight-device hosts; A3 uses one 16-device host. A2/A3 Prefill sets `--enforce-eager`; 950DT products Prefill sets `cudagraph_mode=NONE`. All PD Decode examples use `FULL_DECODE_ONLY` with static kernels enabled.
 
 For A2/A3 MemCache three-tier pooling, retain the basic PD token budgets above. For 950 DT, use the dedicated three-tier pooling rows and the complete commands in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool); both roles use `HCCL_BUFFSIZE=512`. Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
 
