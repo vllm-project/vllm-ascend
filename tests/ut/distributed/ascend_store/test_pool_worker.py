@@ -684,16 +684,18 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         return KVPoolWorker
 
-    def test_global_group_alloc_size_rounds_up(self):
+    def test_global_group_alloc_size_uses_group_payload_under_pp(self):
         cls = self._make_worker_class()
         worker = cls.__new__(cls)
         worker.group_block_len = {0: [2, 1]}
         worker.group_num_layers = {0: 2}
         worker.total_layers = 2
         worker.num_layers = 2
+        worker.pp_size = 2
+        worker.dcp_size = 1
         worker.put_step = 1
 
-        self.assertEqual(worker._global_group_alloc_size(0), 4)
+        self.assertEqual(worker._global_group_alloc_size(0), 3)
 
     def test_check_all_layers_exists(self):
         cls = self._make_worker_class()
