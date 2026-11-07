@@ -40,6 +40,7 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
+import vllm_ascend.patch.worker.patch_mooncake_store  # noqa
 
 # MRv1-only patches. Every module imported below targets a symbol that is only
 # reachable through the V1 Model Runner, so deleting the `patch_v1` package
