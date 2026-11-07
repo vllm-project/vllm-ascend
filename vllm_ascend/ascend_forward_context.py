@@ -169,6 +169,7 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            cudagraph_runtime_mode=aclgraph_runtime_mode,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -395,6 +396,7 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -405,6 +407,7 @@ def select_moe_comm_method(
         is_draft_model (bool): Whether the model runs in MTP mode.
         draft_moe_quant_type (QuantType): The draft model's MoE quantization
             type, used on A5 to decide whether the draft can use mega moe.
+        cudagraph_runtime_mode (CUDAGraphMode): Graph mode used by this batch.
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -432,6 +435,15 @@ def select_moe_comm_method(
             is_draft_model,
             draft_moe_quant_type,
         )
+    if (
+        moe_comm_type is MoECommType.ALLTOALL
+        and lora_config is None
+        and num_tokens is not None
+        and mc2_tokens_capacity is not None
+        and num_tokens > mc2_tokens_capacity
+        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+    ):
+        moe_comm_type = MoECommType.ALLGATHER
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
         "is_draft_model=%s, draft_moe_quant_type=%r",

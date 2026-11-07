@@ -302,6 +302,28 @@ class TestDPPaddingPolicy(unittest.TestCase):
             self.assertEqual(runner._sync_metadata_across_dp(8), (8, None, CUDAGraphMode.NONE))
         all_reduce.assert_not_called()
 
+    def test_sync_passes_agreed_graph_mode_to_comm_selector(self):
+        runner = self._make_runner()
+        module = "vllm_ascend.worker.v1.model_runner"
+
+        def all_reduce(packed_tensor, group):
+            packed_tensor[0, 1] = 32
+            packed_tensor[1, 1] = CUDAGraphMode.PIECEWISE.value
+
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=False),
+            patch(f"{module}.get_dp_group", return_value=SimpleNamespace(cpu_group=None)),
+            patch(f"{module}.dist.all_reduce", side_effect=all_reduce),
+            patch(f"{module}.select_moe_comm_method", return_value=MoECommType.ALLGATHER) as select_method,
+            patch(f"{module}.use_cann_megamoe", return_value=False),
+        ):
+            maximum, across_dp, mode = runner._sync_metadata_across_dp(8, cudagraph_mode=CUDAGraphMode.FULL)
+
+        self.assertEqual(maximum, 32)
+        self.assertEqual(mode, CUDAGraphMode.PIECEWISE)
+        self.assertEqual(across_dp.tolist(), [32, 32])
+        select_method.assert_called_once_with(32, runner.vllm_config, cudagraph_runtime_mode=mode)
+
     def test_sync_only_pads_for_uniform_input_consumers(self):
         cases = (
             ("dense_eager", None, CUDAGraphMode.NONE, False, False, False),
