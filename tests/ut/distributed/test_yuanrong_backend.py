@@ -15,7 +15,7 @@
 import json
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -39,6 +39,23 @@ def _make_backend():
     backend.store.mset_d2h_from_multi_buffers.return_value = None
     backend.store.batch_is_exist.return_value = [1, 0]
     return backend
+
+
+@pytest.mark.parametrize("local_rank,visible_device", [(0, 0), (1, 1), (0, 1), (1, 3), (0, 3), (1, 0)])
+def test_set_device_uses_visible_device_mapping(local_rank, visible_device):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend"
+    with (
+        patch(f"{module}.get_world_group") as world_group,
+        patch(f"{module}.current_platform", create=True) as platform,
+        patch(f"{module}.torch.device") as device,
+        patch(f"{module}.torch.npu.set_device") as set_device,
+    ):
+        world_group.return_value.local_rank = local_rank
+        platform.logical_device_id_to_visible_device_id.return_value = visible_device
+        _make_backend().set_device()
+
+        device.assert_called_once_with(f"npu:{visible_device}")
+        set_device.assert_called_once_with(device.return_value)
 
 
 def test_get_and_put_use_multi_buffer_apis():

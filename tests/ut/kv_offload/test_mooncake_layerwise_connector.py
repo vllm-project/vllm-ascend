@@ -105,6 +105,67 @@ def _make_mock_kv_cache_config(block_size=16):
 
 
 class TestKVCacheSendingLayerThread(unittest.TestCase):
+    def _assert_startup_failure(self, stage, error):
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector"
+        self.thread.send_queue = MagicMock()
+        with (
+            patch(f"{module}.get_world_group") as world_group,
+            patch(f"{module}.current_platform") as platform,
+            patch(f"{module}.torch.device"),
+            patch(f"{module}.torch.npu.set_device") as set_device,
+        ):
+            world_group.return_value.local_rank = 0
+            platform.logical_device_id_to_visible_device_id.return_value = 1
+            targets = {
+                "world_group": world_group,
+                "mapping": platform.logical_device_id_to_visible_device_id,
+                "set_device": set_device,
+            }
+            targets[stage].side_effect = error
+            self.thread.start()
+            try:
+                self.assertTrue(self.ready_event.wait(timeout=2))
+                self.thread.join(timeout=2)
+                self.assertFalse(self.thread.is_alive())
+                self.assertIs(self.thread.startup_error, error)
+                self.thread.send_queue.get.assert_not_called()
+            finally:
+                self.thread.join(timeout=2)
+
+    def test_run_signals_world_group_failure(self):
+        self._assert_startup_failure("world_group", RuntimeError("world group is not initialized"))
+
+    def test_run_signals_device_mapping_failure(self):
+        self._assert_startup_failure("mapping", IndexError("local rank is outside the assigned devices"))
+
+    def test_run_signals_set_device_failure(self):
+        self._assert_startup_failure("set_device", RuntimeError("NPU initialization failed"))
+
+    def test_run_signals_base_exception(self):
+        self._assert_startup_failure("mapping", SystemExit("thread initialization interrupted"))
+
+    def test_run_uses_visible_device_mapping(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector"
+        for local_rank, visible_device in ((0, 0), (1, 1), (0, 1), (1, 3), (0, 3), (1, 0)):
+            with self.subTest(local_rank=local_rank, visible_device=visible_device):
+                self.thread.send_queue = MagicMock()
+                self.thread.send_queue.get.side_effect = StopIteration
+                self.ready_event.clear()
+                with (
+                    patch(f"{module}.get_world_group") as world_group,
+                    patch(f"{module}.current_platform", create=True) as platform,
+                    patch(f"{module}.torch.device") as device,
+                    patch(f"{module}.torch.npu.set_device") as set_device,
+                ):
+                    world_group.return_value.local_rank = local_rank
+                    platform.logical_device_id_to_visible_device_id.return_value = visible_device
+                    with self.assertRaises(StopIteration):
+                        self.thread.run()
+
+                    device.assert_called_once_with(f"npu:{visible_device}")
+                    set_device.assert_called_once_with(device.return_value)
+                    self.assertTrue(self.ready_event.is_set())
+
     def setUp(self):
         self.engine = MagicMock()
         self.engine.register_memory.return_value = 0
@@ -1579,7 +1640,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.KVCacheSendingLayerThread",
-                MagicMock(),
+                MagicMock(return_value=MagicMock(startup_error=None)),
             ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.KVCacheRecvingLayerThread",
@@ -1645,6 +1706,20 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertEqual(len(worker.layer_metadata), 1)
         self.assertIsNone(worker.kv_send_layer_thread)
         self.assertIsNotNone(worker.kv_recv_layer_thread)
+
+    def test_register_kv_caches_propagates_sender_startup_failure(self):
+        error = IndexError("local rank is outside the assigned devices")
+        thread = MagicMock(startup_error=error)
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector"
+        with (
+            patch(f"{module}.KVCacheSendingLayerThread", return_value=thread),
+            self.assertRaisesRegex(RuntimeError, "sending thread failed to initialize") as raised,
+        ):
+            worker.register_kv_caches(self.kv_caches)
+
+        self.assertIs(raised.exception.__cause__, error)
+        thread.start.assert_called_once_with()
 
     def test_register_kv_caches_mla_case(self):
         mla_cache1 = MagicMock()
