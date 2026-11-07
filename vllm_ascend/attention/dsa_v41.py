@@ -14,6 +14,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
@@ -429,6 +430,12 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
+    def _use_qkv_multistream(self, query_tokens: int, cache_tokens: int) -> bool:
+        return self.multistream_dsv4_dsa_overlap and (
+            max(query_tokens, cache_tokens) <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
+            or not torch.npu.is_current_stream_capturing()
+        )
+
     def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
         query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
         cache_hidden = cache_hidden[: cache_metadata.swa.num_actual_tokens]
@@ -437,7 +444,8 @@ class AscendDSAV41Impl:
             return None, None, None
         cos, sin = query_metadata.rope(attn.rotary_emb.layername, query_hidden.shape[0])
         kv_cos, kv_sin = cache_metadata.rope(attn.rotary_emb.layername, cache_hidden.shape[0])
-        if self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
+        use_qkv_multistream = self._use_qkv_multistream(query_hidden.shape[0], cache_hidden.shape[0])
+        if use_qkv_multistream and cache_hidden.shape[0]:
             q, qr = self.multistream_preprocess(
                 attn,
                 query_hidden,
