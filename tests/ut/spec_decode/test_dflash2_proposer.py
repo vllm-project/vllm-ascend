@@ -12,6 +12,7 @@ from vllm_ascend.models.qwen3_dflash2 import (
     DFlashGroupedConv,
     _grouped_conv,
     _score_edges,
+    _score_edges_reference,
 )
 from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import (
     AscendDflash2Proposer,
@@ -74,6 +75,35 @@ def test_selector_edges_match_sequential_reference():
         )
 
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_selector_edges_preserve_fp32_accumulation_and_clamp_prefill_anchor(dtype):
+    """Low-precision inputs must not round the edge sum before adding unary."""
+    table = torch.ones(4, 3, dtype=dtype)
+    hidden = torch.tensor([[[1.0, 0.00390625, 0.0009765625]]], dtype=dtype).expand(2, -1, -1)
+    candidates = torch.tensor([[[1, 2]], [[2, 3]]])
+    unary = torch.zeros(2, 1, 2, dtype=dtype)
+    anchors = torch.tensor([-1, 99])
+    actual = _score_edges(table, table, candidates, unary, hidden, anchors, 2)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, torch.full((2, 1, 2, 2), 1.0048828125), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("shape", [(0, 3, 2), (2, 0, 2), (2, 3, 0)])
+def test_selector_edges_empty_output(shape):
+    table = torch.ones(4, 3)
+    actual = _score_edges_reference(
+        table,
+        table,
+        torch.empty(shape, dtype=torch.int64),
+        torch.empty(shape),
+        torch.empty(*shape[:2], 3),
+        torch.zeros(shape[0], dtype=torch.int64),
+        shape[-1],
+    )
+    assert actual.shape == (*shape, shape[-1])
+    assert actual.dtype == torch.float32
 
 
 def test_dflash2_declares_main_factory_classes():
