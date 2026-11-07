@@ -1,0 +1,6 @@
+pr: 20376
+entries:
+  - category: bugfix
+    text: >-
+      Fixed loss of normalization precision in Model Runner V2 token log
+      probabilities when logits have large common offsets.
