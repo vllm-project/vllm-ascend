@@ -113,7 +113,7 @@ class UCMConnectorV1(KVConnectorBase_V1, SupportsHMA):
         local_rank = getattr(inner, "local_rank", 0)
         port = base_port + max(local_rank, 0)  # one port per rank
         try:
-            from ucm.integration.vllm.prefetch_server import UcmPrefetchServer
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.prefetch_server import UcmPrefetchServer
 
             self._prefetch_server = UcmPrefetchServer(self.prefetch, host, port, token).start()
         except Exception as e:  # noqa: BLE001
