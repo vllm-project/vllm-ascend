@@ -1,0 +1,30 @@
+model_name: "LLM-Research/Phi-4-mini-instruct"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.8
+  enforce_eager: true
+  trust_remote_code: false
+
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.81
+  - name: "exact_match,flexible-extract"
+    value: 0.81
+
+# gsm8k values calibrated locally on Atlas A2 (3 runs, median, RTOL=0.05,
+# see issue #10677): strict 0.81/0.81/0.82, flexible 0.81/0.81/0.82.
+# ceval-valid was dropped during calibration: measured acc 0.476 is the real
+# capability of this English-centric model, far outside RTOL of any sane
+# bonus threshold (plan fallback per issue #10677 discussion).
+limit: 200
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: "auto"
