@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
@@ -66,7 +65,9 @@ class IndexerWrapper(nn.Module):
                 self.register_parameter(name, parameter)
 
         backend_factory = getattr(type(vllm_indexer), "get_ascend_indexer_backend_cls", None)
-        backend_cls = backend_factory(vllm_indexer) if backend_factory is not None else AscendSFAIndexerBackend
+        backend_cls = (
+            backend_factory(vllm_indexer) if backend_factory is not None else vllm_indexer.k_cache.get_attn_backend()
+        )
         self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
 
     # Interface consumed by the SFA impl - delegated to the backend impl.
@@ -225,6 +226,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             dcp_q_replicate=self.dcp_q_replicate_enabled,
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
+            index_group_builder=mla_modules.index_group_builder,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
@@ -249,17 +251,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
 
         original_process_weights = self.mla_attn.process_weights_after_loading
 
-        def wrapped_process_weights(act_dtype: torch.dtype):
+        def wrapped_process_weights(act_dtype: torch.dtype | None = None):
             from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
-            if self.dcp_q_replicate_enabled:
-                self.mla_attn.impl.process_weights_after_loading(act_dtype)
-            elif not isinstance(self.mla_attn.impl, AscendSFAImpl):
-                # Both supported vLLM versions dispatch to the impl here.
-                original_process_weights(act_dtype)
-            else:
+            if self.dcp_q_replicate_enabled or isinstance(self.mla_attn.impl, AscendSFAImpl):
                 # SFA disposes kv_b_proj, so bypass upstream's dense packing.
-                self.mla_attn.impl.process_weights_after_loading(act_dtype)
+                self.mla_attn.impl.process_weights_after_loading(
+                    self.mla_attn.act_dtype if act_dtype is None else act_dtype
+                )
+            elif act_dtype is None:
+                original_process_weights()
+            else:
+                original_process_weights(act_dtype)
 
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 

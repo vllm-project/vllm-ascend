@@ -36,7 +36,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache, get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
 from vllm_ascend.utils import (
@@ -522,6 +522,33 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         )
 
 
+class AscendHiSparseIndexerBackend(AscendSFAIndexerBackend):
+    """Keep HiSparse shared-slab cache writes behind the Indexer interface."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_HISPARSE_INDEXER"
+
+    @staticmethod
+    def get_builder_cls():
+        return AscendHiSparseIndexerMetadataBuilder
+
+    def write_cache(self, k_li, k_li_scale, slot_mapping) -> None:
+        if not self.enable_sparse_li_c8:
+            return super().write_cache(k_li, k_li_scale, slot_mapping)
+        if k_li_scale is None:
+            raise ValueError("HiSparse Indexer C8 requires FP32 scales")
+        from vllm_ascend.hisparse.binding import write_hisparse_indexer_c8
+
+        write_hisparse_indexer_c8(
+            self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+            self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+            k_li,
+            k_li_scale,
+            slot_mapping.reshape(-1),
+        )
+
+
 class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerMetadata]):
     """Builds the metadata consumed by SFA indexer forwards.
 
@@ -901,6 +928,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         buffer_key: object,
         use_cached_rope: bool,
         copy_rope: bool,
+        *,
+        shared_mla_rope: MLARopeMetadataCache | None = None,
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -926,7 +955,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope)
+        if shared_mla_rope is not None and use_cached_rope:
+            cos, sin = shared_mla_rope.get(common_attn_metadata.positions, input_positions)
+        else:
+            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope)
         cos = cos[:num_input_tokens]
         sin = sin[:num_input_tokens]
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
@@ -965,3 +997,46 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
         )
+
+
+class AscendHiSparseIndexerMetadataBuilder(AscendSFAIndexerMetadataBuilder):
+    """Map logical indexer pages into HiSparse's shared device allocation."""
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        context = vllm_config.compilation_config.static_forward_context
+        self._cache_layers = [context[name] for name in layer_names]
+        self._physical_metadata_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        scheduler = vllm_config.scheduler_config
+        max_capture = vllm_config.compilation_config.max_cudagraph_capture_size or 0
+        self._table_capacity = (
+            max(scheduler.max_num_seqs, max_capture) + 1,
+            _round_up(vllm_config.model_config.max_model_len, self.kernel_block_size) // self.kernel_block_size,
+        )
+
+    def _build(self, common_attn_metadata, buffer_key, use_cached_rope, copy_rope, **kwargs):
+        metadata = super()._build(common_attn_metadata, buffer_key, use_cached_rope, copy_rope, **kwargs)
+        strides = {getattr(layer, "hisparse_block_stride", 1) for layer in self._cache_layers}
+        if len(strides) != 1:
+            raise RuntimeError("HiSparse indexers sharing metadata must have the same physical block stride")
+        stride = strides.pop()
+        if stride == 1:
+            return metadata
+        if buffer_key not in self._physical_metadata_buffers:
+            self._physical_metadata_buffers[buffer_key] = (
+                torch.empty(self._table_capacity, dtype=metadata.block_table.dtype, device=self.device),
+                torch.empty(self._slot_capacity, dtype=metadata.slot_mapping.dtype, device=self.device),
+            )
+        table_buffer, slot_buffer = self._physical_metadata_buffers[buffer_key]
+        rows, columns = metadata.block_table.shape
+        table = table_buffer[:rows, :columns]
+        slots = slot_buffer[: metadata.slot_mapping.numel()]
+        torch.mul(metadata.block_table, stride, out=table)
+        logical = metadata.slot_mapping
+        nonnegative = logical.clamp_min(0)
+        physical = (nonnegative // self.kernel_block_size) * (self.kernel_block_size * stride)
+        physical += nonnegative % self.kernel_block_size
+        slots.copy_(torch.where(logical >= 0, physical, -1))
+        metadata.block_table = table
+        metadata.slot_mapping = slots
+        return metadata

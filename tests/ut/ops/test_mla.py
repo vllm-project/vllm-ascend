@@ -318,11 +318,12 @@ class TestAscendSFAIndexerBackend(TestBase):
 
 
 class TestIndexerWrapper(TestBase):
-    @patch("vllm_ascend.ops.mla.AscendSFAIndexerBackend")
-    def test_constructs_backend_and_delegates_sfa_interface(self, mock_backend_cls):
+    def test_constructs_backend_and_delegates_sfa_interface(self):
         vllm_indexer = MagicMock(name="vllm_indexer")
+        mock_backend_cls = vllm_indexer.k_cache.get_attn_backend.return_value
         wrapper = IndexerWrapper(vllm_indexer, qk_rope_head_dim=64)
 
+        vllm_indexer.k_cache.get_attn_backend.assert_called_once_with()
         mock_backend_cls.assert_called_once_with(vllm_indexer, 64)
         self.assertIs(wrapper.impl, mock_backend_cls.return_value)
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)

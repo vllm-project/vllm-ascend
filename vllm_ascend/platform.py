@@ -172,6 +172,10 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str:
+        return "vllm_ascend.hisparse.backend.AscendHiSparseBackend"
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 
