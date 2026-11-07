@@ -84,6 +84,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    kv_cache_uses_large_pages,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -818,7 +819,10 @@ def _reshape_combined_mla_kv_cache(
     v_block_bytes = math.prod(v_shape[1:]) * dtype_size
     if k_block_bytes + v_block_bytes > slot_stride_bytes:
         raise ValueError("Combined MLA kernel slot is smaller than its K/V components.")
-    if k_shape[0] * slot_stride_bytes > raw_cache.numel() * raw_cache.element_size():
+    # The last row starts one slot short of the tensor end only when the rows
+    # are dense; a strided row (large pages) reaches further per row.
+    last_row_end_bytes = (k_shape[0] - 1) * slot_stride_bytes + k_block_bytes + v_block_bytes
+    if last_row_end_bytes > raw_cache.numel() * raw_cache.element_size():
         raise ValueError("Combined MLA kernel slots exceed the layer's raw cache slice.")
     storage_offset_bytes = raw_cache.storage_offset() * raw_cache.element_size()
     if storage_offset_bytes % dtype_size:
@@ -1613,6 +1617,97 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
+_LARGE_PAGE_KV_CACHE_ALIGNMENT = 2 * 1024 * 1024
+
+
+def _large_page_layer_slices(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """Slice the one large-page pool into a raw byte view per layer.
+
+    A row holds every layer's kernel block side by side, so a layer's slice
+    starts at its row offset and each consecutive kernel row starts
+    ``block_stride`` bytes later.
+    """
+    sizes = {
+        descriptor.size
+        for descriptor in kv_cache_config.kv_cache_tensors
+        if not getattr(descriptor, "host_resident", False)
+    }
+    if len(sizes) != 1 or next(iter(sizes), 0) <= 0:
+        raise ValueError("Large-page KV cache requires one nonempty device backing allocation.")
+    backing = _allocate_int8_cache_tensor(sizes.pop(), _LARGE_PAGE_KV_CACHE_ALIGNMENT, device)
+    slices: dict[str, torch.Tensor] = {}
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        names = get_kv_cache_tensor_layers(descriptor)
+        if len(names) != 1:
+            raise ValueError("Large-page descriptors must each place exactly one layer.")
+        if descriptor.block_stride <= 0 or descriptor.layer_stride != descriptor.block_stride:
+            raise ValueError(f"Large-page descriptor for {names[0]} does not stride whole kernel rows.")
+        slices[names[0]] = backing[descriptor.offset :]
+    return slices
+
+
+def _large_page_row_views(
+    attn_groups: Sequence[AttentionGroup],
+    kv_cache_raw_tensors: dict[str, torch.Tensor],
+    kv_cache_config: KVCacheConfig,
+    kernel_block_sizes: list[int],
+    shared_kv_cache_layers: dict[str, str],
+) -> dict[str, Any]:
+    """Bind one strided view per layer over the shared large-page pool.
+
+    Only backends whose cache is a dense per-row block are ported: full
+    attention (``[2, rows, kernel_block, heads, dim]``) and MLA (a K/V pair per
+    row). Sparse, compressed and state backends still assume the uniform-page
+    descriptor layout and are rejected at startup.
+    """
+    layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
+    row_bytes: dict[str, int] = {}
+    num_rows: dict[str, int] = {}
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        for name in get_kv_cache_tensor_layers(descriptor):
+            row_bytes[name] = descriptor.block_stride
+            num_rows[name] = descriptor.size // descriptor.block_stride
+
+    kv_caches: dict[str, Any] = {}
+    for group in attn_groups:
+        group_id = group.kv_cache_group_id
+        if group_id >= len(kernel_block_sizes):
+            continue
+        kernel_block_size = kernel_block_sizes[group_id]
+        for layer_name in group.layer_names:
+            if layer_name in shared_kv_cache_layers:
+                raise ValueError("Large-page KV cache does not support cross-layer KV sharing yet.")
+            spec = layer_specs[layer_name]
+            if not isinstance(spec, (FullAttentionSpec, MLAAttentionSpec)):
+                raise NotImplementedError(f"Large-page KV cache has no view for {type(spec).__name__}.")
+            stride = row_bytes[layer_name]
+            rows = num_rows[layer_name]
+            kernel_spec = spec.copy_with_new_block_size(kernel_block_size)
+            storage_block_size = get_storage_block_size(kernel_spec)
+            # Only the rows' own bytes are addressable; the tail of the pool
+            # after the last row belongs to no block of this layer.
+            needed_bytes = (rows - 1) * stride + kernel_spec.page_size_bytes
+            raw_slice = kv_cache_raw_tensors[layer_name]
+            if needed_bytes > raw_slice.numel():
+                raise ValueError(
+                    f"Large-page view for {layer_name} needs {needed_bytes} bytes but the pool has {raw_slice.numel()}."
+                )
+            raw = raw_slice[:needed_bytes]
+            backend = group.backend
+            if isinstance(spec, MLAAttentionSpec):
+                kv_lora_rank, qk_rope_head_dim = _get_attention_kv_cache_dims(layer_name, spec)
+                k_shape = backend.get_kv_cache_shape(rows, storage_block_size, spec.num_kv_heads, kv_lora_rank)
+                v_shape = backend.get_kv_cache_shape(rows, storage_block_size, spec.num_kv_heads, qk_rope_head_dim)
+                kv_caches[layer_name] = _reshape_combined_mla_kv_cache(raw, k_shape, v_shape, spec.dtype, stride)
+                continue
+            shape = backend.get_kv_cache_shape(rows, storage_block_size, spec.num_kv_heads, spec.head_size)
+            kv_caches[layer_name] = _reshape_combined_attention_kv_cache(raw, shape, spec.dtype, stride)
+    return kv_caches
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1625,6 +1720,9 @@ def allocate_kv_cache_main(
     ``allocate_kv_cache`` and generic ``[B, H, N, C]`` views. Ascend attention
     still consumes separate K/V (and backend-specific state) tensors, so keep
     the Ascend allocation/reshape contract behind the new entry point.
+
+    Under the large-page allocator the pool is planned by vLLM, one raw slice
+    per layer of a single backing, so both steps take the large-page branch.
     """
     del layout
     vllm_config = get_current_vllm_config()
@@ -1635,10 +1733,15 @@ def allocate_kv_cache_main(
         if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
     }
 
-    raw_tensors = _allocate_kv_cache(
-        kv_cache_config,
-        shared_layers=shared_layers,
-        device=device,
+    large_page = kv_cache_uses_large_pages(kv_cache_config)
+    raw_tensors = (
+        _large_page_layer_slices(kv_cache_config, device)
+        if large_page
+        else _allocate_kv_cache(
+            kv_cache_config,
+            shared_layers=shared_layers,
+            device=device,
+        )
     )
 
     attn_groups: list[AttentionGroup] = []
@@ -1665,6 +1768,15 @@ def allocate_kv_cache_main(
             else:
                 group_map[key].layer_names.append(layer_name)
         attn_groups.extend(group_map[key] for key in group_order)
+
+    if large_page:
+        return _large_page_row_views(
+            attn_groups,
+            raw_tensors,
+            kv_cache_config,
+            kernel_block_sizes,
+            shared_layers,
+        )
 
     return _reshape_kv_cache_v2(
         attn_groups=attn_groups,

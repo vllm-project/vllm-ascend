@@ -53,6 +53,21 @@ def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     return isinstance(kv_cache_spec, CircularBufferSpec) or getattr(kv_cache_spec, "is_circular", False)
 
 
+def uses_large_page_allocator(cache_config: CacheConfig) -> bool:
+    """Whether vLLM plans this run with the large-page KV cache allocator.
+
+    The field only exists on vLLM revisions that ship the allocator (RFC
+    vllm-project/vllm#64401); older revisions always plan with
+    ``uniform_page``, so an absent field reads as ``uniform_page``.
+    """
+    return getattr(cache_config, "kv_cache_allocator", "uniform_page") == "large_page"
+
+
+def kv_cache_uses_large_pages(kv_cache_config: Any) -> bool:
+    """Whether this planned pool came from the large-page allocator."""
+    return getattr(kv_cache_config, "allocator", "uniform_page") == "large_page"
+
+
 def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
     """Resolve cacheability through uniform wrappers.
 

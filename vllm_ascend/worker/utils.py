@@ -19,6 +19,7 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
+from vllm_ascend.core.kv_cache_interface import kv_cache_uses_large_pages
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -128,6 +129,12 @@ def prepare_ascend_kernel_block_sizes(
         List of kernel block sizes for each cache group.
     """
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+
+    if kv_cache_uses_large_pages(kv_cache_config):
+        # vLLM derives the kernel block size from the planner's
+        # ``kernel_rows_per_block``; the re-split below reads descriptor
+        # strides that only the uniform-page planner emits.
+        return kernel_block_sizes
 
     # Upstream drops only encoder-only groups, so this index tracks its output.
     index = 0
