@@ -1329,18 +1329,18 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # SWA groups share request coordinates, but may have different
             # replay floors. Reuse only identical input views within this
             # build; tensor contents stay unchanged while groups are built.
-            cache_key = (
+            replay_cache_key = (
                 window_size,
                 req.num_actual_tokens,
                 tuple((t.data_ptr(), t.shape, t.stride(), t.dtype, t.device) for t in replay_inputs),
             )
             replay_cache = self.common_v41_batch_metadata.setdefault("replay-swa-visible-lens", {})
-            cached_replay = replay_cache.get(cache_key)
+            cached_replay = replay_cache.get(replay_cache_key)
             if cached_replay is None:
                 replay_visible_lens = build_replay_swa_visible_lens(window_size, *replay_inputs, req.num_actual_tokens)
                 # Keep the inputs alive so another group's allocation cannot
                 # reuse an address already present in this batch's keys.
-                replay_cache[cache_key] = (replay_inputs, replay_visible_lens)
+                replay_cache[replay_cache_key] = (replay_inputs, replay_visible_lens)
             else:
                 replay_visible_lens = cached_replay[1]
         # In band mode this tensor is the per-token visible length; the sparse
