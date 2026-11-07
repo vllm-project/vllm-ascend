@@ -1,3 +1,5 @@
+# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/deepseek-ai/DeepSeek-V4-Flash.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
 variants:
   ascend_w8a8:
     model_id: Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp
@@ -13,6 +15,8 @@ variants:
     extra_args:
       - '--data-parallel-size'
       - '4'
+      # single_node_dep only emits --data-parallel-size, so the TP half of the
+      # DP4 x TP4 layout on the 16 dies has to be declared as an explicit arg.
       - '--tensor-parallel-size'
       - '4'
       - '--enable-expert-parallel'
@@ -108,7 +112,7 @@ hardware_notes:
       href: '#huawei-ascend-950pr-8x'
   ascend_910c:
     title: vLLM Ascend A3 image required
-    body: Single-node DP4+TP4 with expert parallelism on all 16 NPUs of one Atlas 800T A3 node, using the ModelSlim W8A8 checkpoint from Eco-Tech. TP4 shards the weights across 4 dies per DP rank, and the int8 Lightning Indexer KV cache keeps the 1M context within 64 GB per die. Pin quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 with vLLM 0.30.0 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and use --block-size 32 with --attention_config.indexer_kv_dtype int8. Verified on Atlas 800T A3 — MTP k=1 reaches GSM8K 96.44 (AISBench, 1319 prompts). DSpark k=7 reaches 96.59 with Eco-Tech/DeepSeek-V4-Flash-0731-w8a8, but DSpark is not offered for ascend_w8a8 until the core recipe lists it in modes.dspark.variants (Ref #20563). The single_node_dep strategy also renders a vLLM Router companion that the Ascend tutorial does not use — start only the vllm serve command; it listens on port 8100. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
+    body: All 16 Ascend 910C dies of one Atlas 800T A3 node run DP4+TP4 with expert parallelism, serving the ModelSlim W8A8 checkpoint from Eco-Tech. The int8 Lightning Indexer KV cache keeps the 1M context inside 64 GB per die. Use quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 (vLLM 0.30.0), set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and pull the weights through ModelScope. Measured on A3 with AISBench GSM8K (1319 prompts): MTP k=1 scores 96.44; DSpark k=7 scores 96.59 with a different checkpoint but is not selectable here until the core recipe lists it (vllm-ascend#20563). Start only the vllm serve command on port 8100 — the single_node_dep strategy also renders a vLLM Router companion that this tutorial does not use. Multi-node PD separation is documented separately.
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
@@ -125,6 +129,9 @@ strategy_hardware:
 strategy_overrides:
   single_node_dep:
     hardware_overrides:
+      # The A5 args cannot stay under the brand-level `npu` key: brand values
+      # apply to every Ascend GPU and would override the measured A3 command.
+      # 950DT and 950PR therefore repeat them so A3 keeps only its own layer.
       ascend_950dt_8x:
         extra_args:
           - '--block-size'
@@ -186,6 +193,8 @@ features:
               - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
       dspark:
         hardware_overrides:
+          # Only takes effect once the core recipe lists ascend_w8a8 in
+          # modes.dspark.variants (vllm-ascend#20563).
           ascend_910c:
             args:
               - '--speculative-config'
