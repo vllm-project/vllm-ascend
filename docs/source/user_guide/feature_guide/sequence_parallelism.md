@@ -94,6 +94,34 @@ so the expected gains are more modest and workload dependent:
   reduce-scatter; see [Matmul reduce-scatter fusion](#matmul-reduce-scatter-fusion)
   and validate on the target hardware before relying on it.
 
+#### Fused matmul collectives for dense SP
+
+For prefill-sized batches on unquantized (BF16/FP16) dense-SP models with
+TP size 2, 4 or 8, the boundary collectives are additionally fused into
+their GEMMs through the `torch_npu` fused kernels
+`npu_all_gather_base_mm` (column projections: the sequence all-gather
+overlaps the matmul and the gathered activation is never materialized) and
+`npu_mm_reduce_scatter_base` (row projections: the TP partial sums are
+reduced and scattered in one kernel). The fusion activates automatically
+with dense SP — no extra switch. Decode-sized batches, quantized weights
+and other unsupported configurations fall back to the unfused
+gather / GEMM / reduce-scatter layout with identical numerics. The GDN
+in-projections keep the decoder-level gather (it feeds several consumers
+inside the mixer core); their output projection still fuses.
+
+> [!NOTE]
+> **Graph mode.** The fused kernels cannot be captured into ACL graphs, and
+> plain `cudagraph_mode=FULL` would otherwise serve prefill batches from
+> graphs captured without them; piecewise compilation cannot trace the
+> dense-SP collectives or the fused projections. Eligible deployments
+> therefore demote `FULL` and `FULL_AND_PIECEWISE` to `FULL_DECODE_ONLY` at
+> config time: decode keeps its graphs (the projections fall back to the
+> unfused layout inside decode capture) and prefill and mixed
+> chunked-prefill + decode batches run the fused path eagerly — mixed
+> batches qualify because their prefill chunk supplies the large token
+> count the fused kernels want, while pure decode batches keep the
+> unfused layout.
+
 ### Matmul reduce-scatter fusion
 
 On supported Ascend devices, enable `fuse_gemm_comms` to fuse a
