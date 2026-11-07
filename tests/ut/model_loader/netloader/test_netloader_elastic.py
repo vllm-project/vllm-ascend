@@ -137,6 +137,67 @@ def test_elastic_client_register_failure(recv_return, recv_side_effect):
         mock_socket_instance.close.assert_called_once()
 
 
+def test_elastic_client_socket_creation_failure_tries_next_source():
+    sock = MagicMock()
+    with (
+        patch("socket.socket", side_effect=[OSError("no descriptor"), sock]),
+        patch.object(ElasticClient, "register", return_value=("seed", 12346)),
+        ElasticClient(["127.0.0.1:12345", "127.0.0.1:12346"], 0, "mocked_model_path", 1, 1) as client,
+    ):
+        assert client.server_addr == "127.0.0.1"
+        assert client.server_port == 12346
+        assert client.ack == ("seed", 12346)
+    sock.close.assert_called_once()
+
+
+def test_elastic_client_sets_timeout_before_connect():
+    sock = MagicMock()
+    calls = []
+    sock.settimeout.side_effect = lambda value: calls.append(("settimeout", value))
+    sock.connect.side_effect = lambda address: calls.append(("connect", address))
+    with (
+        patch("socket.socket", return_value=sock),
+        patch.object(ElasticClient, "register", return_value=("seed", 12346)),
+        ElasticClient(["127.0.0.1:12345"], 0, "mocked_model_path", 1, 1),
+    ):
+        pass
+    assert calls[0] == ("settimeout", 60)
+    assert calls[1][0] == "connect"
+
+
+def test_elastic_client_all_socket_creations_fail():
+    with (
+        patch("socket.socket", side_effect=OSError("no descriptor")),
+        ElasticClient(["127.0.0.1:12345", "127.0.0.1:12346"], 0, "mocked_model_path", 1, 1) as client,
+    ):
+        assert (client.s, client.ack, client.server_addr, client.server_port) == (None, None, None, None)
+
+
+def test_elastic_client_connect_timeout_closes_socket_and_retries():
+    first, second = MagicMock(), MagicMock()
+    first.connect.side_effect = TimeoutError("timed out")
+    with (
+        patch("socket.socket", side_effect=[first, second]),
+        patch.object(ElasticClient, "register", return_value=("seed", 12346)),
+        ElasticClient(["127.0.0.1:12345", "127.0.0.1:12346"], 0, "mocked_model_path", 1, 1) as client,
+    ):
+        assert client.s is second
+        assert client.server_port == 12346
+    first.close.assert_called_once()
+
+
+def test_elastic_client_does_not_reclose_previous_socket():
+    sock = MagicMock()
+    sock.connect.side_effect = TimeoutError("timed out")
+    with (
+        patch("socket.socket", side_effect=[sock, OSError("no descriptor")]),
+        ElasticClient(["127.0.0.1:12345", "127.0.0.1:12346"], 0, "mocked_model_path", 1, 1) as client,
+    ):
+        assert client.s is None
+        assert client.ack is None
+    sock.close.assert_called_once()
+
+
 class FakeInt8Param:
     def __init__(self, name="param", device="npu", dtype=torch.int8):
         self.dtype = dtype
