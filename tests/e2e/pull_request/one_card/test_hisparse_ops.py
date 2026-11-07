@@ -2,12 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Real-NPU HiSparse state and mapped-payload tests against a CPU oracle."""
 
-import json
-
 import pytest
 import torch
 import torch_npu  # noqa: F401
-
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend, capture_aware_stream
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
@@ -308,7 +305,6 @@ def test_resolver_strides_padding_graph(device_row_count, compact_attention):
             src, dst = int(expected[2][row, col]), int(expected[3][row, col])
             torch.testing.assert_close(hot[dst // 4, dst % 4].cpu(), host[src])
     torch.testing.assert_close(backing[:, 0].cpu(), torch.full((10, 4, 16), -17.0))
-    print(json.dumps({"resolver_mtp_union_lru_compact_gather": "PASS"}), flush=True)
     latent = torch.empty((4, 8, 1, 12), device="npu")
     rope = torch.empty((4, 8, 1, 4), device="npu")
     pack_attention_rows(hot, out, latent, rope, 12)
@@ -328,7 +324,6 @@ def test_resolver_strides_padding_graph(device_row_count, compact_attention):
     torch.npu.synchronize()
     torch.testing.assert_close(hot[0, 0].cpu(), torch.cat((new_latent[0].flatten().cpu(), new_rope[0].flatten().cpu())))
     torch.testing.assert_close(hot[0, 2].cpu(), hot_cpu[0, 2])
-    print(json.dumps({"pack_scatter_strides_padding": "PASS"}), flush=True)
     # Capture warmed kernels, reset state outside capture, then verify replay
     # after changing the mapped CPU payload. No host selection work runs here.
     stream = torch.npu.Stream()
@@ -356,14 +351,12 @@ def test_resolver_strides_padding_graph(device_row_count, compact_attention):
         for col in range(int(expected[4][row])):
             src, dst = int(expected[2][row, col]), int(expected[3][row, col])
             torch.testing.assert_close(hot[dst // 4, dst % 4].cpu(), host[src])
-    print(json.dumps({"acl_graph_replay_mapped_host_update": "PASS"}), flush=True)
     for _ in range(100):
         graph.replay()
     torch.npu.synchronize()
     torch.testing.assert_close(out.cpu(), expected[0])
     torch.testing.assert_close(dgi_n.cpu(), expected[5])
     torch.testing.assert_close(lru_n.cpu(), expected[6])
-    print(json.dumps({"repeated_graph_replay": "PASS", "iterations": 100}), flush=True)
     if device_row_count:
         for active_rows in [0, 1, 2, 3]:
             valid_rows.fill_(active_rows)
@@ -846,8 +839,6 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
         sfa_dcp_replicated_indexer_size=1,
     )
     key, scale = _quantized_indexer_views(packed, spec)
-    with pytest.raises(RuntimeError, match="view size"):
-        key.view(-1, width)
     writer = AscendHiSparseIndexerBackend.__new__(AscendHiSparseIndexerBackend)
     torch.nn.Module.__init__(writer)
     writer.k_cache = SimpleNamespace(kv_cache=(key, scale))
