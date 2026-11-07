@@ -1717,3 +1717,73 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** 37. File: platform/patch_kv_load_failure_reason.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `Scheduler.update_from_output` on the classes that own-define it
+#      (upstream Scheduler and RecomputeScheduler; the async variants
+#      inherit the wrap via MRO)
+#    Why:
+#       In P/D disaggregated deployments a D-side request whose remote KV
+#       load fails is terminated with FINISHED_ERROR and the client
+#       receives an empty response, so clients cannot tell why the
+#       request died or that they should retry.
+#    How:
+#       Post-process each step's outputs: for every ERROR EngineCoreOutput
+#       with no tokens and no stop_reason, ask the connector to attribute
+#       the failure one-to-one (block-intersection proof plus
+#       handle-deadline coloring: "kv_handle_expired; please retry" vs
+#       "kv_load_failed; please retry"), then rewrite finish_reason to
+#       STOP carrying the reason so it survives to the serving layer.
+#       No-op for connectors without get_kv_load_failure_reason and for
+#       steps without invalid blocks.
+#    Related PR (if no, explain why):
+#       No; pairs with the mooncake connector handle_deadline (H1-H7) work.
+#    Future Plan:
+#       Propose the per-request load-failure reason channel upstream;
+#       retire this patch once the upstream scheduler emits reasons
+#       itself.
+#
+#   2. `OpenAIServingChat.chat_completion_stream_generator` and
+#      `OpenAIServingCompletion.completion_stream_generator` (streaming)
+#    Why:
+#       The upstream streaming generators drop chunks of requests that
+#       have not produced a token yet ("chunked prefill" empty-chunk
+#       filter), so the finish chunk of a zero-token KV-load failure is
+#       swallowed and the client still receives a bare `data: [DONE]`;
+#       OpenAI-compatible SDKs collapse the missing finish to an
+#       empty/unknown turn with no retry hint.
+#    How:
+#       Wrap the generators: tee the engine result stream to record
+#       marker stop_reasons ("kv_handle_expired/kv_load_failed; please
+#       retry"), forward upstream SSE lines verbatim, and when
+#       `data: [DONE]` is about to be emitted with a marker never
+#       forwarded, emit an OpenAI-style error chunk `{"error":
+#       {"message": ..., "type": "server_error", "param": null,
+#       "code": "kv_handle_expired" | "kv_load_failed"}}` in front of it
+#       so AI SDK clients surface the message verbatim. Self-disabling
+#       once upstream forwards the marker itself; requests without
+#       markers keep upstream behavior unchanged.
+#    Related PR (if no, explain why):
+#       No; guards the upstream empty-chunk filter drop until item 1
+#       lands upstream end-to-end.
+#    Future Plan:
+#       Retire together with item 1 once upstream forwards the
+#       per-request failure reason in the finish chunk itself.
+#
+#   3. `OpenAIServingChat.chat_completion_full_generator` and
+#      `OpenAIServingCompletion.create_completion` (non-streaming)
+#    Why:
+#       After item 1 rewrites the output, the non-streaming generators
+#       render a zero-token KV-load failure as an empty 200 response, so
+#       non-streaming clients cannot tell the request failed.
+#    How:
+#       Wrap the generators: when a returned response choice carries one
+#       of the markers above in `stop_reason`, return HTTP 503
+#       `ServiceUnavailableError` (via `create_error_response`) with the
+#       same English message and the request id; otherwise pass the
+#       response through unchanged.
+#    Related PR (if no, explain why):
+#       No; complements items 1-2 for non-streaming clients.
+#    Future Plan:
+#       Retire together with items 1-2.
+#

@@ -96,6 +96,14 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+KV_HANDLE_EXPIRY_MARGIN_S = 5.0
+# Retention window for per-request remote-KV state entries after their handle
+# deadline has passed; stale entries are pruned on the next capture.
+KV_HANDLE_STATE_RETENTION_S = 600.0
+# Stop reasons injected into the finish chunk (stop_reason field) for requests
+# whose remote KV load failed on the consumer (D) side.
+KV_LOAD_FAILURE_REASON_EXPIRED = "kv_handle_expired; please retry"
+KV_LOAD_FAILURE_REASON_GENERIC = "kv_load_failed; please retry"
 
 
 class RemotePortInfo(TypedDict):
@@ -136,6 +144,7 @@ class ReqMeta:
     remote_block_size: int
     local_full_block_ids: BlockIds = tuple()
     do_virtual: bool = False
+    handle_deadline: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -582,6 +591,7 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        handle_deadline: float = 0.0,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -602,6 +612,7 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "handle_deadline": handle_deadline,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -803,6 +814,14 @@ class KVCacheRecvingThread(threading.Thread):
         num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
         if num_local_blocks == 0 and not has_replicate_k_blocks:
             return
+
+        handle_deadline = req_meta.get("handle_deadline", 0.0)
+        if handle_deadline > 0.0 and time.time() > handle_deadline + KV_HANDLE_EXPIRY_MARGIN_S:
+            raise RuntimeError(
+                f"Mooncake KV handle expired: request_id={remote_request_id}, "
+                f"handle_deadline={handle_deadline:.3f}, now={time.time():.3f}; "
+                f"remote blocks may have been force-freed and reused, refusing to pull"
+            )
 
         # Check if we have the remote metadata cached.
         with self.remote_metadata_lock:
@@ -1602,6 +1621,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
             local_full_block_ids=local_full_block_ids or tuple(),
             do_virtual=kv_transfer_params.get("do_virtual", False),
+            handle_deadline=kv_transfer_params.get("handle_deadline", 0.0),
         )
 
 
@@ -1665,6 +1685,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def get_kv_load_failure_reason(self, request_id: str, invalid_block_ids: set[int] | None) -> str | None:
+        """Attribute a remote KV load failure to a request, one-to-one."""
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_kv_load_failure_reason(request_id, invalid_block_ids)
 
     ############################################################
     # Worker Side Methods
@@ -1772,6 +1797,12 @@ class MooncakeConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
+
+        # Per-request remote-KV load state on the consumer (D) side:
+        # request_id -> (handle_deadline, local_block_ids). Captured in
+        # update_state_after_alloc and consumed by get_kv_load_failure_reason
+        # to attribute KV load failures per request (block-intersection proof).
+        self._reqs_remote_kv_state: dict[str, tuple[float, BlockIds]] = {}
 
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
@@ -1968,6 +1999,17 @@ class MooncakeConnectorScheduler:
                         local_full_block_ids,
                         num_external_tokens,
                     )
+                    # Record the remote-KV load state for one-to-one failure
+                    # attribution (see get_kv_load_failure_reason), pruning
+                    # stale entries opportunistically while we hold the map.
+                    now = time.time()
+                    for stale_req_id, (stale_deadline, _) in list(self._reqs_remote_kv_state.items()):
+                        if stale_deadline + KV_HANDLE_STATE_RETENTION_S < now:
+                            self._reqs_remote_kv_state.pop(stale_req_id, None)
+                    self._reqs_remote_kv_state[request.request_id] = (
+                        float(params.get("handle_deadline", 0.0)),
+                        local_block_ids,
+                    )
                 else:
                     logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
@@ -2019,6 +2061,12 @@ class MooncakeConnectorScheduler:
             "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s", request.status, params
         )
 
+        # Drop remote-KV state for finished requests, except when terminated
+        # with FINISHED_ERROR: the failure-reason lookup happens in the same
+        # engine step (update_from_output post-processing) and still needs it.
+        if request.status != RequestStatus.FINISHED_ERROR:
+            self._reqs_remote_kv_state.pop(request.request_id, None)
+
         if params is None:
             return False, None
 
@@ -2047,9 +2095,12 @@ class MooncakeConnectorScheduler:
         computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
+        handle_deadline = 0.0
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
-            self._reqs_need_send[request.request_id] = time.time()
+            delay_start_time = time.time()
+            self._reqs_need_send[request.request_id] = delay_start_time
+            handle_deadline = delay_start_time + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -2066,7 +2117,31 @@ class MooncakeConnectorScheduler:
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
             remote_block_size=self.block_size,
+            handle_deadline=handle_deadline,
         )
+
+    def get_kv_load_failure_reason(self, request_id: str, invalid_block_ids: set[int] | None) -> str | None:
+        """Attribute a remote KV load failure to a request, one-to-one.
+
+        Returns a stop reason only when this request's own remote-KV blocks
+        are among the current step's failed block ids (block-intersection
+        proof); never guesses otherwise. When proven, the handle deadline
+        further classifies the failure:
+
+        * deadline already passed -> the pull was refused to avoid reading
+          force-freed (reused) blocks on the P side, i.e. an expired handle;
+        * otherwise -> a generic remote KV load failure (the exact exception
+          is already logged per request by the receiving thread).
+        """
+        state = self._reqs_remote_kv_state.get(request_id)
+        if state is None or not invalid_block_ids:
+            return None
+        handle_deadline, local_block_ids = state
+        if not any(block_id in invalid_block_ids for group in local_block_ids for block_id in group):
+            return None
+        if handle_deadline > 0.0 and time.time() > handle_deadline + KV_HANDLE_EXPIRY_MARGIN_S:
+            return KV_LOAD_FAILURE_REASON_EXPIRED
+        return KV_LOAD_FAILURE_REASON_GENERIC
 
     def _port_offset_from_handshake_metadata(
         self,
@@ -3922,6 +3997,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        handle_deadline=meta.handle_deadline,
                     )
 
         if self.kv_send_thread is not None and self.dcp_size == 1:
