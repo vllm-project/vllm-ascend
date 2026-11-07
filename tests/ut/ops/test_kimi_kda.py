@@ -219,6 +219,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
+    attention.pcp_size = 1
     attention.local_num_heads = 2
     attention.head_dim = 3
     hidden_states = torch.randn(4, 6)

@@ -193,6 +193,13 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     return hf_config
 
 
+def model_uses_kimi_kda(model_config: Any | None) -> bool:
+    text = getattr(model_config, "hf_text_config", None)
+    return getattr(text, "model_type", None) in ("kimi_linear", "kimi_k31") and bool(
+        getattr(text, "linear_attn_config", None)
+    )
+
+
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
