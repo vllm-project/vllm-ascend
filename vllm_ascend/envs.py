@@ -28,6 +28,27 @@ from typing import Any
 # begin-env-vars-definition
 
 
+def _env_as_bool(name: str, default: str) -> bool:
+    """Read a boolean environment variable.
+
+    Accepts ``1/0`` and ``true/false`` (case-insensitive, surrounding
+    whitespace ignored). An unset or empty value falls back to ``default``.
+    Any other value raises a ValueError that names the variable, so typos
+    surface at startup instead of silently enabling or disabling a flag.
+    """
+    value = os.getenv(name, default).strip().lower()
+    if value == "":
+        value = default.strip().lower()
+    if value in ("1", "true"):
+        return True
+    if value in ("0", "false"):
+        return False
+    raise ValueError(
+        f"Invalid value {os.getenv(name)!r} for environment variable {name};"
+        " expected one of: 1, 0, true, false."
+    )
+
+
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -37,11 +58,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
     # Whether to compile custom kernels. If not set, the default value is True.
+    # Accepts 1/0/true/false (case-insensitive); defaults to true.
     # If set to False, the custom kernels will not be compiled.
     # This configuration option should only be set to False when running UT
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
-    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "COMPILE_CUSTOM_KERNELS": lambda: _env_as_bool("COMPILE_CUSTOM_KERNELS", "1"),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -52,8 +74,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # If not set, we will query chip info through `npu-smi`.
     # Please make sure that the version is correct.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
-    # If set, vllm-ascend will print verbose logs during compilation
-    "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    # If set, vllm-ascend will print verbose logs during compilation.
+    # Accepts 1/0/true/false (case-insensitive); defaults to false
+    "VERBOSE": lambda: _env_as_bool("VERBOSE", "0"),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),

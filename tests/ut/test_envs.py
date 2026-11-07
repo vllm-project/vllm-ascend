@@ -35,10 +35,10 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if "int(" in handler_source:
+                    if "_env_as_bool" in handler_source:
+                        test_vals = ["true", "false"]
+                    elif "int(" in handler_source:
                         test_vals = ["123", "456"]
-                    elif "bool(int(" in handler_source:
-                        test_vals = ["0", "1"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]
 
@@ -57,3 +57,46 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_boolean_env_var_parsing(self):
+        # Boolean variables accept 1/0/true/false (case-insensitive), treat
+        # an empty value as unset, and reject anything else with an error
+        # that names the variable (issue #21064).
+        bool_vars = (
+            ("COMPILE_CUSTOM_KERNELS", True),
+            ("VERBOSE", False),
+        )
+        for var_name, default in bool_vars:
+            with self.subTest(var=var_name):
+                original_val = os.environ.get(var_name)
+                try:
+                    for raw_val, expected in (
+                        ("1", True),
+                        ("0", False),
+                        ("true", True),
+                        ("false", False),
+                        ("TRUE", True),
+                        ("False", False),
+                        (" true ", True),
+                    ):
+                        os.environ[var_name] = raw_val
+                        self.assertEqual(getattr(envs_ascend, var_name), expected)
+
+                    if var_name in os.environ:
+                        del os.environ[var_name]
+                    self.assertEqual(getattr(envs_ascend, var_name), default)
+
+                    os.environ[var_name] = ""
+                    self.assertEqual(getattr(envs_ascend, var_name), default)
+
+                    for bad_val in ("2", "yes", "on"):
+                        os.environ[var_name] = bad_val
+                        with self.assertRaises(ValueError) as ctx:
+                            getattr(envs_ascend, var_name)
+                        self.assertIn(var_name, str(ctx.exception))
+                finally:
+                    if original_val is None:
+                        os.environ.pop(var_name, None)
+                    else:
+                        os.environ[var_name] = original_val
+
