@@ -68,6 +68,9 @@ def packed_broadcast_producer(
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
+    Other source streams must be joined onto the caller stream before entry;
+    a lazy iterator must make newly produced tensors ready on its active slot.
+
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
         group: Process group (PyHcclCommunicator)
@@ -92,6 +95,11 @@ def packed_broadcast_producer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    # Work already submitted by the caller must precede packing on every slot.
+    # Writers on other streams must join the caller stream before entry.
+    caller_stream = torch.npu.current_stream()
+    for stream in streams:
+        stream.wait_stream(caller_stream)
     buffer_idx = 0
     previous_broadcast_stream = None
 
@@ -141,6 +149,8 @@ def packed_broadcast_producer(
                     # on this communicator must not overlap across streams.
                     if previous_broadcast_stream is not None and previous_broadcast_stream is not streams[buffer_idx]:
                         previous_broadcast_stream.synchronize()
+                    # Native HCCL reads the pointer outside torch_npu's queue.
+                    streams[buffer_idx].synchronize()
                     # Match the active packing stream and the explicit native
                     # HCCL stream; wait for both before reusing this slot.
                     group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
@@ -159,6 +169,13 @@ def packed_broadcast_producer(
         _drain_packed_streams(streams, packed_tensors, body_error)
 
 
+def _record_packed_clones(weights: list[tuple[str, torch.Tensor]], reader_streams: tuple[Any, ...]) -> None:
+    # Return before invoking the loader, so loop locals cannot retain clones.
+    for _, tensor in weights:
+        for stream in reader_streams:
+            tensor.record_stream(stream)
+
+
 def packed_broadcast_consumer(
     iterator: Iterator[tuple[str, tuple[list[int], torch.dtype]]],
     group: Any,
@@ -172,6 +189,9 @@ def packed_broadcast_consumer(
     Unpacking clones one actual chunk's payload in addition to the receive
     buffer and loader copies. A HCCL chunk may exceed buffer_size_bytes; peak
     memory also depends on in-flight slots and tensors retained by the loader.
+    Each callback is ordered after earlier slot-stream work. Callbacks using
+    other streams must join work needed by later callbacks onto the active slot
+    before returning; caller work submitted before entry is joined to all slots.
 
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
@@ -211,7 +231,13 @@ def packed_broadcast_consumer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    caller_stream = torch.npu.current_stream()
+    for stream in streams:
+        stream.wait_stream(caller_stream)
     buffer_idx = 0
+    previous_ready = None
+    ready_events = [torch.npu.Event() for _ in streams]
+    reader_streams = (*streams, caller_stream)
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
@@ -258,16 +284,22 @@ def packed_broadcast_consumer(
 
             # Unpack and load weights on the custom stream
             with torch.npu.stream(streams[buffer_idx]):
+                if previous_ready is not None:
+                    streams[buffer_idx].wait_event(previous_ready)
                 names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
-                post_unpack_func(
-                    unpack_tensor(
-                        packed_tensors[buffer_idx],
-                        list(names),
-                        list(shapes),
-                        list(dtypes),
-                        list(tensor_sizes),
-                    )
+                weights = unpack_tensor(
+                    packed_tensors[buffer_idx], list(names), list(shapes), list(dtypes), list(tensor_sizes)
                 )
+                # Callbacks may retain these owning clones and enqueue reads on
+                # a later slot or caller stream before releasing the references.
+                _record_packed_clones(weights, reader_streams)
+                post_unpack_func(weights)
+                # The callback can queue derived-state writes as well as clone
+                # reads, so record completion only after it has returned.
+                # Slot reuse starts with a stream drain, completing its prior
+                # record before this event is recorded for another chunk.
+                previous_ready = ready_events[buffer_idx]
+                previous_ready.record(streams[buffer_idx])
 
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
