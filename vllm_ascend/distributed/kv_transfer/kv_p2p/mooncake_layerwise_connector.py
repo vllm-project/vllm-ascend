@@ -771,6 +771,10 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         # request's own blocks, i.e. every transfer group.
         return self._kv_cache_config.transfer_group_ids
 
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
@@ -933,10 +937,12 @@ class MooncakeLayerwiseConnectorScheduler:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
-    def _truncate_request_for_hybrid_prefill(self, request: "Request") -> None:
+    def on_new_request(self, request: "Request") -> None:
+        # Normalize the P prompt before the scheduler looks up local cache hits.
         params = request.kv_transfer_params
         if (
             params is None
+            or not params.get("do_remote_decode")
             or not self.need_truncate
             or params.get("_p_side_truncated")
             or getattr(request, "num_prompt_tokens", len(request.prompt_token_ids or [])) <= 1
@@ -995,9 +1001,6 @@ class MooncakeLayerwiseConnectorScheduler:
             assert num_computed_tokens % min(self.block_size) == 0
             count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
-
-        if params is not None and params.get("do_remote_decode"):
-            self._truncate_request_for_hybrid_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
