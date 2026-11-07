@@ -68,7 +68,6 @@ import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 # VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
 import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 
-import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 import vllm_ascend.patch.worker.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_input_batch  # noqa

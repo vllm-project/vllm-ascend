@@ -831,7 +831,20 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+    from vllm_ascend.ops.fused_moe.pluggable import (
+        AscendDbrxExperts,
+        AscendGptOssRoutedExperts,
+        AscendTransformersMoERunner,
+        AscendTransformersRoutedExperts,
+    )
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+    from vllm_ascend.ops.fused_moe.router.pluggable import (
+        AscendBiasRouter,
+        AscendCustomRouter,
+        AscendGroupedRouter,
+        AscendSimulatorRouter,
+        AscendTopKRouter,
+    )
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -888,6 +901,15 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
+        "GptOssRoutedExperts": AscendGptOssRoutedExperts,
+        "DbrxExperts": AscendDbrxExperts,
+        "TransformersRoutedExperts": AscendTransformersRoutedExperts,
+        "TransformersMoERunner": AscendTransformersMoERunner,
+        "FusedTopKRouter": AscendTopKRouter,
+        "GroupedTopKRouter": AscendGroupedRouter,
+        "FusedTopKBiasRouter": AscendBiasRouter,
+        "CustomRoutingRouter": AscendCustomRouter,
+        "RoutingSimulatorRouter": AscendSimulatorRouter,
         "GateLinear": AscendGateLinear,
     }
     from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
@@ -905,6 +927,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
+        from vllm_ascend._310p.fused_moe.pluggable_router import (
+            AscendBiasRouter310,
+            AscendGroupedRouter310,
+            AscendTopKRouter310,
+        )
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -933,6 +960,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
+                "FusedTopKRouter": AscendTopKRouter310,
+                "GroupedTopKRouter": AscendGroupedRouter310,
+                "FusedTopKBiasRouter": AscendBiasRouter310,
                 "MoERunner": AscendMoERunner310,
                 "RoutedExperts": AscendRoutedExperts310,
             }
