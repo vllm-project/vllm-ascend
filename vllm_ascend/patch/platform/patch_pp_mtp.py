@@ -87,9 +87,49 @@ def _patch_model_runner_output() -> None:
         empty_output.spec_token_ids = None
 
 
+def _patch_engine_core_batch_queue() -> None:
+    """Serialize PP + speculation on the V1 runner.
+
+    With a batch queue the scheduler advances a request before the model output
+    of the previous verify step has been consumed, so draft tokens are written
+    back against stale ``Request`` state (upstream vllm#61326).
+    """
+    from vllm.v1.engine.core import EngineCore
+
+    if getattr(EngineCore.__init__, "_vllm_ascend_pp_spec_serial_patched", False):
+        return
+
+    original_init = EngineCore.__init__
+
+    @wraps(original_init)
+    def _patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        vllm_config = getattr(self, "vllm_config", None)
+        if (
+            vllm_config is not None
+            and getattr(vllm_config, "speculative_config", None) is not None
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+            and not vllm_config.scheduler_config.async_scheduling
+            and not _is_pd_prefill_node(vllm_config)
+            and not getattr(vllm_config, "use_v2_model_runner", False)
+            and getattr(self, "batch_queue_size", 1) > 1
+        ):
+            logger.info(
+                "PP + speculative decoding on the V1 runner: serializing the "
+                "EngineCore batch queue to keep draft writeback ordered."
+            )
+            self.batch_queue_size = 1
+            self.batch_queue = None
+            self.step_fn = self.step
+
+    _patched_init._vllm_ascend_pp_spec_serial_patched = True  # type: ignore[attr-defined]
+    EngineCore.__init__ = _patched_init
+
+
 def _patch_engine_core() -> None:
     from vllm.v1.engine.core import EngineCore
 
+    _patch_engine_core_batch_queue()
     if getattr(EngineCore.post_step, "_vllm_ascend_pp_mtp_patched", False):
         return
 
