@@ -60,3 +60,39 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
+
+    def all_gatherv(
+        self,
+        input_: torch.Tensor | list[torch.Tensor],
+        dim: int = 0,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor | list[torch.Tensor]:
+        """Gather rows in group-rank order, including uneven or empty shards.
+
+        Without sizes, all ranks must have equal row counts. Otherwise, sizes
+        applies to every tensor in the list and must agree across ranks.
+        Shapes, sizes and tensor-list order must stay fixed during graph replay.
+        """
+        if dim != 0:
+            raise NotImplementedError("only dim 0 all-gatherv is supported")
+        if sizes is not None:
+            if len(sizes) != self.world_size:
+                raise ValueError("all_gatherv sizes must match group size")
+            if any(size < 0 for size in sizes):
+                raise ValueError("all_gatherv sizes must be non-negative")
+
+        def gather(input_: torch.Tensor) -> torch.Tensor:
+            shard_sizes = sizes if sizes is not None else [input_.shape[0]] * self.world_size
+            if input_.shape[0] != shard_sizes[self.rank_in_group]:
+                raise ValueError("all_gatherv local rows do not match sizes")
+            output = torch.empty((sum(shard_sizes), *input_.shape[1:]), dtype=input_.dtype, device=input_.device)
+            # An all-empty group has no data to exchange. Every rank makes
+            # this decision from the same sizes, not its own local row count.
+            if output.numel() == 0:
+                return output
+            dist.all_gather(list(output.split(shard_sizes)), input_.contiguous(), group=self.device_group)
+            return output
+
+        if isinstance(input_, torch.Tensor):
+            return gather(input_)
+        return [gather(tensor) for tensor in input_]
