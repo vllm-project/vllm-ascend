@@ -1,0 +1,6 @@
+pr: 20978
+entries:
+  - category: bugfix
+    text: >-
+      Fixed retained request-progress bookkeeping after cancelled partial DSpark prefills when
+      draft KV sending is skipped.
