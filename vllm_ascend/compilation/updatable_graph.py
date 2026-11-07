@@ -33,8 +33,9 @@ class ContextSource:
     def get(
         self,
         provider: ParamProvider,
-    ) -> Sequence[Params]:
-        return (provider.resolve(self.context),)
+        _index: int,
+    ) -> Params:
+        return provider.resolve(self.context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,13 +45,10 @@ class SharedSource:
     def get(
         self,
         _provider: ParamProvider,
-    ) -> Sequence[Params]:
-        layer_name = getattr(_provider, "layer_name", None)
-        return [
-            {k: v for k, v in param.items() if k != "layer_name"}
-            for param in self.params
-            if layer_name == param.get("layer_name")
-        ]
+        index: int,
+    ) -> Params:
+        # 草稿模型必须连续
+        return self.params[index]
 
 
 _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar("capturing_updatable_graph", default=None)
@@ -61,7 +59,6 @@ class GraphUpdateTask:
     operation: Callable[..., Any]
     kwargs: dict[str, Any]
     provider: ParamProvider
-    provider_index: int
     handle: Any
     event: Any
 
@@ -131,14 +128,13 @@ class UpdatableGraph(torch.npu.NPUGraph):
         operation(**kwargs)
         handle = torch.npu.graph_task_group_end(stream)
         weak_kwargs = weak_ref_tensors(kwargs)
-        provider_index = self.provider_sizes.get(provider, 0)
-        self.provider_sizes[provider] = provider_index + 1
+        # provider_index = self.provider_sizes.get(provider, 0)
+        # self.provider_sizes[provider] = provider_index + 1
         self.tasks.append(
             GraphUpdateTask(
                 operation,
                 weak_kwargs,
                 provider,
-                provider_index,
                 handle,
                 event,
             )
@@ -148,10 +144,20 @@ class UpdatableGraph(torch.npu.NPUGraph):
         self,
         source: ParamSource,
     ) -> tuple[GraphUpdateTask, ...]:
-        params_by_provider = {provider: source.get(provider) for provider in self.provider_sizes}
-        for provider, size in self.provider_sizes.items():
-            assert len(params_by_provider[provider]) == size
-        return tuple(task.bind(params_by_provider[task.provider][task.provider_index]) for task in self.tasks)
+        """
+        SharedSource
+        providers           [p0,p1,p2,p3,p0,p1,p2,p3]                               # 混合注意力 f1,f2,g1,f3  update_params: u1,u2,u3 草稿模型不能是这种类型
+        self.tasks          [t1,t2,t3,t4,t5,t6,t7,t8]
+        source              update_params       [u0,u1,u2,u3,u4,u5,u6,u7]
+
+        ContextSource
+        providers           [p0,p1,p2,p3,p4,p5,p6,p7]
+        self.tasks          [t0,t1,t2,t3,t4,t5,t6,t7]
+        source              attn_metadata       [a0,a1,a2,a3,a4,a5,a6,a7]
+
+        """
+
+        return tuple(task.bind(source.get(task.provider, index)) for index,task in enumerate(self.tasks))
 
     def update(
         self,

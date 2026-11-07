@@ -713,7 +713,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if is_draft_model_prefill:
             return [
                 {
-                    "layer_name": layer_name,
                     "actual_seq_lengths": metadata.actual_seq_lengths_q,
                     "actual_seq_lengths_kv": metadata.seq_lens_list,
                     "block_table": metadata.block_tables,
@@ -729,10 +728,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            for layer_name in self.draft_attn_layer_names:
+            for _ in self.draft_attn_layer_names:
                 fia_params.append(
                     {
-                        "layer_name": layer_name,
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": seq_lens,
                         "block_table": block_table,
