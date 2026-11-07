@@ -82,6 +82,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model                         | Support   | Note                                                                 |    Supported Hardware | W8A8   |  Doc |
     |-------------------------------|-----------|----------------------------------------------------------------------|-----------------------|--------|------|
+    | Qwen2.5-1.5B-apeach           | 🔵        | Classification (Korean harmful content); run with --runner pooling   |          A2          | 🟡 | [Qwen2.5-1.5B-apeach](../../tutorials/models/Qwen2.5-1.5B-apeach.md) |
     | Qwen3-Embedding               | 🔴        |                                                                      |         A2/A3        | 🟡 | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)|
     | Qwen3-VL-Embedding            | 🔴        |                                                                      |         A2/A3        | 🔵 | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
     | Qwen3-Reranker                | 🔴        |                                                                      |         A2/A3        | 🟡 | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)|
