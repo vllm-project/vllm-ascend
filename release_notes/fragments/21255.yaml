@@ -1,0 +1,4 @@
+pr: 21255
+entries:
+  - category: performance
+    text: Reduced GLM-5.3-Flash prefill latency by skipping unused MTP draft queries for eligible single-request eager C8 batches.

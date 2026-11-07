@@ -458,6 +458,7 @@ class AscendSFAMetadata:
     smla_topk_length: torch.Tensor | None = None
     smla_valid_mask: torch.Tensor | None = None
     smla_sinks: torch.Tensor | None = None
+    draft_prefill_query_indices: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -1835,6 +1836,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
+        draft_rows = getattr(attn_metadata, "draft_prefill_query_indices", None)
+        draft_kv_only = draft_rows is not None and draft_rows.numel() == 0
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
             if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
@@ -1955,14 +1958,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            if self.qk_rope_head_dim:
-                q_pe = self.rope_single(q_pe, cos, sin)
-            self._record_query_gather_context(
-                ql_nope,
-                q_pe,
-                attn_metadata,
-            )
+            if not draft_kv_only:
+                q_input = q_c if draft_rows is None else q_c.index_select(0, draft_rows)
+                ql_nope, q_pe = self._q_proj_and_k_up_proj(q_input)
+                if self.qk_rope_head_dim:
+                    q_pe = self.rope_single(q_pe, cos, sin)
+                self._record_query_gather_context(ql_nope, q_pe, attn_metadata)
 
             (
                 k_pe,
@@ -1995,11 +1996,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
-                compute_topk=not self.skip_topk and has_local_query,
+                compute_topk=not self.skip_topk and has_local_query and not draft_kv_only,
             )
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
-            elif self.use_index_cache and has_local_query:
+            elif self.use_index_cache and has_local_query and not draft_kv_only:
                 self._update_indexcache_topk_indices(topk_indices)
         elif self.skip_topk:
             # Static shared-index layers keep no runtime indexer cache and
@@ -2013,6 +2014,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         # scattered - indexer layers persisted it inside indexer.forward
         # above - so the connector can dispatch the PD pull.
         notify_kv_cache_written(self.layer_name or "")
+
+        if draft_kv_only:
+            with attention_transfer_window():
+                pass
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output
+        if draft_rows is not None:
+            if fused_type != PreprocessType.NATIVE:
+                ql_nope = ql_nope.index_select(0, draft_rows)
+                q_pe = q_pe.index_select(0, draft_rows)
+            actual_seq_lengths_query = torch.ones_like(actual_seq_lengths_query)
+            num_input_tokens = draft_rows.numel()
+            if gate_hidden_states is not None:
+                gate_hidden_states = gate_hidden_states.index_select(0, draft_rows)
 
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
