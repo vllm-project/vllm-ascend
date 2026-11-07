@@ -15,6 +15,16 @@ import pytest
 
 from .build_cache_test_utils import build_cache_command, run_command
 
+# The lock timeout the lock-timeout tests configure.
+LOCK_TIMEOUT_SECONDS = 0.2
+# Slack for the measured lock wait: the engine polls the lock every 50 ms and
+# only checks the deadline between polls.
+LOCK_WAIT_SLACK_SECONDS = 1.0
+# A generous ceiling for the whole subprocess. It only guards against a hang.
+# The default entry lock timeout is 60 s, so a ceiling below that still fails
+# when the timeout knob is ignored.
+SUBPROCESS_CEILING_SECONDS = 30.0
+
 
 def _builder(tmp_path: Path) -> Path:
     path = tmp_path / "builder.py"
@@ -140,7 +150,7 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
-                "VLLM_ASCEND_BUILD_CACHE_ENTRY_LOCK_TIMEOUT_SECONDS": "0.2",
+                "VLLM_ASCEND_BUILD_CACHE_ENTRY_LOCK_TIMEOUT_SECONDS": str(LOCK_TIMEOUT_SECONDS),
             },
         )
         elapsed = time.monotonic() - start
@@ -149,13 +159,20 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
 
     assert bypass.returncode == 0, bypass.stdout + bypass.stderr
     assert "[build-cache] BYPASS" in bypass.stdout
-    assert elapsed < 2.0
     assert counter.read_text() == "2"
     events = _read_events(event_log)
     timeouts = [e for e in events if e["event"] == "lock_timeout" and e["lock"] == "entry"]
     assert len(timeouts) == 1
     assert timeouts[0]["path"] == str(lock_path)
     assert any(e["event"] == "cache_result" and e["status"] == "BYPASS" for e in events)
+    # The timeout bounds the lock wait, and the engine measures that wait in
+    # process and reports it as `waited_seconds`. The subprocess wall clock
+    # also covers interpreter startup and the wrapped build command, so it is
+    # not a reliable bound: on a loaded CI runner it reached 2.0155 s against a
+    # 2.0 s limit and failed this test with no lock regression at all (nightly
+    # issue #20431). Assert on the measured wait instead.
+    assert timeouts[0]["waited_seconds"] < LOCK_TIMEOUT_SECONDS + LOCK_WAIT_SLACK_SECONDS
+    assert elapsed < SUBPROCESS_CEILING_SECONDS
 
 
 @pytest.mark.parametrize("lock_kind", ["publish", "action"])
@@ -175,7 +192,7 @@ def test_publication_lock_timeout_fails_fast(tmp_path: Path, lock_kind: str):
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
-                f"VLLM_ASCEND_BUILD_CACHE_{lock_kind.upper()}_LOCK_TIMEOUT_SECONDS": "0.2",
+                f"VLLM_ASCEND_BUILD_CACHE_{lock_kind.upper()}_LOCK_TIMEOUT_SECONDS": str(LOCK_TIMEOUT_SECONDS),
             },
         )
         elapsed = time.monotonic() - start
@@ -184,8 +201,13 @@ def test_publication_lock_timeout_fails_fast(tmp_path: Path, lock_kind: str):
 
     assert failed.returncode == 75, failed.stdout + failed.stderr
     assert f"[build-cache] ERROR lock timeout kind={lock_kind}" in failed.stdout
-    assert elapsed < 2.0
     assert counter.read_text() == "1"
+    timeouts = [e for e in _read_events(event_log) if e["event"] == "lock_timeout" and e["lock"] == lock_kind]
+    assert len(timeouts) == 1
+    # See test_entry_lock_timeout_bypasses_cache: the engine measures the lock
+    # wait in process, so assert on that instead of the subprocess wall clock.
+    assert timeouts[0]["waited_seconds"] < LOCK_TIMEOUT_SECONDS + LOCK_WAIT_SLACK_SECONDS
+    assert elapsed < SUBPROCESS_CEILING_SECONDS
 
 
 def test_many_parallel_hits_complete_without_hang(tmp_path: Path):
