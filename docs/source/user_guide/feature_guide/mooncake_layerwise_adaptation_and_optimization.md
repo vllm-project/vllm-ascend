@@ -27,11 +27,11 @@ multiple cache groups, see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid
 | --- | --- |
 | Software | Requires a Mooncake NPU client with session and range transfer APIs; use Mooncake 0.3.14 or later. Required interfaces are checked at startup. |
 | Deployment | Use the corresponding producer/consumer role on each P/D node. Decode pool reads and writes are controlled separately by `consumer_is_to_load` and `consumer_is_to_put`. |
-| Parallelism | Instances sharing layerwise objects must use matching TP, PP, and PCP sizes and the same PP layer partition. DCP greater than `1` and TP mismatch are not supported. |
+| Parallelism | Instances sharing layerwise objects must use matching TP, PP, and PCP sizes and the same PP layer partition. With KVPP enabled, PCP folds into the owner coordinate and each target layer is persisted by exactly one owner; see [KVPP](kvpp.md). DCP greater than `1` and TP mismatch are not supported. |
 | PP | Uneven layer partitions are supported, but each stage must own layers in every cache group. Empty stage-local cache groups are not supported. |
 | Cache layout | Readers and writers must agree on model weights, cache format, block sizes, and transfer mode. Use separate pool namespaces for incompatible configurations. |
 | Buffer reuse | Mooncake layerwise transfer does not enable cross-layer reuse of NPU cache buffers. |
-| KVPP | Experimental for non-hybrid MLA/SFA models with `load_async=false`; cannot be combined with Mooncake layerwise PCP. See [KVPP](kvpp.md) for its support scope. |
+| KVPP | Experimental for non-hybrid MLA/SFA models with `load_async=false`; supported together with PCP when every KVPP owner persists at least one target layer. DCP remains unsupported. See [KVPP](kvpp.md) for its support scope. |
 
 Hybrid models have additional cache-state and execution-mode requirements in the
 [hybrid attention guide](mooncake_hybrid_attention.md#constraints-and-limitations).

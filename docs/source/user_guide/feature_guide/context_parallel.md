@@ -105,7 +105,7 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - In P/D disaggregation, enable PCP only on the prefill (`kv_producer`) engine; the decode (`kv_consumer`) engine must use `prefill_context_parallel_size=1`.
 - With PCP, `MooncakeConnectorV1` and `MooncakeHybridConnector` do not support PP. `MooncakeHybridConnector` does not support DCP.
 - For PP+PCP, use `MooncakeConnectorV2` on [supported models](pipeline_parallel.md).
-- KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
+- KV cache pooling with PCP supports `AscendStoreConnector` with `use_layerwise=false`, and for non-hybrid MLA/SFA models also with `use_layerwise=true` (Mooncake block-key data plane). With KVPP enabled, PCP folds into the KVPP owner coordinate and each target layer is stored once; producer and consumer must use the same TP, PP, and PCP sizes. See [KVPP](kvpp.md).
 - PCP speculative decoding supports MTP with MLA, SFA, and DeepSeek-V4 DSA models,
   Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.

@@ -33,7 +33,7 @@ The common Mooncake dependency and deployment requirements are listed in the
 | Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
 | PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
 | PCP | Each PCP rank stores its own snapshot. Account for these copies in Store capacity and bandwidth. |
-| KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
+| KVPP | Hybrid layerwise pooling does not support KVPP: KVPP requires a non-hybrid MLA/SFA model. The PCP + KVPP combination is documented for non-hybrid models in [KVPP](kvpp.md). |
 | Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
 | Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
 
@@ -174,7 +174,10 @@ TP rank or head. Objects from different PCP sizes are isolated, and PCP does
 not change the logical token coverage of a group block.
 
 PCP keeps a separate cache copy per PCP rank, so increasing PCP can increase
-Store capacity and transfer-bandwidth requirements. Keep `enable_kvpp` disabled.
+Store capacity and transfer-bandwidth requirements. Keep `enable_kvpp` disabled:
+KVPP requires a non-hybrid MLA/SFA model. For non-hybrid models, PCP + KVPP
+folds PCP into the layer owner coordinate so each layer is stored once; see
+[KVPP](kvpp.md).
 
 ## Configuration Parameters
 
