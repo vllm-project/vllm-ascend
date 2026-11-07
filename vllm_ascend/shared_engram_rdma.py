@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--library-path")
     parser.add_argument("--ready-file")
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
     args = parser.parse_args()
 
     import torch
@@ -35,6 +37,8 @@ def main():
         args.engine_endpoint,
         device=args.device,
         library_path=args.library_path,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
     )
     service = threading.Thread(target=owner.serve_forever, name="engram-owner")
     service.start()
@@ -43,6 +47,7 @@ def main():
         generation=owner.generation,
         endpoint=args.endpoint,
         metadata=owner.metadata,
+        shard=owner.shard,
         table_bytes=sum(t.numel() for t in owner.tables.values()),
     )
     if args.ready_file:

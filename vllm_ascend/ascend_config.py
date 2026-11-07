@@ -402,15 +402,22 @@ class SharedEngramRdmaConfig:
     """A2 immutable table owner and per-rank receive capacity."""
 
     model_config = ConfigDict(extra="forbid")
-    endpoint: str
+    endpoint: str | None = None
+    endpoints: list[str] | None = None
     capacity: int = 65536
     library_path: str | None = None
 
     @model_validator(mode="after")
     def _validate(self):
-        host, separator, port = self.endpoint.rpartition(":")
-        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
-            raise ValueError("shared Engram endpoint must be host:port")
+        if bool(self.endpoint) == bool(self.endpoints):
+            raise ValueError("set exactly one of shared Engram endpoint or endpoints")
+        endpoints = self.endpoints if self.endpoints else [self.endpoint]
+        if len(set(endpoints)) != len(endpoints):
+            raise ValueError("shared Engram endpoints must be distinct")
+        for endpoint in endpoints:
+            host, separator, port = endpoint.rpartition(":")
+            if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+                raise ValueError("shared Engram endpoint must be host:port")
         if not 0 < self.capacity <= 65536:
             raise ValueError("shared Engram capacity must be in [1, 65536]")
         return self

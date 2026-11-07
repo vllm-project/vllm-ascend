@@ -7,9 +7,10 @@ import json
 import os
 import socket
 import struct
+import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -142,6 +143,126 @@ def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
     assert copied.dtype == np.int64
     np.testing.assert_array_equal(copied[:, 0], [[10, -1], [31, 32]])
     np.testing.assert_array_equal(copied[:, 1], [[21, 22], [-1, 42]])
+
+
+def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypatch):
+    fake_kernel = ModuleType("vllm_ascend.ops.triton.engram_lookup")
+    fake_kernel.dequantize_packed_engram = lambda packed, out, count, *_: out.copy_(
+        packed[:count].view(-1, 1).expand_as(out)
+    )
+    monkeypatch.setitem(sys.modules, fake_kernel.__name__, fake_kernel)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            Event=lambda: SimpleNamespace(record=lambda stream: None, synchronize=lambda: None),
+            current_stream=lambda: None,
+        ),
+        raising=False,
+    )
+    readers = []
+    for owner_id in range(3):
+        reader = object.__new__(rdma.RemoteReader)
+        reader.shard = {"index": owner_id, "count": 3}
+        reader.metadata = {
+            "tables": {
+                "1": {"rows": 10, "row_bytes": 1, "scale_dtype": "F32"},
+                "14": {"rows": 10, "row_bytes": 1, "scale_dtype": "F32"},
+            }
+        }
+        reader.capacity = 32
+        reader.closed = reader.failed = False
+        reader._operation_lock = threading.Lock()
+        reader.buffer = torch.empty(32, dtype=torch.uint8)
+        first, _ = rdma.shard_range(10, owner_id, 3)
+        reader._transfer_rows = lambda request, ids, size, r=reader, start=first: r.buffer[:size].copy_(
+            torch.as_tensor(ids + start + 1, dtype=torch.uint8)
+        )
+        readers.append(reader)
+    sharded = object.__new__(rdma.ShardedRemoteReader)
+    sharded.readers, sharded.capacity = readers, 32
+    sharded._last_use = None
+    sharded._operation_lock = threading.Lock()
+    tables = [
+        SimpleNamespace(
+            _checkpoint_key=f"layers.{layer}.engram.embed.weight",
+            num_embeddings=10,
+            head_start=0,
+            part_n_hash_cols=2,
+            vocab_start_idx=1,
+            vocab_end_idx=10,
+            dim=2,
+        )
+        for layer in (1, 14)
+    ]
+    hashes = torch.tensor([[[0, 3], [9, 4]], [[6, 3], [-1, 7]]], dtype=torch.int64)
+    outputs = sharded.lookup_layers(tables, hashes, hashes.numpy())
+    torch.testing.assert_close(outputs[0][:, :, 0], torch.tensor([[0, 4], [7, 4]], dtype=torch.bfloat16))
+    torch.testing.assert_close(outputs[1][:, :, 0], torch.tensor([[10, 5], [0, 8]], dtype=torch.bfloat16))
+    assert all(torch.equal(output[:, :, 0], output[:, :, 1]) for output in outputs)
+
+
+def test_shard_ranges_cover_uneven_table(rdma):
+    assert [rdma.shard_range(10, i, 3) for i in range(3)] == [(0, 3), (3, 6), (6, 10)]
+    with pytest.raises(ValueError):
+        rdma.shard_range(2, 0, 3)
+
+
+def test_multi_owner_reuses_transport_and_retires_all_leases(rdma, monkeypatch):
+    events = []
+    engine = SimpleNamespace(close=lambda: events.append("engine-close"))
+    metadata = {"identity": "checkpoint", "tables": {}}
+
+    def reader(model, endpoint, *, capacity, library_path, transport):
+        index = int(endpoint)
+        events.append(("attach", index, transport is not None))
+        return SimpleNamespace(
+            shard={"index": index, "count": 3},
+            metadata=metadata,
+            engine=engine,
+            generation=str(index),
+            wire=SimpleNamespace(close=lambda: events.append(("wire-close", index))),
+            failed=False,
+            closed=False,
+            buffer=object(),
+        )
+
+    monkeypatch.setattr(rdma, "RemoteReader", reader)
+    monkeypatch.setattr(rdma, "_send", lambda wire, msg: events.append(("retire", msg["generation"])))
+    monkeypatch.setattr(rdma, "_receive", lambda wire: {"closed": True})
+    multi = rdma.ShardedRemoteReader("model", ["0", "1", "2"], capacity=16)
+    multi.close()
+    multi.close()
+    assert events[:3] == [("attach", 0, False), ("attach", 1, True), ("attach", 2, True)]
+    assert events.count("engine-close") == 1
+    assert [event for event in events if isinstance(event, tuple) and event[0] == "retire"] == [
+        ("retire", "0"),
+        ("retire", "1"),
+        ("retire", "2"),
+    ]
+    assert events.index("engine-close") < events.index(("retire", "0"))
+
+
+@pytest.mark.parametrize("code_dtype", [torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
+def test_owner_loads_only_its_checkpoint_rows(rdma, tmp_path, monkeypatch, code_dtype, scale_dtype):
+    config = {"text_config": {"engram_head_dim": 256, "engram_layer_ids": [1], "engram_num_embeddings": [10]}}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    weight_key, scale_key = "layers.1.engram.embed.weight", "layers.1.engram.embed.scale"
+    index = {"weight_map": {weight_key: "weights.safetensors", scale_key: "weights.safetensors"}}
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(json.dumps(index))
+    weights = (torch.arange(10 * 256).reshape(10, 256).float() % 100).to(code_dtype)
+    scales = torch.ones((10, 8), dtype=torch.float32).to(scale_dtype)
+    save_file({weight_key: weights, scale_key: scales}, tmp_path / "weights.safetensors")
+    monkeypatch.setattr(rdma, "HixlEngine", lambda *args: SimpleNamespace(close=lambda: None))
+    owner = rdma.SharedOwner(tmp_path, "127.0.0.1:0", "127.0.0.1:1", shard_index=1, shard_count=3)
+    try:
+        assert owner.shard == {"index": 1, "count": 3}
+        assert owner.tables["1"].shape == (3, 256 + scales.element_size() * 8)
+        torch.testing.assert_close(owner.tables["1"][:, :256], weights[3:6].view(torch.uint8))
+        torch.testing.assert_close(owner.tables["1"][:, 256:], scales[3:6].contiguous().view(torch.uint8))
+    finally:
+        owner.server_close()
 
 
 def test_batch_reader_falls_back_without_touching_transport(rdma):

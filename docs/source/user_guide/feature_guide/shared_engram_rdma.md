@@ -61,6 +61,35 @@ Wait for `POOL_READY` from this owner process. Enable consumers with `cpu_offloa
 
 `capacity` is the maximum number of selected rows in one lookup, including gathered tokens and this rank's head columns. It is not a token count. The consumer allocates a bounded packed-row HBM buffer; the owner allocates a pinned stage of the same capacity per connected reader. Other Engram result/exchange buffers remain additional allocations.
 
+### Multiple owners
+
+To distribute one logical table, start one owner per host with `--shard-count N`
+and a different zero-based `--shard-index` from `0` to `N-1`. Each owner loads
+its corresponding contiguous range of both layers. All owners must use the same
+checkpoint and must be ready before the consumers start. For example, a 2P1D
+deployment can run three owners with `--shard-count 3` and indexes 0, 1, and 2.
+
+Set the consumer configuration on all instances to the owners in index order:
+
+```json
+{
+  "shared_engram_rdma": {
+    "endpoints": ["P0_IP:29500", "P1_IP:29500", "D_IP:29500"],
+    "capacity": 65536,
+    "library_path": "/absolute/path/libengram_hixl.so"
+  }
+}
+```
+
+Use `endpoint` for the existing single-owner configuration or `endpoints` for
+the ordered multi-owner configuration, not both. Each worker reuses one HIXL
+engine and one device receive buffer, sends the appropriate IDs to each owner,
+and restores the result order. The current implementation reads owners in
+sequence. Each owner still allocates a registered host stage per reader; count
+those stages as well as the table shards when planning memory. All shards are
+required: owner loss requires stopping and restarting consumers with a complete
+set of owners; transparent failover is not provided.
+
 The consumer requires the accompanying core loader change that invokes the model's unused-checkpoint-weight filter before materializing a tensor. Metadata-only parameters alone do not prevent a loader from temporarily loading the full table. The multimodal wrapper forwards this filter too.
 
 ## Placement and lifecycle

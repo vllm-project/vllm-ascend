@@ -1043,14 +1043,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 "safetensors",
             ) or vllm_config.load_config.safetensors_load_strategy not in (None, "lazy"):
                 raise ValueError("shared_engram_rdma requires lazy safetensors loading")
-            from .engram.shared_rdma import RemoteReader
+            from .engram.shared_rdma import RemoteReader, ShardedRemoteReader
 
-            remote_reader = RemoteReader(
+            reader_cls = ShardedRemoteReader if remote_engram.endpoints else RemoteReader
+            remote_reader = reader_cls(
                 self.engram_weight_root,
-                remote_engram.endpoint,
+                remote_engram.endpoints or remote_engram.endpoint,
                 capacity=remote_engram.capacity,
                 library_path=remote_engram.library_path,
             )
+            if not remote_engram.endpoints and remote_reader.shard != {"index": 0, "count": 1}:
+                remote_reader.close()
+                raise ValueError("single-owner Engram endpoint points to a sharded owner")
         self._engram_remote_reader = remote_reader
         if self.engram_layout is not None:
             # Head buckets use TP x DP x PCP when sharded, or TP alone when host

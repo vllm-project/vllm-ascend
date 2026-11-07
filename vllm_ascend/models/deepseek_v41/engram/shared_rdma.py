@@ -194,7 +194,7 @@ class HixlEngine:
 class RemoteReader:
     """One rank's reusable connection and finite HBM receive buffer."""
 
-    def __init__(self, model, endpoint, *, capacity, library_path=None):
+    def __init__(self, model, endpoint, *, capacity, library_path=None, transport=None):
         if not 0 < capacity <= MAX_ROWS:
             raise ValueError("invalid remote Engram row capacity")
         self.closed = False
@@ -218,24 +218,30 @@ class RemoteReader:
             if ready.get("metadata") != metadata or not ready.get("generation"):
                 raise ValueError("remote Engram checkpoint or layout mismatch")
             self.metadata = metadata
+            self.shard = ready.get("shard", {"index": 0, "count": 1})
             self.supports_batch = ready.get("batch_lookup", False)
             self.capacity = capacity
             self.generation = ready["generation"]
             self.remote_address = ready["address"]
             self.peer = ready["engine"].encode()
-            row_bytes = max(t["row_bytes"] for t in metadata["tables"].values())
-            self.buffer = torch.empty((capacity * row_bytes,), dtype=torch.uint8, device="npu")
-            # Every TP/DP worker needs a unique HIXL engine identity, even on one Pod IP.
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
-                reservation.bind((self.wire.getsockname()[0], 0))
-                address, port = reservation.getsockname()
-            self.engine = HixlEngine(f"{address}:{port}", torch.npu.current_device(), library_path)
-            self.registration = self.engine.register(self.buffer)
+            if transport is None:
+                row_bytes = max(t["row_bytes"] for t in metadata["tables"].values())
+                self.buffer = torch.empty((capacity * row_bytes,), dtype=torch.uint8, device="npu")
+                # Every TP/DP worker needs a unique HIXL engine identity, even on one Pod IP.
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                    reservation.bind((self.wire.getsockname()[0], 0))
+                    address, port = reservation.getsockname()
+                self.engine = HixlEngine(f"{address}:{port}", torch.npu.current_device(), library_path)
+                self.registration = self.engine.register(self.buffer)
+            else:
+                self.engine, self.buffer, self.registration = transport.engine, transport.buffer, transport.registration
             self.engine.check(self.engine.lib.engram_hixl_connect(self.engine.handle, self.peer))
         except BaseException:
             # Keep registered local memory alive if initialization did not complete.
             if self.engine is not None:
                 _hold_reader(self)
+                if transport is not None:
+                    _hold_reader(transport)
             else:
                 self.wire.close()
             raise
@@ -362,6 +368,147 @@ class RemoteReader:
                 raise
 
 
+class ShardedRemoteReader:
+    """Route selected rows to immutable HIXL owners and restore their order."""
+
+    copy_hashes = staticmethod(RemoteReader.copy_hashes)
+
+    def __init__(self, model, endpoints, *, capacity, library_path=None):
+        self.readers = []
+        self.capacity = capacity
+        self._last_use = None
+        self._operation_lock = threading.Lock()
+        try:
+            for index, endpoint in enumerate(endpoints):
+                reader = RemoteReader(
+                    model,
+                    endpoint,
+                    capacity=capacity,
+                    library_path=library_path,
+                    transport=self.readers[0] if self.readers else None,
+                )
+                self.readers.append(reader)
+                if reader.shard != {"index": index, "count": len(endpoints)}:
+                    raise ValueError("remote Engram owner shard layout mismatch")
+                if index and reader.metadata != self.readers[0].metadata:
+                    raise ValueError("remote Engram owners use different checkpoints")
+        except BaseException:
+            with suppress(Exception):
+                self.close()
+            raise
+
+    def _lookup(self, tables, indices, cpu_hashes, outputs):
+        with self._operation_lock:
+            return self._lookup_locked(tables, indices, cpu_hashes, outputs)
+
+    def _lookup_locked(self, tables, indices, cpu_hashes, outputs):
+        from vllm_ascend.ops.triton.engram_lookup import dequantize_packed_engram
+
+        entries = [
+            self.readers[0]._lookup_ids(table, ids, hashes)
+            for table, ids, hashes in zip(tables, indices, cpu_hashes, strict=True)
+        ]
+        for output in outputs:
+            output.zero_()
+        for reader in self.readers:
+            selected = []
+            for layer, spec, ids in entries:
+                first, last = shard_range(spec["rows"], reader.shard["index"], reader.shard["count"])
+                positions = np.flatnonzero((ids >= first) & (ids < last))
+                selected.append((layer, spec, positions, ids[positions] - first))
+            count = sum(len(ids) for _, _, _, ids in selected)
+            if not count:
+                continue
+            if count > reader.capacity:
+                raise ValueError("Engram batch exceeds configured remote capacity")
+            request = dict(
+                op="lookup_batch", lookups=[dict(layer=layer, count=len(ids)) for layer, _, _, ids in selected]
+            )
+            packed_ids = np.concatenate([ids for _, _, _, ids in selected])
+            byte_count = sum(len(ids) * spec["row_bytes"] for _, spec, _, ids in selected)
+            with reader._operation_lock:
+                if reader.failed or reader.closed:
+                    raise RuntimeError("remote Engram reader is failed or closed")
+                try:
+                    if self._last_use is not None:
+                        self._last_use.synchronize()
+                    reader._transfer_rows(request, packed_ids, byte_count)
+                    offset = 0
+                    for (_, spec, positions, ids), output in zip(selected, outputs, strict=True):
+                        size = len(ids) * spec["row_bytes"]
+                        if size:
+                            values = torch.empty((len(ids), output.shape[-1]), dtype=output.dtype, device=output.device)
+                            dequantize_packed_engram(
+                                reader.buffer[offset : offset + size],
+                                values,
+                                len(ids),
+                                spec["row_bytes"],
+                                spec["scale_dtype"],
+                                spec.get("code_dtype", "I8"),
+                            )
+                            positions_npu = torch.as_tensor(positions, dtype=torch.int64, device=output.device)
+                            output.view(-1, output.shape[-1]).index_copy_(0, positions_npu, values)
+                        offset += size
+                    reader._last_use = torch.npu.Event()
+                    reader._last_use.record(torch.npu.current_stream())
+                    self._last_use = reader._last_use
+                except BaseException:
+                    _hold_reader(reader)
+                    raise
+
+    def lookup(self, table, indices, out, *, cpu_ids=None):
+        self._lookup([table], [indices], [cpu_ids], [out])
+
+    def lookup_layers(self, tables, gathered, cpu_hashes):
+        if gathered.shape[0] * sum(table.part_n_hash_cols for table in tables) > self.capacity:
+            return None
+        outputs = [
+            torch.empty(
+                (gathered.shape[0], table.part_n_hash_cols, table.dim), dtype=torch.bfloat16, device=gathered.device
+            )
+            for table in tables
+        ]
+        self._lookup(
+            tables,
+            [gathered[:, slot] for slot in range(len(tables))],
+            [cpu_hashes[:, slot] for slot in range(len(tables))],
+            outputs,
+        )
+        return outputs
+
+    def close(self):
+        with self._operation_lock:
+            self._close()
+
+    def _close(self):
+        if not self.readers or all(reader.closed for reader in self.readers):
+            return
+        if any(reader.failed for reader in self.readers):
+            raise RuntimeError("failed remote Engram reader requires external recovery")
+        try:
+            if self._last_use is not None:
+                self._last_use.synchronize()
+            self.readers[0].engine.close()
+        except BaseException:
+            for reader in self.readers:
+                _hold_reader(reader)
+            raise
+        error = None
+        for reader in self.readers:
+            try:
+                _send(reader.wire, dict(op="close", generation=reader.generation))
+                if _receive(reader.wire) != {"closed": True}:
+                    raise RuntimeError("owner did not retire remote Engram lease")
+                reader.wire.close()
+                reader.buffer = None
+                reader.closed = True
+            except Exception as exc:
+                _hold_reader(reader)
+                error = error or exc
+        if error is not None:
+            raise error
+
+
 def _lookup_plan(request, tables, capacity):
     operation = request.get("op")
     if operation == "lookup":
@@ -419,13 +566,22 @@ def _pack_lookup_rows(engine, stage, tables, plan, ids):
         )
 
 
+def shard_range(rows, index, count):
+    if type(index) is not int or type(count) is not int or count < 1 or not 0 <= index < count or rows < count:
+        raise ValueError("invalid Engram shard layout")
+    return rows * index // count, rows * (index + 1) // count
+
+
 class SharedOwner(socketserver.ThreadingTCPServer):
     """Immutable DRAM table, with one leased host staging range per connection."""
 
     allow_reuse_address = True
 
-    def __init__(self, model, endpoint, engine_endpoint, *, device=0, library_path=None):
+    def __init__(self, model, endpoint, engine_endpoint, *, device=0, library_path=None, shard_index=0, shard_count=1):
         self.metadata = checkpoint_metadata(model)
+        self.shard = {"index": shard_index, "count": shard_count}
+        for spec in self.metadata["tables"].values():
+            shard_range(spec["rows"], shard_index, shard_count)
         self.generation = uuid.uuid4().hex
         self.device = device
         self.engine_endpoint = engine_endpoint
@@ -440,14 +596,17 @@ class SharedOwner(socketserver.ThreadingTCPServer):
         root = Path(model)
         index = json.loads((root / self.metadata["index_file"]).read_text())["weight_map"]
         for layer, spec in self.metadata["tables"].items():
-            packed = torch.empty((spec["rows"], spec["row_bytes"]), dtype=torch.uint8)
+            first, last = shard_range(spec["rows"], shard_index, shard_count)
+            packed = torch.empty((last - first, spec["row_bytes"]), dtype=torch.uint8)
             for suffix, start, end in (("weight", 0, 256), ("scale", 256, spec["row_bytes"])):
                 key = f"layers.{layer}.engram.embed.{suffix}"
                 with safe_open(root / index[key], framework="pt", device="cpu") as file:
                     tensor = file.get_slice(key)
-                    for row in range(0, spec["rows"], 1 << 20):
-                        stop = min(row + (1 << 20), spec["rows"])
-                        packed[row:stop, start:end].copy_(tensor[row:stop].contiguous().view(torch.uint8))
+                    for row in range(first, last, 1 << 20):
+                        stop = min(row + (1 << 20), last)
+                        packed[row - first : stop - first, start:end].copy_(
+                            tensor[row:stop].contiguous().view(torch.uint8)
+                        )
             self.tables[layer] = packed
             print(json.dumps(dict(stage="TABLE_LOADED", layer=layer, bytes=packed.numel())), flush=True)
         host, port = endpoint.rsplit(":", 1)
@@ -510,6 +669,7 @@ class _OwnerConnection(socketserver.BaseRequestHandler):
                     address=stage.data_ptr(),
                     engine=endpoint,
                     batch_lookup=True,
+                    shard=getattr(owner, "shard", {"index": 0, "count": 1}),
                 ),
             )
             while True:
