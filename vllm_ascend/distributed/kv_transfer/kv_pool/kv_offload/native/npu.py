@@ -61,6 +61,8 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
 class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
     """CPU primary tier plus vLLM secondary tiers on Ascend NPU."""
 
+    _manager: OffloadingManager | None
+
     def _uses_shared_region(self) -> bool:
         # Unlike the CPU-only NPU spec, tiering always connects every worker
         # and the scheduler-side primary tier through SharedOffloadRegion.
@@ -91,7 +93,6 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             )
         return SharedOffloadRegion(**region_kwargs)
 
-    @override
     def get_manager(self) -> OffloadingManager:
         # Upstream hardcodes its single-file mapping inside get_manager.
         # Reuse its managers with the same segmented region as NPU workers,
