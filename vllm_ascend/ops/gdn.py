@@ -195,6 +195,12 @@ def _flatten_recurrent_state_indices(
     return state_indices[seq_ids, slot_ids].contiguous()
 
 
+# The fla_npu AscendC recurrent GDN kernel silently returns without writing
+# output when a sequence exceeds this many tokens. Wider speculative windows
+# must use the uncapped FLA Triton recurrent kernel instead.
+_MAX_RECURRENT_GDN_TOKENS = 8
+
+
 def _split_head_first_conv_output(
     output: torch.Tensor, num_k_heads: int, num_v_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -720,10 +726,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            if attn_metadata.spec_decode_metadata.use_upstream_recurrent:
+            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
+                spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
+            )
+            if use_upstream_recurrent:
                 # The native packed-index API bounds accepted_prev by the
                 # current query length. Reuse vLLM's strided state-table API
-                # for adaptive graphs, whose next query may be only one token.
+                # for adaptive graphs and windows wider than the AscendC cap.
                 core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
                     q=query_spec,
                     k=key_spec,
