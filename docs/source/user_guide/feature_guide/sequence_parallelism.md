@@ -75,3 +75,23 @@ vllm serve <moe-model> \
   --enable-expert-parallel \
   --additional-config '{"enable_flashcomm1": true}'
 ```
+
+### Migrating the FlashComm1 environment variable
+
+Use `additional_config.enable_flashcomm1` for new deployments. An explicit
+`true` or `false` takes precedence over `VLLM_ASCEND_ENABLE_FLASHCOMM1`.
+If both settings disagree, initialization logs an override warning.
+When the option is absent, the legacy variable remains a compatibility fallback:
+`1` and `true` (case-insensitive, ignoring surrounding whitespace) enable it;
+other values, including an unset variable, disable it.
+
+For example, the following disables FlashComm1 even if the legacy variable is set:
+
+```bash
+VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
+  --tensor-parallel-size 2 \
+  --enable-expert-parallel \
+  --additional-config '{"enable_flashcomm1": false}'
+```
+
+The switch does not bypass the SP-MoE topology and backend requirements above.
