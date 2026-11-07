@@ -27,6 +27,10 @@ from vllm.sequence import IntermediateTensors
 # and HyperConnection components before the MTP module is initialized.
 from . import model as _model  # noqa: F401
 
+# The upstream MTP module imports GatedResidual before the target wrapper is
+# loaded. Keep the drafter on the same Ascend HC path as the target model.
+upstream_mtp.GatedResidual = _model.AscendGatedResidual
+
 _MTP_LAYER_PREFIX = re.compile(r"^mtp\.layers\.(\d+)(?=\.)")
 
 

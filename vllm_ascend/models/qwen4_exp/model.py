@@ -27,6 +27,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
+from .hc_dual_stream import AscendGatedResidual
 from .ple import patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
@@ -37,6 +38,7 @@ upstream_hc.hc_combine = hc_combine
 upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
+upstream_hc.GatedResidual = AscendGatedResidual
 
 # PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
 # internal formats are enabled. Scope the graph-safe option override to the
@@ -48,6 +50,7 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+upstream_model.GatedResidual = AscendGatedResidual
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
