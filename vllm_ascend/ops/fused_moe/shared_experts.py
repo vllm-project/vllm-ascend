@@ -94,6 +94,7 @@ class SubmittedSharedExpertGateUp:
     gate_up_input_scale: torch.Tensor | None
     local_dp_metadata: tuple[int, int] | None
     path: SharedExpertMLPPath
+    gate_up_done: torch.npu.Event | None = None
 
 
 class AscendSharedExperts:
@@ -470,6 +471,7 @@ class AscendSharedExperts:
         self,
         prepared_execution: PreparedSharedExpertExecution,
         router_output_ready: torch.npu.Event | None,
+        record_done_event: bool = False,
     ) -> SubmittedSharedExpertGateUp:
         """Submit Gate-Up before routed TopK/dispatch are enqueued.
 
@@ -502,6 +504,7 @@ class AscendSharedExperts:
                 gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
             else:
                 gate_up = self.part1(prepared_execution.gate_up_input)
+            gate_up_done = torch.npu.current_stream().record_event() if record_done_event else None
 
         return SubmittedSharedExpertGateUp(
             hidden_states=prepared_execution.hidden_states,
@@ -509,6 +512,7 @@ class AscendSharedExperts:
             gate_up_input_scale=gate_up_input_scale,
             local_dp_metadata=prepared_execution.local_dp_metadata,
             path=path,
+            gate_up_done=gate_up_done,
         )
 
     def _run_a8_int_mlp(
