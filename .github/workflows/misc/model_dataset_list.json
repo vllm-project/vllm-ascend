@@ -172,6 +172,7 @@
             "google/gemma-4-E2B-it",
             "google/gemma-4-E4B-it",
             "google/siglip2-base-patch16-224",
+            "intfloat/e5-mistral-7b-instruct",
             "intfloat/multilingual-e5-small",
             "jinaai/jina-embeddings-v3",
             "jinaai/jina-embeddings-v4",

@@ -82,6 +82,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model                         | Support   | Note                                                                 |    Supported Hardware | W8A8   |  Doc |
     |-------------------------------|-----------|----------------------------------------------------------------------|-----------------------|--------|------|
+    | E5-Mistral-7B-Instruct        | 🔵        | Embedding model; LAST pooling via --pooler-config, max 4096 tokens   |         A2/A3        | 🟡 | [E5-Mistral-7B-Instruct](../../tutorials/models/E5-Mistral-7B-Instruct.md)|
     | Qwen3-Embedding               | 🔴        |                                                                      |         A2/A3        | 🟡 | [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)|
     | Qwen3-VL-Embedding            | 🔴        |                                                                      |         A2/A3        | 🔵 | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
     | Qwen3-Reranker                | 🔴        |                                                                      |         A2/A3        | 🟡 | [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)|
