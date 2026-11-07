@@ -1,0 +1,4 @@
+pr: 20359
+entries:
+  - category: bugfix
+    text: Fixed the Ascend hybrid KV cache coordinator ignoring --prefix-cache-retention-interval, which forced dense sliding-window prefix-cache retention and collapsed the DeepSeek-V4.1-Flash Prefill prefix-cache hit rate under high concurrency. With the flag unset the coordinator now uses the upstream default of 0 (semantic checkpoints only); pass None to keep dense retention.
