@@ -9,6 +9,74 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
+@pytest.mark.parametrize("needs_output_buffer", [False, True])
+def test_projection_tp_uses_shared_kda_boundary_with_live_metadata(monkeypatch, needs_output_buffer):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "projection_tp"
+    layer._needs_output_buffer = needs_output_buffer
+    layer.local_num_heads, layer.head_dim = 1, 4
+    context = SimpleNamespace(attn_metadata=None, no_compile_layers={layer.prefix: layer})
+    seen = []
+
+    def project(owner, hidden):
+        assert owner is layer
+        seen.append(("projection", context.attn_metadata))
+        padded = torch.nn.functional.pad(hidden, (0, 0, 0, 1))
+        return padded * 2, torch.zeros(1, 3, 1, 4), torch.zeros(1, 3, 1), torch.zeros(3, 1, 4)
+
+    def core(qkv_proj_states, g1, beta, core_attn_out):
+        seen.append(("core", context.attn_metadata))
+        if context.attn_metadata is None:
+            core_attn_out.zero_()
+        else:
+            core_attn_out.copy_(qkv_proj_states.view(1, 3, 1, 4))
+
+    def norm(output, gate):
+        seen.append(("norm", context.attn_metadata))
+        return output
+
+    def output_projection(hidden):
+        seen.append(("output", context.attn_metadata))
+        return hidden * 3, None
+
+    layer.projection_tp = SimpleNamespace(project=project)
+    layer._forward_core, layer.o_norm, layer.o_proj = core, norm, output_projection
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+    name = "glm5next_kda_forward_with_output" if needs_output_buffer else "glm5next_kda_forward"
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    hidden = torch.arange(8, dtype=torch.float32).view(2, 4)
+    try:
+        library.impl(name, getattr(model_kda, name))
+        with torch.inference_mode():
+            compiled = torch.compile(layer, backend="eager", fullgraph=True)
+            torch.testing.assert_close(compiled(hidden, torch.arange(2)), torch.zeros_like(hidden))
+            context.attn_metadata = {"live": True}
+            torch.testing.assert_close(compiled(hidden, torch.arange(2)), hidden * 6)
+    finally:
+        library._destroy()
+    assert seen == [
+        (stage, metadata) for metadata in (None, {"live": True}) for stage in ("projection", "core", "norm", "output")
+    ]
+
+
+@pytest.mark.parametrize("needs_output_buffer", [False, True])
+def test_projection_tp_all_empty_skips_core_and_output(monkeypatch, needs_output_buffer):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "empty_projection_tp"
+    layer.projection_tp = SimpleNamespace(project=lambda owner, hidden: None)
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
+    hidden = torch.empty(0, 4)
+    output = torch.empty_like(hidden) if needs_output_buffer else None
+    result = layer._forward(hidden, output)
+    if needs_output_buffer:
+        assert result is None
+    else:
+        assert result is not None and result.shape == hidden.shape
+
+
 def test_glm_kda_backend_declares_pcp_support() -> None:
     backend = model_kda.Glm5NextLinearAttention.get_attn_backend(None)
 
@@ -30,6 +98,7 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     # True dispatches to the mutable op writing a graph-owned buffer, False to
     # the variant returning its own output.
     layer._needs_output_buffer = needs_output_buffer
+    layer.projection_tp = None
     layer.local_projection_size = 2
     layer.local_num_heads = 1
     layer.head_dim = 2
