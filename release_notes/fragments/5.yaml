@@ -1,0 +1,9 @@
+pr: 5
+entries:
+  - category: feature
+    text: >-
+      Added standalone decode context parallel (DCP) support to Mooncake
+      block-key layerwise KV pooling. Each DCP rank stores and reads its own
+      context shard, and producer and consumer must use the same TP/PP/DCP
+      topology. DCP cannot be combined with PCP, KVPP, or cache groups that
+      vLLM does not shard across DCP ranks.
