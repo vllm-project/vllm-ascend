@@ -141,6 +141,10 @@ struct BlockSchedulerGdnFwdO {
         if (processNewTask) {
             if (unlikely(taskIdx >= taskNum)) {
                 isRunning = false;
+                // Drain the previous stage without reading metadata for a
+                // nonexistent next chunk (cu_seqlens/chunk_offsets may end here).
+                currStage = (currStage + 1) % PING_PONG_STAGES;
+                return;
             }
             vIdx = taskIdx / (shapeBatch * numChunks * vNumHead);
             shapeBatchIdx = (taskIdx - vIdx * shapeBatch * numChunks * vNumHead) / (numChunks * vNumHead);
