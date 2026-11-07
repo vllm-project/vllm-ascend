@@ -785,8 +785,8 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
     assert worker_mamba_widths == {354}
 
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
-    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec, MLAAttentionSpec)
-    assert all(isinstance(group.kv_cache_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
+    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec.first_spec, MLAAttentionSpec)
+    assert all(isinstance(group.kv_cache_spec.first_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
     scheduler_mamba_widths = {
         group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
         for group in scheduler_config.kv_cache_groups[1:]

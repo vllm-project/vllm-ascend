@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
 from collections.abc import Mapping
-from copy import copy
-from dataclasses import replace
 from math import lcm
 
 import vllm
@@ -181,7 +179,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             self.eagle_group_ids = {
                 i
                 for i, g in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(g.kv_cache_spec, FullAttentionSpec)
+                if isinstance(_manager_spec(g.kv_cache_spec), FullAttentionSpec)
             }
         # vLLM main (#61589) reads this base-class attribute in cache_blocks();
         # lookahead hashes clear the drop while keeping the groups flagged.
@@ -225,8 +223,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
         self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
+            isinstance(_manager_spec(g.kv_cache_spec), MambaSpec)
+            and _manager_spec(g.kv_cache_spec).mamba_cache_mode == "align"
             and g.kv_cache_spec.block_size > hash_block_size
             for g in kv_cache_config.kv_cache_groups
         )
@@ -275,6 +273,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         return lcm(self.scheduler_block_size or self.lcm_block_size, tail_alignment)
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
+        kv_cache_spec = _manager_spec(kv_cache_spec)
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
             return block_size
@@ -563,14 +562,6 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if num_cacheable_groups == 0 or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        if num_cacheable_groups == 0:
-            # Upstream's no-prefix coordinator expects scheduler specs rather
-            # than the planner's uniform wrappers. Preserve the caller's config.
-            kv_cache_config = copy(kv_cache_config)
-            kv_cache_config.kv_cache_groups = [
-                replace(group, kv_cache_spec=_manager_spec(group.kv_cache_spec))
-                for group in kv_cache_config.kv_cache_groups
-            ]
         orig_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,

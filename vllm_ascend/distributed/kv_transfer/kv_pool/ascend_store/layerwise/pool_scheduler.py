@@ -14,8 +14,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    build_layerwise_reuse_layout,
+    get_layerwise_policy,
     get_layerwise_reuse_config,
+    validate_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
@@ -123,7 +124,9 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if kv_cache_config is not None and reuse_config is not None:
             layout = get_layerwise_layout(kv_cache_config)
             if layout is None:
-                layout = build_layerwise_reuse_layout(kv_cache_config, self.num_layers, reuse_config)
+                raise ValueError("Layerwise cache configuration has no published reuse layout")
+            policy = get_layerwise_policy(kv_cache_config, self.num_layers, reuse_config)
+            validate_layerwise_reuse_layout(kv_cache_config, layout, policy=policy, base_layers=self.num_layers)
             self._layerwise_layout = layout
             self.layerwise_offload = layout.has_layer_reuse
             return

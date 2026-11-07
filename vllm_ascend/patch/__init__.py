@@ -320,7 +320,7 @@
 #       Group spec simplification loses per-name reuse intent, and the connector
 #       must receive the same slots used for allocation and physical accounting.
 #    How:
-#       Preserve declared reuse names when grouping, infer slots from the
+#       Retain per-layer specs in scheduler configuration, infer slots from the
 #       original backing and carry placement/dependencies through dataclass IPC.
 #       Existing Qwen4 cost and config hooks consume the same slot inference.
 #    Related PR:
@@ -328,7 +328,7 @@
 #    Future Plan:
 #       Remove the bridge when upstream has equivalent plugin placement and
 #       serialized connector metadata hooks. The companion upstream interface
-#       change supplies KVCacheSpec.reuse and per-name group intent.
+#       change supplies KVCacheSpec.reuse and preserves the per-layer dictionary.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

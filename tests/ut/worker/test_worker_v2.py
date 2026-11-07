@@ -93,7 +93,12 @@ class TestNPUWorkerV2(TestBase):
         else:
             from vllm.v1.core import kv_cache_planning as planning
 
-        self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
+        if vllm_version_is("0.32.0"):
+            self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
+        else:
+            from vllm_ascend.core.kv_cache_config_builder import get_kv_cache_groups_for_profiling
+
+            self.assertIs(worker.get_kv_cache_groups, get_kv_cache_groups_for_profiling)
         self.assertIs(worker.unify_hybrid_kv_cache_specs, planning.unify_hybrid_kv_cache_specs)
 
     def test_get_encoder_cudagraph_stats_is_serializable(self):

@@ -23,8 +23,11 @@ from vllm_ascend.core.layerwise_cache_config import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
+    get_layerwise_policy,
     get_layerwise_reuse_config,
     get_physical_layer_index,
+    infer_layerwise_reuse_layout,
+    validate_layerwise_reuse_layout,
 )
 
 
@@ -319,6 +322,40 @@ def test_reuse_field_survives_replace_and_does_not_change_group_equality():
     assert original == replace(original, reuse=False)
 
 
+def test_mixed_reuse_survives_grouping_without_changing_membership():
+    from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
+
+    members = names(4)
+    resident = dict.fromkeys(members, spec(reuse=False))
+    mixed = {name: spec(reuse=i % 2 == 1) for i, name in enumerate(members)}
+    baseline = create_kv_cache_group_specs(resident, [members])
+    groups = create_kv_cache_group_specs(mixed, [members])
+    assert [group.layer_names for group in groups] == [group.layer_names for group in baseline]
+    assert {name: s.reuse for name, s in groups[0].kv_cache_spec.kv_cache_specs.items()} == {
+        name: s.reuse for name, s in mixed.items()
+    }
+
+
+def test_inference_and_published_validation_have_separate_inputs():
+    config = cache(dict.fromkeys(names(), spec()))
+    vc = runtime()
+    policy = get_layerwise_policy(config, 6, vc.kv_transfer_config.kv_connector_extra_config)
+    original = deepcopy(config)
+    inferred = infer_layerwise_reuse_layout(config, policy, base_layers=6)
+    assert config == original
+    assert get_layerwise_layout(config) is None
+    apply_layerwise_kv_cache_plan(config, vc)
+    assert get_layerwise_layout(config) == inferred
+    placed = deepcopy(config)
+    validate_layerwise_reuse_layout(config, inferred, policy=policy, base_layers=6)
+    assert config == placed
+    with pytest.raises(ValueError, match="already placed"):
+        infer_layerwise_reuse_layout(config, policy, base_layers=6)
+    config.num_blocks += 1
+    with pytest.raises(ValueError, match="policy/capacity"):
+        validate_layerwise_reuse_layout(config, inferred, base_layers=6)
+
+
 def test_serialized_result_survives_real_dataclass_copy():
     config = cache(dict.fromkeys(names(), spec()))
     apply_layerwise_kv_cache_plan(config, runtime())
@@ -326,8 +363,7 @@ def test_serialized_result_survives_real_dataclass_copy():
     assert get_layerwise_layout(pickle.loads(pickle.dumps(result))) == get_layerwise_layout(config)
 
 
-@pytest.mark.parametrize("uniform", [False, True])
-def test_worker_projection_preserves_per_name_reuse_after_group_merge(uniform):
+def test_worker_projection_preserves_per_name_reuse_after_group_merge():
     from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -336,8 +372,8 @@ def test_worker_projection_preserves_per_name_reuse_after_group_merge(uniform):
 
     members = names(4)
     specs = {name: spec(reuse=i % 2 == 0) for i, name in enumerate(members)}
-    group_spec = UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs) if uniform else specs[members[0]]
-    group = KVCacheGroupSpec(members, group_spec, reuse_layer_names=frozenset(members[::2]))
+    group_spec = UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs)
+    group = KVCacheGroupSpec(members, group_spec)
     projected = _project_kv_cache_groups_to_worker([group], {name: specs[name] for name in members[1:3]})
     expanded = get_layerwise_kv_cache_specs(KVCacheConfig(1, [], projected))
     assert {name: s.reuse for name, s in expanded.items()} == {members[1]: False, members[2]: True}

@@ -19,8 +19,9 @@ from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    build_layerwise_reuse_layout,
+    get_layerwise_policy,
     get_physical_layer_index,
+    infer_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerLoadTask, SharedBlockData
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
@@ -160,11 +161,34 @@ def test_null_state_blocks_never_enter_model_load_masks(cached_tokens):
     assert worker._compute_reachable_load_masks(request, cached_tokens) == ([False, True], [True, False])
 
 
+@pytest.mark.parametrize("consumer", ["scheduler", "worker"])
+def test_consumers_reject_missing_published_plan(consumer):
+    config = make_config(2)
+    config.layerwise_reuse = None
+    vc = runtime_config()
+    if consumer == "scheduler":
+        scheduler = object.__new__(LayerwiseKVPoolScheduler)
+        scheduler.num_layers = 48
+        with pytest.raises(ValueError, match="no published reuse layout"):
+            scheduler._init_layerwise_offload(vc, config)
+    else:
+        worker = object.__new__(LayerwiseKVPoolWorker)
+        worker.kv_cache_config = config
+        worker.num_layers = 48
+        worker.use_layerwise_transfer = True
+        worker.hf_config = SimpleNamespace(num_hidden_layers=48)
+        worker._extra_config = vc.kv_transfer_config.kv_connector_extra_config
+        with pytest.raises(ValueError, match="no published reuse layout"):
+            worker._init_layerwise_config()
+    assert get_layerwise_layout(config) is None
+
+
 def test_scheduler_and_worker_use_summary_and_owner_residency():
     config = make_config(2)
     original = build_qwen4_kv_cache_layout(config.kv_cache_groups, config.num_blocks)
     probe = KVCacheConfig(config.num_blocks, make_qwen4_original_tensors(original), config.kv_cache_groups)
-    expected = build_layerwise_reuse_layout(probe, 48, runtime_config().kv_transfer_config.kv_connector_extra_config)
+    policy = get_layerwise_policy(probe, 48, runtime_config().kv_transfer_config.kv_connector_extra_config)
+    expected = infer_layerwise_reuse_layout(probe, policy, base_layers=48)
     scheduler = object.__new__(LayerwiseKVPoolScheduler)
     scheduler.num_layers = 48
     scheduler._init_layerwise_offload(runtime_config(), config)

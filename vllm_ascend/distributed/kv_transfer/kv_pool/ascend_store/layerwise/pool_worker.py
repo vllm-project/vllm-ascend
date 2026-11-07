@@ -54,8 +54,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
+    get_layerwise_policy,
+    validate_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -233,12 +234,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "num_hidden_layers",
                 self.num_layers,
             )
-            if self.use_layerwise_transfer and self._layerwise_layout is None:
-                self._layerwise_layout = build_layerwise_reuse_layout(
-                    self.kv_cache_config,
-                    base_layers,
-                    self._extra_config,
-                    excluded_layer_names=set(draft_names),
+            if self.use_layerwise_transfer:
+                if self._layerwise_layout is None:
+                    raise ValueError("Layerwise cache configuration has no published reuse layout")
+                policy = get_layerwise_policy(self.kv_cache_config, base_layers, self._extra_config, set(draft_names))
+                validate_layerwise_reuse_layout(
+                    self.kv_cache_config, self._layerwise_layout, policy=policy, base_layers=base_layers
                 )
             if (
                 draft_names

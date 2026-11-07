@@ -212,15 +212,12 @@ def get_layerwise_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KV
     """Expand specs without losing per-name intent after homogeneous merging."""
     result = {}
     for group in kv_cache_config.kv_cache_groups:
-        reuse_names = getattr(group, "reuse_layer_names", None)
         for name in group.layer_names:
             spec = (
                 group.kv_cache_spec.kv_cache_specs[name]
                 if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
                 else group.kv_cache_spec
             )
-            if reuse_names is not None:
-                spec = replace(spec, reuse=name in reuse_names)
             result[name] = spec
     return result
 
@@ -321,23 +318,24 @@ def _descriptor_buckets(domains, specs, base_layers):
     return buckets
 
 
-def build_layerwise_reuse_layout(
-    kv_cache_config: KVCacheConfig,
+def get_layerwise_policy(
+    config: KVCacheConfig,
     base_layers: int,
     extra_config: dict[str, Any],
-    *,
     excluded_layer_names: set[str] | None = None,
-) -> LayerwiseReuseLayout:
-    """Infer slots inside original backing domains; never infer storage from groups."""
-    specs = get_layerwise_kv_cache_specs(kv_cache_config)
-    layers = sorted({get_physical_layer_index(name, base_layers) for name in specs})
-    policy = normalize_layerwise_policy(layers, extra_config, tuple(sorted(excluded_layer_names or ())))
+) -> LayerwisePolicy:
+    layers = sorted({get_physical_layer_index(name, base_layers) for name in get_layerwise_kv_cache_specs(config)})
+    return normalize_layerwise_policy(layers, extra_config, tuple(sorted(excluded_layer_names or ())))
+
+
+def _validate_reuse_intent(config: KVCacheConfig, policy: LayerwisePolicy, base_layers: int) -> None:
+    specs = get_layerwise_kv_cache_specs(config)
     for name, spec in specs.items():
         if spec.reuse and (
             name in policy.excluded_owners or get_physical_layer_index(name, base_layers) in policy.independent_layers
         ):
             raise ValueError(f"reuse=True conflicts with excluded/independent configuration: {name}")
-    for group in kv_cache_config.kv_cache_groups:
+    for group in config.kv_cache_groups:
         if any(specs[name].reuse for name in group.layer_names) and (
             group.host_resident or not group.enable_kv_transfer
         ):
@@ -348,25 +346,52 @@ def build_layerwise_reuse_layout(
                 units.setdefault(get_physical_layer_index(name, base_layers), set()).add(specs[name].reuse)
         if any(len(flags) > 1 for flags in units.values()):
             raise NotImplementedError("Mixed reuse intent within one group/layer transfer is unsupported")
-    previous = get_layerwise_layout(kv_cache_config)
-    if previous is not None:
-        if (
-            replace(previous.policy, excluded_owners=policy.excluded_owners) != policy
-            or previous.num_blocks != kv_cache_config.num_blocks
-        ):
-            raise ValueError("Layerwise policy/capacity changed after placement")
-        requested_names = {name for name, spec in specs.items() if spec.reuse}
-        if requested_names != {name for slot in previous.buffer_slots for name in slot}:
-            raise ValueError("Layerwise reuse intent changed after placement")
-        if previous.has_layer_reuse:
-            try:
-                valid = build_layerwise_tensors(kv_cache_config, previous) == kv_cache_config.kv_cache_tensors
-            except (ValueError, NotImplementedError):
-                valid = False
-            if not valid:
-                raise ValueError("Layerwise descriptors changed after placement")
-        return previous
 
+
+def validate_layerwise_reuse_layout(
+    config: KVCacheConfig,
+    layout: LayerwiseReuseLayout,
+    *,
+    policy: LayerwisePolicy | None = None,
+    base_layers: int = 0,
+) -> None:
+    """Check a published placement without inferring or changing its slots."""
+    policy = layout.policy if policy is None else policy
+    _validate_reuse_intent(config, policy, base_layers)
+    if (
+        replace(layout.policy, excluded_owners=policy.excluded_owners) != policy
+        or layout.num_blocks != config.num_blocks
+    ):
+        raise ValueError("Layerwise policy/capacity changed after placement")
+    specs = get_layerwise_kv_cache_specs(config)
+    requested = {name for name, spec in specs.items() if spec.reuse}
+    members = [name for slot in layout.buffer_slots for name in slot]
+    if (
+        requested != set(members)
+        or len(members) != len(set(members))
+        or layout.resident_layer_names != set(specs) - requested
+    ):
+        raise ValueError("Layerwise reuse intent changed after placement")
+    if layout.has_layer_reuse:
+        try:
+            valid = build_layerwise_tensors(config, layout) == config.kv_cache_tensors
+        except (ValueError, NotImplementedError):
+            valid = False
+        if not valid:
+            raise ValueError("Layerwise descriptors changed after placement")
+
+
+def infer_layerwise_reuse_layout(
+    kv_cache_config: KVCacheConfig,
+    policy: LayerwisePolicy,
+    *,
+    base_layers: int = 0,
+) -> LayerwiseReuseLayout:
+    """Infer new slots from original descriptors after the caller enables offload."""
+    if get_layerwise_layout(kv_cache_config) is not None:
+        raise ValueError("Cannot infer layerwise reuse from an already placed configuration")
+    _validate_reuse_intent(kv_cache_config, policy, base_layers)
+    specs = get_layerwise_kv_cache_specs(kv_cache_config)
     if not any(spec.reuse for spec in specs.values()):
         return LayerwiseReuseLayout(policy, kv_cache_config.num_blocks, (), frozenset(specs), {})
     domains = _storage_domains(kv_cache_config, specs)
@@ -533,14 +558,12 @@ def apply_layerwise_kv_cache_plan(
             raise ValueError("Requested layerwise reuse has no original cache descriptors")
         return
     base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-    layout = build_layerwise_reuse_layout(
-        kv_cache_config,
-        base_layers,
-        extra,
-        excluded_layer_names=excluded_layer_names,
-    )
-    if get_layerwise_layout(kv_cache_config) is not None:
+    policy = get_layerwise_policy(kv_cache_config, base_layers, extra, excluded_layer_names)
+    previous = get_layerwise_layout(kv_cache_config)
+    if previous is not None:
+        validate_layerwise_reuse_layout(kv_cache_config, previous, policy=policy, base_layers=base_layers)
         return
+    layout = infer_layerwise_reuse_layout(kv_cache_config, policy, base_layers=base_layers)
     tensors = (
         build_layerwise_tensors(kv_cache_config, layout) if layout.has_layer_reuse else kv_cache_config.kv_cache_tensors
     )

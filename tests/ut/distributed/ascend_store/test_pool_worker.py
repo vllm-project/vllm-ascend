@@ -41,6 +41,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
     LayerTransferTask,
@@ -178,6 +181,10 @@ def make_worker(
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
+    if kv_cache_config is not None and use_layerwise and extra_config and extra_config.get("backend") == "memcache":
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = True
+        apply_layerwise_kv_cache_plan(kv_cache_config, config)
     return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
@@ -259,9 +266,8 @@ class TestPCPPoolWorker(unittest.TestCase):
 
         # Adding same-spec draft layers must not turn a non-reused target
         # layout into scratch reuse: allocation keeps those draft pages private.
-        config.kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=target_names + draft_names, kv_cache_spec=target),
-        ]
+        config = original_cache(dict.fromkeys(target_names + draft_names, target), [target_names, draft_names], n=2)
+        config.dspark_draft_layer_names = tuple(draft_names)
         worker = make_worker(
             self,
             num_layers=4,
@@ -955,6 +961,15 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             for names in (main_names, indexer_names)
         ]
 
+        runtime = SimpleNamespace(
+            model_config=SimpleNamespace(get_num_layers=lambda _: 4),
+            parallel_config=None,
+            kv_transfer_config=SimpleNamespace(
+                kv_connector="AscendStoreConnector",
+                kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, **worker._extra_config},
+            ),
+        )
+        apply_layerwise_kv_cache_plan(worker.kv_cache_config, runtime)
         worker._init_layerwise_config()
 
         self.assertEqual(worker.num_layers, 5)

@@ -30,7 +30,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     QSA_COMPRESSED,
     QSA_MAIN,
     build_qwen4_kv_cache_layout,
-    declare_qwen4_reuse,
     get_qwen4_exp_kv_cache_config,
     get_qwen4_exp_pool_bytes_per_block,
     make_qsa_kernel_page_cache,
@@ -43,12 +42,20 @@ PREFIX = "language_model.model.layers."
 
 
 def sample_groups():
-    main = FullAttentionSpec(block_size=768, num_kv_heads=1, head_size=256, head_size_v=256, dtype=torch.bfloat16)
+    main = FullAttentionSpec(
+        reuse=True, block_size=768, num_kv_heads=1, head_size=256, head_size_v=256, dtype=torch.bfloat16
+    )
     raw = CircularBufferSpec(
         block_size=4, num_kv_heads=1, head_size=140, head_size_v=0, dtype=torch.bfloat16, page_size_padded=786432
     )
     compressed = MLAAttentionSpec(
-        block_size=768, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4, page_size_padded=786432
+        reuse=True,
+        block_size=768,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+        page_size_padded=786432,
     )
     gdn = MambaSpec(
         block_size=768,
@@ -81,18 +88,18 @@ def sample_groups():
                 **{f"{source}.indexer.compressed_key_cache": compressed for source in sources},
             }
         ),
-        *[group({name: gdn for name in states[start : start + 12]}) for start in (0, 12, 24)],
+        *[
+            group(
+                {
+                    name: replace(gdn, reuse=int(name.split("layers.")[1].split(".")[0]) >= 2)
+                    for name in states[start : start + 12]
+                }
+            )
+            for start in (0, 12, 24)
+        ],
         group({f"{PREFIX}1.ple": ple}),
     ]
 
-    declared = declare_qwen4_reuse(
-        {name: spec for group_spec in groups for name, spec in group_spec.kv_cache_spec.kv_cache_specs.items()}
-    )
-    for group_spec in groups:
-        group_spec.kv_cache_spec = replace(
-            group_spec.kv_cache_spec,
-            kv_cache_specs={name: declared[name] for name in group_spec.layer_names},
-        )
     return groups
 
 
@@ -246,12 +253,17 @@ def test_apply_is_idempotent_and_rejects_changed_policy():
         apply_layerwise_kv_cache_plan(config, vc)
 
 
-def test_slot_result_survives_scheduler_simplification_and_pickle():
+def test_per_layer_specs_and_slots_survive_scheduler_conversion_and_pickle():
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
     config = make_config(2)
     scheduler = generate_scheduler_kv_cache_config([config])
     transported = pickle.loads(pickle.dumps(config))
+    for original, copied in zip(config.kv_cache_groups, scheduler.kv_cache_groups):
+        assert isinstance(copied.kv_cache_spec, UniformTypeKVCacheSpecs)
+        assert {name: spec.reuse for name, spec in copied.kv_cache_spec.kv_cache_specs.items()} == {
+            name: spec.reuse for name, spec in original.kv_cache_spec.kv_cache_specs.items()
+        }
     assert get_layerwise_layout(scheduler) == get_layerwise_layout(transported)
     assert transported.kv_cache_tensors == config.kv_cache_tensors
     assert get_layerwise_layout(config).predecessors[11] == (3,)

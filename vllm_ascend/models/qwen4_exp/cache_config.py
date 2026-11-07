@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Final
 
 import regex as re
@@ -116,11 +116,7 @@ def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         else {name: group.kv_cache_spec for name in group.layer_names}
     )
-    reuse_names = getattr(group, "reuse_layer_names", None)
-    return {
-        name: replace(spec, reuse=name in reuse_names) if reuse_names is not None else spec
-        for name, spec in members.items()
-    }
+    return members
 
 
 def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
@@ -641,10 +637,6 @@ def get_qwen4_exp_kv_cache_groups(
     groups = get_default_groups(vllm_config, kv_cache_spec)
     groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
     groups = _merge_mamba_state_groups(groups, len(owners[0]))
-    for group in groups:
-        group.reuse_layer_names = frozenset(
-            name for name in group.layer_names if getattr(kv_cache_spec[name], "reuse", False)
-        )
     logger.info(
         "Using Qwen4 cache grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
         len(owners[0]) + len(owners[1]),
@@ -693,24 +685,6 @@ def make_qwen4_original_tensors(layout: Qwen4KVCacheLayout) -> list[KVCacheTenso
     )
 
     return tensors
-
-
-def declare_qwen4_reuse(specs):
-    """Declare source intent independently of the offload/independent policy."""
-    if not any(_classify_spec(name, spec) == QSA_RAW for name, spec in specs.items()):
-        return specs
-    # The initial GDN states remain persistent, as do raw rings and PLE.
-    first_rotating_state_layer = 2
-    return {
-        name: replace(
-            spec,
-            reuse=(
-                _classify_spec(name, spec) in (QSA_MAIN, QSA_COMPRESSED)
-                or (_classify_spec(name, spec) == GDN and _owner_sort_key(name)[0] >= first_rotating_state_layer)
-            ),
-        )
-        for name, spec in specs.items()
-    }
 
 
 def apply_qwen4_layerwise(config, vllm_config):

@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -509,7 +516,13 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
     config = KVCacheConfig(
         num_blocks=3,
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec, reuse_layer_names=frozenset(target_names[1:]))
+            KVCacheGroupSpec(
+                layer_names=names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=spec.block_size,
+                    kv_cache_specs={name: replace(spec, reuse=name in target_names[1:]) for name in names},
+                ),
+            )
         ],
         kv_cache_tensors=[
             KVCacheTensor(

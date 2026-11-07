@@ -192,7 +192,7 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0,)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
-    assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
+    assert scheduler_config.kv_cache_groups[1].kv_cache_spec.kv_cache_specs == layer_specs
     assert result.kv_cache_groups == original_groups
 
 

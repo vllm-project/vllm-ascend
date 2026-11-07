@@ -83,7 +83,7 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
 )
-from vllm_ascend.core.layerwise_cache_config import kv_cache_allocation_bytes
+from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout, kv_cache_allocation_bytes
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -95,10 +95,12 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
     build_layerwise_tensors,
+    get_layerwise_policy,
     get_layerwise_reuse_config,
     get_physical_layer_index,
+    infer_layerwise_reuse_layout,
+    validate_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -128,9 +130,10 @@ if vllm_version_is("0.32.0"):
     )
 else:
     from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
     )
+
+    from vllm_ascend.core.kv_cache_config_builder import get_kv_cache_groups_for_profiling as get_kv_cache_groups
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -1258,17 +1261,20 @@ class NPUWorker(WorkerBase):
                 _ascend_pool_bytes_per_block(probe_config, groups),
             )
         else:
+            probe_config = copy.copy(self.vllm_config)
+            probe_config.cache_config = copy.copy(self.vllm_config.cache_config)
+            probe_config.cache_config.num_gpu_blocks_override = 1
             probe = _orig_get_kv_cache_config_from_groups(
-                self.vllm_config,
+                probe_config,
                 groups,
                 sum(spec.page_size_bytes for spec in kv_cache_spec.values()),
             )
-        layout = build_layerwise_reuse_layout(
-            probe,
-            base_layers,
-            extra_config,
-            excluded_layer_names=excluded_layer_names,
-        )
+        policy = get_layerwise_policy(probe, base_layers, extra_config, excluded_layer_names)
+        layout = get_layerwise_layout(probe)
+        if layout is None:
+            layout = infer_layerwise_reuse_layout(probe, policy, base_layers=base_layers)
+        else:
+            validate_layerwise_reuse_layout(probe, layout, policy=policy, base_layers=base_layers)
         if uses_physical_budget:
             # Applying the saving again would count it twice. Slot validation
             # above still runs, including explicit reuse/exclusion conflicts.

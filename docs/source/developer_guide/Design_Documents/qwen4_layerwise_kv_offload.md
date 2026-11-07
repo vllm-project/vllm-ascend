@@ -8,10 +8,16 @@ for startup configuration, supported deployment modes and capacity examples.
 KVCacheSpec.reuse requests participation in layerwise reuse. Its default is
 False; disabling layerwise leaves the original descriptors unchanged.
 The keyword-only field does not participate in spec equality or hashing,
-so it does not change logical cache groups. KVCacheGroupSpec.reuse_layer_names
-preserves per-name intent when homogeneous specs are merged. This requires
-the companion vLLM interface/planning change; a dynamic attribute on a frozen
-spec is not a replacement for the declared field.
+so it does not change logical cache groups. Each component declares reuse at
+spec construction; conversions carry the field forward. UniformTypeKVCacheSpecs
+retains the per-layer dictionary through grouping, worker projection and scheduler
+configuration. Managers select scheduling geometry at their read boundary without
+replacing the dictionary. This requires the companion vLLM interface/planning
+change; no extra group-level reuse-name list is used.
+
+Qwen4 owns its grouping through SupportsKVCacheGrouping on the model class.
+Engine planning and worker profiling both resolve that hook through the cache
+configuration builder, preserving the same group count and membership.
 
 Qwen4 declares main/compressed QSA and GDN layers from physical layer 2 as
 reuse participants when constructing its specs. GDN layers 0 and 1, raw rings,
@@ -21,7 +27,10 @@ to resolve a conflict. A small bucket may require no actual aliasing.
 
 ## One slot inference rule
 
-build_layerwise_reuse_layout receives the original KVCacheConfig.
+infer_layerwise_reuse_layout receives the original KVCacheConfig and a normalized
+policy. It rejects already placed configurations.
+validate_layerwise_reuse_layout checks published intent, capacity and descriptors
+without creating a new plan.
 Ordinary contiguous regions are bucketed inside each original descriptor;
 independent tensors are never merged based on spec equality. Compatibility
 includes the complete spec and its concrete type. Simultaneously used
@@ -53,8 +62,7 @@ save/restore requests fail before placement is published.
 The result contains policy, slot members, resident names and overwrite
 predecessors. It does not copy specs, group structures, component views or
 transfer regions. LayerwiseKVCacheConfig declares that result for dataclass
-IPC. Scheduler spec simplification consumes this result without trying to
-recover the original layout from a representative group spec.
+IPC. The scheduler retains per-layer specs and consumes this published result.
 
 ## Allocation and capacity
 
@@ -86,8 +94,9 @@ fit the physical budget.
 
 ## Transfers and lifecycle
 
-Both pool scheduler and pool worker consume the serialized slot result or
-invoke the same inference function on complete original configuration.
+Both pool scheduler and pool worker consume and validate the serialized slot
+result. An enabled reuse connector rejects a missing published plan; consumers
+never infer placement. Disabled offload bypasses inference and validation.
 Transfer addresses come from the actual allocated views. Resident/rotating
 classification applies to group/layer transfer regions, not the entire
 physical decoder layer.

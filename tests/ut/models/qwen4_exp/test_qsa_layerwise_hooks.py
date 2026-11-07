@@ -4,10 +4,44 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
 import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
+
+
+def test_qsa_components_declare_reuse_before_collection():
+    from vllm.models.qwen4_exp.common.qsa_indexer import QSACompressedKeyCache, QSARawKeyCache
+
+    config = SimpleNamespace(cache_config=SimpleNamespace(block_size=768), num_speculative_tokens=0)
+    main = SimpleNamespace(num_kv_heads=1, head_dim=128, kv_cache_torch_dtype=torch.bfloat16, kv_cache_dtype="auto")
+    indexer = SimpleNamespace(cache_config=config.cache_config, head_size=128, dtype=torch.bfloat16, compress_ratio=4)
+    spec = qsa.upstream_qsa.Qwen4ExpQSAAttention.get_kv_cache_spec(main, config)
+    assert isinstance(spec, FullAttentionSpec)
+    assert spec.reuse
+    assert QSACompressedKeyCache.get_kv_cache_spec(indexer, config).reuse
+    assert not QSARawKeyCache.get_kv_cache_spec(indexer, config).reuse
+
+
+@pytest.mark.parametrize("layer,expected", [(0, False), (1, False), (2, True), (5, True)])
+@pytest.mark.parametrize("model_type", ["qwen4_exp", "qwen3_next"])
+def test_gdn_declares_reuse_at_inherited_spec_boundary(monkeypatch, layer, expected, model_type):
+    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+
+    original = MambaSpec(block_size=16, shapes=((2, 4), (4, 4)), dtypes=(torch.float32, torch.float32))
+    monkeypatch.setattr(GatedDeltaNetAttention, "get_kv_cache_spec", lambda *_: original)
+    owner = QwenGatedDeltaNetAttention.__new__(QwenGatedDeltaNetAttention)
+    torch.nn.Module.__init__(owner)
+    owner.layer_idx = layer
+    owner._exports_checkpoints = False
+    config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)))
+    result = owner.get_kv_cache_spec(config)
+    assert result.reuse == (expected and model_type == "qwen4_exp")
+    assert result == original
+    assert not original.reuse
 
 
 def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatch):

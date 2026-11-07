@@ -18,6 +18,12 @@ from vllm.config import VllmConfig
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+
+try:
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+except ImportError:
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
@@ -27,6 +33,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
+from .cache_config import get_qwen4_exp_kv_cache_groups
 from .ple import patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
@@ -73,6 +80,13 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
     @classmethod
+    def get_kv_cache_groups(
+        cls, vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+    ) -> list[KVCacheGroupSpec]:
+        groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, get_kv_cache_groups)
+        return get_kv_cache_groups(vllm_config, kv_cache_spec) if groups is None else groups
+
+    @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
         # dense bank; only GDN's complete conv+SSM state shares QSA pages.
@@ -87,6 +101,12 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
 
 class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    @classmethod
+    def get_kv_cache_groups(
+        cls, vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+    ) -> list[KVCacheGroupSpec]:
+        return AscendQwen4ExpForCausalLM.get_kv_cache_groups(vllm_config, kv_cache_spec)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
