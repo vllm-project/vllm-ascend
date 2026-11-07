@@ -162,6 +162,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
     CopySfaRequestStates,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import (
+    RequestIdentityRegistry,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     allocate_kv_offload_topk_profile_buffers,
@@ -709,6 +712,7 @@ class NPUModelRunner(GPUModelRunner):
         # Per-request metadata consumed by the Sparse KV offload resident LRU.
         self._offload_req_ids_tensor = None
         self._offload_token_to_req = None
+        self._offload_request_identity = RequestIdentityRegistry() if self.sparse_kv_offload_enabled else None
         self._offload_pool_slots = None
         self._offload_pool_active = None
         self._offload_request_states = (
@@ -1160,6 +1164,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.cached.setdefault(cur_hash, set()).add(new_req_data.req_id)
 
     def _on_request_state_removed(self, req_id: str, req_state: Any | None) -> None:
+        if self._offload_request_identity is not None:
+            self._offload_request_identity.remove(req_id)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
         if req_state is None:
@@ -3782,6 +3788,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
         if self.sparse_kv_offload_enabled:
+            assert self._offload_request_identity is not None
             update_sparse_kv_offload_metadata(
                 num_tokens,
                 num_reqs,
@@ -3791,6 +3798,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_start_loc,
                 self._offload_req_ids_tensor,
                 self._offload_token_to_req,
+                request_identity=self._offload_request_identity,
+                is_dummy=offload_dummy,
             )
         if self.sparse_kv_offload_config.use_fused_copy_sfa and self.sparse_kv_offload_enabled:
             assert self._offload_pool_slots is not None

@@ -1,3 +1,5 @@
+from zlib import adler32
+
 import pytest
 
 from vllm_ascend.device.device_config import get_ascend_device_type
@@ -6,6 +8,9 @@ from vllm_ascend.device.hardware import AscendDeviceType
 torch = pytest.importorskip("torch")
 torch_npu = pytest.importorskip("torch_npu")
 
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import (  # noqa: E402
+    RequestIdentityRegistry,
+)
 from vllm_ascend.utils import enable_custom_op  # noqa: E402
 
 ROWS = 4
@@ -18,6 +23,11 @@ MEMBERSHIP_STORAGE_SIZE = 16400
 EXTERNAL_PLAN_READY_MARKER = 0x5A45
 DIRECT_SELECTION_LAYOUT_MARKER = 0x5A44
 PAIRED_SELECTION_COPY_MARKER = 0x5A56
+COLLIDING_REQUEST_IDS = (
+    "234054828099429543",
+    "471754017250656876",
+    "304399536143223879",
+)
 
 
 def _load_sparse_kv_ops():
@@ -193,6 +203,62 @@ def test_stable_rows_suffix_invalidation_and_plan_encoding(sparse_kv_ops):
     assert bool((state.plan[0, 4:TOPK] < 0).all())
     assert bool((state.plan[1, :TOPK] > 0).all())
     assert state.plan[:2, TOPK + 4].tolist() == [1, 0]
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
+@pytest.mark.parametrize("force_row_reuse", [False, True])
+@pytest.mark.parametrize("next_request_id", COLLIDING_REQUEST_IDS)
+def test_request_incarnations_do_not_inherit_resident_hits(sparse_kv_ops, force_row_reuse, next_request_id):
+    assert {adler32(req_id.encode()) for req_id in COLLIDING_REQUEST_IDS} == {585106354}
+    registry = RequestIdentityRegistry()
+    first_request_id = COLLIDING_REQUEST_IDS[0]
+    first_owner = registry.get_or_create(first_request_id)
+    owners = [first_owner]
+    if force_row_reuse:
+        # No empty physical rows remain, so the new owner must reset row zero.
+        owners.extend(registry.get_or_create(f"occupant-{row}") for row in range(1, ROWS))
+
+    state = PlannerState()
+    topk = torch.arange(TOPK, dtype=torch.int32).view(1, TOPK)
+    state.call(sparse_kv_ops, owners, topk.repeat(len(owners), 1), [MAX_TOKEN] * len(owners))
+    assert state.physical_rows[0].item() == 0
+    assert state.miss_count[0].item() == TOPK
+
+    # Repeated decode/MTP metadata for the same live request retains its hits.
+    assert registry.get_or_create(first_request_id) == first_owner
+    state.call(sparse_kv_ops, [first_owner], topk, [MAX_TOKEN])
+    assert state.physical_rows[0].item() == 0
+    assert state.miss_count[0].item() == 0
+    assert bool((state.plan[0, :TOPK] > 0).all())
+
+    registry.remove(first_request_id)
+    next_owner = registry.get_or_create(next_request_id)
+    assert next_owner != first_owner
+    state.call(sparse_kv_ops, [next_owner], topk, [MAX_TOKEN])
+
+    expected_row = 0 if force_row_reuse else 1
+    assert state.physical_rows[0].item() == expected_row
+    assert state.last_req_ids[expected_row].item() == next_owner
+    assert state.miss_count[0].item() == TOPK
+    assert bool((state.plan[0, :TOPK] < 0).all())
+    assert state.plan[0, TOPK + 4].item() == expected_row
+
+    # Both row-selection paths must produce the same reloads as a cold cache.
+    reference = PlannerState()
+    reference.call(sparse_kv_ops, [next_owner], topk, [MAX_TOKEN])
+    torch.testing.assert_close(state.current_slots[0], reference.current_slots[0])
+    torch.testing.assert_close(state.miss_tokens[0], reference.miss_tokens[0])
+    torch.testing.assert_close(state.miss_slots[0], reference.miss_slots[0])
+    torch.testing.assert_close(state.slot_to_token[expected_row], reference.slot_to_token[0])
+    torch.testing.assert_close(state.plan[0, :TOPK], reference.plan[0, :TOPK])
+
+    state.call(sparse_kv_ops, [next_owner], topk, [MAX_TOKEN])
+    assert state.physical_rows[0].item() == expected_row
+    assert state.miss_count[0].item() == 0
+    assert bool((state.plan[0, :TOPK] > 0).all())
 
 
 @pytest.mark.skipif(

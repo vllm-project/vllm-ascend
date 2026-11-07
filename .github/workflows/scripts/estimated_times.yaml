@@ -9,6 +9,7 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py: 600
   tests/e2e/pull_request/one_card/test_mc2_local_padding.py: 60
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30

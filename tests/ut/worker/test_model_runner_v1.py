@@ -48,6 +48,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
@@ -3675,6 +3676,7 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
         runner.cpu_encoder_cache = {}
         runner.cached = {}
         runner._offload_request_states = CopySfaRequestStates()
+        runner._offload_request_identity = RequestIdentityRegistry()
         runner._pending_encoder_cache_copies = deque()
         runner.late_interaction_runner = MagicMock()
         runner._sync_device = MagicMock()
@@ -3682,6 +3684,8 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
 
     def test_request_removal_invalidates_offload_history_without_cached_request(self):
         runner = self._build_runner()
+        old_owner = runner._offload_request_identity.get_or_create("a")
+        retained_owner = runner._offload_request_identity.get_or_create("temporarily-unscheduled")
         slots = np.zeros(4, dtype=np.int32)
         active = np.zeros(4, dtype=np.bool_)
         args = dict(
@@ -3700,6 +3704,9 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
         runner._on_request_state_removed("a", None)
         outcome = runner._offload_request_states.prepare(computed_tokens=np.asarray([512]), **args)
         self.assertEqual(outcome, (False, {}, (0,)))
+        self.assertGreater(runner._offload_request_identity.get_or_create("a"), retained_owner)
+        self.assertNotEqual(runner._offload_request_identity.get_or_create("a"), old_owner)
+        self.assertEqual(runner._offload_request_identity.get_or_create("temporarily-unscheduled"), retained_owner)
 
     def test_reset_clears_score_encoder_cache_state(self):
         runner = self._build_runner()
@@ -3730,6 +3737,7 @@ class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
         runner._pending_encoder_cache_copies = deque()
         runner.use_score_encoder_cache = use_score_encoder_cache
         runner._offload_request_states = None
+        runner._offload_request_identity = None
         runner.maybe_save_ec_to_connector = MagicMock()
         return runner
 

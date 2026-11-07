@@ -62,8 +62,7 @@ class SparseKVOffloadMetadata:
         req_ids_buffer = self.req_ids_buffers[step]
         token_to_req_buffer = self.token_to_req_buffers[step]
         req_ids = input_batch.req_ids[:num_reqs]
-        if getattr(input_batch, "is_dummy", False):
-            req_ids = [f"offload-dummy-{row}" for row in range(num_reqs)]
+        assert model_state._offload_request_identity is not None
         update_sparse_kv_offload_metadata(
             num_tokens,
             num_reqs,
@@ -73,6 +72,8 @@ class SparseKVOffloadMetadata:
             query_start_loc_np,
             req_ids_buffer,
             token_to_req_buffer,
+            request_identity=model_state._offload_request_identity,
+            is_dummy=getattr(input_batch, "is_dummy", False),
         )
         pool_slots = model_state._offload_pool_slots
         pool_active = model_state._offload_pool_active
