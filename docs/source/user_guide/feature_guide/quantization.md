@@ -172,6 +172,27 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code 
 ```
 
+## LeapQuant Recurrent-State Quantization
+
+The sections above quantize **weights** offline. LeapQuant ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166)) instead quantizes the **recurrent state** of hybrid linear-attention models online, during inference: the gated-delta-rule (GDN/KDA) state of Qwen3.5 and Kimi linear-attention layers is kept full precision inside a token window and re-encoded every `window` tokens as a small fp16 low-rank compensator plus int8 residual codes. Because the state is quantized once per window rather than once per decode step, quantization error stays bounded over long contexts instead of accumulating geometrically, while most of the state pool drops to one byte per element.
+
+Enable it through `additional_config`; no offline step or modified checkpoint is needed:
+
+```bash
+vllm serve Qwen/Qwen3.5-9B --additional-config '{
+  "leapquant_config": {"enabled": true, "window": 16, "compensator_tokens": 4}
+}'
+```
+
+Current scope:
+
+- **Hardware**: Atlas A3 only.
+- **Models**: GDN hybrid models (e.g. Qwen3.5-0.8B/9B) and Kimi linear attention (KDA) layers.
+- **Tuning knobs**: `window` (8/16/32/64), `compensator_tokens` (rank 1–8), see the [`leapquant_config` reference](../configuration/additional_config.md#leapquant_config). `window=16, compensator_tokens=4` matches the paper.
+- **Incompatible with**: speculative decoding, PD-disaggregation KV connectors, C8 KV cache quantization, aligned Mamba cache mode, and FULL graph mode (use `NONE`/`PIECEWISE`, the default). Invalid combinations are rejected at startup.
+
+The first release is a pure torch-npu implementation focused on correctness; fused triton-ascend kernels are planned as a follow-up.
+
 ## References
 
 - [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
