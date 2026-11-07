@@ -369,6 +369,40 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented.
 
+### Bounded hybrid KV reads
+
+For pull-mode `MooncakeHybridConnector`, the decoder can optionally split
+synchronous KV reads into bounded batches. This can reduce receive bursts when
+multiple prefill peers feed the same decoder. Add these fields to the decoder's
+existing `kv_connector_extra_config`:
+
+```json
+{
+  "kv_read_batch_bytes": 262144,
+  "kv_read_batch_descriptors": 128
+}
+```
+
+`kv_read_batch_bytes` defaults to **0** (disabled); a positive value must be a
+multiple of 256 bytes. `kv_read_batch_descriptors` defaults to **128** and must
+be a positive integer. Invalid values fail at receiver initialization. Restart
+the decoder after changing them. Set the byte limit to zero to restore the
+original transfer call and concurrency.
+
+When enabled, each receiver admits one synchronous read batch at a time in
+FIFO order. Requests rejoin the queue between batches. Large descriptors are
+split with aligned offsets; final tails retain their exact size. A negative
+transfer result or exception stops the request's remaining reads and releases
+the next queued reader. Existing connector error handling remains responsible
+for reporting the request outcome.
+
+These limits are per receiver, not per host or link. They do not change
+collective communication, QoS, PFC or ECN, and do not impose a bandwidth cap.
+Smaller batches can increase transfer-call overhead; tune with the same
+workload and monitor KV latency, receiver drops, retries and client TTFT.
+The 256 KiB example is a measured A2 deployment setting, not a universal
+recommendation. The default remains disabled for existing deployments.
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.

@@ -15,9 +15,11 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
+from vllm.config import KVTransferConfig  # noqa: E402
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.kv_read_batcher import KVReadBatcher  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
@@ -54,6 +56,7 @@ class MockRequest:
 class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
     def _make_thread(self):
         thread = object.__new__(KVCacheRecvingThread)
+        thread._kv_read_batcher = KVReadBatcher()
         thread.executor = ThreadPoolExecutor(max_workers=2)
         thread.peer_request_queues = defaultdict(deque)
         thread.active_peer_request_handlers = set()
@@ -150,6 +153,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         vllm_config = types.SimpleNamespace(
             model_config=model_config,
             cache_config=types.SimpleNamespace(block_size=16),
+            kv_transfer_config=KVTransferConfig(kv_connector="MooncakeHybridConnector", kv_role="kv_consumer"),
         )
         kv_cache_config = types.SimpleNamespace(kv_cache_groups=[])
         worker_events: defaultdict[int, list[tuple[str, int | str]]] = defaultdict(list)
