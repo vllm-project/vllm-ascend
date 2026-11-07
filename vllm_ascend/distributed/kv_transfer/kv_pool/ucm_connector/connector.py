@@ -14,11 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
-
-logger = init_logger(__name__)
 
 # isort: off
 if TYPE_CHECKING:

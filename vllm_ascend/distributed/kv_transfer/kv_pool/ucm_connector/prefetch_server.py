@@ -14,9 +14,7 @@ import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.logger import logger
 
 # UCM BlockId is a 16-byte hash (std::array<std::byte, 16>), i.e. 32 hex chars.
 # A mismatched length would be truncated by BufferArrayView (num=0), warming
