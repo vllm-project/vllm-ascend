@@ -609,8 +609,7 @@ class AscendDSAV41Impl:
             # Finish the input cast before query quantization starts on the
             # auxiliary stream, so the WKV matmul can overlap that quantization.
             self._quantize_indexer_query(attn, prepared_indexer, metadata)
-            kv = compressor.wkv(hidden_states_fp32)
-            score = compressor.wgate(hidden_states_fp32)
+            kv, score = compressor.project_c2(hidden_states_fp32)
             latent = compressor.pool_projected(kv, score, state_metadata)
             source_cos = state_metadata.c2_source_cos
             source_sin = state_metadata.c2_source_sin
