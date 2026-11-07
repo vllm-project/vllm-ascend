@@ -262,6 +262,8 @@ public:
         yGm.SetGlobalBuffer((__gm__ T *)y);
         postGm.SetGlobalBuffer((__gm__ float *)post);
         combFragGm.SetGlobalBuffer((__gm__ float *)combFrag);
+        preMixGm.SetGlobalBuffer((__gm__ float *)preMix);
+        preGm.SetGlobalBuffer((__gm__ float *)pre);
         workspaceGm.SetGlobalBuffer((__gm__ float *)workspace);
     }
 
@@ -308,6 +310,10 @@ public:
         pipe->InitBuffer(xCastBuf, xQueSize * sizeof(float));
         pipe->InitBuffer(yCastBuf,
             yRowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(float));
+        // preMix 按行紧凑排布(行距 hcMult)，UB 按 hcMultAlign 预留，
+        // 保证 Brcb 每次读取 8 个元素时尾部不越界。
+        pipe->InitBuffer(preMixBuf,
+            tilingData->prePostRowFactor * tilingData->hcMultAlign * sizeof(float));
 
         hcBase0Local = hcBaseBuf0.Get<float>();
         hcBase1Local = hcBaseBuf1.Get<float>();
@@ -315,6 +321,7 @@ public:
         mixes01ReduceLocal = mixes01ReduceBuf.Get<float>();
         xCastLocal = xCastBuf.Get<float>();
         yCastLocal = yCastBuf.Get<float>();
+        preMixLocal = preMixBuf.Get<float>();
     }
 
     __aicore__ inline void InitSinkhornBuffers(int64_t stage1UsedCoreNum)
@@ -695,6 +702,28 @@ public:
         ProcessPre(mixes01ReduceLocal, mixes01ReduceLocal, hcBase0Local, rsqrtLocal,
             rowBrcbLocal0, hcBrcbLocal1, hcScale0, tilingData->hcEps,
             curRowFactor, tilingData->hcMult);
+        if (tilingData->hasPreOut != 0) {
+            // pre 供下一层 delayed preMix 使用；UB 行距 hcMultAlign，逐行写回。
+            event_t eventIdPreOut = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(eventIdPreOut);
+            WaitFlag<HardEvent::V_MTE3>(eventIdPreOut);
+            for (int64_t rowIdx = 0; rowIdx < curRowFactor; rowIdx++) {
+                CopyOut(mixes01ReduceLocal[rowIdx * tilingData->hcMultAlign],
+                    preGm[(globalRowOffset + rowIdx) * tilingData->hcMult],
+                    1, tilingData->hcMult);
+            }
+        }
+        if (tilingData->hasPreMix != 0) {
+            // delayed preMix 为 [bs, hcMult] 紧凑布局；逐行搬入按 hcMultAlign
+            // 对齐的 UB 槽位，避免 VEC 指令访问未对齐地址。
+            for (int64_t rowIdx = 0; rowIdx < curRowFactor; rowIdx++) {
+                CopyIn(preMixGm[(globalRowOffset + rowIdx) * tilingData->hcMult],
+                    preMixLocal[rowIdx * tilingData->hcMultAlign], 1, tilingData->hcMult);
+            }
+            event_t eventIdPreMix = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(eventIdPreMix);
+            WaitFlag<HardEvent::MTE2_V>(eventIdPreMix);
+        }
         mixesQue01.template FreeTensor(mixes01Local);
         squareSumQue.template FreeTensor(squareSumOutLocal);
 
@@ -705,6 +734,9 @@ public:
             int64_t rowOffset = globalRowOffset + rowIdx;
             const LocalTensor<float> preRow =
                 mixes01ReduceLocal[rowIdx * tilingData->hcMultAlign];
+            // preMix 为 [bs, hcMult] 紧凑布局，行距 hcMult；非 premix 用当前 pre。
+            const LocalTensor<float> yPreRow = tilingData->hasPreMix != 0 ?
+                preMixLocal[rowIdx * tilingData->hcMultAlign] : preRow;
             for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
                 int64_t curDFactor = dLoopIdx == tilingData->dLoop - 1 ?
                     tilingData->tailDFactor : tilingData->dFactor;
@@ -715,7 +747,7 @@ public:
                 xQue.template EnQue(xLocal);
                 xLocal = xQue.template DeQue<T>();
                 yLocal = yQue.template AllocTensor<T>();
-                ProcessY(yLocal, xLocal, preRow, hcBrcbLocal1, xCastLocal, yCastLocal,
+                ProcessY(yLocal, xLocal, yPreRow, hcBrcbLocal1, xCastLocal, yCastLocal,
                     1, tilingData->hcMult, curDFactor);
                 xQue.template FreeTensor(xLocal);
                 yQue.template EnQue(yLocal);
@@ -1027,6 +1059,8 @@ private:
     GlobalTensor<T> yGm;
     GlobalTensor<float> postGm;
     GlobalTensor<float> combFragGm;
+    GlobalTensor<float> preMixGm;
+    GlobalTensor<float> preGm;
 
     TQue<QuePosition::VECIN, 1> mixesQue01;
     TQue<QuePosition::VECIN, 1> mixesQue2;
@@ -1053,6 +1087,7 @@ private:
     TBuf<QuePosition::VECCALC> xCastBuf;
     TBuf<QuePosition::VECCALC> yCastBuf;
     TBuf<QuePosition::VECCALC> maskPatternBuf;
+    TBuf<QuePosition::VECCALC> preMixBuf;
 
     LocalTensor<float> mixes01Local;
     LocalTensor<float> mixes2Local;
@@ -1074,6 +1109,7 @@ private:
     LocalTensor<float> yCastLocal;
     LocalTensor<float> squareSumOutLocal;
     LocalTensor<uint32_t> maskPatternLocal;
+    LocalTensor<float> preMixLocal;
 };
 
 // preMix 场景专用的 Part2 实现，对应 tilingKey=2。
