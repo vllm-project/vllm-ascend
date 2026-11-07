@@ -8,8 +8,9 @@ import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -46,7 +47,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
-from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
+from vllm_ascend.models.deepseek_v4.indexer import (
+    MAX_DSV4_INDEXER_TP_SHARD_SKEW,
+    MIN_DSV4_INDEXER_TP_SHARD_COST,
+    MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK,
+    AscendIndexerMetadata,
+    IndexerOverlapPlan,
+    ensure_prefill_shard_exchange_workspace,
+    prefill_shard_exchange_supported,
+)
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
@@ -92,6 +101,78 @@ else:
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
+
+
+@dataclass(frozen=True)
+class AscendDSAPrefillRowShard:
+    """One TP rank's contiguous slice of the indexer prefill rows.
+
+    Decode rows stay replicated and precede the sharded prefill rows in the
+    packed QLI input. ``start``/``stop`` address the original mixed-batch row
+    layout while ``sizes`` holds prefill rows only. The QLI metadata below
+    covers only the slice's active requests, rebased to the rank-local frame:
+    a request's ``qli_seqused_k`` is its history visible at the slice's last
+    row (start_pos + local stop), validated bitwise against a full-batch call
+    on 910B. Cache writes stay replicated and never consult this shard.
+    """
+
+    num_decode_tokens: int
+    start: int
+    stop: int
+    sizes: tuple[int, ...]
+    block_table: torch.Tensor
+    qli_cu_seqlens_q: torch.Tensor
+    qli_seqused_k: torch.Tensor
+    qli_cmp_residual_k: torch.Tensor
+    qli_metadata: torch.Tensor
+    max_seqlen_q: int
+    max_seqlen_kv: int
+
+
+def balanced_prefill_row_shard(
+    seq_lens_cpu: torch.Tensor,
+    query_lens_cpu: torch.Tensor,
+    compress_ratio: int,
+    tp_size: int,
+    min_rows_per_rank: int,
+) -> tuple[int, ...] | None:
+    """Contiguous per-rank prefill row counts balanced by scoring work.
+
+    Row cost is the number of compressed keys the row scores,
+    ``(first visible key + row offset) // compress_ratio``, so the split
+    equalizes scored-key work instead of raw rows; contiguous slices keep the
+    request order intact. Declines (``None``) below the per-rank row floor,
+    below the cumulative-cost floor, or when the padded gather implied by the
+    split (``tp x largest slice``) exceeds the skew cap; declined batches
+    score the whole batch on the original replicated path.
+    """
+    query_lens = query_lens_cpu.to(dtype=torch.int64)
+    seq_lens = seq_lens_cpu[: query_lens.shape[0]].to(dtype=torch.int64)
+    num_rows = int(query_lens.sum().item())
+    if tp_size < 2 or num_rows < min_rows_per_rank * tp_size:
+        return None
+
+    first_key = torch.repeat_interleave(seq_lens - query_lens + 1, query_lens)
+    row_in_request = torch.arange(num_rows, dtype=torch.int64, device="cpu") - torch.repeat_interleave(
+        torch.cumsum(query_lens, dim=0) - query_lens,
+        query_lens,
+    )
+    cumulative_cost = torch.cumsum((first_key + row_in_request) // compress_ratio, dim=0)
+    total_cost = int(cumulative_cost[-1].item()) if cumulative_cost.numel() else 0
+    if total_cost < MIN_DSV4_INDEXER_TP_SHARD_COST:
+        return None
+
+    targets = torch.arange(1, tp_size, dtype=torch.int64, device="cpu") * total_cost // tp_size
+    boundaries = [0, *torch.searchsorted(cumulative_cost, targets).tolist(), num_rows]
+    # Keep >= 1 row per rank; this also handles repeated costs from compression.
+    for index in range(1, tp_size):
+        boundaries[index] = max(boundaries[index], boundaries[index - 1] + 1)
+    for index in range(tp_size - 1, 0, -1):
+        boundaries[index] = min(boundaries[index], boundaries[index + 1] - 1)
+    sizes = tuple(boundaries[index + 1] - boundaries[index] for index in range(tp_size))
+    if max(sizes) * tp_size > MAX_DSV4_INDEXER_TP_SHARD_SKEW * num_rows:
+        return None
+    return sizes
 
 
 class OProjBufferPool:
@@ -475,6 +556,9 @@ class AscendDSAReqMetadata:
     qli_cu_seqlens_q: torch.Tensor = None
     qli_seqused_k: torch.Tensor = None
     qli_cmp_residual_k: torch.Tensor = None
+    # Per-rank contiguous slice of the prefill indexer rows, or None for the
+    # fully replicated scoring path.
+    prefill_row_shard: "AscendDSAPrefillRowShard | None" = None
     compressor_metadata: CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
     attn_mask: torch.Tensor | None = None
@@ -732,6 +816,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     """
 
     _request_capacity_factor: ClassVar[int] = 1
+    # Only the C4 Indexer role plans prefill row shards; subclasses inherit.
+    _prefill_shard_exchange_eligible: ClassVar[bool] = False
+    _prefill_shard_logged_once: ClassVar[bool] = False
 
     def _use_specialized_metadata(self) -> bool:
         # Deferred device tasks and vision models keep their existing metadata path.
@@ -857,6 +944,27 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # +1 holds the FIA dummy request inserted by mixed-batch padding.
         self.qli_seqused_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self.qli_cmp_residual_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
+        # Prefill indexer row sharding: reserve the shared exchange workspace
+        # at model-build time -- before the memory profile on every runner --
+        # and keep the rebased QLI buffers persistent so the sharded path
+        # never allocates at step time.
+        self._prefill_row_shard: AscendDSAPrefillRowShard | None = None
+        if self._prefill_shard_exchange_eligible:
+            self.prefill_shard_qli_metadata_buffer = torch.zeros(
+                DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            )
+            self.prefill_shard_qli_seqused_k = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
+            self.prefill_shard_qli_cmp_residual_k = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
+            self.prefill_shard_cu_seqlens_q = torch.zeros(max_qli_reqs + 2, dtype=torch.int32, device=self.device)
+            if prefill_shard_exchange_supported(
+                self.vllm_config.parallel_config,
+                self.vllm_config.compilation_config.cudagraph_mode,
+            ):
+                ensure_prefill_shard_exchange_workspace(
+                    torch.device(self.device),
+                    scheduler_config.max_num_batched_tokens,
+                    self.model_config.hf_config.index_topk,
+                )
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         # DSpark triton fast-path state: exact per-request query count (set by
@@ -1034,6 +1142,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        # Plan the prefill row shard once per step, before either request
+        # builder path consumes it in _build_indexer_query.
+        self._prefill_row_shard = None
+        if self._prefill_shard_exchange_eligible:
+            self._prefill_row_shard = self._prepare_prefill_row_shard(
+                common_attn_metadata, num_actual_reqs, full_graph_mode
+            )
         request_builder = (
             type(self).build_req_metadata
             if self._use_specialized_metadata()
@@ -2002,6 +2117,148 @@ class AscendDSASWAMetadataBuilder(AscendDSAAttentionMetadataBuilder):
 class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
     """Indexer: QLI query/length metadata and compressor cache writes."""
 
+    _prefill_shard_exchange_eligible = True
+
+    def _prefill_row_sharding_supported(self, full_graph_mode: bool) -> bool:
+        # Pure-TP prefills only: PCP/DCP already shard prefill work by
+        # context, and FULL graphs capture prefill steps. This gate is judged
+        # per batch; the workspace reservation at __init__ uses the coarser
+        # config-level predicate. A config object that does not expose the
+        # parallel sizes (e.g. minimal unit-test fixtures) simply declines.
+        parallel_config = getattr(self.vllm_config, "parallel_config", None)
+        if parallel_config is None:
+            return False
+        return (
+            self.model_config.hf_config.model_type == "deepseek_v4"
+            and self.compressor_ratio == 4
+            and get_tensor_model_parallel_world_size() > 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and self.num_prefills > 0
+            and not full_graph_mode
+        )
+
+    def _prepare_prefill_row_shard(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        num_actual_reqs: int | None,
+        full_graph_mode: bool,
+    ) -> AscendDSAPrefillRowShard | None:
+        """Plan this rank's contiguous slice of the prefill indexer rows.
+
+        CPU-only work: rebase the decode-plus-local-slice request set into the
+        persistent rank-local QLI buffers. A request split across ranks keeps
+        only the history visible at its last local row (prefix-visible), which
+        is exactly the history those rows score against on the replicated
+        path. Any layout surprise falls back to the replicated path.
+        """
+        if not self._prefill_row_sharding_supported(full_graph_mode):
+            return None
+        metadata_cache = self.common_ratio_to_sas_metadata
+        assert metadata_cache is not None
+        seq_lens_cpu = metadata_cache.get("seq_lens_cpu")
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+            if seq_lens_cpu is None:
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            if seq_lens_cpu is None:
+                seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            # This planner runs before the query-input builder, whose own
+            # fallback would repeat the .cpu() sync; cache like it does.
+            metadata_cache["seq_lens_cpu"] = seq_lens_cpu
+
+        num_reqs = common_attn_metadata.num_reqs
+        actual_reqs = num_reqs if num_actual_reqs is None else min(num_actual_reqs, num_reqs)
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: actual_reqs + 1].to(
+            dtype=torch.int64, device="cpu"
+        )
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        # Decode requests lead the batch; a layout that does not match the
+        # split bookkeeping falls back to the replicated path.
+        if self.num_decodes > actual_reqs:
+            return None
+        num_decode_reqs = self.num_decodes
+        num_decode_tokens = int(query_start_loc_cpu[num_decode_reqs].item())
+        if num_decode_tokens != self.num_decode_tokens:
+            return None
+        prefill_query_lens_cpu = query_lens_cpu[num_decode_reqs:]
+        prefill_seq_lens_cpu = seq_lens_cpu[num_decode_reqs:actual_reqs].to(dtype=torch.int64, device="cpu")
+        if prefill_query_lens_cpu.numel() == 0:
+            return None
+
+        tp_size = get_tensor_model_parallel_world_size()
+        sizes = balanced_prefill_row_shard(
+            prefill_seq_lens_cpu,
+            prefill_query_lens_cpu,
+            self.compressor_ratio,
+            tp_size,
+            MIN_DSV4_INDEXER_TP_SHARD_ROWS_PER_RANK,
+        )
+        if sizes is None:
+            return None
+
+        tp_rank = get_tensor_model_parallel_rank()
+        prefill_shard_start = sum(sizes[:tp_rank])
+        prefill_shard_stop = prefill_shard_start + sizes[tp_rank]
+        if not type(self)._prefill_shard_logged_once:
+            type(self)._prefill_shard_logged_once = True
+            logger.info(
+                "DSv4 indexer prefill row sharding engaged: %d prefill rows on TP rank %d/%d, "
+                "local slice [%d, %d), per-rank sizes %s",
+                int(prefill_query_lens_cpu.sum().item()),
+                tp_rank,
+                tp_size,
+                prefill_shard_start,
+                prefill_shard_stop,
+                list(sizes),
+            )
+        prefill_request_starts = query_start_loc_cpu[num_decode_reqs:-1] - num_decode_tokens
+        local_starts = (prefill_shard_start - prefill_request_starts).clamp(min=0)
+        local_stops = (prefill_shard_stop - prefill_request_starts).clamp(min=0)
+        local_starts = torch.minimum(local_starts, prefill_query_lens_cpu)
+        local_stops = torch.minimum(local_stops, prefill_query_lens_cpu)
+        active = local_stops > local_starts
+        local_prefill_query_lens = local_stops[active] - local_starts[active]
+        # History visible at each active request's last local row.
+        local_prefill_seq_lens_cpu = prefill_seq_lens_cpu[active] - prefill_query_lens_cpu[active] + local_stops[active]
+        if int(local_prefill_query_lens.sum().item()) != sizes[tp_rank]:
+            return None
+
+        decode_query_lens_cpu = query_lens_cpu[:num_decode_reqs]
+        decode_seq_lens_cpu = seq_lens_cpu[:num_decode_reqs].to(dtype=torch.int64, device="cpu")
+        local_query_lens = torch.cat((decode_query_lens_cpu, local_prefill_query_lens))
+        local_seq_lens_cpu = torch.cat((decode_seq_lens_cpu, local_prefill_seq_lens_cpu))
+        local_cu = torch.cat((torch.zeros(1, dtype=torch.int64, device="cpu"), torch.cumsum(local_query_lens, dim=0)))
+        num_local_reqs = local_seq_lens_cpu.shape[0]
+        qli_cu = self.prefill_shard_cu_seqlens_q[: num_local_reqs + 1]
+        qli_cu.copy_(local_cu.to(dtype=torch.int32))
+        local_seq_i32 = local_seq_lens_cpu.to(dtype=torch.int32)
+        qli_seqused = self.prefill_shard_qli_seqused_k[:num_local_reqs]
+        qli_residual = self.prefill_shard_qli_cmp_residual_k[:num_local_reqs]
+        # The rebase runs on CPU while these persistent buffers live on NPU;
+        # the out= variants refuse cross-device inputs, so compute then copy_.
+        qli_seqused.copy_(torch.div(local_seq_i32, 4, rounding_mode="floor"))
+        qli_residual.copy_(torch.remainder(local_seq_i32, 4))
+        request_indices = torch.cat(
+            (
+                torch.arange(num_decode_reqs, dtype=torch.int64, device="cpu"),
+                torch.nonzero(active, as_tuple=False).flatten() + num_decode_reqs,
+            )
+        )
+        return AscendDSAPrefillRowShard(
+            num_decode_tokens=num_decode_tokens,
+            start=num_decode_tokens + prefill_shard_start,
+            stop=num_decode_tokens + prefill_shard_stop,
+            sizes=sizes,
+            block_table=self.block_table.index_select(0, request_indices.to(self.block_table.device)),
+            qli_cu_seqlens_q=qli_cu,
+            qli_seqused_k=qli_seqused,
+            qli_cmp_residual_k=qli_residual,
+            qli_metadata=self.prefill_shard_qli_metadata_buffer,
+            max_seqlen_q=int(local_query_lens.max().item()),
+            max_seqlen_kv=int(local_seq_lens_cpu.max().item()),
+        )
+
     def _build_qli_metadata(
         self,
         metadata_cache: dict,
@@ -2103,6 +2360,48 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
             num_reqs = req.seq_lens.shape[0]
             req.qli_seqused_k = self.qli_seqused_k[:num_reqs]
             req.qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+        # Rank-local QLI metadata for the prefill row shard, planned in
+        # build(); registered as a second deferred task keyed by its own
+        # buffer so the sharded select_topk waits on exactly this build.
+        # Builders exercised without __init__/build() (unit fixtures create
+        # them via __new__) read a missing attribute as "no shard planned".
+        shard = getattr(self, "_prefill_row_shard", None)
+        req.prefill_row_shard = shard
+        if shard is not None:
+
+            def build_shard_qli_metadata() -> torch.Tensor:
+                qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                    num_heads_q=self.model_config.hf_config.index_n_heads,
+                    num_heads_k=1,
+                    head_dim=self.model_config.hf_config.index_head_dim,
+                    topk=self.model_config.hf_config.index_topk,
+                    quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
+                    cu_seqlens_q=shard.qli_cu_seqlens_q,
+                    seqused_k=shard.qli_seqused_k,
+                    cmp_residual_k=shard.qli_cmp_residual_k,
+                    batch_size=shard.qli_seqused_k.shape[0],
+                    max_seqlen_q=shard.max_seqlen_q,
+                    max_seqlen_k=shard.max_seqlen_kv // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                    device=str(self.seqused_q.device),
+                )
+                self.prefill_shard_qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+                return self.prefill_shard_qli_metadata_buffer
+
+            if self._device_metadata_enabled:
+                self._device_metadata_tasks = (
+                    DeviceMetadataTask(
+                        DeviceMetadataStage.INDEXER,
+                        build_shard_qli_metadata,
+                        id(self.prefill_shard_qli_metadata_buffer),
+                    ),
+                    *self._device_metadata_tasks,
+                )
+            else:
+                build_shard_qli_metadata()
 
 
 class AscendDSAImpl(AttentionImplBase[Any]):
