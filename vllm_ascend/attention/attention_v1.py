@@ -975,6 +975,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode = 4
             else:
                 sparse_mode = 3
+            atten_mask = attn_metadata.attn_mask
+            # Draft and verify forwards carry several query tokens per request,
+            # and FIA's paged split-fuse tiling rejects sparse_mode=3 without
+            # an explicit mask in that case.
+            if atten_mask is None and num_tokens > len(actual_seq_qlen):
+                from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+
+                atten_mask = AttentionMaskBuilder(query.device).get_splitfuse_attn_mask()
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key.contiguous(),
@@ -984,7 +992,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 input_layout="TND",
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=atten_mask,
                 sparse_mode=sparse_mode,
                 softmax_scale=self.scale,
                 block_table=block_table,
