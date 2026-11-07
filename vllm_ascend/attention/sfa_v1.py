@@ -57,6 +57,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -2036,11 +2037,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
         if gate_hidden_states is not None:
             assert self.g_proj is not None
-            attn_output.mul_(torch.sigmoid(self.g_proj(gate_hidden_states.contiguous())[0]))
-        self._finalize_o_proj(
-            attn_output,
-            output[:num_input_tokens],
-        )
+            gate = self.g_proj(gate_hidden_states.contiguous())[0]
+            flash_attention_gate(attn_output, gate)
+        self._finalize_o_proj(attn_output, output[:num_input_tokens])
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
