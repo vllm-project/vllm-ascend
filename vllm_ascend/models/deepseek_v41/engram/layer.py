@@ -4,7 +4,7 @@
 
 import torch
 from torch import nn
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.engram_gate import fused_engram_gate
@@ -15,19 +15,29 @@ from .common import engram_gate
 class AscendEngram(nn.Module):
     """Consume rows prepared by the v1 runner in the checkpoint residual basis."""
 
-    def __init__(self, config, quant_config, prefix: str) -> None:
+    def __init__(
+        self,
+        config,
+        quant_config,
+        prefix: str,
+        *,
+        use_sequence_parallel: bool = False,
+    ) -> None:
         super().__init__()
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
         self.eps = config.rms_norm_eps
-        self.wkv = ReplicatedLinear(
+        self.wkv = ColumnParallelLinear(
             (config.engram_max_ngram_size - 1) * config.engram_n_heads * config.engram_head_dim,
             (self.hc_mult + 1) * self.dim,
             bias=False,
+            gather_output=True,
+            disable_tp=use_sequence_parallel,
             quant_config=quant_config,
             prefix=f"{prefix}.wkv",
             return_bias=False,
         )
+
         self.q_weight = nn.Parameter(torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16))
         self.k_weight = nn.Parameter(torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16))
 
