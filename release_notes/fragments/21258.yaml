@@ -1,0 +1,8 @@
+pr: 21258
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in compatibility patch for using upstream vLLM's
+      MooncakeStoreConnector with legacy Ascend Fabric initialization and NPU
+      transfer-thread device binding. The enable_ascend_fabric_patch option
+      defaults to false and can remain disabled on HDK 26.1 or later.
