@@ -296,10 +296,21 @@ class FusedMC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
+    @property
+    def mega_moe_max_tokens(self) -> int:
+        # Static startup config; cached after the first read so the hot
+        # combine path does not re-query the config object every step.
+        value = self.__dict__.get("_mega_moe_max_tokens")
+        if value is None:
+            value = get_ascend_config().mega_moe_max_tokens
+            self.__dict__["_mega_moe_max_tokens"] = value
+        return value
+
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
-        self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        ascend_config = get_ascend_config()
+        self.enable_fused_mc2 = ascend_config.enable_fused_mc2
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
@@ -426,7 +437,7 @@ class FusedMC2CommImpl(MoECommMethod):
         else:
             # P nodes and PD-mixed nodes use the configured value. This keeps
             # the existing memory/performance tradeoff for prefill workloads.
-            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            max_recv_token_num = self.mega_moe_max_tokens
             # absolute_safe_max_recv_token_num is the max value required by mega moe api
             if max_recv_token_num > absolute_safe_max_recv_token_num:
                 max_recv_token_num = absolute_safe_max_recv_token_num
@@ -599,7 +610,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     bias2=weights.w2_scale_bias,
                     probs=fused_experts_input.topk_weights.to(torch.float32),
                     group=self.token_dispatcher.moe_all_to_all_group_name,
-                    max_output_size=get_ascend_config().mega_moe_max_tokens,
+                    max_output_size=self.mega_moe_max_tokens,
                     swiglu_limit=self.swiglu_limit,
                     world_size=self.token_dispatcher.ep_world_size,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
