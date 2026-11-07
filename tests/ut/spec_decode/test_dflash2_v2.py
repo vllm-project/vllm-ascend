@@ -386,7 +386,7 @@ def test_lilicorr_uses_ascend_dflash_runtime_hooks():
     assert issubclass(AscendLiLiCorrSpeculator, AscendDFlash2Speculator)
     assert AscendLiLiCorrSpeculator.build_draft_attn_metadatas is AscendDFlashSpeculator.build_draft_attn_metadatas
     assert AscendLiLiCorrSpeculator.propose is AscendDFlashSpeculator.propose
-    assert "init_cudagraph_manager" in AscendLiLiCorrSpeculator.__dict__
+    assert AscendLiLiCorrSpeculator.init_cudagraph_manager is AscendDFlashSpeculator.init_cudagraph_manager
     assert AscendLiLiCorrSpeculator._generate_draft is LiLiCorrSpeculator._generate_draft
     assert AscendLiLiCorrSpeculator._score_candidates is LiLiCorrSpeculator._score_candidates
 
@@ -425,22 +425,25 @@ def test_lilicorr_rejects_lmhead_tp_before_candidate_sampling(monkeypatch):
 
 
 @REQUIRES_LILICORR
-def test_lilicorr_requires_enforce_eager(monkeypatch):
-    calls: list[CUDAGraphMode] = []
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
-        lambda self, mode: calls.append(mode),
-    )
+@pytest.mark.parametrize(
+    "enforce_eager,expected_mode",
+    [(False, CUDAGraphMode.FULL_DECODE_ONLY), (None, CUDAGraphMode.FULL_DECODE_ONLY), (True, CUDAGraphMode.NONE)],
+)
+def test_lilicorr_graph_manager_reuses_dflash_policy(monkeypatch, enforce_eager, expected_mode):
+    calls = []
     speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+    speculator.update_stream = object()
 
-    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
+    def initialize_parent(self, mode):
+        calls.append(mode)
+        self.query_cudagraph_manager = SimpleNamespace()
+
+    monkeypatch.setattr(DFlashSpeculator, "init_cudagraph_manager", initialize_parent)
     speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
-
-    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    with pytest.raises(NotImplementedError, match="graph mode"):
-        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    assert calls == [expected_mode]
+    assert speculator.query_cudagraph_manager.speculator is speculator
+    assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
 
 
 @pytest.mark.parametrize(
@@ -487,6 +490,38 @@ def test_selector_scores_without_forward_context():
     with override_forward_context(None):
         assert speculator._score_candidates(candidates, unary, hidden) is scores
     selector.assert_called_once()
+
+
+@REQUIRES_LILICORR
+def test_lilicorr_scores_with_its_own_head_without_forward_context():
+    candidates = torch.zeros(2, 2, 2, dtype=torch.int64)
+    unary = torch.zeros(2, 2, 2)
+    hidden = torch.zeros(2, 2, 4)
+    embeddings = torch.ones(2, 2, 2, 4)
+    expected = torch.full((2, 2, 2, 2), 0.5)
+
+    def score(*args):
+        assert not is_forward_context_available()
+        return expected
+
+    head = MagicMock(side_effect=score)
+    selector = MagicMock()
+    embedding = MagicMock(return_value=embeddings)
+    speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    speculator.model = SimpleNamespace(model=SimpleNamespace(lilicorr=head, candidate_selector=selector))
+    speculator.target_embeddings = embedding
+    speculator.anchor_hidden = torch.ones(2, 4)
+    speculator.anchor_valid = torch.tensor([True, False])
+    with override_forward_context(None):
+        assert speculator._score_candidates(candidates, unary, hidden) is expected
+    embedding.assert_called_once()
+    assert embedding.call_args.args[0] is candidates
+    head.assert_called_once()
+    token_embeddings, unary_arg, hidden_arg, anchor, valid = head.call_args.args
+    assert token_embeddings is embeddings and unary_arg is unary and hidden_arg is hidden
+    torch.testing.assert_close(anchor, speculator.anchor_hidden[:2])
+    torch.testing.assert_close(valid, speculator.anchor_valid[:2])
+    selector.assert_not_called()
 
 
 def test_greedy_walk_contract_reference():
@@ -660,3 +695,87 @@ def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
         dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
 
     kernel.assert_not_called()
+
+
+@REQUIRES_LILICORR
+@pytest.mark.parametrize("use_aux", [False, True])
+def test_lilicorr_graph_refreshes_anchor_after_rejection_and_slot_reuse(monkeypatch, use_aux):
+    """Execute the real upstream graph staging and anchor hooks on CPU."""
+    speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    speculator.num_speculative_steps = 2
+    speculator.max_num_tokens = 12
+    speculator.hidden_states = torch.zeros(12, 4)
+    speculator._aux_staging = torch.zeros(9, 4) if use_aux else None
+    speculator._num_rejected = torch.zeros(3, dtype=torch.int32)
+    speculator.anchor_hidden = torch.zeros(3, 4)
+    speculator.anchor_valid = torch.zeros(3, dtype=torch.bool)
+    speculator._context_slot_mappings = torch.zeros(1, 12, dtype=torch.int32)
+    boundaries = torch.zeros(4, dtype=torch.int32)
+    speculator.target_input_buffers = SimpleNamespace(query_start_loc=boundaries)
+    speculator.model = SimpleNamespace(
+        model=SimpleNamespace(hidden_norm=lambda value: value * 2),
+        combine_hidden_states=lambda value: value + 1,
+    )
+    speculator._precompute_context_kv = MagicMock()
+    fixed = [speculator.hidden_states, speculator._num_rejected, speculator.anchor_hidden, speculator.anchor_valid]
+    if use_aux:
+        fixed.append(speculator._aux_staging)
+    addresses = [tensor.data_ptr() for tensor in fixed]
+    # Shrink and reuse request slots while the graph still executes three rows.
+    for step, (starts, rejected) in enumerate(
+        [([0, 3, 6, 6], [1, 2]), ([0, 3, 3, 3], [0]), ([0, 6, 12, 12], [2, 1]), ([0, 3, 6, 6], [3, 2])]
+    ):
+        num_reqs = len(rejected)
+        num_tokens = starts[num_reqs]
+        boundaries.copy_(torch.tensor(starts, dtype=torch.int32))
+        hidden = torch.arange(num_tokens * 4, dtype=torch.float32).view(num_tokens, 4) + step * 100
+        aux = list(hidden.split(2, dim=-1)) if use_aux else None
+        rejected_tensor = torch.tensor(rejected, dtype=torch.int32)
+        batch = SimpleNamespace(num_reqs=num_reqs, num_tokens=num_tokens)
+
+        def forbid_host_read(*args, **kwargs):
+            raise AssertionError("LiLiCorr graph preparation must not read device tensors on the host")
+
+        with monkeypatch.context() as no_host:
+            for operation in ("item", "cpu", "tolist"):
+                no_host.setattr(torch.Tensor, operation, forbid_host_read)
+            speculator._prepare_graph_replay(batch, 3, hidden, aux, rejected_tensor, dummy_run=False)
+            speculator._prepare_graph_forward(3, None)
+        ends = torch.tensor(starts[1 : num_reqs + 1]) - rejected_tensor
+        valid = ends > torch.tensor(starts[:num_reqs])
+        indices = (ends - 1).clamp_min(0)
+        expected = (hidden[indices] + (1 if use_aux else 0)) * 2 * valid[:, None]
+        torch.testing.assert_close(speculator.anchor_hidden[:num_reqs], expected)
+        torch.testing.assert_close(speculator.anchor_valid[:num_reqs], valid)
+        assert not speculator.anchor_valid[num_reqs:].any()
+        assert not speculator.anchor_hidden[num_reqs:].any()
+        assert (speculator._context_slot_mappings[:, num_tokens:9] == -1).all()
+        assert [tensor.data_ptr() for tensor in fixed] == addresses
+        speculator._precompute_context_kv.assert_called_with(0, 9)
+        if num_tokens > 9:
+            assert speculator._precompute_context_kv.call_args_list[-2].args == (9, num_tokens)
+
+
+@REQUIRES_LILICORR
+def test_lilicorr_capture_records_context_preparation_before_scoring():
+    speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    speculator.sample_indices = torch.ones(6, dtype=torch.int64)
+    speculator.sample_pos = torch.ones(6, dtype=torch.int64)
+    speculator.sample_idx_mapping = torch.zeros(6, dtype=torch.int64)
+    speculator._context_slot_mappings = torch.zeros(1, 12, dtype=torch.int32)
+    speculator.query_cudagraph_manager = MagicMock()
+    speculator.input_buffers = object()
+    speculator.block_tables = object()
+    speculator.attn_groups = object()
+    speculator.kv_cache_config = object()
+    speculator.max_model_len = 4096
+    speculator._group_causal = {0: False}
+    speculator.capture()
+    args, kwargs = speculator.query_cudagraph_manager.capture.call_args
+    assert args[0] == speculator._generate_draft
+    assert kwargs["prepare_forward"] == speculator._prepare_graph_forward
+    assert kwargs["causal"] == speculator._group_causal
+    assert not speculator.sample_indices.any()
+    assert not speculator.sample_pos.any()
+    assert (speculator.sample_idx_mapping == -1).all()
+    assert (speculator._context_slot_mappings == -1).all()

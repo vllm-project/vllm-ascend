@@ -1,0 +1,4 @@
+pr: 20786
+entries:
+  - category: feature
+    text: Enabled full decode ACL graph drafting for LiLiCorr on Model Runner V2, with eager draft control and fallback for unsupported attention backends.

@@ -34,12 +34,13 @@ class _RunnerKwargs(TypedDict):
     async_scheduling: bool
     generation_config: str
     seed: int
+    compilation_config: dict
 
 
 RUNNER_KWARGS: _RunnerKwargs = {
     "tensor_parallel_size": 2,
     "dtype": "bfloat16",
-    "enforce_eager": True,
+    "enforce_eager": False,
     "max_model_len": 4096,
     "max_num_seqs": len(PROMPTS_SHORT),
     "gpu_memory_utilization": 0.8,
@@ -47,6 +48,7 @@ RUNNER_KWARGS: _RunnerKwargs = {
     "async_scheduling": False,
     "generation_config": "vllm",
     "seed": 0,
+    "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8, 16, 32, 64]},
 }
 
 
@@ -78,6 +80,28 @@ def greedy_reference(mrv2_environment):
     return [output.outputs[0] for output in outputs]
 
 
+def _track_draft_graph_replays(worker):
+    """Instrument only the test worker; detect silent eager fallback."""
+    manager = worker.model_runner.speculator.query_cudagraph_manager
+    manager._test_replay_count = 0
+    manager._test_padded_replay_count = 0
+    original = manager.run_fullgraph
+
+    def counted(desc):
+        manager._test_replay_count += 1
+        if desc.num_reqs > worker.model_runner.speculator.input_batch.num_reqs:
+            manager._test_padded_replay_count += 1
+        return original(desc)
+
+    manager.run_fullgraph = counted
+    return bool(manager.graphs)
+
+
+def _read_draft_graph_replays(worker):
+    manager = worker.model_runner.speculator.query_cudagraph_manager
+    return manager._test_replay_count, manager._test_padded_replay_count
+
+
 @pytest.mark.e2e_model("Qwen/Qwen3.8-27B")
 @pytest.mark.e2e_coverage(
     arch="dense",
@@ -86,20 +110,23 @@ def greedy_reference(mrv2_environment):
     deploy="",
     hardware="A3",
     quantization="BF16",
-    graph_mode="eager",
+    graph_mode="eager,full_decode_only",
 )
 @pytest.mark.parametrize(
     "draft_sample_method,temperature",
     [("greedy", 0.0), ("probabilistic", 0.0), ("probabilistic", 0.8)],
 )
-def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference, draft_model_path, record_property):
+@pytest.mark.parametrize("draft_enforce_eager", [True, False])
+def test_qwen38_lilicorr_tp2(
+    draft_sample_method, temperature, draft_enforce_eager, greedy_reference, draft_model_path, record_property
+):
     # A block of eight contains one anchor and at most seven draft tokens.
     speculative_config = {
         "method": "dflash",
         "model": draft_model_path,
         "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
         "draft_tensor_parallel_size": 2,
-        "enforce_eager": True,
+        "enforce_eager": draft_enforce_eager,
         "draft_sample_method": draft_sample_method,
     }
     with VllmRunner(
@@ -107,6 +134,9 @@ def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference,
     ) as runner:
         config = runner.model.llm_engine.vllm_config.speculative_config
         assert "LiLiCorrDraftModel" in config.draft_model_config.architectures
+        captured = runner.model.collective_rpc(_track_draft_graph_replays)
+        if not draft_enforce_eager:
+            assert all(captured), "LiLiCorr must capture draft graphs on every TP rank"
         outputs = runner.model.generate(
             PROMPTS_SHORT,
             SamplingParams(
@@ -118,6 +148,19 @@ def test_qwen38_lilicorr_tp2(draft_sample_method, temperature, greedy_reference,
             ),
             use_tqdm=False,
         )
+        # A second call reuses request-state slots. Three live requests require
+        # padding to the four-request capture bucket (32 draft query tokens).
+        runner.model.generate(
+            PROMPTS_SHORT[:3],
+            SamplingParams(temperature=temperature, seed=1, max_tokens=16, ignore_eos=True),
+            use_tqdm=False,
+        )
+        replay_counts = runner.model.collective_rpc(_read_draft_graph_replays)
+        if draft_enforce_eager:
+            assert all(count == 0 for count, _ in replay_counts)
+        else:
+            assert all(count > 0 and padded > 0 for count, padded in replay_counts)
+        record_property("draft_graph_replays", replay_counts)
         metrics = runner.model.get_metrics()
 
     tokens = [list(output.outputs[0].token_ids) for output in outputs]
