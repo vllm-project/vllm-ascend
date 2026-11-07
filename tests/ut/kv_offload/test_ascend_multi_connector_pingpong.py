@@ -86,6 +86,7 @@ def make_pingpong_connector(
 ) -> AscendMultiConnector:
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector._connectors = [store, p2p]
+    connector._configure_layerwise_reuse_completion()
     connector._layerwise_workspace_fences_enabled = True
     connector._execution_id = -1
     connector._workspace_generation = 0

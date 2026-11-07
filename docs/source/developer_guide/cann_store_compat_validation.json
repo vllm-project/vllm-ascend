@@ -1,0 +1,70 @@
+{
+  "date": "2026-11-07",
+  "branch": "backport/cann-swa-bounded-replay",
+  "parent_revision": "60aa38cf4c0b078bf22d9e3450236eb070d594a9",
+  "upstream_vllm_pin": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "scope": [
+    "Store worker and scheduler accept the legacy CacheConfig.prefix_match_unit field when hash_block_size is absent or unset",
+    "Preserve explicit modern hash_block_size precedence, existing default and CP scaling",
+    "Do not publish KV-write callbacks from the MultiConnector constructor",
+    "Document direct Mooncake P/D configuration and the remaining Store/MultiConnector replay boundary"
+  ],
+  "before_fix": {
+    "failed": 2,
+    "errors": [
+      "Real vLLM 0.30 CacheConfig raises AttributeError for hash_block_size in KVPoolScheduler; the worker contains the same access",
+      "A MultiConnector child with a KV-write callback raises UnboundLocalError for layer_name during construction"
+    ]
+  },
+  "cpu_regression": {
+    "files": 4,
+    "passed": 144,
+    "seconds": 18.70,
+    "log": "/tmp/cann-store-compat-regressions.log",
+    "junit": "/tmp/cann-store-compat-regressions.xml",
+    "coverage": [
+      "Real legacy CacheConfig with default and explicit prefix_match_unit",
+      "Modern field precedence and fallback when the modern field is unset",
+      "Actual Store worker and scheduler constructors, hybrid groups, token database and external coordinator hash units",
+      "Model-parallel and backend service leaves are simulated; PCP=1 and DCP=1",
+      "MultiConnector initialization does not invoke KV-write callbacks",
+      "Existing MultiConnector reuse ordering and ping-pong workspace tests",
+      "Existing SWA legacy scheduler, allocation and remote-handoff regressions"
+    ],
+    "env": {
+      "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+      "VLLM_VERSION": "0.30.0",
+      "VLLM_PLUGINS": "",
+      "OMP_NUM_THREADS": "1"
+    },
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/ut/kv_offload/test_ascend_store_legacy_config.py",
+      "tests/ut/kv_offload/test_ascend_multi_connector.py",
+      "tests/ut/kv_offload/test_ascend_multi_connector_pingpong.py",
+      "tests/ut/patch/platform/test_patch_swa_bounded_replay_legacy.py",
+      "--tb=short"
+    ]
+  },
+  "fixture_repairs": [
+    "Initialize the disabled workspace-fence flag in existing tests that bypass the MultiConnector constructor",
+    "Initialize reuse-completion lists in the existing ping-pong test helper"
+  ],
+  "checks": {
+    "ruff_new_tests": "passed",
+    "ruff_format_new_tests": "passed",
+    "ruff_runtime_delta": "No added diagnostics; runtime files retain 14 existing baseline diagnostics",
+    "diff_check": "passed",
+    "format_sh_ci": "Executed in an isolated clone; blocked before hooks by nodeenv parsing 27.0.0-alpha.0.0.0 (invalid literal 0-alpha)",
+    "additional_store_tests": "141 setup errors in the existing distributed/ascend_store suite: its autouse fixture patches get_attention_compute_start_gate on pool_worker, where that symbol no longer exists; this fixture was not changed",
+    "additional_store_log": "/tmp/cann-store-compat-existing.log"
+  },
+  "not_validated": [
+    "Real A3 model startup, NPU kernels, HCCL or Mooncake network",
+    "AscendStore plus MultiConnector with SWA replay remains unsupported by this backport",
+    "Store prefix-hit replay, accuracy, latency or throughput on the user's deployment"
+  ]
+}

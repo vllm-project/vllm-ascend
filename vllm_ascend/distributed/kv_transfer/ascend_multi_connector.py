@@ -76,12 +76,6 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             for connector in self._connectors
         )
 
-        # Phase 2: only then may sibling hooks publish reuse-enabling work.
-        for connector in self._non_slot_release_connectors:
-            hook = getattr(connector, "on_kv_cache_written", None)
-            if callable(hook):
-                hook(layer_name)
-
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = {} if kv_transfer_config is None else (
             kv_transfer_config.kv_connector_extra_config or {}

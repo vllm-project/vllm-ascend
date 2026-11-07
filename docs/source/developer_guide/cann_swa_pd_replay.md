@@ -168,3 +168,52 @@ CPU 回归覆盖真实 vLLM 0.30 scheduler、缓存分配和块引用、同步/�
 
 本轮记录：31 个相关文件共 **1449 passed、23 skipped、513 subtests passed**。
 复现命令、源码校验值及未验证项见[验证记录](cann_swa_pd_replay_validation.json)。
+
+## 7 AscendStore 初始化报错与 MultiConnector 边界
+
+如果 D 在启动时沿着 `MultiConnector → AscendStoreConnector → KVPoolWorker`
+报 `AttributeError: 'CacheConfig' object has no attribute 'hash_block_size'`，
+这是配置接口兼容问题，还没有进入请求 prefill、KV 接收或 decode。
+CANN 配套的 vLLM 0.30 使用 `CacheConfig.prefix_match_unit` 表示哈希粒度，
+没有 `CacheConfig.hash_block_size` 字段。
+
+Store worker 和 scheduler 已同时兼容两种字段：优先使用整数
+`hash_block_size`，否则读取 `prefix_match_unit`；都未设置时保留原有的最小组
+block size 默认值和 CP 缩放规则。不能只给 worker 随意补一个常数，
+否则 scheduler 与外部缓存键的哈希粒度可能不一致。
+另外移除了 MultiConnector 构造函数中提前触发 KV 写入回调的错误代码；
+该回调只应在对应层完成 KV 写入时执行。
+
+这两处启动修复没有接入 Store 的 SWA 恢复协议。当前 replay ON 仍只支持
+第 3 节列出的直接 Mooncake connector，不能保留外层 MultiConnector 后
+仅删除其中一个 child，也不能通过切换 MRV2 绕开限制。
+
+先验证 P/D SWA 时，可将 D 的整个 `KV_TRANSFER_CONFIG` 替换为：
+
+```shell
+KV_TRANSFER_CONFIG='{
+    "kv_connector": "MooncakeHybridConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
+    "engine_id": "1",
+    "kv_port": 30100,
+    "kv_connector_extra_config": {
+        "prefill": {"dp_size": 4, "tp_size": 4},
+        "decode": {"dp_size": 8, "tp_size": 2}
+    }
+}'
+```
+
+P 同样直接使用 `MooncakeHybridConnector`，保留 P 原有的 producer 角色、
+engine ID 和端口，并一致声明上述 DP/TP。两端保持 MRV1，按第 4 节进行
+replay OFF/ON 对照。这是去掉 Store 缓存池后的直接 P/D 路径；
+不要将其结果当作原有缓存池部署的等价性能基线。
+
+已提供的 D Store child 配置只有 `load_async=true` 时，并不会自动启用 Store 读取：
+`kv_role=kv_consumer` 的读取还受 `consumer_is_to_load` 控制，默认关闭。
+`load_async` 只控制已经启用的读取采用同步还是异步。
+要保留 Store，需要另外适配 MultiConnector 按每个请求选择的缓存来源报告恢复的组，
+并验证 Store 命中后缺少 SWA 窗口时的重建、失败恢复和缓存块生命周期；
+单独修复字段访问不代表这些功能已经支持。
+
+启动兼容回归的复现信息及检查边界见[验证记录](cann_store_compat_validation.json)。
