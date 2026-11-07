@@ -43,8 +43,16 @@ try:
     import batch_invariant_ops  # type: ignore[import-not-found] # noqa
 
     HAS_ASCENDC_BATCH_INVARIANT = True
+    # Workspace query of the batch-invariant FIA kernel. Resolved together with the
+    # package so that builds without it (older batch_invariant_ops) keep working.
+    _BI_FIA_MAX_WORKSPACE = getattr(
+        batch_invariant_ops,
+        "_npu_fused_infer_attention_score_batch_invariant_get_max_workspace",
+        None,
+    )
 except ImportError:
     HAS_ASCENDC_BATCH_INVARIANT = False
+    _BI_FIA_MAX_WORKSPACE = None
 
 
 def add_rms_norm(
@@ -146,6 +154,13 @@ def enable_batch_invariant_mode():
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
+        # full_graph_fia() sizes the FIA workspace with this query and then registers the
+        # task for the batch-invariant kernel above. Patching only the call would size the
+        # workspace for the non-batch-invariant kernel, which can be smaller than the BI
+        # kernel requires (Ascend 950: 203,456,512 B vs 487,327,744 B), and graph capture
+        # then fails with EZ1010. Keep the query on the same kernel as the call.
+        if _BI_FIA_MAX_WORKSPACE is not None:
+            torch_npu._npu_fused_infer_attention_score_get_max_workspace = _BI_FIA_MAX_WORKSPACE
         # patch npu_add_rms_norm to ensure batch invariant.
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
