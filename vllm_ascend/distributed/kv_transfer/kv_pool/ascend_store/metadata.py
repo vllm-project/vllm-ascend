@@ -11,6 +11,7 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
@@ -302,6 +303,70 @@ def infer_cache_transfer_granularity(
     for group_id in kv_cache_group_ids:
         granularities.append(get_group_block_size(group_block_sizes, group_id))
     return math.lcm(*granularities)
+
+
+@dataclass(frozen=True)
+class PoolCacheGeometry:
+    block_sizes: tuple[int, ...]
+    cacheable_group_ids: tuple[int, ...]
+    hash_block_size: int
+    core_hit_alignment: int
+    transfer_granularity: int
+    block_only: bool
+
+
+def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: bool) -> PoolCacheGeometry:
+    """Consume the Core hash contract; do not use the requested PMU as a page size."""
+    cache = vllm_config.cache_config
+    parallel = vllm_config.parallel_config
+    dcp = parallel.decode_context_parallel_size
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
+    group_ids = tuple(infer_cacheable_group_ids(groups))
+    block_sizes = (
+        tuple(kv_cache_utils.resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups)
+        if groups
+        else (cache.block_size * dcp,)
+    )
+    page_alignment = math.lcm(*(block_sizes[i] for i in group_ids))
+    hash_size = getattr(kv_cache_config, "hash_block_size", None)
+    hit_alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
+    has_hash = isinstance(hash_size, int) and hash_size > 0
+    has_alignment = isinstance(hit_alignment, int) and hit_alignment > 0
+    if kv_cache_config is None:
+        if isinstance(cache.prefix_match_unit, int):
+            raise ValueError("AscendStore requires a resolved KVCacheConfig with prefix_match_unit")
+        hash_size = hit_alignment = page_alignment
+    elif not (has_hash and has_alignment):
+        scheduler_size, resolved_hash = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+        if not has_hash:
+            hash_size = resolved_hash
+        if not has_alignment:
+            hit_alignment = kv_cache_utils.resolve_cache_hit_alignment_tokens(
+                kv_cache_config, vllm_config, scheduler_size, hash_size
+            )
+    if any(block_sizes[i] % hash_size for i in group_ids):
+        raise ValueError(
+            f"AscendStore cannot fold Core hash size {hash_size} into cacheable pages "
+            f"{tuple(block_sizes[i] for i in group_ids)}"
+        )
+    extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+    mode = extra.get("pool_prefix_mode")
+    if mode not in (None, "block_only"):
+        raise ValueError(f"Unsupported AscendStore pool_prefix_mode={mode!r}; use 'block_only'")
+    block_only = mode == "block_only" or (not use_layerwise and hit_alignment < page_alignment)
+    if block_only and (use_layerwise or extra.get("discard_partial_chunks", True) is not True):
+        raise ValueError("AscendStore block_only requires bulk transfer and discard_partial_chunks=true")
+    logger.info(
+        "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
+        "pool_transfer_alignment=%d mode=%s group_pages=%s",
+        cache.prefix_match_unit,
+        hash_size,
+        hit_alignment,
+        page_alignment,
+        "block_only" if block_only else "existing",
+        block_sizes,
+    )
+    return PoolCacheGeometry(block_sizes, group_ids, hash_size, hit_alignment, page_alignment, block_only)
 
 
 class ChunkedTokenDatabase:
