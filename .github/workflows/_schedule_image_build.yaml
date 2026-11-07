@@ -70,6 +70,12 @@ on:
       SYNC_TOOLS_TOKEN:
         description: 'GitHub token for dispatching quay.io sync workflow'
         required: false
+      GITHUB_PROXY:
+        description: 'Cluster-internal git-cdn base URL for github.com (empty = direct)'
+        required: false
+      GITCODE_PROXY:
+        description: 'Cluster-internal git-cdn base URL for gitcode.com (empty = direct)'
+        required: false
 
 defaults:
   run:
@@ -215,6 +221,8 @@ jobs:
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+          GITHUB_PROXY=${{ secrets.GITHUB_PROXY }}
+          GITCODE_PROXY=${{ secrets.GITCODE_PROXY }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
