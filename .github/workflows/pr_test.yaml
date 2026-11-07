@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY: validate A3 800I FED runner smoke test (linux-aarch64-a3-800i-fed-2). Do not merge.
+# TEMPORARY: validate A3 800I FED runner smoke test (linux-aarch64-a3-800i-fed-16). Do not merge.
 name: E2E
 
 on:
@@ -140,7 +140,8 @@ jobs:
               )
           groups["a3"] = dict(
               a3_template,
-              runner="linux-aarch64-a3-800i-fed-2",
+              runner="linux-aarch64-a3-800i-fed-16",
+              num_npus=16,
               partition_name="a3-smoke",
               partition="1-1",
               tests=" ".join(a3_tests),
