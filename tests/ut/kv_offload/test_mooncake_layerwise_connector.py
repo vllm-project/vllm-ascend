@@ -913,11 +913,16 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(tokens, 16)
         self.assertTrue(async_flag)
 
-    def test_get_num_new_matched_tokens_hybrid_truncates_prefill_request(self):
+    def test_on_new_request_hybrid_truncates_before_prefix_lookup(self):
         self.scheduler.need_truncate = True
         request = MockRequest("req1", prompt_token_ids=list(range(4)), kv_transfer_params={"do_remote_decode": True})
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector.connector_scheduler = self.scheduler
 
-        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
+        connector.on_new_request(request)
+        self.assertEqual(request.num_prompt_tokens, 3)
+        connector.on_new_request(request)
+        tokens, async_flag = connector.get_num_new_matched_tokens(request, 0)
 
         self.assertEqual(tokens, 0)
         self.assertFalse(async_flag)
@@ -926,6 +931,42 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(request.num_prompt_tokens, 3)
         self.assertEqual(request.max_tokens, 1)
         self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+
+    def test_prefix_lookup_never_shortens_a_request_after_local_hits(self):
+        self.scheduler.need_truncate = True
+        request = MockRequest("hit", list(range(17)), {"do_remote_decode": True})
+
+        self.assertEqual(self.scheduler.get_num_new_matched_tokens(request, 16), (0, False))
+        self.assertEqual(request.num_prompt_tokens, 17)
+        self.assertEqual(len(request._all_token_ids) - 16, 1)
+
+    def test_hybrid_admission_handles_cache_block_boundaries_once(self):
+        self.scheduler.need_truncate = True
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector.connector_scheduler = self.scheduler
+        for length in (1, 2, 16, 17, 18, 32, 33):
+            with self.subTest(length=length):
+                request = MockRequest("boundary", list(range(length)), {"do_remote_decode": True})
+                expected = max(length - 1, 1)
+                connector.on_new_request(request)
+                self.assertEqual(request.num_prompt_tokens, expected)
+                connector.on_new_request(request)
+                connector.get_num_new_matched_tokens(request, 0)
+                self.assertEqual(request.num_prompt_tokens, expected)
+                self.assertEqual(request.prompt_token_ids, list(range(expected)))
+                self.assertEqual(request._all_token_ids, list(range(expected)))
+
+    def test_admission_preserves_consumer_and_non_hybrid_requests(self):
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector.connector_scheduler = self.scheduler
+        for hybrid, params in ((True, {"do_remote_prefill": True}), (True, {}), (False, {"do_remote_decode": True})):
+            with self.subTest(hybrid=hybrid, params=params):
+                self.scheduler.need_truncate = hybrid
+                request = MockRequest("unchanged", list(range(17)), params)
+                connector.on_new_request(request)
+                self.assertEqual(request.num_prompt_tokens, 17)
+                self.assertEqual(request.max_tokens, 16)
+                self.assertNotIn("_p_side_truncated", request.kv_transfer_params)
 
     def test_build_connector_meta(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
