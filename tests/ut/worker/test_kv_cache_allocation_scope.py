@@ -6,11 +6,28 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
+from vllm_ascend.device_allocator.sleep_mode_backend import AscendLegacySleepModeBackend
+from vllm_ascend.device_allocator.sleep_runtime import AscendSleepRuntime
 from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
+
+
+@pytest.fixture(autouse=True)
+def runtime_config(monkeypatch):
+    from vllm_ascend.device_allocator import sleep_runtime
+    from vllm_ascend.worker import worker as worker_module
+
+    monkeypatch.setattr(sleep_runtime, "get_ascend_config", lambda: worker_module.get_ascend_config())
+
+
+def bind_sleep_backend(worker):
+    worker.sleep_mode_backend = AscendLegacySleepModeBackend()
+    worker.sleep_mode_backend.bind_runtime(AscendSleepRuntime(worker))
+    worker._sleep_saved_parameters = {}
 
 
 class _AllocationScope(AbstractContextManager):
@@ -121,7 +138,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
         # wake_up ends with a device barrier; this UT runs on a CPU runner, so the
         # barrier must be mocked or torch.npu.synchronize() would try to init NPU.
         patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device") as mock_synchronize,
-        patch("vllm_ascend.worker.worker.CaMemAllocator") as mock_allocator_class,
+        patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator") as mock_allocator_class,
         patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_config,
     ):
         mock_get_config.return_value = SimpleNamespace(
@@ -129,6 +146,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
             rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
         )
         mock_allocator_class.get_instance.return_value = MagicMock()
+        bind_sleep_backend(worker)
         NPUWorker.wake_up(worker, tags=["kv_cache"])
 
     assert runner.recovery_calls == 0
@@ -144,12 +162,13 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     worker.model_runner = SimpleNamespace(model=model)
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()
+    bind_sleep_backend(worker)
     return worker
 
 
 @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-@patch("vllm_ascend.worker.worker.CaMemAllocator")
+@patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
 def test_level1_sleep_does_not_cpu_backup_hadamard(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
@@ -174,7 +193,7 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 
 @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-@patch("vllm_ascend.worker.worker.CaMemAllocator")
+@patch("vllm_ascend.device_allocator.sleep_runtime.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
 def test_level2_sleep_still_cpu_backups_named_buffers(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
