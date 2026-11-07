@@ -7,12 +7,14 @@ from vllm_ascend.device.device_config import (
     check_ascend_device_type,
     get_ascend_device_type,
     get_device_config,
+    uses_native_int8_sparse_adaptor,
 )
 from vllm_ascend.device.hardware import (
     AscendDeviceType,
     device_type_from_runtime_soc,
     device_type_from_soc_version,
 )
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_hardware_profile
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +22,22 @@ def clear_device_config_cache():
     get_device_config.cache_clear()
     yield
     get_device_config.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "device,expected",
+    [
+        (AscendDeviceType.A2, False),
+        (AscendDeviceType.A3, True),
+        (AscendDeviceType.A5, False),
+        (AscendDeviceType._310P, False),
+    ],
+)
+def test_native_int8_sparse_adaptor_selection_preserves_release_profiles(device, expected):
+    profile = get_hardware_profile(device)
+    assert uses_native_int8_sparse_adaptor(profile) is expected
+    if device == AscendDeviceType.A3:
+        assert profile.device_adaptor_family is DeviceAdaptorFamily.STANDARD
 
 
 @pytest.mark.parametrize(
