@@ -4,12 +4,15 @@
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
+from vllm_ascend.models.deepseek_v41 import model as model_mod
+from vllm_ascend.models.deepseek_v41.decoder_replay_sp import SPReplayPlan
+from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM, DeepseekV41Model
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
@@ -42,6 +45,42 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     replay = replay_mod.make_decoder_replay(model, config)
     assert replay is not None
     assert model.decoder_replay_start == 1
+
+
+@pytest.mark.parametrize(
+    ("runner_v2", "pcp_size", "adaptive", "enabled"),
+    [(True, 1, False, True), (False, 1, False, False), (True, 2, False, False), (True, 1, True, False)],
+)
+def test_sp_decoder_replay_requires_host_known_mrv2_layout(runner_v2, pcp_size, adaptive, enabled):
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=128, engram_layer_ids=[]),
+        end_layer=3,
+        use_sequence_parallel=True,
+        _run_replay_layers=lambda *states: states,
+        topk_indices_buffer=torch.empty(8, 2),
+        candidate_indices_buffer=torch.empty(8, 2),
+        candidate_lengths_buffer=torch.empty(8),
+        topk_lengths_buffer=torch.empty(8),
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=runner_v2,
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        speculative_config=SimpleNamespace(
+            draft_model_config=None, enable_adaptive_verification=adaptive, use_dspark=lambda: True
+        ),
+        lora_config=None,
+    )
+    replay = replay_mod.make_decoder_replay(model, config)
+    assert (replay is not None) == enabled
+    if enabled:
+        assert replay.sequence_parallel
 
 
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
@@ -143,6 +182,171 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert replay(hidden, None) == (hidden, None)
     assert entered == [True, False]
     assert torch.equal(buffer, torch.arange(6))
+
+
+@pytest.fixture(params=[False, True], ids=["non_sp", "sp"])
+def compiled_replay_model(monkeypatch, request):
+    class Layer(torch.nn.Module):
+        engram = None
+
+        def __init__(self, index):
+            super().__init__()
+            self.layer_idx = index
+            self.weight = torch.nn.Parameter(torch.eye(3) * (index + 2), requires_grad=False)
+
+        def forward(self, positions, hidden, mix, unused, input_ids):
+            return torch.nn.functional.linear(hidden, self.weight), mix + 1
+
+        @staticmethod
+        def hc_collapse(hidden, mix):
+            return hidden.mean(dim=1)
+
+    model = DeepseekV41Model.__new__(DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    model.hc_mult = 1
+    model.use_sequence_parallel = request.param
+    model._mtp_hidden_buffer = None
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model.layers = torch.nn.ModuleList(Layer(i) for i in range(3))
+    model.norm = torch.nn.Identity()
+    model.end_layer = 3
+    model.start_layer = 0
+    model.decoder_replay_start = 1
+    model.aux_hidden_state_layers = (1, 3)
+    replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
+    replay.sequence_parallel = model.use_sequence_parallel
+    model.decoder_replay_layers = replay
+    # One-rank SP isolates the compile dispatch. Multi-rank data movement is
+    # covered separately by the real Gloo tests.
+    monkeypatch.setattr(model_mod, "is_forward_context_available", lambda: False)
+    monkeypatch.setattr(model_mod.envs, "VLLM_MOE_SKIP_PADDING", False)
+    monkeypatch.setattr(model_mod, "sp_shard", lambda tensor: tensor.clone())
+    monkeypatch.setattr(model_mod, "sp_all_gather", lambda tensor: tensor.clone())
+    monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(device_group=None))
+    monkeypatch.setattr(torch.distributed, "all_to_all_single", lambda output, source, **kwargs: output.copy_(source))
+    graphs, compiled_calls = [], []
+
+    def backend(graph, example_inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    # Match vLLM's unguarded dispatch: runtime state changes must be handled
+    # outside the compiled entry, without relying on Dynamo recompilation.
+    compiled = torch.compile(
+        model.forward,
+        backend=backend,
+        fullgraph=True,
+        options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe},
+    )
+
+    def compiled_entry(self, *args, **kwargs):
+        compiled_calls.append(True)
+        return compiled(*args, **kwargs)
+
+    # Model the decorated backbone's __call__ with a real compiled callable;
+    # the outer production forward chooses __call__ versus raw forward.
+    monkeypatch.setattr(DeepseekV41Model, "__call__", compiled_entry)
+    causal = SimpleNamespace(model=model)
+    embeddings = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+
+    def forward(**kwargs):
+        return AscendDeepseekV41LLMForCausalLM.forward(
+            causal,
+            torch.arange(6),
+            torch.arange(6),
+            inputs_embeds=embeddings,
+            engram_lookups={},
+            engram_mask=torch.empty(0, dtype=torch.bool),
+            **kwargs,
+        )
+
+    try:
+        yield SimpleNamespace(
+            model=model, replay=replay, forward=forward, graphs=graphs, calls=compiled_calls, embeddings=embeddings
+        )
+    finally:
+        torch._dynamo.reset()
+
+
+@pytest.mark.parametrize("replay_enabled", [False, True])
+def test_decode_compiles_every_layer_including_decoder_tail(compiled_replay_model, replay_enabled):
+    case = compiled_replay_model
+    if not replay_enabled:
+        case.model.decoder_replay_layers = None
+    output, aux = case.forward()
+    torch.testing.assert_close(output, case.embeddings * 24)
+    torch.testing.assert_close(aux[0], case.embeddings)
+    torch.testing.assert_close(aux[1], case.embeddings * 6)
+    assert len(case.graphs) == 1
+    # Check the graph contents, not just that compile() returned the right
+    # values: an opaque replay op must not swallow the two late linear layers.
+    linears = [node for node in case.graphs[0].graph.nodes if node.target == torch.nn.functional.linear]
+    assert len(linears) == len(case.model.layers)
+    assert all("dsv41_sp_decoder_replay" not in str(node.target) for node in case.graphs[0].graph.nodes)
+
+
+def test_capture_engram_inputs_keep_compiled_entry(compiled_replay_model):
+    case = compiled_replay_model
+    entered = []
+
+    @contextmanager
+    def captured_engram_inputs(ids, positions, lookback, offsets, valid_tokens):
+        entered.append((offsets.tolist(), valid_tokens.item()))
+        yield {"engram_lookups": {}, "engram_mask": torch.empty(0, dtype=torch.bool)}
+
+    case.model.captured_engram_inputs = captured_engram_inputs
+    output, _ = case.forward(engram_query_start_loc=torch.tensor([0, 6]), engram_valid_token_count=torch.tensor(6))
+    torch.testing.assert_close(output, case.embeddings * 24)
+    assert entered == [([0, 6], 6)]
+    assert len(case.calls) == 1
+    assert sum(node.target == torch.nn.functional.linear for node in case.graphs[0].graph.nodes) == 3
+
+
+def test_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_replay_model):
+    case = compiled_replay_model
+    case.forward()  # compile ordinary warmup/decode with no replay plan
+    contexts = []
+
+    @contextmanager
+    def decoder_context():
+        contexts.append("enter")
+        try:
+            yield
+        finally:
+            contexts.append("exit")
+
+    for offsets, kept, rows in (([0, 6], [2], [4, 5]), ([0, 1, 6], [1, 2], [0, 4, 5])):
+        case.replay.rows = torch.tensor(rows)
+        case.replay.num_actual_rows = len(rows)
+        case.replay.context_factory = decoder_context
+        if case.model.use_sequence_parallel:
+            case.replay.sp_plan = SPReplayPlan.build(
+                np.array(offsets), np.array(kept), 6, len(rows), 1, 0, torch.device("cpu")
+            )
+        output, aux = case.forward()
+        expected = torch.zeros_like(case.embeddings)
+        expected[rows] = case.embeddings[rows] * 24
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(aux[0], case.embeddings)
+        torch.testing.assert_close(aux[1], expected / 4)
+        assert len(case.calls) == 1
+    assert contexts == ["enter", "exit", "enter", "exit"]
+
+    # An untrimmed DP peer must enter its decoder context too, even without
+    # local rows to compact. It must not reuse the original compiled metadata.
+    case.replay.rows = None
+    case.replay.sp_plan = None
+    output, _ = case.forward()
+    torch.testing.assert_close(output, case.embeddings * 24)
+    assert len(case.calls) == 1
+    assert contexts[-2:] == ["enter", "exit"]
+
+    # prepare() clears this context for the next ordinary decode/capture.
+    case.replay.context_factory = None
+    output, _ = case.forward()
+    torch.testing.assert_close(output, case.embeddings * 24)
+    assert len(case.calls) == 2
+    assert len(case.graphs) == 1
 
 
 def test_model_replays_only_layers_after_kv_sources(monkeypatch):

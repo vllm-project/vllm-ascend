@@ -1566,7 +1566,15 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         last_layer = None
         aux_hidden_states = []
         for layer in self.layers:
-            if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
+            # Active replay enters through the uncompiled model forward.
+            # Warmup/decode trace every layer below without reading the mutable
+            # per-forward plan or hiding the decoder tail inside a custom op.
+            if (
+                self.decoder_replay_layers is not None
+                and layer.layer_idx == self.decoder_replay_start
+                and not torch.compiler.is_compiling()
+                and self.decoder_replay_layers.context_factory is not None
+            ):
                 hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                     hidden_states, pre_mix, positions, input_ids
                 )
@@ -1739,11 +1747,18 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_query_start_loc=None,
         engram_valid_token_count=None,
     ):
+        model_forward = self.model
+        replay = self.model.decoder_replay_layers
+        if replay is not None and replay.context_factory is not None:
+            # prepare() activates this context only for an eager replay batch,
+            # including untrimmed DP peers. Bypass the no-guards compiled entry
+            # only for these forwards; ordinary decode/warmup still use __call__.
+            model_forward = self.model.forward
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count
             ) as graph_inputs:
-                return self.model(
+                return model_forward(
                     input_ids,
                     positions,
                     intermediate_tensors,
@@ -1751,7 +1766,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     lookback_token_ids=lookback_token_ids,
                     **graph_inputs,
                 )
-        return self.model(
+        return model_forward(
             input_ids,
             positions,
             intermediate_tensors,

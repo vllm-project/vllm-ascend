@@ -3,16 +3,17 @@
 
 """Exercise replay coordination with real DP/PCP collectives on four CPUs."""
 
-import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import vllm.v1.utils as vllm_v1_utils
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
@@ -80,6 +81,15 @@ def _distributed_replay_worker(rank, init_method):
     dp = SimpleNamespace(cpu_group=dp_groups[pcp_rank], rank_in_group=dp_rank)
     try:
         with pytest.MonkeyPatch.context() as patch:
+            # copy_to_gpu() reads this global even when the buffer constructor
+            # received pin_memory=False. Keep forked CPU workers out of the
+            # accelerator's pinned-memory allocator on NPU-equipped hosts too.
+            patch.setattr(vllm_v1_utils, "PIN_MEMORY", False)
+            patch.setattr(
+                torch.Tensor,
+                "pin_memory",
+                Mock(side_effect=AssertionError("CPU replay must not pin accelerator memory")),
+            )
             patch.setattr(replay_mod, "get_dp_group", lambda: dp)
             patch.setattr(replay_mod, "get_pcp_group", lambda: pcp)
             patch.setattr(replay_mod, "should_skip_allreduce_across_dp_group", lambda _: False)
@@ -179,8 +189,10 @@ def _distributed_replay_worker(rank, init_method):
         dist.destroy_process_group()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="fork inherits the CPU test dependency mocks")
-def test_pcp_dp_replay_collectives(tmp_path):
+@pytest.mark.skipif("fork" not in mp.get_all_start_methods(), reason="fork inherits the CPU test dependency mocks")
+@pytest.mark.parametrize("pin_memory_available", [False, True])
+def test_pcp_dp_replay_collectives(tmp_path, monkeypatch, pin_memory_available):
+    monkeypatch.setattr(vllm_v1_utils, "PIN_MEMORY", pin_memory_available)
     mp.start_processes(
         _distributed_replay_worker,
         args=(f"file://{tmp_path / 'rendezvous'}",),
