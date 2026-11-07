@@ -289,13 +289,30 @@ class BaseKVPoolScheduler(ABC):
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.info(
-            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
-            request.request_id,
-            request.num_tokens,
-            num_external_hit_tokens,
-            need_to_allocate,
-        )
+        if self.layerwise_offload:
+            # Reused layers must restore the whole pooled prefix.
+            layerwise_load_tokens = num_external_hit_tokens if self.use_eagle else store_skip_tokens
+            independent_layer_load_tokens = max(0, layerwise_load_tokens - num_computed_tokens)
+            logger.info(
+                "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, usable hit tokens: %d, "
+                "need to allocate: %d, independent layer load tokens per layer: %d, "
+                "reused layer load tokens per layer: %d",
+                request.request_id,
+                request.num_tokens,
+                store_skip_tokens,
+                num_external_hit_tokens,
+                need_to_allocate,
+                independent_layer_load_tokens,
+                layerwise_load_tokens,
+            )
+        else:
+            logger.info(
+                "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
+                request.request_id,
+                request.num_tokens,
+                num_external_hit_tokens,
+                need_to_allocate,
+            )
 
         process_hit_without_alloc = self._process_hit_without_alloc(store_skip_tokens)
         if need_to_allocate <= 0 and not process_hit_without_alloc:
