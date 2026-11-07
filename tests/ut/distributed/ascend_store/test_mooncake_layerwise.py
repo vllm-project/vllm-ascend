@@ -222,6 +222,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             grouped_block_size=worker.grouped_block_size,
         )
         worker.use_block_key_layerwise = True
+        worker.use_layerwise_transfer = True
         worker.layerwise_offload = False
         worker.independent_layers = []
         worker.page_size_bytes = 60

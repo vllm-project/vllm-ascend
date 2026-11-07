@@ -260,10 +260,15 @@ class LayerBatchBuilder:
             return self._build_key_major_shared(task, is_save)
 
         total = 0
+        public_blocks = {}
         for block_range in task.block_ranges:
             total += block_range.end_block - block_range.start_block
             if block_range.partial_block_index is not None:
                 total += 1
+            request = block_range.request
+            if is_save and task.group_id in request.public_save_blocks and id(request) not in public_blocks:
+                public_blocks[id(request)] = request.public_save_blocks[task.group_id]
+                total += len(public_blocks[id(request)][0])
 
         block_ids_arr, block_gvas_arr = self._ensure_buf(total)
         req_ids: list[str] = []
@@ -314,6 +319,12 @@ class LayerBatchBuilder:
                 block_ids_arr[offset] = block_ids_np[block_range.partial_block_index]
                 block_gvas_arr[offset] = partial_block_gva
                 offset += 1
+
+            public = public_blocks.pop(id(request), None)
+            if public is not None:
+                end = offset + len(public[0])
+                block_ids_arr[offset:end], block_gvas_arr[offset:end] = public
+                offset = end
 
         block_ids_slice = block_ids_arr[:offset]
         block_gvas_slice = block_gvas_arr[:offset]

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import KVTransferConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import layerwise_cache_layout
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -26,7 +28,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 @pytest.mark.parametrize("pool", [4, 16])
@@ -308,6 +310,56 @@ def test_misaligned_logical_block_is_rejected():
     )
     with pytest.raises(ValueError, match="divisible"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
+
+
+@pytest.mark.parametrize("pool", [4, 16])
+def test_offload_pool_budget_uses_final_physical_assignments(pool, monkeypatch):
+    monkeypatch.setattr(
+        layerwise_cache_layout,
+        "get_backend_class",
+        lambda _: SimpleNamespace(layerwise_data_plane="gva"),
+    )
+    config = make_config()
+    config.model_config.hf_text_config = SimpleNamespace(num_hidden_layers=8)
+    config.model_config.get_num_layers = lambda _: 8
+    config.parallel_config.tensor_parallel_size = 8
+    config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.rank = 0
+    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.enable_prefix_caching = True
+    config.additional_config = {}
+    config.speculative_config = None
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "backend": "memcache",
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        },
+    )
+    specs = {}
+    for first_layer in (0, 4):
+        for name, spec in make_specs(pool).items():
+            layer = int(name.split(".")[2])
+            name = name.replace(f".layers.{layer}.", f".layers.{layer + first_layer}.")
+            specs[name] = (
+                replace(spec, mamba_cache_mode="align", num_speculative_blocks=5)
+                if isinstance(spec, MambaSpec)
+                else spec
+            )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    cost = get_glm5_next_pool_bytes_per_block(groups, config)
+    assert 0 < cost < get_glm5_next_pool_bytes_per_block(groups)
+    if not vllm_version_is("0.32.0"):
+        from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+        assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(config, groups) == cost
+    plan = get_glm5_next_kv_cache_config(config, groups, 17 * cost)
+    assert plan.num_blocks == 17
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == 17 * cost
+    assert get_glm5_next_pool_bytes_per_block(plan.kv_cache_groups, config) == cost
 
 
 @pytest.mark.parametrize("use_sparse", [False, True])

@@ -92,15 +92,21 @@ def transferred(w, is_save):
     if not tasks:
         return {}
     data = builder.build_shared(tasks[0], is_save=is_save)
-    return dict(zip(data.block_ids_arr.tolist(), data.block_gvas_arr.tolist()))
+    if is_save:
+        # Check both destinations before selecting the private restore pages.
+        keys = {key for block_range in tasks[0].block_ranges for key in block_range.request.save_keys}
+        assert {w.m_store.data[key] for key in keys} == set(data.block_gvas_arr.tolist())
+    addresses: dict[int, int] = {}
+    for block, gva in zip(data.block_ids_arr.tolist(), data.block_gvas_arr.tolist()):
+        # Public publication is appended after the request's private pages.
+        addresses.setdefault(block, gva)
+    return addresses
 
 
 def save(w, meta):
     w._process_save_for_layer_batch([meta], 1)
     w._alloc_gvas_for_save([meta])
     addresses = transferred(w, True)
-    # Every key being committed must have a transfer, not just an allocation.
-    assert set(w.m_store.data[k] for k in meta.save_keys) == set(addresses.values())
     w.m_store.committed.update(meta.save_keys)
     return addresses
 
@@ -123,13 +129,15 @@ class SnapshotTests(unittest.TestCase):
         w._process_load_for_layer_batch([m], 1)
         self.assertEqual(transferred(w, False), saved)
         self.assertNotIn("full:h0", w.m_store.queries)
-        save(w, m)
+        saved = save(w, m)
         self.assertIn("full:h0", w.m_store.committed)
         self.assertEqual(t.num_saved_tokens, 128)
         reset(w)
         m = step(t, 133, ["h0"], 131)
         w._prepare_load_gvas([m])
-        self.assertIn("full:h0", w.m_store.queries)
+        w._process_load_for_layer_batch([m], 1)
+        self.assertEqual(transferred(w, False), saved)
+        self.assertNotIn("full:h0", w.m_store.queries)
         save(w, m)
         self.assertNotIn("full:h0", m.save_keys)
 

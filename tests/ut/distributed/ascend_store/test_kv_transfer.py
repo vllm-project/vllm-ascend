@@ -1210,6 +1210,28 @@ class TestLayerBatchBuilder(unittest.TestCase):
         np.testing.assert_array_equal(result.size_array, [10, 20, 10, 20])
         np.testing.assert_array_equal(result.gvas_array, [10030, 10040, 20030, 20040])
 
+    def test_public_payload_is_sent_once_with_private_payload(self):
+        request = self._make_request()
+        request.public_save_blocks = {0: (np.asarray([2]), np.asarray([50000]))}
+        task = LayerTransferTask(
+            layer_id=1,
+            layer_idx_in_group=1,
+            block_ranges=[LayerBlockRange(request, 0, 1), LayerBlockRange(request, 1, 2)],
+        )
+        builder = self._make_builder()
+        loaded = builder.build_shared(task, is_save=False)
+        np.testing.assert_array_equal(loaded.block_ids_arr, [2, 3])
+        np.testing.assert_array_equal(loaded.block_gvas_arr, [30000, 40000])
+
+        saved = builder.build_shared(task)
+        self.assertEqual(len(saved.block_ids_arr), 3)
+        self.assertEqual(set(zip(saved.block_ids_arr, saved.block_gvas_arr)), {(2, 10000), (3, 20000), (2, 50000)})
+        sent = builder.build_addrs(saved, 1)
+        segments = set(zip(sent.addr_array, sent.size_array, sent.gvas_array))
+        self.assertEqual(len(sent.addr_array), 6)
+        self.assertIn((3020, 10, 50030), segments)
+        self.assertIn((4040, 20, 50040), segments)
+
     def test_filters_and_deduplicates_blocks(self):
         request = self._make_request(
             block_ids_by_group=[[1, 1, 2]],
