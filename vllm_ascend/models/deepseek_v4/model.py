@@ -32,7 +32,11 @@ import torch
 import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.33.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -97,7 +101,6 @@ from vllm_ascend.utils import (
     enable_custom_op,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
-    vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -107,14 +110,6 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
-
-# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.32.0 lane still ships it under
-# `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.32.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
-else:
-    from transformers import DeepseekV4Config
 
 sequence_parallel_chunk = sp_shard
 
@@ -341,8 +336,7 @@ class DeepseekV4MoE(nn.Module):
 
         # vLLM main folded `num_hash_layers` into the per-layer `mlp_layer_types`;
         # judge Hash-MoE per layer (it need not be a contiguous prefix) and fall
-        # back to the legacy count on the v0.32.0 lane, which has no
-        # `mlp_layer_types`.
+        # back to the legacy count for checkpoints without `mlp_layer_types`.
         if is_draft_layer:
             self.hash = False
         else:
@@ -702,18 +696,17 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
-        if not vllm_version_is("0.32.0"):
-            # vLLM #61392 folded `compress_ratios` into `layer_types`; the
-            # Ascend helpers and the KV-store metadata still index the legacy
-            # field, so restore it.
-            if getattr(config, "compress_ratios", None) is None:
-                # `vllm.transformers_utils.deepseek_v4_utils` only exists on
-                # main (added by #61392), so keep the import lazy.
-                from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+        # vLLM #61392 folded `compress_ratios` into `layer_types`; the
+        # Ascend helpers and the KV-store metadata still index the legacy
+        # field, so restore it.
+        if getattr(config, "compress_ratios", None) is None:
+            # `vllm.transformers_utils.deepseek_v4_utils` only exists on
+            # main (added by #61392), so keep the import lazy.
+            from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
-                compress_ratios = get_compress_ratios(config)
-                if compress_ratios:
-                    config.compress_ratios = list(compress_ratios)
+            compress_ratios = get_compress_ratios(config)
+            if compress_ratios:
+                config.compress_ratios = list(compress_ratios)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config

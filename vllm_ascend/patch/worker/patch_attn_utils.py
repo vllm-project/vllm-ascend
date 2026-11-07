@@ -27,10 +27,10 @@ def _get_ascend_sfa_indexer_backend(_self):
 
 
 # vLLM main (#63384) moved OLMoE to the Transformers backend, whose
-# `vllm_attention_forward` bakes a layout-dependent `aten.view`. v0.32.0 still
+# `vllm_attention_forward` bakes a layout-dependent `aten.view`. v0.33.0 still
 # uses the native OLMoE implementation, where this mismatch cannot happen, so
 # the release lane gets none of this patch.
-if not vllm_version_is("0.32.0"):
+if not vllm_version_is("0.33.0"):
     _VLLM_ATTENTION_IMPL = "vllm"
 
     @cache

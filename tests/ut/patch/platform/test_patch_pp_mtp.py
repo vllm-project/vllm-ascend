@@ -416,9 +416,9 @@ def test_pp_mtp_spec_token_id_edge_cases():
     _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
     assert finished.spec_token_ids == ["keep"]
     assert empty_sampled.spec_token_ids == []
-    # Main trims to the validated prefix plus one lookahead token; 0.32.0 returns
+    # Main trims to the validated prefix plus one lookahead token; 0.33.0 returns
     # only the validated prefix.
-    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.32.0") else [401, 402])
+    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.33.0") else [401, 402])
 
 
 def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):

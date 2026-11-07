@@ -1126,8 +1126,8 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
-            if vllm_version_is("0.32.0"):
-                # 0.32.0 rejects drafts verified against a permissive grammar
+            if vllm_version_is("0.33.0"):
+                # 0.33.0 rejects drafts verified against a permissive grammar
                 # row; main moved that bookkeeping into the scheduler and the
                 # draft-token handler.
                 import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
@@ -1145,7 +1145,7 @@ class NPUModelRunner(GPUModelRunner):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            if vllm_version_is("0.32.0"):
+            if vllm_version_is("0.33.0"):
                 sampler_output = self.rejection_sampler(
                     logits,
                     input_batch,
@@ -1371,8 +1371,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc,
             )
         else:
-            # Main hands non-last PP ranks the drafts received from the last
-            # rank; 0.32.0 has no such argument, hence the None-only path above.
+            # Non-last PP ranks receive drafts from the last rank on both versions.
             super().postprocess_sampled(
                 idx_mapping,
                 sampled_tokens,

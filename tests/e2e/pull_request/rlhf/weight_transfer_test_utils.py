@@ -30,8 +30,6 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from vllm_ascend.utils import vllm_version_is
-
 
 @dataclass(frozen=True)
 class WeightUpdateModelCase:
@@ -330,11 +328,6 @@ def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
 FIXED_WEIGHT_SEED = 20260915
 
 
-def _source_metadata(func):
-    """vLLM main (#63256) requires a cached property; v0.32.0 still calls it."""
-    return func if vllm_version_is("0.32.0") else cached_property(func)
-
-
 class FixedRandomWeightSource(WeightSource):
     """Generate every reduced-model parameter deterministically on demand.
 
@@ -438,7 +431,7 @@ class FixedRandomWeightSource(WeightSource):
             return tensor.uniform_(0.9, 1.1)
         return tensor.uniform_(-0.02, 0.02)
 
-    @_source_metadata
+    @cached_property
     def metadata(self) -> list[ParamMeta]:
         return [ParamMeta(name, dtype, shape) for name, shape, dtype in self._parameters]
 
@@ -447,11 +440,9 @@ class FixedRandomWeightSource(WeightSource):
             for name, shape, dtype in self._parameters:
                 yield name, self._make_tensor(name, shape, dtype)
 
-    if not vllm_version_is("0.32.0"):
-
-        def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
-            """vLLM main drives updates through `iter_full()` instead of `__iter__`."""
-            yield from self.__iter__()
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """vLLM main drives updates through `iter_full()` instead of `__iter__`."""
+        yield from self.__iter__()
 
     @property
     def case_id(self) -> str:
@@ -495,8 +486,7 @@ def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
     raises ``ValueError: Tensor ... exceeds buffer_size_bytes``. Keep the 1 GiB
     floor and add 128 MiB of headroom above the largest tensor.
     """
-    # `metadata` is a method on v0.32.0 and a cached property on main.
-    metadata = source.metadata() if vllm_version_is("0.32.0") else source.metadata
+    metadata = source.metadata
     max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
     return max(max_tensor_bytes + 128 * 2**20, 2**30)
 

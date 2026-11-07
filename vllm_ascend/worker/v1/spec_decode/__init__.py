@@ -18,7 +18,6 @@
 #
 
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer, is_dflash2_draft
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
@@ -37,11 +36,6 @@ from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProp
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
-# vLLM #61701 removed Medusa (and MLP speculator) support on main; the v0.32.0
-# lane still ships `AscendMedusaProposer`.
-if vllm_version_is("0.32.0"):
-    from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer
-
 
 def get_spec_decode_method(method, vllm_config, device, runner):
     if method == "ngram":
@@ -51,11 +45,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
     elif method == "suffix":
         return AscendSuffixDecodingProposer(vllm_config, runner)
     elif method == "medusa":
-        if vllm_version_is("0.32.0"):
-            return AscendMedusaProposer(vllm_config, device)
-        raise ValueError(
-            "Medusa speculative decoding was removed in vLLM (vLLM #61701) and is only supported on the v0.32.0 lane."
-        )
+        raise ValueError("Medusa speculative decoding was removed in vLLM (vLLM #61701).")
     elif method == "dspark":
         return AscendDSparkProposer(vllm_config, device, runner)
     elif method == "mtp" and vllm_config.speculative_config.use_gemma4_mtp():

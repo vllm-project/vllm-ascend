@@ -65,7 +65,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -604,21 +603,20 @@ class NPUPlatform(Platform):
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
-        if not vllm_version_is("0.32.0"):
-            from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+        from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
-            seen: set[int] = set()
-            for config in (
-                getattr(vllm_config.model_config, "hf_config", None),
-                getattr(vllm_config.model_config, "hf_text_config", None),
-            ):
-                if config is None or id(config) in seen:
-                    continue
-                seen.add(id(config))
-                if getattr(config, "compress_ratios", None) is None:
-                    ratios = get_compress_ratios(config)
-                    if ratios:
-                        config.compress_ratios = list(ratios)
+        seen: set[int] = set()
+        for config in (
+            getattr(vllm_config.model_config, "hf_config", None),
+            getattr(vllm_config.model_config, "hf_text_config", None),
+        ):
+            if config is None or id(config) in seen:
+                continue
+            seen.add(id(config))
+            if getattr(config, "compress_ratios", None) is None:
+                ratios = get_compress_ratios(config)
+                if ratios:
+                    config.compress_ratios = list(ratios)
 
         _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)

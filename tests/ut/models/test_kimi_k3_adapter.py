@@ -22,7 +22,6 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkModel,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -744,10 +743,6 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
         assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="The AMD specialized-decode hooks we inherit are main-only.",
-)
 def test_kimi_lm_initializes_specialized_decode(monkeypatch):
     from vllm.models.kimi_k3.amd.specialized_decode import runtime
 
@@ -786,10 +781,6 @@ def test_kimi_lm_initializes_specialized_decode(monkeypatch):
     assert model.specialized_decode is None
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="The AMD specialized-decode hooks we inherit are main-only.",
-)
 def test_kimi_lm_uses_ascend_hybrid_model_state():
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
@@ -799,10 +790,6 @@ def test_kimi_lm_uses_ascend_hybrid_model_state():
     assert model.get_model_state_cls() is AscendMambaHybridModelState
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="Upstream passes the specialized-decode step only on main.",
-)
 def test_kimi_model_forwards_specialized_decode_step(monkeypatch):
     seen = {}
     step = object()

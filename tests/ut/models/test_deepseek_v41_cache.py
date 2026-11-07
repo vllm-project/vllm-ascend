@@ -18,7 +18,10 @@ import torch
 import torch_npu
 from vllm.config import set_current_vllm_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
-from vllm.v1.core import kv_cache_utils
+
+# vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.33.0 lane still ships them in `kv_cache_utils`.
+from vllm.v1.core import kv_cache_planning, kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from tests.deepseek_v41_utils import (
@@ -57,18 +60,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
-
-# vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.32.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core import kv_cache_utils as kv_cache_planning
-else:
-    from vllm.v1.core import kv_cache_planning
-
-# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def _pool_bytes_per_block(runtime, groups):
@@ -84,8 +76,6 @@ def _max_memory_usage_bytes_from_groups(runtime, groups):
     the upstream formula; that formula sizes the pool through the builder hook,
     so feed it the Ascend V4.1 per-block cost.
     """
-    if not _UPSTREAM_MAX_MEMORY_TAKES_BUILDER:
-        return kv_cache_planning._max_memory_usage_bytes_from_groups(runtime, groups)
     builder = MagicMock()
     builder._get_pool_bytes_per_block.return_value = get_deepseek_v41_pool_bytes_per_block(groups)
     return kv_cache_planning._max_memory_usage_bytes_from_groups(builder, runtime, groups)

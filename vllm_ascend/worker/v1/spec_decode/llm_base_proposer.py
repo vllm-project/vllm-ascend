@@ -1222,7 +1222,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
         common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs_padded + 1]
-        if not vllm_version_is("0.32.0"):
+        if not vllm_version_is("0.33.0"):
             # seq_lens/query_start_loc were replaced above; drop cached layouts.
             common_attn_metadata.invalidate_cached_layout()  # type: ignore[attr-defined]
 
@@ -2080,7 +2080,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
-        if not vllm_version_is("0.32.0"):
+        if not vllm_version_is("0.33.0"):
             # seq_lens was advanced in place above; drop cached layouts.
             common_attn_metadata.invalidate_cached_layout()  # type: ignore[attr-defined]
         if common_attn_metadata.seq_lens_cpu is not None:
