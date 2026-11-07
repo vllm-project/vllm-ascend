@@ -488,7 +488,7 @@ def test_split_registration_excludes_swa_and_keeps_only_unpadded_payload(
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = cache_config
     worker.vllm_config = object()
-    captured = []
+    captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
     # No SWA entry is needed: bounded replay rebuilds it on the NPU.
