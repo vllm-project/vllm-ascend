@@ -16,7 +16,6 @@ test_cases:
       ASCEND_ENABLE_USE_FABRIC_MEM: "1"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
-      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
       PYTHONHASHSEED: "0"
     kv_pool:
       type: "mooncake"
@@ -33,6 +32,8 @@ test_cases:
         enable_ssd_offload: false
     server_cmd:
       # Disable the local prefix cache so repeated prompts exercise the pool.
+      - "--prefix-cache-retention-interval"
+      - "4096"
       - "--no-enable-prefix-caching"
       - "--no-disable-hybrid-kv-cache-manager"
       - "--max-model-len"
