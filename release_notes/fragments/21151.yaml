@@ -1,0 +1,8 @@
+pr: 21151
+entries:
+  - category: bugfix
+    text: >-
+      Bounded idle DP dummy batches during MRV1 DeepSeek V4.1 decoder replay
+      so they no longer force trimmed peers back to the full prefill
+      communication width.
+    model: deepseek-v4.1

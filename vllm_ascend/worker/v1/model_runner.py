@@ -3367,7 +3367,10 @@ class NPUModelRunner(GPUModelRunner):
         )
         trims = False
         kept_lens = np.empty(0, dtype=np.int32)
-        self._decoder_replay_num_actual_tokens = num_tokens
+        # Idle replicas must still participate in the decoder's EP collectives,
+        # but must not force trimmed peers back to the full prefill chunk width.
+        # This extent is used only if a replica actually enables replay below.
+        self._decoder_replay_num_actual_tokens = min(num_tokens, layers.window) if is_dummy else num_tokens
         if real_batch:
             assert common is not None
             num_reqs = self.input_batch.num_reqs
