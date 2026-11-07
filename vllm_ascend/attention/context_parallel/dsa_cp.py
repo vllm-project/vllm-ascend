@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar
+from weakref import WeakValueDictionary
 
 import torch
 from vllm.config import VllmConfig
@@ -516,7 +517,7 @@ class AscendDSAPCPImpl(AscendDSAImpl):
 
     supports_pcp: ClassVar[bool] = True
 
-    o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
+    o_proj_full_pools: ClassVar[WeakValueDictionary[Any, torch.Tensor]] = WeakValueDictionary()
     o_proj_weight_switch_pool_key = "dsa_pcp_o_proj"
 
     def __init__(self, *args, **kwargs):

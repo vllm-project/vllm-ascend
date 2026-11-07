@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, ClassVar, NamedTuple, TypeVar
+from weakref import WeakValueDictionary
 
 import torch
 from torch import nn
@@ -70,7 +71,7 @@ class AscendSFAPCPImpl(AscendSFAImpl):
 
     supports_pcp: ClassVar[bool] = True
 
-    o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
+    o_proj_full_pools: ClassVar[WeakValueDictionary[Any, torch.Tensor]] = WeakValueDictionary()
     o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
 
     def __init__(self, *args, **kwargs) -> None:

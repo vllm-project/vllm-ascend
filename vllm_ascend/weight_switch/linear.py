@@ -16,6 +16,7 @@
 #
 """Parallel-domain-agnostic full-weight switching for linear methods."""
 
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
@@ -428,7 +429,7 @@ class WeightSwitchMixin:
         layer: torch.nn.Module,
         config: WeightSwitchConfig,
         *,
-        pool: dict[Any, torch.Tensor] | None = None,
+        pool: MutableMapping[Any, torch.Tensor] | None = None,
         pool_key_prefix: Any | None = None,
         clone_local_tensors: bool = False,
     ) -> WeightSwitchState:
