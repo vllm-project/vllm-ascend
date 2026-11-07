@@ -92,8 +92,10 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL} ${PYTORCH_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ \
+        --only-binary=pillow \
         --extra-index-url ${ASCEND_INDEX_URL} \
         --extra-index-url ${PYTORCH_INDEX_URL} && \
+    python3 -c 'from PIL import features; assert features.check("avif"), "Pillow AVIF decoder is unavailable"' && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
