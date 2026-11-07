@@ -281,8 +281,12 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
 
 
 @pytest.mark.parametrize("speculative,adaptive", [(False, False), (True, False), (True, True)])
-def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
+@pytest.mark.parametrize("recover", [False, True])
+def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
     layer = _make_layer()
+    layer.use_gdn_recoverssm = recover
+    if recover:
+        layer.kv_cache += (torch.empty(2, 1, 4, 5),)
     packed = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     metadata = _make_mixed_metadata()
     metadata.num_prefills = 0
@@ -292,8 +296,10 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
     metadata.num_decode_tokens = 0 if speculative else 4
     metadata.num_spec_decodes = 2 if speculative else 0
     metadata.num_spec_decode_tokens = 4 if speculative else 0
-    metadata.spec_sequence_masks = torch.tensor([True, True]) if speculative else None
+    metadata.spec_sequence_masks = torch.tensor([True, True]) if speculative and not recover else None
     metadata.spec_state_indices_tensor = torch.tensor([0, 1], dtype=torch.int32)
+    if recover:
+        metadata.spec_state_indices_tensor = metadata.spec_state_indices_tensor[:, None]
     metadata.non_spec_state_indices_tensor = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
     metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
         spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
@@ -335,6 +341,14 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         assert kwargs["num_accepted_tokens"].tolist() == [3, 2]
         return v.clone(), kwargs["initial_state"]
 
+    def verify(q, k, v, g, beta, checkpoint_state, replay_cache, query_start_loc, state_indices, spec_query_len):
+        assert checkpoint_state is layer.kv_cache[1]
+        assert replay_cache is layer.kv_cache[2]
+        assert state_indices.shape == (2,) and spec_query_len == layer.num_spec + 1
+        torch.testing.assert_close(q, packed[:, :2].reshape(1, 4, 1, 2))
+        torch.testing.assert_close(k, packed[:, 2:4].reshape(1, 4, 1, 2))
+        return v.clone()
+
     # Reject the inherited concat helper for all real decode inputs.
     original = layer.rearrange_mixed_qkv.side_effect
     layer.rearrange_mixed_qkv.side_effect = lambda x: (
@@ -353,12 +367,16 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         patch(
             "vllm_ascend.ops.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
         ) as varlen_conv,
-        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent),
-        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent),
+        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent) as native,
+        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent) as upstream,
+        patch("vllm_ascend.ops.gdn.gdn_recoverssm_verify", side_effect=verify) as recovery,
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
     torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
+    assert recovery.call_count == int(speculative and recover)
+    assert native.call_count == int(not speculative or (not recover and not adaptive))
+    assert upstream.call_count == int(speculative and adaptive and not recover)
     if speculative:
         selected_conv = varlen_conv if adaptive else conv
         torch.testing.assert_close(

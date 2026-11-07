@@ -16,6 +16,12 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.device.device_config import is_950
+from vllm_ascend.ops.triton.mamba.recoverssm import (
+    compact_conv_state_kernel as _compact_conv_state_kernel,
+)
+from vllm_ascend.ops.triton.mamba.recoverssm import (
+    prepare_commit_plan_kernel as _prepare_commit_plan_kernel,
+)
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
 RECOVERSSM_COMMIT_HEAD_TILE = 2
@@ -95,6 +101,48 @@ def _kda_recurrent_step(
     tl.static_assert(raw_beta.dtype == tl.float32)
     correction *= tl.sigmoid(raw_beta)
     return state + correction[:, None] * normalized_k[None, :], correction
+
+
+@triton.jit
+def _load_kda_commit_record(
+    correction_ptr,
+    kg_ptr,
+    offs_k,
+    offs_v,
+    mask_k,
+    mask_v,
+    stride_correction_dim,
+    stride_kg_dim,
+    A,
+    dt_bias,
+    lower_bound,
+    K: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+    GROUPED: tl.constexpr = False,
+):
+    # Pointers already select the layer, block, head and token record.
+    k = tl.load(
+        kg_ptr + offs_k * stride_kg_dim,
+        mask=mask_k,
+        other=0.0 if mask_k is not None else None,
+    ).to(tl.float32)
+    correction = tl.load(
+        correction_ptr + offs_v * stride_correction_dim,
+        mask=mask_v,
+        other=0.0 if mask_v is not None else None,
+    ).to(tl.float32)
+    raw_g = tl.load(
+        kg_ptr + (K + offs_k) * stride_kg_dim,
+        mask=mask_k,
+        other=0.0 if mask_k is not None else None,
+    ).to(tl.float32)
+    if GROUPED:
+        normalized_k = _kda_l2_normalize_heads(k)
+    else:
+        normalized_k = _kda_l2_normalize(k)
+    gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+    tl.static_assert(gate.dtype == tl.float32)
+    return correction, normalized_k, tl.exp(gate)
 
 
 @triton.jit
@@ -200,7 +248,7 @@ def _kda_recoverssm_verify_kernel(
         mask=mask_k,
         other=0.0 if mask_k is not None else None,
     ).to(tl.float32)
-    for token_offset in range(tl.maximum(query_len - 1, 0)):
+    for token_offset in range(query_len):
         token = bos + token_offset
         q = tl.load(
             q_ptr + token * stride_q_token + pid_h * K + offs_k,
@@ -236,7 +284,10 @@ def _kda_recoverssm_verify_kernel(
         tl.static_assert(raw_beta.dtype == tl.float32)
         correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
         out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
-        state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
+        # The last KDA token only needs output and compact records.
+        # Its updated local state has no consumer.
+        if token_offset < query_len - 1:
+            state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
         tl.store(
             out_ptr + token * stride_out_token + pid_h * V + offs_v,
             out,
@@ -266,292 +317,13 @@ def _kda_recoverssm_verify_kernel(
                 raw_g,
                 mask=mask_k,
             )
-    if query_len > 0:
-        token_offset = query_len - 1
-        token = bos + token_offset
-        q = tl.load(
-            q_ptr + token * stride_q_token + pid_h * K + offs_k,
-            mask=mask_k,
-            other=0.0 if mask_k is not None else None,
-        ).to(tl.float32)
-        k = tl.load(
-            k_ptr + token * stride_k_token + pid_h * K + offs_k,
-            mask=mask_k,
-            other=0.0 if mask_k is not None else None,
-        ).to(tl.float32)
-        v = tl.load(
-            v_ptr + token * stride_v_token + pid_h * V + offs_v,
-            mask=mask_v,
-            other=0.0 if mask_v is not None else None,
-        ).to(tl.float32)
-        raw_g = tl.load(
-            raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
-            mask=mask_k,
-            other=0.0 if mask_k is not None else None,
-        ).to(tl.float32)
-        raw_beta = tl.load(
-            raw_beta_ptr + token * stride_beta_token + pid_h,
-        ).to(tl.float32)
-
-        q = _kda_l2_normalize(q) * (K**-0.5)
-        normalized_k = _kda_l2_normalize(k)
-        gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
-        tl.static_assert(gate.dtype == tl.float32)
-        decay = tl.exp(gate)
-        weighted_k = normalized_k * decay
-        weighted_q = q * decay
-        tl.static_assert(raw_beta.dtype == tl.float32)
-        correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
-        out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
-        tl.store(
-            out_ptr + token * stride_out_token + pid_h * V + offs_v,
-            out,
-            mask=mask_v,
-        )
-
-        correction_ptr = (
-            correction_cache_ptr
-            + state_idx * stride_correction_block
-            + pid_h * stride_correction_head
-            + token_offset * stride_correction_pos
-        )
-        tl.store(
-            correction_ptr + offs_v * stride_correction_dim,
-            correction,
-            mask=mask_v,
-        )
-        if pid_v == 0:
-            kg_ptr = kg_cache_ptr + state_idx * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
-            tl.store(
-                kg_ptr + offs_k * stride_kg_dim,
-                k,
-                mask=mask_k,
-            )
-            tl.store(
-                kg_ptr + (K + offs_k) * stride_kg_dim,
-                raw_g,
-                mask=mask_k,
-            )
-
-
-@triton.heuristics(
-    {
-        "HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None,
-        "ALIGN_MODE": lambda args: args["block_table_ptr"] is not None,
-    }
-)
-@triton.jit
-def _prepare_commit_plan_kernel(
-    num_accepted_ptr,
-    request_indices_ptr,
-    state_indices_ptr,
-    query_start_loc_ptr,
-    block_table_ptr,
-    num_computed_ptr,
-    commit_lens_ptr,
-    state_commit_lens_ptr,
-    boundary_commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    mamba_block_size,
-    block_table_width,
-    stride_num_accepted,
-    stride_request_indices,
-    stride_state_indices,
-    stride_query_start_loc,
-    stride_block_table_row,
-    stride_block_table_col,
-    stride_num_computed,
-    SPEC_QUERY_LEN: tl.constexpr,
-    HAS_REQUEST_INDICES: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
-):
-    spec_idx = tl.program_id(0)
-    source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices).to(tl.int64)
-    request_idx = spec_idx
-    if HAS_REQUEST_INDICES:
-        request_idx = tl.load(request_indices_ptr + spec_idx * stride_request_indices).to(tl.int64)
-    num_accepted = tl.load(num_accepted_ptr + request_idx * stride_num_accepted).to(tl.int32)
-    bos = tl.load(query_start_loc_ptr + spec_idx * stride_query_start_loc).to(tl.int64)
-    eos = tl.load(query_start_loc_ptr + (spec_idx + 1) * stride_query_start_loc).to(tl.int64)
-    query_len = (eos - bos).to(tl.int32)
-    commit_len = tl.minimum(tl.maximum(num_accepted, 0), query_len)
-    commit_len = tl.minimum(commit_len, SPEC_QUERY_LEN)
-
-    final_state_idx = source_state_idx
-    boundary_state_idx = null_block_id
-    boundary_recovery_len = 0
-    if ALIGN_MODE:
-        num_computed = tl.load(num_computed_ptr + request_idx * stride_num_computed).to(tl.int32)
-        final_num_computed = num_computed + commit_len
-        final_state_col = tl.minimum(final_num_computed // mamba_block_size, block_table_width - 1)
-        final_state_idx = tl.load(
-            block_table_ptr + request_idx * stride_block_table_row + final_state_col * stride_block_table_col
-        ).to(tl.int64)
-        next_boundary = (num_computed // mamba_block_size + 1) * mamba_block_size
-        crosses_boundary = final_num_computed >= next_boundary
-        boundary_recovery_len = next_boundary - num_computed
-        boundary_state_idx = tl.load(
-            block_table_ptr
-            + request_idx * stride_block_table_row
-            + (next_boundary // mamba_block_size - 1) * stride_block_table_col,
-            mask=crosses_boundary,
-            other=null_block_id,
-        ).to(tl.int64)
-    valid = (source_state_idx > null_block_id) & (commit_len > 0)
-    tl.store(commit_lens_ptr + spec_idx, tl.where(valid, commit_len, 0))
-    has_boundary = (boundary_state_idx > null_block_id) & (boundary_recovery_len > 0)
-    # Predicate once per request, rather than reading several metadata arrays in
-    # every head/value program merely to discover that it has no work.
-    tl.store(state_commit_lens_ptr + spec_idx, tl.where(valid & ~has_boundary, commit_len, 0))
-    tl.store(boundary_commit_lens_ptr + spec_idx, tl.where(valid & has_boundary, commit_len, 0))
-    tl.store(
-        final_state_indices_ptr + spec_idx,
-        tl.where(valid, final_state_idx, null_block_id),
-    )
-    tl.store(
-        boundary_state_indices_ptr + spec_idx,
-        tl.where(valid, boundary_state_idx, null_block_id),
-    )
-    tl.store(
-        boundary_recovery_lens_ptr + spec_idx,
-        tl.where(valid, boundary_recovery_len, 0),
-    )
-
-
-@triton.jit
-def _copy_conv_state_tile(
-    source_ptr,
-    final_ptr,
-    boundary_ptr,
-    channel_offsets,
-    history_offsets,
-    token_stride,
-    commit_len,
-    boundary_recovery_len,
-    mask,
-    boundary_valid,
-    ALIGN_MODE: tl.constexpr,
-):
-    final_values = tl.load(
-        source_ptr + channel_offsets + (commit_len - 1 + history_offsets) * token_stride,
-        mask=mask,
-    )
-    if ALIGN_MODE:
-        boundary_values = tl.load(
-            source_ptr + channel_offsets + (boundary_recovery_len - 1 + history_offsets) * token_stride,
-            mask=mask & boundary_valid,
-        )
-        tl.store(
-            boundary_ptr + channel_offsets + history_offsets * token_stride,
-            boundary_values,
-            mask=mask & boundary_valid,
-        )
-    tl.store(
-        final_ptr + channel_offsets + history_offsets * token_stride,
-        final_values,
-        mask=mask,
-    )
-
-
-@triton.jit
-def _compact_conv_state_kernel(
-    conv_state_ref_ptr,
-    conv_state_base_addrs_ptr,
-    conv_state_block_strides_ptr,
-    conv_state_dim_strides_ptr,
-    conv_state_token_strides_ptr,
-    state_indices_ptr,
-    commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    conv_dim,
-    conv_history_len,
-    stride_state_indices,
-    BLOCK_D: tl.constexpr,
-    BLOCK_HISTORY: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
-    DIM_STRIDE: tl.constexpr = None,
-    USE_1D_CHANNEL_GATHER: tl.constexpr = False,
-):
-    pid_d = tl.program_id(0)
-    pid_b = tl.program_id(1)
-    pid_l = tl.program_id(2)
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
-    if source_state_idx <= null_block_id:
-        return
-
-    commit_len = tl.load(commit_lens_ptr + pid_b)
-    if commit_len == 0:
-        return
-    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
-
-    if final_state_idx <= null_block_id:
-        return
-
-    base_addr = tl.load(conv_state_base_addrs_ptr + pid_l)
-    block_stride = tl.load(conv_state_block_strides_ptr + pid_l)
-    if DIM_STRIDE is None:
-        dim_stride = tl.load(conv_state_dim_strides_ptr + pid_l)
-    else:
-        dim_stride = DIM_STRIDE
-    token_stride = tl.load(conv_state_token_strides_ptr + pid_l)
-    conv_state_ptr = base_addr.to(tl.pointer_type(conv_state_ref_ptr.dtype.element_ty))
-    source_ptr = conv_state_ptr + source_state_idx * block_stride
-    final_ptr = conv_state_ptr + final_state_idx * block_stride
-
-    boundary_ptr = None
-    if ALIGN_MODE:
-        boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
-
-    if USE_1D_CHANNEL_GATHER and (DIM_STRIDE is not None and DIM_STRIDE != 1):
-        # A3 Triton 3.2 requires one-dimensional gathers for strided channels.
-        offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-        for history in tl.static_range(BLOCK_HISTORY):
-            mask = (offs_d < conv_dim) & (history < conv_history_len)
-            _copy_conv_state_tile(
-                source_ptr,
-                final_ptr,
-                boundary_ptr,
-                offs_d * dim_stride,
-                history,
-                token_stride,
-                commit_len,
-                boundary_recovery_len,
-                mask,
-                boundary_state_idx > null_block_id,
-                ALIGN_MODE,
-            )
-        return
-    offs_d = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D))[None, :]
-    offs_h = tl.arange(0, BLOCK_HISTORY)[:, None]
-    mask = (offs_d < conv_dim) & (offs_h < conv_history_len)
-    _copy_conv_state_tile(
-        source_ptr,
-        final_ptr,
-        boundary_ptr,
-        offs_d * dim_stride,
-        offs_h,
-        token_stride,
-        commit_len,
-        boundary_recovery_len,
-        mask,
-        boundary_state_idx > null_block_id,
-        ALIGN_MODE,
-    )
 
 
 @triton.jit
 def _accumulate_kda_commit_step(
     correction_cache_ptr,
     kg_cache_ptr,
-    token_offset,
+    token_record_pos,
     offs_k,
     offs_v,
     mask_k,
@@ -572,38 +344,28 @@ def _accumulate_kda_commit_step(
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
 ):
-    correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
-    kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
-    k = tl.load(
-        kg_ptr + offs_k * stride_kg_cache_dim,
-        mask=mask_k,
-        other=0.0 if mask_k is not None else None,
-    ).to(tl.float32)
-    correction = tl.load(
-        correction_ptr + offs_v * stride_correction_cache_dim,
-        mask=mask_v,
-        other=0.0 if mask_v is not None else None,
-    ).to(tl.float32)
-    raw_g = tl.load(
-        kg_ptr + (K + offs_k) * stride_kg_cache_dim,
-        mask=mask_k,
-        other=0.0 if mask_k is not None else None,
-    ).to(tl.float32)
-    normalized_k = _kda_l2_normalize(k)
-    gate = _kda_gate(
-        raw_g,
-        dt_bias,
-        A,
-        lower_bound,
-        USE_LOWER_BOUND,
+    correction_ptr = correction_cache_ptr + token_record_pos * stride_correction_cache_pos
+    kg_ptr = kg_cache_ptr + token_record_pos * stride_kg_cache_pos
+    correction, normalized_k, decay = _load_kda_commit_record(
+        correction_ptr=correction_ptr,
+        kg_ptr=kg_ptr,
+        offs_k=offs_k,
+        offs_v=offs_v,
+        mask_k=mask_k,
+        mask_v=mask_v,
+        stride_correction_dim=stride_correction_cache_dim,
+        stride_kg_dim=stride_kg_cache_dim,
+        A=A,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+        K=K,
+        USE_LOWER_BOUND=USE_LOWER_BOUND,
     )
-    tl.static_assert(gate.dtype == tl.float32)
-    decay = tl.exp(gate)
     weighted_k = normalized_k * final_decay
     final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
     final_decay *= decay
     if ALIGN_MODE:
-        before_boundary = token_offset < boundary_recovery_len
+        before_boundary = token_record_pos < boundary_recovery_len
         boundary_k = normalized_k * boundary_decay
         boundary_correction = tl.where(
             before_boundary,
@@ -730,12 +492,12 @@ def _commit_kda_state_kernel(
 
     # A3 runtime iteration bounds UB use; A5 retains its faster static expansion.
     if UNROLL_COMMIT:
-        for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-            if reverse_offset < commit_len:
+        for token_offset in tl.static_range(SPEC_QUERY_LEN):
+            if token_offset < commit_len:
                 final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
                     correction_cache_ptr,
                     kg_cache_ptr,
-                    commit_len - reverse_offset - 1,
+                    commit_len - token_offset - 1,
                     offs_k,
                     offs_v,
                     mask_k,
@@ -757,12 +519,12 @@ def _commit_kda_state_kernel(
                     ALIGN_MODE,
                 )
     else:
-        for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
-            if reverse_offset < commit_len:
+        for token_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
+            if token_offset < commit_len:
                 final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
                     correction_cache_ptr,
                     kg_cache_ptr,
-                    commit_len - reverse_offset - 1,
+                    commit_len - token_offset - 1,
                     offs_k,
                     offs_v,
                     mask_k,
@@ -945,35 +707,34 @@ def _commit_kda_state_grouped_kernel(
     if ALIGN_MODE:
         boundary_decay = tl.full([BH, BK], 1.0, tl.float32)
         boundary_correction = tl.zeros([BH, BV, BK], tl.float32)
-    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-        if reverse_offset < commit_len:
-            token_offset = commit_len - reverse_offset - 1
-            correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
-            kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
-            k = tl.load(
-                kg_ptr[:, None] + offs_k[None, :] * stride_kg_cache_dim,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            correction = tl.load(
-                correction_ptr[:, None] + offs_v[None, :] * stride_correction_cache_dim,
-                mask=mask_v,
-                other=0.0 if mask_v is not None else None,
-            ).to(tl.float32)
-            raw_g = tl.load(
-                kg_ptr[:, None] + (K + offs_k[None, :]) * stride_kg_cache_dim,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            normalized_k = _kda_l2_normalize_heads(k)
-            gate = _kda_gate(raw_g, dt_bias, A[:, None], lower_bound, USE_LOWER_BOUND)
-            tl.static_assert(gate.dtype == tl.float32)
-            decay = tl.exp(gate)
+    for token_offset in tl.static_range(SPEC_QUERY_LEN):
+        if token_offset < commit_len:
+            # Reverse token access order from commit_len.
+            token_record_pos = commit_len - token_offset - 1
+            correction_ptr = correction_cache_ptr + token_record_pos * stride_correction_cache_pos
+            kg_ptr = kg_cache_ptr + token_record_pos * stride_kg_cache_pos
+            grouped_A = A[:, None]
+            correction, normalized_k, decay = _load_kda_commit_record(
+                correction_ptr=correction_ptr[:, None],
+                kg_ptr=kg_ptr[:, None],
+                offs_k=offs_k[None, :],
+                offs_v=offs_v[None, :],
+                mask_k=mask_k,
+                mask_v=mask_v,
+                stride_correction_dim=stride_correction_cache_dim,
+                stride_kg_dim=stride_kg_cache_dim,
+                A=grouped_A,
+                dt_bias=dt_bias,
+                lower_bound=lower_bound,
+                K=K,
+                USE_LOWER_BOUND=USE_LOWER_BOUND,
+                GROUPED=True,
+            )
             weighted_k = normalized_k * final_decay
             final_correction = tl.fma(correction[:, :, None], weighted_k[:, None, :], final_correction)
             final_decay *= decay
             if ALIGN_MODE:
-                before_boundary = token_offset < boundary_recovery_len
+                before_boundary = token_record_pos < boundary_recovery_len
                 boundary_k = normalized_k * boundary_decay
                 boundary_correction = tl.where(
                     before_boundary,
