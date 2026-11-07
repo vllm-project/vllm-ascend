@@ -1388,6 +1388,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         "get_current_hardware_profile",
         lambda: get_hardware_profile(device_type),
     )
+    monkeypatch.setattr(dsa_v1, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
@@ -1431,42 +1432,17 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             )
         ],
     )
-    attn_group = AttentionGroup(
-        backend=AscendDSAC4Backend,
-        layer_names=[layer_name],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
     runner_kv_caches: list[Any] = []
 
-    # vLLM #51718 reworked upstream init_kv_cache to allocate generic 4D
-    # views via `allocate_kv_cache` + `create_kv_cache_views`; that layout
-    # cannot express the Ascend DSV4 page-strided cache. Route the
-    # allocation through the Ascend DSV4 path (the same wiring the v0.28.0
-    # patch applies) so the returned structure matches on both lanes.
+    # Exercise the unified allocator and backend runtime views through
+    # upstream initialization, including its binding/connector handoff.
     def _ascend_allocate_kv_cache(
         _kv_cache_config: KVCacheConfig,
         _device: torch.device,
         _layout: Any,
         _kernel_block_sizes: list[int],
     ) -> dict[str, Any]:
-        del _layout
-        raw_tensors = attn_utils._allocate_kv_cache(
-            _kv_cache_config,
-            shared_layers={},
-            device=_device,
-        )
-        # `_reshape_kv_cache_v2` expects the flat attention-group list,
-        # matching upstream v0.28.0 `init_kv_cache`, which flattens
-        # `attn_groups` before reshaping.
-        return attn_utils._reshape_kv_cache_v2(
-            attn_groups=[attn_group],
-            kv_cache_raw_tensors=raw_tensors,
-            cache_dtype=cache_config.cache_dtype,
-            kernel_block_sizes=_kernel_block_sizes,
-            shared_kv_cache_layers={},
-            kv_cache_config=_kv_cache_config,
-        )
+        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
 
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
@@ -1504,7 +1480,6 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert [component.dtype for component in cache_components] == [
         cache_dtype,
         scale_dtype,
-        *([cache_dtype] if device_type == AscendDeviceType.A5 else []),
     ]
     backing_storage = cache_components[0].untyped_storage().data_ptr()
     assert all(component.untyped_storage().data_ptr() == backing_storage for component in cache_components)
@@ -2698,12 +2673,12 @@ def test_mrv2_binding_wraps_only_v41_slots():
     other_layer = SimpleNamespace(kv_cache=None)
     other_layer.bind_kv_cache = lambda cache: setattr(other_layer, "kv_cache", cache)
     kv_caches = {
-        # V4.1 reshape output: one slot tensor per layer.
-        "model.layers.0.self_attn.attn": torch.zeros(4, 2),
+        # Unified V4.1 allocation exposes a list of runtime components.
+        "model.layers.0.self_attn.attn": [torch.zeros(4, 2)],
         # Non-V4.1 Ascend allocation: a (k, v) tuple.
         "model.layers.1.self_attn.attn": (torch.zeros(2, 2), torch.zeros(2, 2)),
-        # V4.1 indexer reshape output: a (kv, scale) tuple slot view.
-        "model.layers.2.self_attn.indexer.k_cache": (torch.zeros(2, 2), torch.zeros(2, 1)),
+        # The indexer binds its two components as a (kv, scale) tuple.
+        "model.layers.2.self_attn.indexer.k_cache": [torch.zeros(2, 2), torch.zeros(2, 1)],
     }
     forward_context = {
         "model.layers.0.self_attn.attn": v41_layer,
@@ -2717,7 +2692,7 @@ def test_mrv2_binding_wraps_only_v41_slots():
     # V4.1 slots dispatch to their own bind_kv_cache (kv_cache[0] contract)
     # while other layers keep the raw (k, v) allocation.
     assert isinstance(v41_layer.kv_cache, list)
-    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"]
+    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"][0]
     assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
     # The indexer consumer unpacks kv_cache[0] into (kv, scale).
     kv_view, scale_view = v41_indexer.kv_cache[0]

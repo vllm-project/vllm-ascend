@@ -69,6 +69,8 @@ When preparing or reviewing a PR, read the [PR testing requirements](docs/source
 
 ### Python Conventions
 
+Use ordinary module docstrings and focused code comments. When editing vLLM or vLLM-Ascend code, do not add `[Role]`, `[Invariants]`, `[Timeouts & Locks]`, `[Side-Effect Policy]`, or equivalent agent-maintenance headers, including when a parent workspace instruction requires them for its own components.
+
 - **Imports**: All imports at the top of the file. Valid exceptions:
     - Circular imports (use inline imports)
     - Lazy loading for worker/isolation processes

@@ -334,3 +334,33 @@ def test_clipped_swiglu_kernel_selection_per_adaptor(adaptor, uses_fused_kernel)
     gate = torch.clamp(x[..., :d], max=limit)
     up = torch.clamp(x[..., d:], min=-limit, max=limit)
     torch.testing.assert_close(out, gate * torch.sigmoid(alpha * gate) * (up + beta))
+
+
+def test_a5_indexer_reconstructs_combined_cache_from_shared_components():
+    from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
+
+    blocks, tokens, width, stride = 2, 4, 128, 768
+    backing = torch.zeros(64 + blocks * stride, dtype=torch.int8)
+    raw = backing[64:]
+    data, scales = create_cache_component_views(
+        raw,
+        [(blocks, tokens, 1, width), (blocks, tokens, 1, 1)],
+        [torch.int8, torch.float32],
+        stride,
+    )
+    state = torch.empty(0)
+    caches = [torch.empty(0), torch.empty(0), torch.empty(0), state, data, scales]
+    actual_state, actual_data, actual_scales, full = A5DeviceAdaptor.unpack_dsa_indexer_kv_cache(caches)
+    assert actual_state is state and actual_data is data and actual_scales is scales
+    assert full.shape == (blocks, tokens, 1, 132)
+    assert full.stride(0) == stride
+    assert full.data_ptr() == data.data_ptr()
+    forward = A5DeviceAdaptor.unpack_dsa_forward_kv_cache(caches, 4)
+    assert forward[3] is data and forward[4] is scales
+    assert forward[5].shape == full.shape
+    assert forward[5].stride() == full.stride()
+    assert forward[5].data_ptr() == full.data_ptr()
+    full[1].fill_(3)
+    expected = torch.zeros_like(backing)
+    expected[64 + stride : 64 + stride + tokens * 132].fill_(3)
+    torch.testing.assert_close(backing, expected)

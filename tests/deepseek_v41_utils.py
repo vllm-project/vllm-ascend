@@ -12,7 +12,6 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
-    get_storage_block_size,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
@@ -314,32 +313,29 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
 
 
 def allocate_cache_views(config, device="cpu"):
-    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+    from vllm_ascend.worker.v2.attn_utils import (
+        _get_cache_attention_groups,
+        create_kv_cache_runtime_views,
+    )
 
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
-    backings, caches = [], {}
-    for allocation in config.kv_cache_tensors:
-        raw = torch.zeros(allocation.size, dtype=torch.uint8, device=device)
-        backings.append(raw)
-        for name in allocation.layers:
-            spec = specs[name]
-            shape = (config.num_blocks, get_storage_block_size(spec), spec.num_kv_heads, spec.head_size)
-            shapes = [shape]
-            dtypes = [spec.dtype]
-            offset = 0
-            is_index = isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
-            if is_index:
-                source_name = name.removesuffix(".indexer.k_cache") + ".long_kv_cache"
-                offset = specs[source_name].unpadded_page_size_bytes
-                shapes.append((config.num_blocks, get_storage_block_size(spec), spec.num_kv_heads, spec.scale_dim))
-                dtypes.append(spec.scale_dtype)
-            views = NPUModelRunner._adjust_kv_layout(
-                None,
-                raw,
-                shapes,
-                dtypes,
-                allocation.block_stride,
-                initial_offset_bytes=offset,
-            )
-            caches[name] = tuple(views) if is_index else views[0]
-    return backings, caches
+    context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
+    raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)
+    raw_tensors = {}
+    for descriptor in config.kv_cache_tensors:
+        for index, name in enumerate(descriptor.layers):
+            start = descriptor.offset + index * descriptor.layer_stride
+            span = (config.num_blocks - 1) * descriptor.block_stride + specs[name].page_size_bytes
+            raw_tensors[name] = raw[start : start + span]
+    caches = create_kv_cache_runtime_views(
+        config,
+        raw_tensors,
+        _get_cache_attention_groups(config, layers, {}),
+        [group.kv_cache_spec.block_size for group in config.kv_cache_groups],
+        {},
+    )
+    for name, cache in caches.items():
+        layers[name].bind_kv_cache(cache)
+    return [raw], {name: layer.kv_cache[0] for name, layer in layers.items()}
