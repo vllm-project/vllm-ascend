@@ -125,7 +125,9 @@ private:
         pipe_->InitBuffer(outFp32Buf_, hiddenSizeAlignFp32_ * sizeof(float));
         metaAlign_ = (blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32 * ELEM_PER_BLK_FP32;
         pipe_->InitBuffer(vecMetaBuf_, metaAlign_ * sizeof(float));
-        pipe_->InitBuffer(metaSoftmaxBuf_, metaAlign_ * sizeof(float));
+        // Brcb(repeat=1) writes eight 32-byte blocks, even for one scalar.
+        const uint32_t scratchElems = metaAlign_ < ELEM_PER_REP_FP32 ? ELEM_PER_REP_FP32 : metaAlign_;
+        pipe_->InitBuffer(metaSoftmaxBuf_, scratchElems * sizeof(float));
         pipe_->InitBuffer(metaBrcBuf_, metaAlign_ * ELEM_PER_BLK_FP32 * sizeof(float));
         pipe_->InitBuffer(scalarBuf_, SCALAR_LOCAL_ELEMS * sizeof(float));
 
@@ -224,6 +226,7 @@ private:
             }
 
             // 非原地平方：outFp32=v²，保留 vRow=v，省去 DataCopy 备份
+            ClearFp32TailBlock(outFp32_, hiddenSize_);
             Mul(outFp32_, vRow_, vRow_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, outFp32_, static_cast<int32_t>(hiddenSize_));
@@ -242,6 +245,7 @@ private:
             }
             BroadcastScalarMulTensor(vRow_, vRow_, scalarLocal_, metaSoftmax_, metaBrc_, hiddenSize_,
                                      hiddenSizeAlignFp32_);
+            ClearFp32TailBlock(outFp32_, hiddenSize_);
             Mul(outFp32_, vRow_, scoreWeight_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             // Reduce directly into the compact score slot. WholeReduceSum emits
@@ -259,10 +263,7 @@ private:
         Duplicate(metaSoftmax_, 0.0f, metaAlign_);
         PipeBarrier<PIPE_V>();
         CopyCompactFloatsUb(metaSoftmax_, vecMeta_, blockCount_);
-        const uint8_t brcRepeat =
-            static_cast<uint8_t>((blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32);
-        Brcb(metaBrc_, metaSoftmax_, brcRepeat, {1, MOV_8});
-        PipeBarrier<PIPE_V>();
+        BroadcastCompactScores(metaBrc_, metaSoftmax_, metaAlign_);
     }
 
     __aicore__ inline void WriteProbsQue(uint32_t tokenIdx)
@@ -313,6 +314,7 @@ private:
         if (tiling_->fusedChain != 0 && tiling_->outputNormEps > 0.0f) {
             Cast(outFp32_, outLocal, RoundMode::CAST_NONE, hiddenSize_);
             PipeBarrier<PIPE_V>();
+            ClearFp32TailBlock(vRow_, hiddenSize_);
             Mul(vRow_, outFp32_, outFp32_, hiddenSize_);
             PipeBarrier<PIPE_V>();
             ReduceSumHalfInterval(scalarLocal_, vRow_, static_cast<int32_t>(hiddenSize_));

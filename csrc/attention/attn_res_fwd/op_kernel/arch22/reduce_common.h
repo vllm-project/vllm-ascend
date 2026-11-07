@@ -25,7 +25,8 @@ constexpr uint32_t ELEM_PER_REP_FP32 = 64;
 constexpr uint32_t ELEM_PER_BLK_FP32 = 8;
 constexpr uint32_t SCALAR_LOCAL_ELEMS = ELEM_PER_BLK_FP32; // Brcb dup + workScalar[0..1]
 constexpr float ZERO = 0;
-constexpr float SOFTMAX_PAD = -1e20f;
+// Padding must not exceed any finite score during a rounded-tail maximum.
+constexpr float SOFTMAX_PAD = -3.402823466e38f;
 constexpr int32_t HALf_INTERVAL = 2;
 constexpr int32_t INDEX_TWO = 2;
 constexpr int32_t INDEX_FOUR = 4;
@@ -122,6 +123,16 @@ __aicore__ inline int32_t findPowerTwo(int32_t n)
     n |= n >> INDEX_EIGHT;
     n |= n >> INDEX_SIXTEEN;
     return (n + 1) >> 1;
+}
+
+// Half-interval folds read the last partial block rounded up to eight floats.
+// Clear that block before producing valid elements; aligned rows need no work.
+__aicore__ inline void ClearFp32TailBlock(const LocalTensor<float> &row, uint32_t count)
+{
+    if (count % ELEM_PER_BLK_FP32 != 0) {
+        Duplicate(row[count / ELEM_PER_BLK_FP32 * ELEM_PER_BLK_FP32], 0.0f, ELEM_PER_BLK_FP32);
+        PipeBarrier<PIPE_V>();
+    }
 }
 
 /*!
@@ -368,7 +379,23 @@ __aicore__ inline void ReduceSumSmallB(const LocalTensor<float>& workScalar, con
     PipeBarrier<PIPE_V>();
 }
 
-/*! Brcb 标量到 1 block（8 float）。 */
+// Each Brcb repeat reads 8 compact floats and writes 64 broadcast floats.
+// Split large candidate banks before narrowing the hardware repeat count.
+__aicore__ inline void BroadcastCompactScores(const LocalTensor<float>& dst, const LocalTensor<float>& src,
+                                             uint32_t alignedCount)
+{
+    constexpr uint32_t maxRepeats = 255;
+    const uint32_t repeats = alignedCount / ELEM_PER_BLK_FP32;
+    for (uint32_t done = 0; done < repeats;) {
+        const uint32_t count = repeats - done > maxRepeats ? maxRepeats : repeats - done;
+        Brcb(dst[done * ELEM_PER_REP_FP32], src[done * ELEM_PER_BLK_FP32],
+             static_cast<uint8_t>(count), {1, MOV_8});
+        done += count;
+    }
+    PipeBarrier<PIPE_V>();
+}
+
+/*! Brcb 输出至少 8 blocks（64 float）；后续标量广播只使用第一个 block。 */
 __aicore__ inline void BrcbScalarRow1(const LocalTensor<float>& tmpBuffer, const LocalTensor<float>& scalarRow)
 {
     Brcb(tmpBuffer, scalarRow, 1, {1, MOV_8});
@@ -447,7 +474,8 @@ __aicore__ inline void SubLastDimBrcRow1(const LocalTensor<float>& output, const
 
 /*!
  * dst = src * broadcast(scalarSrc[0])；1 标量 Brcb 成 1 block，再 MulRowByBrcBlock 沿 H 复用。
- * brcScratch 前 1 block 作 Brcb 输出；dupLocal 为 Brcb 源 block（8 float）。dupLocal 不可与 scalarSrc 同址。
+ * brcScratch 需至少 8 blocks（64 float），计算只使用其第一个 block。
+ * dupLocal 为 Brcb 源 block（8 float），不可与 scalarSrc 同址。
  */
 __aicore__ inline void BroadcastScalarMulTensor(const LocalTensor<float>& dst, const LocalTensor<float>& src,
                                                 const LocalTensor<float>& scalarSrc,
