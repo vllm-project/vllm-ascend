@@ -462,6 +462,30 @@ def test_executor_belongs_to_built_metadata(state):
     assert result["cache"].device_metadata_executor is state.executor
 
 
+def test_full_graph_only_leaves_eager_metadata_synchronous(state):
+    state.full_graph_only = True
+    builder = Builder()
+    resource = SimpleNamespace()
+
+    def build(**kwargs):
+        assert not builder.enabled
+        return {"cache": resource}
+
+    result = state.run_build(
+        build,
+        attn_groups=[[SimpleNamespace(get_metadata_builder=lambda _: builder)]],
+        full_graph_mode=False,
+    )
+    assert result["cache"] is resource
+    assert not hasattr(resource, "device_metadata_executor")
+    assert state.executor.calls == []
+
+
+def test_full_graph_only_capture_still_attaches_executor(state):
+    state.full_graph_only = True
+    test_executor_belongs_to_built_metadata(state)
+
+
 def test_wait_uses_forward_metadata_without_leaking_into_draft(monkeypatch):
     import vllm_ascend.worker.device_metadata as common
 
