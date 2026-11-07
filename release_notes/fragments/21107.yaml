@@ -1,0 +1,4 @@
+pr: 21107
+entries:
+  - category: bugfix
+    text: Fixed async prefill stalls after long prefix-cache hits by reserving physical KV blocks correctly for sliding-window and chunked-local attention.
