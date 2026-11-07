@@ -255,6 +255,19 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
+    def may_load_async(self, request: "Request") -> bool:
+        """Whether this connector may load the request's prefix asynchronously.
+
+        Lets the V1 scheduler admit the request to its async-load queue, where
+        the transfer can start while the running batch is full and where
+        ``--max-num-inflight-kv-loads`` bounds the number of loads holding KV
+        blocks. Upstream only grew this hook in
+        vllm-project/vllm#65319, so builds on an older vLLM pin never call it
+        and this override stays inert there.
+        """
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.may_load_async(request)
+
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(request, blocks, num_external_tokens)

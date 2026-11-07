@@ -704,6 +704,26 @@ class BaseKVPoolScheduler(ABC):
         if connector_output.finished_recving:
             self._async_loading_req_ids.difference_update(connector_output.finished_recving)
 
+    def may_load_async(self, request: "Request") -> bool:
+        """Whether this request may load its prefix asynchronously.
+
+        The V1 scheduler calls this once when the request enters a waiting
+        queue, so it must stay cheap: no pool lookup here. Reporting ``True``
+        lets ``--max-num-inflight-kv-loads`` park the request on the async
+        queue, where its transfer can start while the running batch is full.
+
+        A false positive is not free: upstream keeps the request on the async
+        queue, and it holds back other async loads until a running slot is
+        free. A pool hit cannot be told from a miss without a lookup, so report
+        ``True`` only where a load is possible at all -- when ``load_async`` is
+        on and the role may load.
+        """
+        if not self.load_async:
+            return False
+        # Mirrors the early return in ``get_num_new_matched_tokens``: a
+        # consumer that is not allowed to load never starts an async load.
+        return not (self.kv_role == "kv_consumer" and not self.consumer_is_to_load)
+
     def request_finished(
         self,
         request: "Request",

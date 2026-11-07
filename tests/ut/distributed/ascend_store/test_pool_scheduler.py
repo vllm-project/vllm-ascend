@@ -328,6 +328,27 @@ class TestKVPoolScheduler(unittest.TestCase):
                 request = MagicMock(prompt_token_ids=list(range(token_count)))
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
 
+    def test_may_load_async_follows_load_async_flag(self):
+        for load_async in (True, False):
+            with self.subTest(load_async=load_async):
+                scheduler = KVPoolScheduler(
+                    self._make_config(extra_config={"load_async": load_async}), use_layerwise=False
+                )
+                self.assertEqual(scheduler.may_load_async(MagicMock()), load_async)
+
+    def test_may_load_async_skips_read_only_consumer(self):
+        read_only = KVPoolScheduler(
+            self._make_config(kv_role="kv_consumer", extra_config={"load_async": True}),
+            use_layerwise=False,
+        )
+        self.assertFalse(read_only.may_load_async(MagicMock()))
+
+        loading_consumer = KVPoolScheduler(
+            self._make_config(kv_role="kv_consumer", extra_config={"load_async": True, "consumer_is_to_load": True}),
+            use_layerwise=False,
+        )
+        self.assertTrue(loading_consumer.may_load_async(MagicMock()))
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_retain_mamba_blocks_for_save_excludes_speculative_tail(self, mock_client_cls):
         """Speculative scratch blocks must never be pinned for async sends.
