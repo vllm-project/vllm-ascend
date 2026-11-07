@@ -1,0 +1,117 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Test CPU-8 Runner (Reference)
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - 'test-cpu-32*'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test-cpu-8:
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Job started - sleeping for debugging
+        run: |
+          echo "=========================================="
+          echo "🔍 CPU-32 Runner Diagnostic Workflow"
+          echo "=========================================="
+          echo ""
+          echo "Job has started successfully!"
+          echo "This means the runner matched and pod was created."
+          echo ""
+          echo "Pod will sleep for 15 minutes for debugging."
+          echo "You can now run:"
+          echo ""
+          echo "  # Find the pod"
+          echo "  kubectl get pods -n vllm-project -o wide | grep test-cpu-32"
+          echo ""
+          echo "  # View logs"
+          echo "  kubectl logs -f <pod-name> -n vllm-project -c runner"
+          echo ""
+          echo "  # Enter the pod"
+          echo "  kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
+          echo ""
+          echo "=========================================="
+          echo "Sleep will start now (900 seconds = 15 minutes)"
+          echo "=========================================="
+
+      - name: Checkout and basic info
+        run: |
+          echo "=== 🎯 Job Pod Created Successfully! ==="
+          echo ""
+          echo "Current directory:"
+          pwd
+          echo ""
+          echo "System info:"
+          uname -a
+          echo ""
+          echo "CPU cores: $(nproc)"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo ""
+          echo "Current user:"
+          whoami
+          echo ""
+          echo "Listing files in current directory:"
+          ls -la | head -20
+
+      - name: Keep pod running for manual debugging (60 minutes)
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "🛌 Pod is now sleeping for 60 minutes"
+          echo "=========================================="
+          echo ""
+          echo "You have 60 minutes to:"
+          echo "  1. Find the pod:"
+          echo "     kubectl get pods -n vllm-project -o wide"
+          echo ""
+          echo "  2. Check logs in real-time:"
+          echo "     kubectl logs -f <pod-name> -n vllm-project -c runner"
+          echo ""
+          echo "  3. Execute commands in the pod:"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- which buildctl"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- ls -la ~/.docker/"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- env | grep BUILDKIT"
+          echo "     kubectl exec <pod-name> -n vllm-project -c runner -- ls -la /tmp/buildkit/"
+          echo ""
+          echo "  4. Open an interactive shell:"
+          echo "     kubectl exec -it <pod-name> -n vllm-project -c runner -- bash"
+          echo ""
+          echo "=========================================="
+          echo "Sleep started: $(date)"
+          echo "Will sleep for 3600 seconds (60 minutes)"
+          echo "=========================================="
+          sleep 3600
+          echo "Sleep ended: $(date)"
+          echo "=========================================="
+
+      - name: Final status
+        run: |
+          echo ""
+          echo "✅ Pod has completed 15-minute debug session"
+          echo "Test workflow finished."
