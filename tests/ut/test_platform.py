@@ -19,6 +19,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
+    _update_compilation_modes,
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
@@ -350,6 +351,86 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
     assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward_with_output") == expected_count
     if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
         assert compilation_config.splitting_ops == []
+
+
+def _compilation_mode_config(mode, *, enforce_eager=False):
+    return SimpleNamespace(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=mode,
+        ),
+        model_config=SimpleNamespace(enforce_eager=enforce_eager, is_encoder_decoder=False),
+        additional_config={},
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+    )
+
+
+def _ascend_config_with_vpp(vpp_size):
+    return SimpleNamespace(
+        xlite_graph_config=SimpleNamespace(enabled=False, full_mode=False),
+        ascend_compilation_config=None,
+        virtual_pipeline_parallel_size=vpp_size,
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
+)
+def test_update_compilation_modes_vpp_requires_per_stage_compile(mode):
+    # torch.compile traces the virtual stage's layer slice once and drops all
+    # guards, so every stage would replay the first stage's layers.
+    vllm_config = _compilation_mode_config(mode)
+    with pytest.raises(ValueError, match="needs one compiled artifact per virtual stage"):
+        _update_compilation_modes(vllm_config, _ascend_config_with_vpp(2))
+
+
+def test_update_compilation_modes_vpp_rejects_breakable_full_graph(monkeypatch):
+    # The breakable wrapper keys its cache by batch descriptor only, so it
+    # remains virtual-stage blind even with per-stage compilation.
+    monkeypatch.setattr(
+        "vllm_ascend.envs.VLLM_ASCEND_VPP_PER_STAGE_COMPILE",
+        True,
+    )
+    monkeypatch.setattr(
+        "vllm.compilation.breakable_cudagraph.is_breakable_cudagraph_enabled",
+        lambda: True,
+    )
+    vllm_config = _compilation_mode_config(CUDAGraphMode.FULL)
+    with pytest.raises(ValueError, match="breakable acl graph is not supported"):
+        _update_compilation_modes(vllm_config, _ascend_config_with_vpp(2))
+
+
+@pytest.mark.parametrize(
+    "vpp_size,mode",
+    [
+        (1, CUDAGraphMode.FULL),
+        (1, CUDAGraphMode.FULL_DECODE_ONLY),
+        (1, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY),
+        (2, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL_AND_PIECEWISE),
+    ],
+)
+def test_update_compilation_modes_allows_supported_vpp_graph_modes(monkeypatch, vpp_size, mode):
+    monkeypatch.setattr(
+        "vllm_ascend.envs.VLLM_ASCEND_VPP_PER_STAGE_COMPILE",
+        True,
+    )
+    monkeypatch.setattr(
+        "vllm.compilation.breakable_cudagraph.is_breakable_cudagraph_enabled",
+        lambda: False,
+    )
+    vllm_config = _compilation_mode_config(mode)
+    _update_compilation_modes(vllm_config, _ascend_config_with_vpp(vpp_size))
+    assert vllm_config.compilation_config.cudagraph_mode == mode
 
 
 class TestNPUPlatform(TestBase):

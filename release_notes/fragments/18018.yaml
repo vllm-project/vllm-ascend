@@ -1,0 +1,6 @@
+pr: 18018
+entries:
+  - category: bugfix
+    text: Fixed the VPP debug switch `VLLM_ASCEND_VPP_FOLD_NO_PRESYNC=1`, which previously skipped the cross-rank send together with the pre-send synchronization and could hang VPP serving.
+  - category: feature
+    text: Added per-virtual-stage compilation and captured-address binding so virtual pipeline parallelism supports acl graphs and torch.compile. Acl graph caches are keyed by (batch descriptor, virtual stage), each virtual stage gets its own compiled artifact and inductor cache, and graph inputs as well as `slot_mapping` are copied onto the captured buffers before every replay. Enable with `VLLM_ASCEND_VPP_PER_STAGE_COMPILE=1`; without it, VPP combined with torch.compile now fails at startup instead of silently replaying the first stage's compiled layers (previously this included `PIECEWISE`, which started but computed wrong results). `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` are supported; breakable acl graph remains rejected.

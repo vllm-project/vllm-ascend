@@ -58,6 +58,10 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     using_paged_attention,
 )
+from vllm_ascend.compilation.graph_io import (
+    graph_io_capture_active,
+    note_graph_direct_read,
+)
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
@@ -1234,6 +1238,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
+        if graph_io_capture_active():
+            # The KV write reads slot_mapping by address inside an ACL graph.
+            # Verify it aliases a metadata buffer the VPP binder pins before
+            # every replay; otherwise the graph would replay stale slots.
+            note_graph_direct_read("slot_mapping", slot_mapping)
         DeviceOperator.reshape_and_cache(
             key=key,
             value=value,
@@ -1268,6 +1277,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
+            if graph_io_capture_active():
+                # See ``do_kv_cache_update``: this tensor is read by address by
+                # the captured KV write, and only an alias of a pinned
+                # metadata anchor can be refreshed before each replay.
+                note_graph_direct_read("slot_mapping", slots_to_cache)
             DeviceOperator.reshape_and_cache(
                 key=key_to_cache,
                 value=value_to_cache,

@@ -52,6 +52,9 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
+from vllm_ascend.distributed.parallel_state import (
+    get_virtual_pipeline_parallel_rank,
+)
 
 
 @patch("vllm_ascend.compilation.acl_graph.use_updatable_graph", return_value=False)
@@ -380,8 +383,9 @@ class TestACLGraphWrapper(TestBase):
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
 
         # Verify the entry was created and updated
-        self.assertIn(self.mock_batch_descriptor, wrapper.concrete_aclgraph_entries)
-        entry = wrapper.concrete_aclgraph_entries[self.mock_batch_descriptor]
+        entry_key = (self.mock_batch_descriptor, get_virtual_pipeline_parallel_rank())
+        self.assertIn(entry_key, wrapper.concrete_aclgraph_entries)
+        entry = wrapper.concrete_aclgraph_entries[entry_key]
         self.assertEqual(entry.aclgraph, mock_npu_graph)
         self.assertEqual(entry.output, "weak_ref_output")
 

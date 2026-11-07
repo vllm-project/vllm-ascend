@@ -95,3 +95,8 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_vpp_make_layers  # noqa
+
+# Gives VPP one torch.compile artifact per virtual stage; the aot hash factor
+# and the backend prefix patches are inert unless a virtual stage is active.
+import vllm_ascend.patch.worker.patch_vpp_compile  # noqa

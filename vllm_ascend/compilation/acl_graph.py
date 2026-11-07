@@ -19,9 +19,15 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.distributed.parallel_state import (
+    get_virtual_pipeline_parallel_rank,
+    get_virtual_pipeline_parallel_size,
+)
 
 from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
@@ -59,8 +65,39 @@ class ACLGraphEntry:
     output: Any | None = None
 
     # for aclgraph debugging, track the input addresses
-    # during capture, and check if they are the same during replay
-    input_addresses: list[int] | None = None
+    # during capture, and check if they are the same during replay.
+    # (path, data_ptr) pairs, covering positional args, keyword args and
+    # ``IntermediateTensors`` (whose tensors the graph reads by address).
+    input_addresses: list[tuple[str, int]] | None = None
+
+
+def _collect_input_addresses(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    out: list[tuple[str, int]] | None = None,
+    prefix: str = "",
+) -> list[tuple[str, int]]:
+    """Flatten tensors reachable from a forward call into (path, address)."""
+    if out is None:
+        out = []
+    if isinstance(args, tuple) and not prefix:
+        for i, value in enumerate(args):
+            _collect_input_addresses(value, {}, out, f"args[{i}]")
+        for key, value in kwargs.items():
+            _collect_input_addresses(value, {}, out, f"kwargs[{key}]")
+        return out
+    if isinstance(args, torch.Tensor):
+        out.append((prefix, args.data_ptr()))
+    elif isinstance(args, IntermediateTensors):
+        for key, value in args.tensors.items():
+            _collect_input_addresses(value, {}, out, f"{prefix}.{key}")
+    elif isinstance(args, dict):
+        for key, value in args.items():
+            _collect_input_addresses(value, {}, out, f"{prefix}[{key}]")
+    elif isinstance(args, (list, tuple)):
+        for i, value in enumerate(args):
+            _collect_input_addresses(value, {}, out, f"{prefix}[{i}]")
+    return out
 
 
 class ACLGraphWrapper:
@@ -75,8 +112,9 @@ class ACLGraphWrapper:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
     PIECEWISE).
     2. At runtime, the wrapper receives a runtime_mode and a
-    batch_descriptor(key) from the forward context and blindly trust them
-    for aclgraph dispatching.
+    batch_descriptor from the forward context; the cache key is the pair
+    (batch_descriptor, virtual pipeline stage), so under VPP every virtual
+    stage captures and replays its own layer slice.
     3. If runtime_mode is NONE or runtime_mode does not match the mode of the
     wrapper, just call the runnable directly.
     4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
@@ -117,15 +155,28 @@ class ACLGraphWrapper:
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
+        # Input-address bookkeeping is enabled under VPP (where the runner
+        # bounds inputs itself and a mismatch means a stale replay) and when
+        # explicitly requested through the graph IO debug flags. Outside those
+        # cases nothing is recorded, so non-VPP execution keeps its original
+        # per-step behavior.
+        self._io_strict = ascend_envs.VLLM_ASCEND_GRAPH_IO_STRICT
+        self._io_debug = ascend_envs.VLLM_ASCEND_GRAPH_IO_DEBUG
+        self._track_extra = self._io_strict or self._io_debug or self.is_debugging_mode
+        self._address_mismatch_logged = False
 
         self.graph_pool = current_platform.get_global_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
         self.aclgraph_options = cudagraph_options
-        # the entries for different batch descriptors that we need to capture
-        # aclgraphs for.
-        self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
+        # the entries for different (batch descriptor, virtual stage) pairs
+        # that we need to capture aclgraphs for. Under VPP one wrapper serves
+        # every virtual stage of this rank, and each stage runs a different
+        # layer slice, so the virtual stage is part of the key: keying by the
+        # batch descriptor alone would make later stages replay the first
+        # stage's captured layers.
+        self.concrete_aclgraph_entries: dict[tuple[BatchDescriptor, int], ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
         self.update_stream = update_stream
@@ -175,11 +226,12 @@ class ACLGraphWrapper:
             # runtime modes.
             return self.runnable(*args, **kwargs)
 
-        if batch_descriptor not in self.concrete_aclgraph_entries:
-            # create a new entry for this batch descriptor
-            self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
+        entry_key = (batch_descriptor, get_virtual_pipeline_parallel_rank())
+        if entry_key not in self.concrete_aclgraph_entries:
+            # create a new entry for this (batch descriptor, virtual stage)
+            self.concrete_aclgraph_entries[entry_key] = ACLGraphEntry(batch_descriptor=batch_descriptor)
 
-        entry = self.concrete_aclgraph_entries[batch_descriptor]
+        entry = self.concrete_aclgraph_entries[entry_key]
 
         if entry.aclgraph is None:
             if self.aclgraph_options.debug_log_enable:
@@ -191,8 +243,8 @@ class ACLGraphWrapper:
             # validate that aclgraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
-            input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
-            entry.input_addresses = input_addresses
+            if self._track_extra or get_virtual_pipeline_parallel_size() > 1:
+                entry.input_addresses = _collect_input_addresses(args, kwargs)
             aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
@@ -280,14 +332,23 @@ class ACLGraphWrapper:
             # manage the memory during acl graph capture
             return output
 
-        if self.is_debugging_mode:
-            # check if the input addresses are the same
-            new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
-            assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for aclgraphs are different "
-                f"during replay. Expected {entry.input_addresses}, "
-                f"got {new_input_addresses}"
-            )
+        if entry.input_addresses is not None:
+            # The graph reads the captured addresses; a mismatch means it would
+            # replay another batch's data. The runner's GraphIOBinder is
+            # responsible for copying inputs onto those addresses, so this is a
+            # verification aid rather than a repair.
+            new_input_addresses = _collect_input_addresses(args, kwargs)
+            if new_input_addresses != entry.input_addresses:
+                diff = [(old, new) for old, new in zip(entry.input_addresses, new_input_addresses) if old != new]
+                message = f"Input addresses for aclgraphs are different during replay. mismatched paths: {diff[:8]}"
+                # Upstream raised this assertion whenever VLLM_LOGGING_LEVEL is
+                # DEBUG; keep that for the non-VPP path and raise under the
+                # explicit strict flag (the binder should guarantee a match).
+                if self._io_strict or self.is_debugging_mode:
+                    raise AssertionError(message)
+                if not self._address_mismatch_logged:
+                    self._address_mismatch_logged = True
+                    logger.warning("[vllm-ascend][VPP graph io] %s", message)
 
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
