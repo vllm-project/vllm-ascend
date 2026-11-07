@@ -369,6 +369,20 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented.
 
+### Hybrid connector receive failures
+
+`MooncakeHybridConnector` reports failed KV reads or cache reformatting by
+request ID through `KVConnectorTransferResults.failed_recving`. Completion and
+failure are published together, after all submitted local receive tasks for
+that request finish. Other requests continue normally. Cache-group block IDs
+are not flattened into a single invalid-block list.
+
+The scheduler applies `kv_load_failure_policy` from `--kv-transfer-config`:
+`fail` terminates the request; `recompute` discards the failed external cache
+and recomputes locally. This is failure reporting, not automatic transport
+retry. Handling connection loss in the remote cleanup/acknowledgement path
+remains subject to that transport's timeout behavior.
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
