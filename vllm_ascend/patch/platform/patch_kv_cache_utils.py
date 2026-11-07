@@ -109,13 +109,12 @@ def _ascend_resolve_kv_cache_block_sizes(
 ) -> tuple[int, int]:
     """Ascend-compatible resolve_kv_cache_block_sizes.
 
-    vLLM PR #40860 added a restriction that hybrid KV cache groups with
-    multiple block sizes do not support DCP.
-    This restriction is correct for CUDA but not for Ascend, which implements
-    context parallelism for MLA and SWA-MLA layers independently.
-
-    For multiple KV cache groups with DCP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp to maintain alignment.
+    v0.32.0's upstream resolver no longer carries the vLLM #40860
+    hybrid-multi-block-size + DCP restriction, but it lacks Ascend's
+    private-tail handling: non-prefix-cacheable tail groups (e.g. GLM-Next's
+    fixed tail block) must be excluded from scheduling/hashing resolution while
+    EngineCore's global minimum is taken across the original groups. Ascend
+    also computes the hash block size over the prefix-cacheable groups only.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
