@@ -101,6 +101,10 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
+      # 线下 karc 节点到 pypi.org 出口极慢（squid 120s 后 ABORTED），
+      # 指向华为云 pypi 镜像（实测 0.3s 返回完整 simple 索引）。
+      UV_DEFAULT_INDEX: https://mirrors.huaweicloud.com/repository/pypi/simple
+      PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
