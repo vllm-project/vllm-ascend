@@ -1,0 +1,5 @@
+pr: 21244
+entries:
+  - category: performance
+    text: Reduced DeepSeek V4.1 bounded SWA replay metadata construction overhead by reusing visible lengths across groups with identical input views within a batch.
+    model: deepseek-v4.1
