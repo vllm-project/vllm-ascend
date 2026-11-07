@@ -708,7 +708,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.actual_seq_lengths_q = [2]
         metadata.causal = True
         metadata.attn_mask = None
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
             result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
@@ -877,7 +877,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), torch.ones(10, 8, 64))
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
@@ -935,7 +935,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty(10, 8, 64)
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly

@@ -1,0 +1,10 @@
+pr: 20390
+entries:
+  - category: performance
+    text: >-
+      Added an experimental, disabled-by-default vector Attention option for
+      single-request BF16 decode with short contexts, including Qwen3-0.6B.
+      Greedy outputs may differ from FIA; evaluate task quality before enabling
+      enable_small_decode_attention.
+    model: Qwen3-0.6B
+    hardware: [A2]
