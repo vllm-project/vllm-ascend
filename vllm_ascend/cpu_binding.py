@@ -387,14 +387,12 @@ class CpuAlloc:
             npu
             for npu in self.device_info.all_logic_npus
             if npu in self.device_info.running_npu_list
-            or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
+            or any(cpu in allowed_cpu_set for cpu in self._get_npu_affinity(npu))
         ]
 
         numa_to_npus: dict[int, list[int]] = defaultdict(list)
         for npu in candidate_npus:
-            base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
-            ]
+            base_cpu_list = [cpu for cpu in self._get_npu_affinity(npu) if cpu in self.device_info.allowed_cpus]
             numa_node = self.get_single_numa_node(base_cpu_list)
             if numa_node is None:
                 logger.warning(
@@ -550,6 +548,40 @@ class CpuAlloc:
         self._build_topo_affinity_cpu_pool()
         return True
 
+    def _logic_to_physical_npu(self) -> dict[int, int]:
+        """Map chip logic ids back to the NPU ids used by `npu-smi info -t topo`.
+
+        `npu-smi info -t topo` numbers NPUs by their physical NPU id, while the
+        rest of the binding flow works with chip logic ids. The two differ on
+        hosts where the cards are not enumerated as NPU0..N (for example a
+        single 910B3 container where `npu-smi info -m` reports NPU ID=7 for
+        Chip Logic ID=0). Without the translation the affinity lookup is always
+        empty and CPU binding is silently skipped.
+        """
+        logic_to_physical: dict[int, int] = {}
+        for physical_id, chip_map in getattr(self.device_info, "npu_map_info", {}).items():
+            if not physical_id.isdigit():
+                continue
+            for logic_id in chip_map.values():
+                if logic_id and logic_id.isdigit():
+                    logic_to_physical.setdefault(int(logic_id), int(physical_id))
+        return logic_to_physical
+
+    def _get_npu_affinity(self, npu: int) -> list[int]:
+        """Return the topo CPU affinity for a chip logic id.
+
+        The topo table is keyed by physical NPU ids, so prefer the explicit
+        logic-id -> physical-id mapping when it contains this chip. The two ids
+        can also overlap numerically, in which case looking up the logic id
+        directly would silently select another NPU's CPUs.
+        """
+        if not hasattr(self, "_logic_to_physical_map"):
+            self._logic_to_physical_map = self._logic_to_physical_npu()
+        physical_npu = self._logic_to_physical_map.get(npu)
+        if physical_npu is not None:
+            return self.device_info.npu_affinity.get(physical_npu, [])
+        return self.device_info.npu_affinity.get(npu, [])
+
     def _build_topo_affinity_cpu_pool(self) -> None:
         # topo_affinity mode
         if not self.device_info.npu_affinity:
@@ -565,12 +597,10 @@ class CpuAlloc:
             # Always keep visible NPUs for strict conflict checks; include
             # non-visible NPUs only when they overlap this process's cpuset.
             if npu in self.device_info.running_npu_list
-            or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
+            or any(cpu in allowed_cpu_set for cpu in self._get_npu_affinity(npu))
         ]
         for npu in candidate_npus:
-            base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
-            ]
+            base_cpu_list = [cpu for cpu in self._get_npu_affinity(npu) if cpu in self.device_info.allowed_cpus]
             if not base_cpu_list:
                 raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
             extra_cpu_list = self.extend_numa(base_cpu_list)
