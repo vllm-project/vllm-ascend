@@ -14,10 +14,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import contextlib
 import hashlib
 import json
 import logging
 import os
+import shlex
+import signal
 import subprocess
 import tempfile
 import time
@@ -76,8 +79,8 @@ class AisbenchRunner:
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
         self.stdout_file = f"output_{self.task_type}.txt"
-        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
-        print(f"running aisbench cmd: {aisbench_cmd}")
+        aisbench_cmd.append("--debug")
+        print(f"running aisbench cmd: {shlex.join(aisbench_cmd)}")
         env = None
         if self.profile_marker is not None:
             env = os.environ.copy()
@@ -85,7 +88,14 @@ class AisbenchRunner:
             env["PYTHONPATH"] = os.pathsep.join(filter(None, (repo_root, env.get("PYTHONPATH", ""))))
             env["ASCEND_PROFILE_REQUEST_MARKER"] = str(self.profile_marker)
             env["ASCEND_PROFILE_ENABLED"] = str(bool(self.profile_targets)).lower()
-        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True, env=env)
+        with open(self.stdout_file, "w", encoding="utf-8") as stdout:
+            self.proc = subprocess.Popen(
+                aisbench_cmd,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
 
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
         self.model = model
@@ -156,7 +166,12 @@ class AisbenchRunner:
         try:
             self._run_aisbench_task()
             self._wait_for_task()
+            self._stop_aisbench_task()
         except BaseException:
+            try:
+                self._stop_aisbench_task()
+            except Exception as exc:
+                logging.error("AISBench cleanup also failed: %s", exc)
             try:
                 self._finish_profiling(controller)
             except Exception as exc:
@@ -305,16 +320,43 @@ class AisbenchRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.proc is not None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(8)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        self._stop_aisbench_task()
+
+    def _stop_aisbench_task(self):
+        """Stop the owned benchmark process group and reap its leader."""
+        proc = self.proc
+        if proc is None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            # The leader can exit before its workers, so clean up the session
+            # even when waiting for the leader did not time out.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=8)
+        self.proc = None
+
+    def _check_process_exit(self, returncode, line, expected_message):
+        if returncode is None:
+            return
+        if returncode != 0:
+            raise RuntimeError(f"AISBench exited with code {returncode}. See {self.stdout_file}.\n{line}")
+        if expected_message not in line:
+            raise RuntimeError(
+                f"AISBench exited without expected output {expected_message!r}. See {self.stdout_file}.\n{line}"
+            )
 
     def _wait_for_exp_folder(self):
         while True:
+            # Poll before reading so an observed exit includes all final output.
+            returncode = self.proc.poll()
             line = self._check_runtime_stdout()
+            self._check_process_exit(returncode, line, "Current exp folder: ")
             if "Current exp folder: " in line:
                 self.exp_folder = re.search(r"Current exp folder: (.*)", line).group(1)
                 print(f"Current exp folder: {self.exp_folder}")
@@ -325,17 +367,19 @@ class AisbenchRunner:
         self._wait_for_exp_folder()
         result_msg = self.RESULT_MSG[self.task_type]
         while True:
+            returncode = self.proc.poll()
             line = self._check_runtime_stdout()
+            self._check_process_exit(returncode, line, result_msg)
             if result_msg in line:
                 print(line)
                 self.result_line = line
+                self._check_process_exit(self.proc.wait(), line, result_msg)
                 return
             self._check_runtime_error(line)
 
     def _check_runtime_stdout(self):
         time.sleep(5)
-        cmd = f"tail -100 {self.stdout_file}"
-        return subprocess.check_output(cmd, shell=True).decode()
+        return subprocess.check_output(["tail", "-100", self.stdout_file]).decode()
 
     @staticmethod
     def _check_runtime_error(line):
