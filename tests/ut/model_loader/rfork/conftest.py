@@ -48,20 +48,14 @@ def runtime(monkeypatch, local_weights):
         RForkTransferBackend=lambda **kwargs: Mock(registered_structural_digest="registered-digest"),
     )
 
-    class StartupError(RuntimeError):
-        def __init__(self, message, *, handle=None):
-            super().__init__(message)
-            self.handle = handle
-
     stub(
         f"{prefix}.seed_server",
         RForkSeedServerHandle=Mock,
-        RForkSeedServerStartupError=StartupError,
-        start_rfork_server=Mock(),
+        create_rfork_server=Mock(),
     )
     types = load("types")
     config = load("config")
-    load("manifest")
+    load("timing")
     load("tensor_layout")
     load("seed_client")
     client = load("planner_client")
@@ -102,10 +96,9 @@ def tensor_runtime(monkeypatch, local_weights):
     class _SeedTransferInfo:
         session_id: str
         weights: dict
-        formats: dict | None = None
 
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.types", SeedTransferInfo=_SeedTransferInfo)
-    _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.manifest", "manifest.py")
+    _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.timing", "timing.py")
     tensor_layout = _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.tensor_layout", "tensor_layout.py")
     transfer_backend = _load_module(
         monkeypatch, "vllm_ascend.model_loader.rfork.transfer_backend", "transfer_backend.py"
@@ -178,6 +171,7 @@ def rfork_helpers(monkeypatch, local_weights):
     install("vllm_ascend.device.hardware_profile", get_current_hardware_profile=lambda: SimpleNamespace())
     package("vllm_ascend.model_loader")
     package("vllm_ascend.model_loader.rfork")
+    _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.timing", "timing.py")
 
     safety = _load_module(monkeypatch, "rfork_restored_lifecycle_safety", "safety.py")
     install("vllm_ascend.model_loader.rfork.safety", mutable_weights_bypass_reason=safety.mutable_weights_bypass_reason)
@@ -194,13 +188,12 @@ def rfork_helpers(monkeypatch, local_weights):
         build_compatibility_fingerprint=lambda *args, **kwargs: "fingerprint",
     )
     install("vllm_ascend.model_loader.rfork.session", RForkSession=object)
+    tensor_layout = _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.tensor_layout", "tensor_layout.py")
     types_module = _load_module(monkeypatch, "rfork_restored_lifecycle_types", "types.py")
     install(
         "vllm_ascend.model_loader.rfork.types",
-        RForkFallbackCleanupResult=types_module.RForkFallbackCleanupResult,
         RForkIdentity=types_module.RForkIdentity,
         RForkLifecycleState=types_module.RForkLifecycleState,
-        RForkSeedServiceStartResult=types_module.RForkSeedServiceStartResult,
     )
 
     package("vllm_ascend.eplb")
@@ -248,4 +241,5 @@ def rfork_helpers(monkeypatch, local_weights):
         dynamo_hooks=dynamo_hooks,
         rope_dict=rope_dict,
         mtp_module=mtp_module,
+        tensor_layout=tensor_layout,
     )

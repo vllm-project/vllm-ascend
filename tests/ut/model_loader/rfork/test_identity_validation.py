@@ -21,13 +21,6 @@ def identity_module(monkeypatch):
 
 
 @pytest.fixture
-def manifest_module(monkeypatch):
-    _stub(monkeypatch, "vllm.logger", logger=logging.getLogger("rfork-manifest-validation-test"))
-    _stub(monkeypatch, "vllm_ascend.model_loader.rfork.types", SeedTransferInfo=object)
-    return _load_module(monkeypatch, "rfork_test_manifest", "manifest.py")
-
-
-@pytest.fixture
 def seed_module(monkeypatch):
     _stub(monkeypatch, "vllm.logger", logger=logging.getLogger("rfork-seed-validation-test"))
 
@@ -43,7 +36,6 @@ def seed_module(monkeypatch):
         RFORK_PROTOCOL_VERSION=1,
         SeedTransferInfo=SeedTransferInfo,
     )
-    _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.manifest", "manifest.py")
     return _load_module(monkeypatch, "rfork_test_seed_client", "seed_client.py")
 
 
@@ -366,8 +358,8 @@ def test_fingerprint_changes_when_rope_configuration_changes(identity_module):
         base_fingerprint = _build_fingerprint(identity_module, base_config)
         changed_fingerprint = _build_fingerprint(identity_module, changed_config)
         assert base_fingerprint != changed_fingerprint, field
-        assert identity_module.build_seed_key(0, "model", "strategy", base_fingerprint, "digest") != (
-            identity_module.build_seed_key(0, "model", "strategy", changed_fingerprint, "digest")
+        assert identity_module.build_seed_key(0, base_fingerprint, "digest") != (
+            identity_module.build_seed_key(0, changed_fingerprint, "digest")
         ), field
 
 
@@ -398,8 +390,8 @@ def test_resolved_commits_isolate_moving_revision_seeds(identity_module):
         first_fingerprint = _build_fingerprint(identity_module, first)
         second_fingerprint = _build_fingerprint(identity_module, second)
         assert first_fingerprint != second_fingerprint, (config_field, commit_field)
-        assert identity_module.build_seed_key(0, "model", "strategy", first_fingerprint, "digest") != (
-            identity_module.build_seed_key(0, "model", "strategy", second_fingerprint, "digest")
+        assert identity_module.build_seed_key(0, first_fingerprint, "digest") != (
+            identity_module.build_seed_key(0, second_fingerprint, "digest")
         ), (config_field, commit_field)
 
 
@@ -426,7 +418,7 @@ def test_unresolved_revision_keeps_explicit_version_fallback(identity_module):
 
 
 def test_fingerprint_changes_when_kv_role_changes(identity_module):
-    # Role isolation is unconditional, including checkpoint-layout transfer.
+    # Role isolation is unconditional.
     for quantization in (None, "ascend"):
         model_config = _model_config(quantization=quantization)
         producer = _build_fingerprint(identity_module, model_config, kv_role="kv_producer")
@@ -535,11 +527,11 @@ def test_moe_data_parallel_ranks_isolate_expert_shard_seed_keys(identity_module,
     monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
     model_config = _model_config()
     fingerprint = _build_fingerprint(identity_module, model_config, data_parallel_size=2, is_moe_model=True)
-    first_key = identity_module.build_seed_key(0, "model", "strategy", fingerprint, "digest", sharded_dp_rank=0)
-    second_key = identity_module.build_seed_key(0, "model", "strategy", fingerprint, "digest", sharded_dp_rank=1)
+    first_key = identity_module.build_seed_key(0, fingerprint, "digest", sharded_dp_rank=0)
+    second_key = identity_module.build_seed_key(0, fingerprint, "digest", sharded_dp_rank=1)
     assert first_key != second_key
     # Replicated ranks leave the selector None and share the key.
-    replicated_key = identity_module.build_seed_key(0, "model", "strategy", fingerprint, "digest")
+    replicated_key = identity_module.build_seed_key(0, fingerprint, "digest")
     assert replicated_key != first_key
 
 
@@ -921,20 +913,16 @@ def test_session_rejects_missing_required_configuration(runtime):
 
 def test_build_seed_key_rejects_missing_identity_values(identity_module):
     build = identity_module.build_seed_key
-    with pytest.raises(RuntimeError, match="model_url"):
-        build(0, "", "strategy", "fingerprint", "digest")
-    with pytest.raises(RuntimeError, match="model_deploy_strategy_name"):
-        build(0, "model", "", "fingerprint", "digest")
     with pytest.raises(RuntimeError, match="compatibility fingerprint"):
-        build(0, "model", "strategy", "", "digest")
+        build(0, "", "digest")
     with pytest.raises(RuntimeError, match="structural digest"):
-        build(0, "model", "strategy", "fingerprint", "")
+        build(0, "fingerprint", "")
 
 
 def test_build_seed_key_changes_with_structural_digest(identity_module):
     fingerprint = _fingerprint(identity_module)
-    first = identity_module.build_seed_key(0, "model", "strategy", fingerprint, "digest-a")
-    second = identity_module.build_seed_key(0, "model", "strategy", fingerprint, "digest-b")
+    first = identity_module.build_seed_key(0, fingerprint, "digest-a")
+    second = identity_module.build_seed_key(0, fingerprint, "digest-b")
     assert first != second
 
 
@@ -948,6 +936,16 @@ def test_structural_digest_tracks_shape_dtype_and_name_set(tensor_runtime):
     assert build(base) != build([("a.weight", torch.zeros(2, 3, dtype=torch.float64)), ("b.weight", torch.zeros(4))])
     assert build(base) != build([("a.weight", torch.zeros(2, 3))])
     assert build([]) != build(base)
+
+
+def test_structural_digest_tracks_stride(tensor_runtime):
+    build = tensor_runtime.tensor_layout.build_structural_digest
+    contiguous = torch.arange(9).reshape(3, 3)
+    transposed = contiguous.t()
+
+    assert contiguous.shape == transposed.shape
+    assert build([("weight", contiguous)]) != build([("weight", transposed)])
+    assert build([("weight", contiguous)]) == build([("weight", contiguous.clone())])
 
 
 def test_structural_digest_tracks_npu_format(tensor_runtime, monkeypatch):
@@ -967,100 +965,6 @@ def test_structural_digest_tracks_npu_format(tensor_runtime, monkeypatch):
     assert build(tensors) != base
 
 
-def test_manifest_accepts_only_the_current_five_field_format(manifest_module):
-    assert manifest_module.parse_weight_info((1, 1, 4)) is None
-    assert manifest_module.parse_weight_info((1, 1, 4, [1])) is None
-    assert manifest_module.parse_weight_info({"ptr": 1, "numel": 1, "element_size": 4}) is None
-    parsed = manifest_module.parse_weight_info((1, 1, 4, [1], torch.float32))
-    assert parsed == (1, 1, 4, (1,), "float32")
-
-
-def test_manifest_rejects_duplicate_or_divergent_tensor_names(manifest_module):
-    tensor = torch.ones(1, dtype=torch.float32)
-    seed_info = SimpleNamespace(
-        weights={"weight": (1, 1, 4, [1], "float32")},
-        formats={"weight": 0},
-    )
-
-    assert (
-        manifest_module.validate_weight_manifest(
-            seed_info,
-            [("weight", tensor), ("weight", tensor)],
-            set(),
-        )
-        is None
-    )
-    assert (
-        manifest_module.validate_weight_manifest(
-            seed_info,
-            [("different.weight", tensor)],
-            set(),
-        )
-        is None
-    )
-
-
-def test_manifest_allows_a_validated_remote_only_shared_skip(manifest_module, monkeypatch):
-    tensor = torch.ones(1, dtype=torch.float32)
-    seed_info = SimpleNamespace(
-        weights={
-            "weight": (1, 1, 4, [1], "float32"),
-            "shared.weight": (2, 1, 4, [1], "float32"),
-        },
-        formats={"weight": 0, "shared.weight": 0},
-    )
-    monkeypatch.setattr(manifest_module, "read_npu_format", lambda _tensor: 0)
-
-    parsed = manifest_module.validate_weight_manifest(
-        seed_info,
-        [("weight", tensor)],
-        {"shared.weight"},
-    )
-
-    assert parsed == {"weight": (1, 1, 4, (1,), "float32")}
-
-
-def test_manifest_rejects_a_skip_missing_from_the_remote_manifest(manifest_module, monkeypatch):
-    tensor = torch.ones(1, dtype=torch.float32)
-    seed_info = SimpleNamespace(
-        weights={"weight": (1, 1, 4, [1], "float32")},
-        formats={"weight": 0},
-    )
-    monkeypatch.setattr(manifest_module, "read_npu_format", lambda _tensor: 0)
-
-    assert (
-        manifest_module.validate_weight_manifest(
-            seed_info,
-            [("weight", tensor)],
-            {"absent.weight"},
-        )
-        is None
-    )
-
-
-def test_manifest_rejects_a_skip_still_present_locally(manifest_module, monkeypatch):
-    tensor = torch.ones(1, dtype=torch.float32)
-    seed_info = SimpleNamespace(
-        weights={
-            "weight": (1, 1, 4, [1], "float32"),
-            "shared.weight": (2, 1, 4, [1], "float32"),
-        },
-        formats={"weight": 0, "shared.weight": 0},
-    )
-    monkeypatch.setattr(manifest_module, "read_npu_format", lambda _tensor: 0)
-
-    # A skipped name that the caller left in the local manifest means the exclusion
-    # filter diverged from the skip set, so the transfer must not proceed.
-    assert (
-        manifest_module.validate_weight_manifest(
-            seed_info,
-            [("weight", tensor), ("shared.weight", tensor)],
-            {"shared.weight"},
-        )
-        is None
-    )
-
-
 def test_seed_url_appends_independent_port_and_rejects_conflicts(seed_module):
     assert seed_module.build_seed_url("http://seed-host", 1234) == "http://seed-host:1234"
     assert seed_module.build_seed_url("https://seed-host:1234", 1234) == "https://seed-host:1234"
@@ -1078,8 +982,7 @@ def test_seed_metadata_rejects_other_protocol_versions(seed_module, monkeypatch,
         status_code=200,
         json=lambda: {
             "rfork_protocol_version": protocol_version,
-            "rfork_transfer_engine_info": ["session", {"weight": [1, 1, 4, [1], "float32"]}],
-            "rfork_transfer_engine_format_info": {"weight": 2},
+            "rfork_transfer_engine_info": ["session", {"weight": 1}],
         },
     )
     monkeypatch.setattr(seed_module.requests, "get", Mock(return_value=response))
@@ -1171,30 +1074,6 @@ def test_planner_seed_key_requires_bound_structural_digest(planner_module, monke
     with pytest.raises(RuntimeError, match="changed after binding"):
         client.bind_structural_digest("digest-b")
     assert client.seed_key == "seed-key"
-
-
-def test_planner_verify_structural_digest_binds_and_reports_drift(planner_module, caplog):
-    config = SimpleNamespace(
-        request_timeout_sec=1.0,
-        planner_url="http://planner",
-        model_url="model",
-        model_deploy_strategy_name="strategy",
-        send_model_identity_headers=False,
-    )
-    identity = SimpleNamespace(
-        tp_rank=0, pp_rank=None, ep_rank=None, is_draft_model=False, compatibility_fingerprint="fp"
-    )
-    client = planner_module.RForkPlannerClient(config, identity)
-
-    # First use binds without an error; repeated verification is a no-op.
-    assert client.verify_structural_digest("digest-a")
-    assert client.structural_digest == "digest-a"
-    assert client.verify_structural_digest("digest-a")
-
-    with caplog.at_level(logging.ERROR):
-        assert not client.verify_structural_digest("digest-b")
-    assert "changed between registration" in caplog.text
-    assert client.structural_digest == "digest-a"
 
 
 def test_planner_acquires_and_renews_a_ttl_lease(planner_module, monkeypatch):

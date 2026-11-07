@@ -3,6 +3,7 @@
 """Guard the LoadConfig-held sessions against reuse across different model identities."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -50,7 +51,7 @@ def test_misdetected_draft_is_rejected_by_fingerprint(rfork_helpers, monkeypatch
     vllm_config, model_config = _misjudged_draft_configs()
 
     with pytest.raises(RuntimeError, match="different model identity") as excinfo:
-        loader._ensure_rfork_session(vllm_config, model_config)
+        loader._get_session(vllm_config, model_config)
 
     assert "differing fields: compatibility_fingerprint" in str(excinfo.value)
     assert created == []
@@ -74,9 +75,34 @@ def test_matching_identity_reuses_existing_session(rfork_helpers, monkeypatch):
 
     vllm_config, model_config = _misjudged_draft_configs()
 
-    assert loader._ensure_rfork_session(vllm_config, model_config) is stored
+    assert loader._get_session(vllm_config, model_config) is stored
     assert created == []
     assert load_config.rfork_session is stored
+
+
+def test_second_load_aborts_without_touching_existing_session(rfork_helpers, runtime, monkeypatch):
+    module = rfork_helpers.loader
+    session = runtime.session.RForkSession(runtime.config, runtime.identity)
+    with session.loading():
+        pass
+    loader = module.RForkModelLoader(SimpleNamespace(device=None, model_loader_extra_config={}))
+    monkeypatch.setattr(loader, "_get_session", lambda *args: session)
+    initialize = Mock()
+    fallback = Mock()
+    monkeypatch.setattr(module, "initialize_model", initialize)
+    monkeypatch.setattr(module, "_load_with_default_loader", fallback)
+    monkeypatch.setattr(module, "_rfork_bypass_reason", lambda *args: None)
+    vllm_config, model_config = _misjudged_draft_configs()
+    model_config.dtype = torch.float32
+    vllm_config.device_config = SimpleNamespace(device="cpu")
+
+    with pytest.raises(runtime.session.RForkSessionUnavailableError, match="already loaded"):
+        loader.load_model(vllm_config, model_config)
+
+    initialize.assert_not_called()
+    fallback.assert_not_called()
+    session.transfer_backend.unregister_memory_region.assert_not_called()
+    assert session.shutdown()
 
 
 def test_foreign_session_fallback_does_not_touch_stored_session(rfork_helpers, monkeypatch):
@@ -91,7 +117,7 @@ def test_foreign_session_fallback_does_not_touch_stored_session(rfork_helpers, m
         ),
         register_destination=lambda *args, **kwargs: calls.append("register_destination"),
         prepare_for_fallback=lambda: calls.append("prepare_for_fallback"),
-        start_seed_service=lambda *args, **kwargs: calls.append("start_seed_service"),
+        schedule_seed_service=lambda *args, **kwargs: calls.append("schedule_seed_service"),
     )
     load_config = SimpleNamespace(device=None, model_loader_extra_config={}, rfork_session=stored_session)
     loader = module.RForkModelLoader(load_config)
@@ -123,3 +149,27 @@ def test_foreign_session_fallback_does_not_touch_stored_session(rfork_helpers, m
     # The stored target session was never touched: no fallback cleanup ran on it.
     assert calls == ["default_loader"]
     assert load_config.rfork_session is stored_session
+
+
+def test_configuration_error_aborts_instead_of_falling_back(rfork_helpers, monkeypatch):
+    module = rfork_helpers.loader
+    loader = module.RForkModelLoader(SimpleNamespace(device=None, model_loader_extra_config={}))
+    calls = []
+
+    def fail_session(*args, **kwargs):
+        raise module.RForkConfigurationError("rfork_scheduler_url is required")
+
+    monkeypatch.setattr(loader, "_get_session", fail_session)
+    monkeypatch.setattr(module, "_load_with_default_loader", lambda *args, **kwargs: calls.append("fallback"))
+    monkeypatch.setattr(
+        module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
+    )
+    vllm_config, model_config = _misjudged_draft_configs()
+    model_config.dtype = torch.float32
+    vllm_config.device_config = SimpleNamespace(device="cpu")
+
+    with pytest.raises(module.RForkConfigurationError, match="rfork_scheduler_url"):
+        loader.load_model(vllm_config, model_config)
+    assert calls == []
