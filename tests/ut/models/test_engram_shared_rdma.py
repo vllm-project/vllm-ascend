@@ -147,7 +147,7 @@ def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
 
 def test_three_owner_routing_restores_order_and_masks_invalid_ids(rdma, monkeypatch):
     fake_kernel = ModuleType("vllm_ascend.ops.triton.engram_lookup")
-    fake_kernel.dequantize_packed_engram = lambda packed, out, count, *_: out.copy_(
+    fake_kernel.__dict__["dequantize_packed_engram"] = lambda packed, out, count, *_: out.copy_(
         packed[:count].view(-1, 1).expand_as(out)
     )
     monkeypatch.setitem(sys.modules, fake_kernel.__name__, fake_kernel)
@@ -209,7 +209,7 @@ def test_shard_ranges_cover_uneven_table(rdma):
 
 
 def test_multi_owner_reuses_transport_and_retires_all_leases(rdma, monkeypatch):
-    events = []
+    events: list[object] = []
     engine = SimpleNamespace(close=lambda: events.append("engine-close"))
     metadata = {"identity": "checkpoint", "tables": {}}
 
