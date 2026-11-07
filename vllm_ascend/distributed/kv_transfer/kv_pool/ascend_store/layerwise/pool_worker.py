@@ -30,6 +30,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import (
+    layerwise_dcp_rank,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
     prepare_group_sessions,
 )
@@ -170,7 +173,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "is not supported with layerwise KV transfer (use_layerwise=True). "
                 "The layerwise threads do not implement TP-mismatch handling."
             )
-        # Both PD sides must derive the same GVA shard layout.
+        # The worker key builder and the scheduler-side hit-check enumeration
+        # must agree on which DCP rank owns this worker's context shard.
+        if self.dcp_size > 1:
+            expected_dcp_rank = layerwise_dcp_rank(self.tp_rank, self.pcp_rank, self.pcp_size, self.dcp_size)
+            if expected_dcp_rank != self.dcp_rank:
+                raise ValueError(
+                    "Layerwise DCP rank mapping mismatch: "
+                    f"tp_rank={self.tp_rank}, pcp_rank={self.pcp_rank}, pcp_size={self.pcp_size}, "
+                    f"dcp_size={self.dcp_size} maps to dcp_rank={expected_dcp_rank}, "
+                    f"but the DCP group reports rank {self.dcp_rank}."
+                )
+        # Both PD sides must derive the same layerwise shard layout.
         if self.kv_role in ("kv_producer", "kv_consumer") and infer_dcp_mismatch_info(
             self.kv_role, self._extra_config, self.dcp_size, self.pcp_size
         ):
@@ -180,7 +194,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 f"(local dcp_size={self.dcp_size}, local pcp_size={self.pcp_size}, "
                 f"peer role={peer_role}) is not supported with layerwise KV "
                 f"transfer. Both the producer and consumer must use the same "
-                f"dcp_size/pcp_size so the layerwise GVA shard layout is consistent."
+                f"dcp_size/pcp_size so the layerwise shard layout is consistent."
             )
 
     def _init_layerwise_config(self) -> None:
@@ -757,7 +771,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
         return self.layerwise_keys.make_full_key(
-            group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank, self.pcp_rank
+            group_id,
+            block_hash_hex,
+            self.metadata[group_id].head_or_tp_rank,
+            self.pp_rank,
+            self.pcp_rank,
+            self.dcp_rank,
         )
 
     def _make_layerwise_partial_key(

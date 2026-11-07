@@ -11,9 +11,10 @@ from unittest.mock import patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import layerwise_dcp_rank
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
@@ -54,17 +55,185 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                                 sets.append(set(keys))
                             self.assertFalse(sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
 
-    def test_pcp_does_not_enable_dcp(self):
-        with self.assertRaisesRegex(ValueError, "decode_context_parallel_size=2"):
-            config = self.make_config()
-            config.parallel_config.prefill_context_parallel_size = 4
-            config.parallel_config.decode_context_parallel_size = 2
+    def test_dcp_keys_cover_all_workers_and_isolate_topologies(self):
+        for pp_size in (1, 2):
+            for num_groups in (1, 2):
+                with self.subTest(pp_size=pp_size, num_groups=num_groups):
+                    config = self.make_config(pp_size)
+                    cache = self.make_cache_config(num_groups)
+                    builders = []
+                    for dcp_size in (1, 2, 4):
+                        config.parallel_config.decode_context_parallel_size = dcp_size
+                        builders.append(
+                            MooncakeBackend.bind_layerwise_keys(
+                                vllm_config=config,
+                                kv_cache_config=cache,
+                                model_name="model",
+                                use_hybrid=num_groups > 1,
+                                grouped_block_size=[16 * (g + 1) for g in range(num_groups)],
+                            )
+                        )
+                    for group in range(num_groups):
+                        for heads in (1, 2):
+                            sets = []
+                            for builder in builders:
+                                keys = builder.make_hit_check_keys(group, "hash", heads)
+                                writers = [
+                                    builder.make_full_key(group, "hash", head, stage, 0, dcp_rank)
+                                    for stage in range(pp_size)
+                                    for dcp_rank in range(builder.dcp_size)
+                                    for head in range(heads)
+                                ]
+                                self.assertEqual(keys, writers)
+                                self.assertEqual(len(set(keys)), pp_size * builder.dcp_size * heads)
+                                sets.append(set(keys))
+                            self.assertFalse(sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+
+    def test_pcp_and_dcp_cannot_be_combined(self):
+        config = self.make_config()
+        config.parallel_config.prefill_context_parallel_size = 4
+        config.parallel_config.decode_context_parallel_size = 2
+        with self.assertRaisesRegex(ValueError, "supports PCP or DCP, not both"):
             MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=self.make_cache_config(1),
                 model_name="model",
                 use_hybrid=False,
                 grouped_block_size=[16],
+            )
+
+    def test_dcp_rejects_layer_sharded_kvpp(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        config.additional_config = {"enable_kvpp": True}
+        with self.assertRaisesRegex(ValueError, "layer-sharded caches"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=self.make_cache_config(1),
+                model_name="model",
+                use_hybrid=False,
+                grouped_block_size=[16],
+            )
+
+    def test_dcp_rejects_recurrent_align_state_groups(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        cache = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.state"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((4,),),
+                        dtypes=("uint8",),
+                        mamba_cache_mode="align",
+                        num_speculative_blocks=1,
+                    ),
+                )
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "align-state"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=cache,
+                model_name="model",
+                use_hybrid=True,
+                grouped_block_size=[16],
+            )
+
+    def test_dcp_rejects_sliding_window_groups(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        cache = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.swa"],
+                    SlidingWindowSpec(
+                        block_size=16,
+                        sliding_window=16,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype="uint8",
+                    ),
+                )
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "sliding-window"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=cache,
+                model_name="model",
+                use_hybrid=True,
+                grouped_block_size=[16],
+            )
+
+    def test_dcp_rank_mapping_matches_group_layout(self):
+        self.assertEqual(layerwise_dcp_rank(0, 0, 1, 4), 0)
+        self.assertEqual(layerwise_dcp_rank(3, 0, 1, 4), 3)
+        self.assertEqual(layerwise_dcp_rank(4, 0, 1, 4), 0)
+        # Generalized (TP, PCP) plane; standalone layerwise DCP restricts PCP=1.
+        self.assertEqual(layerwise_dcp_rank(0, 1, 2, 4), 1)
+        self.assertEqual(layerwise_dcp_rank(1, 1, 2, 4), 3)
+
+    def test_dcp_rejects_prefix_match_unit(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        config.cache_config.prefix_match_unit = 16
+        with self.assertRaisesRegex(ValueError, "prefix_match_unit"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=self.make_cache_config(1),
+                model_name="model",
+                use_hybrid=False,
+                grouped_block_size=[32],
+            )
+
+    def test_dcp_rejects_non_dcp_sharded_groups(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        cache = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.state"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((4,),),
+                        dtypes=("uint8",),
+                    ),
+                )
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "DCP-sharded"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=cache,
+                model_name="model",
+                use_hybrid=True,
+                grouped_block_size=[32],
+            )
+
+    def test_dcp_rejects_mixed_block_size_granularity(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        cache = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.kv"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                ),
+                KVCacheGroupSpec(
+                    ["model.layers.1.kv"],
+                    FullAttentionSpec(block_size=24, num_kv_heads=1, head_size=1, dtype="uint8"),
+                ),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "multiple of the smallest block size"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=cache,
+                model_name="model",
+                use_hybrid=True,
+                grouped_block_size=[32, 48],
             )
 
     def test_pcp_rejects_layer_sharded_kvpp(self):
