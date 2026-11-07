@@ -365,8 +365,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        # Reuse the already-on-device query_start_loc (a synced view of the same
+        # CpuGpuBuffer as query_start_loc_cpu) instead of re-doing a per-forward H2D copy.
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         # vLLM main keeps speculative-decode request metadata at the real
