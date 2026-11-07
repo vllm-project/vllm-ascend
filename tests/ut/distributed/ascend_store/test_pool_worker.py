@@ -45,7 +45,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     SharedBlockData,
     get_partial_block_index,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
+    LAYERWISE_READ_LEASE_TTL_MS,
+    LayerwiseKVPoolWorker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
@@ -2434,6 +2437,55 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertNotIn(201, request.load_block_gvas_by_group_np[0])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
+    def test_layerwise_load_batches_groups_and_preserves_partial_destinations(self):
+        worker = self._make_gva_worker(2)
+        worker.grouped_block_size = [16, 32]
+        request = ReqMeta(
+            req_id="grouped-load",
+            token_len_chunk=16,
+            target_token_len=56,
+            block_ids=[7, 8, 9],
+            block_ids_by_group=[[7, 8, 9], [10, 11]],
+            block_ids_by_group_np=[np.asarray([7, 8, 9]), np.asarray([10, 11])],
+            block_hashes=["h0", "h1"],
+            load_spec=LoadSpec(0, 40, True),
+        )
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda value=value: [value]) for value in range(201, 206)]
+        pinned = [SimpleNamespace(gva_list=lambda value=value: [value]) for value in range(301, 306)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.return_value = [0] * 5
+
+        self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
+
+        keys = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        self.assertEqual(len(keys), 5)
+        self.assertEqual(worker.m_store.batch_get_key_info.call_count, 2)
+        worker.m_store.batch_add_lease.assert_called_once_with(keys, LAYERWISE_READ_LEASE_TTL_MS)
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301, 302, 0])
+        self.assertEqual(request.load_block_gvas_by_group_np[1].tolist(), [304, 0])
+        self.assertEqual(request.partial_load_gva_per_group, [303, 305])
+        self.assertEqual(request.load_keys, keys)
+        self.assertEqual(worker._step_load_keys, set(keys))
+
+    def test_batched_load_retries_each_partial_and_refreshes_under_lease(self):
+        worker = self._make_gva_worker(2)
+        keys = ["group0-full", "group0-partial", "group1-full", "group1-partial"]
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])] * 4
+        pinned = [SimpleNamespace(gva_list=lambda value=value: [value]) for value in range(301, 305)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.side_effect = [[0, -3101, 0, -3101], [0], [0]]
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.time.sleep"
+        ) as sleep:
+            self.assertEqual(worker._lease_load_gvas(keys, {1, 3}), ([301, 302, 303, 304], keys))
+
+        self.assertEqual(
+            [call.args[0] for call in worker.m_store.batch_add_lease.call_args_list], [keys, keys[1:2], keys[3:]]
+        )
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(worker._step_load_keys, set(keys))
+
     @staticmethod
     def _make_multi_block_gva_request(block_hashes):
         block_ids = list(range(7, 7 + len(block_hashes)))
@@ -2758,9 +2810,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         missing_info.size.return_value = 0
         missing_info.gva_list.return_value = []
         worker.m_store.batch_get_key_info.side_effect = [
+            [valid_info, missing_info],
             [valid_info],
-            [valid_info],
-            [missing_info],
         ]
         worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(
