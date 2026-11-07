@@ -14,6 +14,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
+    AscendFIAMetadataBuilder,
     AscendMetadata,
 )
 from vllm_ascend.attention.context_parallel.attention_cp import (
@@ -145,7 +146,7 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_get_builder_cls(self):
         with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+            self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendFIAMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
         with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
@@ -282,6 +283,75 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+
+@pytest.mark.parametrize("builder_cls", [AscendAttentionMetadataBuilder, AscendFIAMetadataBuilder])
+@pytest.mark.parametrize("for_capture", [False, True], ids=["runtime", "capture"])
+@pytest.mark.parametrize(
+    "boundaries,num_input_tokens,is_prefilling",
+    [
+        ([0, 1, 2], 2, [False, False]),
+        ([0, 1, 5], 5, [False, True]),
+        ([0, 3, 6], 8, [False, False]),
+    ],
+    ids=["decode", "mixed-prefill", "padded-spec-decode"],
+)
+def test_query_boundaries_copy_is_skipped_only_for_fia(
+    builder_cls, for_capture, boundaries, num_input_tokens, is_prefilling
+):
+    builder = builder_cls.__new__(builder_cls)
+    builder.device = "cpu"
+    builder.use_pcp = False
+    builder.kv_cache_spec = None
+    builder.speculative_config = None
+    builder.vllm_config = SimpleNamespace(use_v2_model_runner=True)
+    builder.model_config = SimpleNamespace(runner_type="generate")
+    builder.attn_mask_builder = MagicMock()
+    query_start_loc_cpu = torch.tensor(boundaries, dtype=torch.int32)
+    query_start_loc_gpu = query_start_loc_cpu.clone()
+    seq_lens = torch.tensor([7, 9], dtype=torch.int32)
+    common = SimpleNamespace(
+        context_parallel_metadata=None,
+        num_reqs=2,
+        num_actual_tokens=boundaries[-1],
+        num_input_tokens=num_input_tokens,
+        max_query_len=max(b - a for a, b in zip(boundaries, boundaries[1:])),
+        query_start_loc_cpu=query_start_loc_cpu,
+        query_start_loc=query_start_loc_gpu,
+        seq_lens=seq_lens,
+        block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(boundaries[-1]),
+        causal=True,
+        attn_state=AscendAttentionState.ChunkedPrefill,
+        is_prefilling=torch.tensor(is_prefilling),
+    )
+    with (
+        patch.object(builder, "_split_decodes_and_prefills", return_value=(2, 0, boundaries[-1], 0)),
+        patch.object(attn_module, "_select_seq_lens", return_value=seq_lens),
+        patch.object(torch.Tensor, "pin_memory", return_value=query_start_loc_cpu.clone()) as pin,
+    ):
+        metadata = builder.build_for_graph_capture(common) if for_capture else builder.build(0, common)
+
+    expected_q = boundaries[1:]
+    if num_input_tokens > boundaries[-1]:
+        expected_q = expected_q + [num_input_tokens]
+    assert metadata.actual_seq_lengths_q == expected_q
+    assert metadata.query_start_loc_gpu is query_start_loc_gpu
+    assert metadata.seq_lens_gpu is seq_lens
+    assert metadata.seq_lens_list == [7, 9] + [1] * (len(expected_q) - 2)
+    assert metadata.block_tables.shape[0] == len(expected_q)
+    if builder_cls is AscendFIAMetadataBuilder:
+        pin.assert_not_called()
+        assert metadata.query_start_loc is None
+    else:
+        pin.assert_called_once()
+        torch.testing.assert_close(metadata.query_start_loc, query_start_loc_cpu)
+        # Other backends retain a snapshot rather than aliasing either buffer.
+        assert metadata.query_start_loc.data_ptr() != query_start_loc_cpu.data_ptr()
+        assert metadata.query_start_loc.data_ptr() != query_start_loc_gpu.data_ptr()
+        query_start_loc_cpu.fill_(-1)
+        query_start_loc_gpu.fill_(-1)
+        assert metadata.query_start_loc.tolist() == boundaries
 
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
