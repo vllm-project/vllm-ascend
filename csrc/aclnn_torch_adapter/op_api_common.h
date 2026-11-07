@@ -40,6 +40,9 @@
 #define NPU_NAME_SPACE at_npu::native
 using namespace at;
 
+// Keep legacy adapter helpers distinct from PTA runtime symbols.
+namespace vllm_ascend::aclnn_adapter {
+
 typedef struct aclOpExecutor aclOpExecutor;
 typedef struct aclTensor aclTensor;
 typedef struct aclScalar aclScalar;
@@ -768,5 +771,9 @@ typedef void (*ReleaseHugeMem)(void *, bool);
       unInitMemFunc(nullptr, false);                                          \
     }                                                                         \
   } while (false)
+
+} // namespace vllm_ascend::aclnn_adapter
+
+using namespace vllm_ascend::aclnn_adapter;
 
 #endif
