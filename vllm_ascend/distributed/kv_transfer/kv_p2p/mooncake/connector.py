@@ -88,6 +88,8 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def shutdown(self) -> None:
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
