@@ -1,0 +1,6 @@
+pr: 20840
+entries:
+  - category: bugfix
+    text: Fixed NPU IPC trainer cleanup to collect released IPC allocations after weight updates.
+  - category: bugfix
+    text: Fixed packed NPU IPC weight updates failing to release producer staging buffers after multi-chunk transfers.
