@@ -1460,6 +1460,15 @@ def refresh_block_size(vllm_config):
             cache_config.block_size = 32
         return
 
+    if is_deepseek_v41(model_config.hf_config):
+        if cache_config.block_size not in [32, 64, 128]:
+            logger.warning(
+                "For deepseek_v41 model, block size should be 32, 64 or 128. "
+                "Setting block size to 128 for better performance."
+            )
+            cache_config.block_size = 128
+        return
+
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
         # logic rather than the generic platform default.

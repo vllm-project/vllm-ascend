@@ -1,0 +1,4 @@
+pr: 21088
+entries:
+  - category: bugfix
+    text: DeepSeek V4.1 now keeps the supported KV cache block sizes (32, 64, and 128) when prefix caching or chunked prefill is enabled, instead of silently changing 32/64 to 128.

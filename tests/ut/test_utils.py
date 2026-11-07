@@ -858,6 +858,57 @@ class TestRefreshBlockSizeC8MXFP(TestBase):
             utils.refresh_block_size(config)
 
 
+def _make_refresh_config(block_size, model_type="deepseek_v41"):
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=block_size,
+            cache_dtype="bfloat16",
+            enable_prefix_caching=True,
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=model_type),
+            hf_text_config=None,
+            is_hybrid=False,
+        ),
+        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
+        speculative_config=None,
+    )
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "deepseek_v41_text"])
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_refresh_block_size_dsv41_preserves_supported_sizes(model_type, block_size):
+    config = _make_refresh_config(block_size, model_type)
+    with mock.patch.object(utils, "is_c8_mxfp_kv_quant", return_value=False):
+        utils.refresh_block_size(config)
+    assert config.cache_config.block_size == block_size
+
+
+@pytest.mark.parametrize("block_size", [16, 256])
+def test_refresh_block_size_dsv41_unsupported_sizes_fall_back_to_128(block_size):
+    config = _make_refresh_config(block_size)
+    with (
+        mock.patch.object(utils, "is_c8_mxfp_kv_quant", return_value=False),
+        mock.patch.object(utils.logger, "warning") as warning,
+    ):
+        utils.refresh_block_size(config)
+    assert config.cache_config.block_size == 128
+    warning.assert_called_once()
+    assert "deepseek_v41 model" in warning.call_args.args[0]
+
+
+def test_refresh_block_size_dsv4_unsupported_size_falls_back_to_32():
+    config = _make_refresh_config(16, model_type="deepseek_v4")
+    with (
+        mock.patch.object(utils, "is_c8_mxfp_kv_quant", return_value=False),
+        mock.patch.object(utils.logger, "warning") as warning,
+    ):
+        utils.refresh_block_size(config)
+    assert config.cache_config.block_size == 32
+    warning.assert_called_once()
+    assert "deepseek_v4 model" in warning.call_args.args[0]
+
+
 @pytest.fixture
 def physical_device_lookup():
     with mock.patch("vllm.platforms.current_platform") as platform:
