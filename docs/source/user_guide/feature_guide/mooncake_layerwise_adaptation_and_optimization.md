@@ -182,9 +182,12 @@ and `DCP=1` keys remain unchanged. A prefix block is reported as a cache hit
 only after every PP stage and DCP rank has committed it.
 
 PCP and DCP cannot be enabled together for layerwise pooling. DCP requires
-full-attention cache groups: upstream vLLM does not support DCP for
-sliding-window caches, so models with sliding-window or recurrent/align-state
-groups (for example DeepSeek-V4 SWA/compressor caches) must keep DCP disabled.
+cache groups that vLLM shards across DCP, such as full-attention caches. Groups
+with a full per-rank state, including sliding-window, recurrent/align-state and
+circular-buffer caches (for example DeepSeek-V4 SWA/compressor caches), must
+keep DCP disabled. The smallest cache-group block size must divide every other
+group block size so that the pool hashes blocks at the same granularity as the
+scheduler, and `--prefix-match-unit` must not be set with DCP.
 See the [hybrid attention guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
 
 ### Use Cached Prefixes
