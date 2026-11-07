@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
     LayerwiseKVPoolWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import ChunkedTokenDatabase
 
 
 def test_reuse_layout_remap_to_stage_local():
@@ -107,8 +108,16 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     worker._prepare_load_gvas = Mock()
     worker._alloc_gvas_for_save = Mock()
     worker._masked_runs_cache = {}
-    # Builders only need the registered geometry; no real backend client.
-    worker.token_database = worker
+    # Register the real database geometry without creating a backend client.
+    worker.token_database = ChunkedTokenDatabase([], worker.grouped_block_size, None)
+    worker.token_database.set_group_buffers(
+        worker.group_kv_caches_base_addr,
+        worker.group_block_len,
+        worker.group_block_stride,
+        group_num_layers=worker.group_num_layers,
+        group_layer_cache_entry_offsets=worker.group_layer_cache_entry_offsets,
+        group_cache_entry_segments=worker.group_cache_entry_segments,
+    )
     return worker, layer_offset
 
 

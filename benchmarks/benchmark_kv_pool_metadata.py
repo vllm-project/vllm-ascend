@@ -179,8 +179,8 @@ class LeaseCase:
         import numpy as np
 
         assert result is None
-        assert self.request.load_keys == self.keys
-        np.testing.assert_array_equal(self.request.load_block_gvas_by_group_np[0], self.addresses)
+        assert self.request.transfer.load_keys == self.keys
+        np.testing.assert_array_equal(self.request.transfer.load_block_gvas_by_group_np[0], self.addresses)
         assert self.worker._step_load_keys == set(self.keys)
         assert self.store.calls == {
             "metadata_calls": 2,
