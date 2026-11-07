@@ -22,13 +22,14 @@ RMSNorm for the fused Q/K RMSNorm, and the mHC pre/post torch fallbacks. They
 used to live in ``patch_triton.py`` and were split out because nothing here is
 Triton.
 
-Import order matters: the ``_cc1d.causal_conv1d_update`` wrapper installed here
-is deliberately overwritten by the NPU Triton kernel in ``patch_triton.py``, so
-this module must be imported *before* ``patch_triton`` (see
-``vllm_ascend/patch/worker/__init__.py``).
+The ``_cc1d.causal_conv1d_update`` wrapper installed here stays the effective
+implementation for vLLM consumers: the NPU Triton kernel that used to overwrite
+it no longer exists, and rebinding a missing symbol only produced a misleading
+startup warning.
 """
 
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
+from vllm.logger import logger
 
 from vllm_ascend.ops.causal_conv1d import (
     causal_conv1d_fn as _npu_causal_conv1d_fn_impl,
@@ -37,6 +38,12 @@ from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as _npu_causal_co
 
 
 def _npu_causal_conv1d_update(*args, **kwargs):
+    logger.warning_once(
+        "causal_conv1d_update is served by the PyTorch Ascend implementation,"
+        " which synchronises per request and therefore cannot be captured into a"
+        " decode ACL graph; use --enforce-eager or"
+        " VLLM_USE_BREAKABLE_CUDAGRAPH=1 for the models that reach this rebind."
+    )
     for key in (
         "null_block_id",
         "block_idx_first_scheduled_token",
