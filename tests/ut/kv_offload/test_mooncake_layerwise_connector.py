@@ -651,6 +651,42 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
             self.assertNotIn("reqX", th.task_tracker)
             self.assertIn("reqX", th.failed_requests)
 
+    def test_completion_before_worker_registration_is_retained(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                th = KVCacheRecvingLayerThread(0, 5555, 1, 1, "engineA", self.meta, self.ready_event)
+                worker = object.__new__(MooncakeLayerwiseConnectorWorker)
+                worker.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True))
+                worker.kv_recv_layer_thread = th
+                worker.request_map = {}
+                worker.virtual_request = set()
+                worker._recving_metadata = {}
+                worker._invalid_block_ids = set()
+                if failed:
+                    th.update_failed_task("early")
+                else:
+                    for rank in range(8):
+                        th.update_done_task("early", 8, f"peer:{rank}")
+
+                self.assertEqual(worker.get_finished(), (set(), set()))
+                worker.request_map["early"] = "early-12345678"
+                worker._recving_metadata["early-12345678"] = SimpleNamespace(local_block_ids=[[7, 8], [9]])
+                result = worker.get_finished()
+                self.assertEqual(result, (set(), set() if failed else {"early-12345678"}))
+                self.assertEqual(worker._invalid_block_ids, {7, 8, 9} if failed else set())
+                self.assertEqual(worker.request_map, {})
+                self.assertEqual(worker._recving_metadata, {})
+                self.assertEqual(worker.get_finished(), (set(), set()))
+
+    def test_unregistered_completion_does_not_delay_registered_request(self):
+        th = KVCacheRecvingLayerThread(0, 5555, 1, 1, "engineA", self.meta, self.ready_event)
+        th.update_done_task("early", 1, "peer")
+        th.update_done_task("ready", 1, "peer")
+        self.assertEqual(th.get_and_clear_done_requests({"ready"}), {"ready"})
+        self.assertEqual(th.get_and_clear_done_requests({"ready"}), set())
+        self.assertEqual(th.get_and_clear_done_requests({"early"}), {"early"})
+        self.assertEqual(th.get_and_clear_done_requests(), set())
+
     def test_update_done_task_aggregates_by_pd_head_ratio(self):
         th = KVCacheRecvingLayerThread(
             tp_rank=0,

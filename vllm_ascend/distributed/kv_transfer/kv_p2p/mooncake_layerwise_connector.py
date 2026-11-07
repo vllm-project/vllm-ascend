@@ -11,7 +11,7 @@ import struct
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -602,26 +602,31 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.metadata = metadata
 
-    def get_and_clear_done_requests(self) -> set[str]:
+    def get_and_clear_done_requests(self, request_ids: Collection[str] | None = None) -> set[str]:
         """
         Get and clear the requests that have been completed.
         Returns:
             A set of request IDs that have been completed.
         """
         with self.lock:
-            finished_requests = self.done_requests
-            self.done_requests = set()
+            # A P completion can arrive before the D worker registers its metadata.
+            finished_requests = (
+                self.done_requests if request_ids is None else self.done_requests.intersection(request_ids)
+            )
+            self.done_requests = self.done_requests - finished_requests
         return finished_requests
 
-    def get_and_clear_failed_requests(self) -> set[str]:
+    def get_and_clear_failed_requests(self, request_ids: Collection[str] | None = None) -> set[str]:
         """
         Get and clear the requests that have failed.
         Returns:
             A set of request IDs that have failed.
         """
         with self.lock:
-            failed_requests = self.failed_requests
-            self.failed_requests = set()
+            failed_requests = (
+                self.failed_requests if request_ids is None else self.failed_requests.intersection(request_ids)
+            )
+            self.failed_requests = self.failed_requests - failed_requests
         return failed_requests
 
     def update_failed_task(self, req_id: str) -> None:
@@ -1575,6 +1580,7 @@ class MooncakeLayerwiseConnectorWorker:
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_recving = (
             self.kv_recv_layer_thread.get_and_clear_done_requests(  # type: ignore[union-attr]
+                self.request_map
             )
             if self.vllm_config.kv_transfer_config.is_kv_consumer
             else set()
@@ -1584,7 +1590,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.virtual_request = set()
 
         failed_recving = (
-            self.kv_recv_layer_thread.get_and_clear_failed_requests()
+            self.kv_recv_layer_thread.get_and_clear_failed_requests(self.request_map)
             if self.vllm_config.kv_transfer_config.is_kv_consumer and self.kv_recv_layer_thread is not None
             else set()
         )
