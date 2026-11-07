@@ -1246,24 +1246,31 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         )
         compilation_config.cudagraph_mode = cudagraph_mode
 
-    # Dense-SP MC2 fusion cannot run inside FULL graphs: plain FULL also
-    # registers mixed-mode (prefill-shaped) keys, and prefill batches then
-    # replay graphs captured without the fused matmul-collective kernels —
-    # outputs stay correct but the fusion silently disappears. Demote to
-    # FULL_DECODE_ONLY so decode keeps its graphs (the fused projections
-    # already fall back to the unfused layout inside decode capture) and
-    # prefill runs eagerly, where the fusion is active.
+    # Dense-SP MC2 cannot live inside graphs or compiled pieces: plain FULL
+    # also registers mixed-mode (prefill-shaped) keys, and prefill batches
+    # then replay graphs captured without the fused matmul-collective
+    # kernels — outputs stay correct but the fusion silently disappears —
+    # while FULL_AND_PIECEWISE compiles prefill pieces that the dense-SP
+    # collectives and fused projections cannot trace (no registered custom
+    # ops / fake impls on this branch), failing the fullgraph compile.
+    # Demote both to FULL_DECODE_ONLY: decode keeps its graphs (the fused
+    # projections already fall back to the unfused layout inside decode
+    # capture) and prefill and mixed chunked-prefill + decode batches run
+    # eagerly, where the fused path is active.
     if (
         enable_dense_sp(vllm_config)
-        and compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        and compilation_config.cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE)
         and not enforce_eager
         and _is_unquantized_model_config(model_config)
     ):
+        original_mode = compilation_config.cudagraph_mode
         compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         logger.warning_once(
-            "enable_flashcomm1 dense sequence parallelism demotes cudagraph_mode FULL to "
+            "enable_flashcomm1 dense sequence parallelism demotes cudagraph_mode %s to "
             "FULL_DECODE_ONLY: the fused matmul-collective projections cannot be captured "
-            "into prefill graphs, so prefill stays eager to keep the fusion active."
+            "into prefill graphs or traced by piecewise compilation, so prefill and mixed "
+            "batches stay eager to keep the fusion active.",
+            original_mode,
         )
 
 

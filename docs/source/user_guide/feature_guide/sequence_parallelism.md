@@ -112,12 +112,15 @@ inside the mixer core); their output projection still fuses.
 > [!NOTE]
 > **Graph mode.** The fused kernels cannot be captured into ACL graphs, and
 > plain `cudagraph_mode=FULL` would otherwise serve prefill batches from
-> graphs captured without them. Eligible deployments therefore demote
-> `FULL` to `FULL_DECODE_ONLY` at config time: decode keeps its graphs (the
-> projections fall back to the unfused layout inside decode capture) and
-> prefill runs the fused path eagerly. `FULL_AND_PIECEWISE` is untouched —
-> its prefill runs the compiled pieces eagerly between the piecewise graphs,
-> so the projections branch at runtime and the fusion stays active.
+> graphs captured without them; piecewise compilation cannot trace the
+> dense-SP collectives or the fused projections. Eligible deployments
+> therefore demote `FULL` and `FULL_AND_PIECEWISE` to `FULL_DECODE_ONLY` at
+> config time: decode keeps its graphs (the projections fall back to the
+> unfused layout inside decode capture) and prefill and mixed
+> chunked-prefill + decode batches run the fused path eagerly — mixed
+> batches qualify because their prefill chunk supplies the large token
+> count the fused kernels want, while pure decode batches keep the
+> unfused layout.
 
 ### Matmul reduce-scatter fusion
 

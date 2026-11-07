@@ -7,9 +7,14 @@ entries:
       (torch_npu.npu_all_gather_base_mm) and the reduce-scatter into the row
       GEMMs (torch_npu.npu_mm_reduce_scatter_base) for prefill-sized
       unquantized batches at TP size 2/4/8, overlapping the boundary
-      communication with the matmuls. The fused kernels cannot be captured
-      into graphs, so `cudagraph_mode=FULL` is demoted to `FULL_DECODE_ONLY`
-      on eligible deployments: decode keeps its graphs (the projections fall
-      back to the unfused layout inside decode capture) and prefill runs the
-      fused path eagerly. Decode and unsupported configurations keep the
-      unfused layout with identical numerics; no new switch is required.
+      communication with the matmuls. Mixed chunked-prefill + decode batches
+      fuse as well: the prefill chunk supplies the large token count the
+      fused kernels want and the batch runs eagerly, so chunked-prefill
+      serving keeps the fusion. The fused kernels cannot be captured into
+      graphs or traced by piecewise compilation, so `cudagraph_mode=FULL`
+      and `FULL_AND_PIECEWISE` are demoted to `FULL_DECODE_ONLY` on
+      eligible deployments: decode keeps its graphs (the projections fall
+      back to the unfused layout inside decode capture) and prefill and
+      mixed batches run the fused path eagerly. Decode-only and unsupported
+      configurations keep the unfused layout with identical numerics; no
+      new switch is required.

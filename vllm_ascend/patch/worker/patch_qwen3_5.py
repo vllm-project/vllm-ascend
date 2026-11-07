@@ -56,13 +56,20 @@ DENSE_SP_FUSED_TP_SIZES = (2, 4, 8)
 _DENSE_SP_FUSED_DTYPES = (torch.bfloat16, torch.float16)
 
 
-def _pure_prefill_batch() -> bool:
-    """Whether the running batch is prefill-only.
+def _prefill_sized_batch() -> bool:
+    """Whether the running batch carries prefill-sized work.
 
-    The fused collectives cannot allocate their comm resources inside decode
-    graph capture (the same constraint KimiOProjMMReduceScatterOp guards
-    against), so decode-sized batches fall back to the unfused
-    gather / GEMM / reduce-scatter layout, which returns the same shapes.
+    True for pure prefill batches AND mixed chunked-prefill + decode batches:
+    under the FULL -> FULL_DECODE_ONLY demotion both run eagerly, so the
+    fused kernels never execute inside a capture. Mixed batches fuse because
+    their prefill chunk supplies the large M the fused kernels want; the
+    decode rows ride along through the same shapes. Decode-only batches
+    (num_prefills == 0) fall back to the unfused gather / GEMM /
+    reduce-scatter layout — the small-M regime has no fusion gain — and so
+    do the uniform-decode graphs, whose capture-time metadata classifies
+    every request as decode (num_prefills == 0), keeping the comm-resource
+    allocation out of decode graph capture (the same constraint
+    KimiOProjMMReduceScatterOp guards against).
     """
     if not is_forward_context_available():
         return False
@@ -72,11 +79,7 @@ def _pure_prefill_batch() -> bool:
             (meta for meta in attn_metadata.values() if hasattr(meta, "num_prefills") and hasattr(meta, "num_decodes")),
             None,
         )
-    return bool(
-        attn_metadata is not None
-        and getattr(attn_metadata, "num_prefills", 0) > 0
-        and getattr(attn_metadata, "num_decodes", 0) == 0
-    )
+    return bool(attn_metadata is not None and getattr(attn_metadata, "num_prefills", 0) > 0)
 
 
 class DenseSpAllGatherMmOp(CustomColumnParallelOp):
@@ -106,7 +109,7 @@ class DenseSpAllGatherMmOp(CustomColumnParallelOp):
     def _can_fuse(self, input_: torch.Tensor) -> bool:
         weight = self.layer.weight
         return (
-            _pure_prefill_batch()
+            _prefill_sized_batch()
             and input_.ndim == 2
             and input_.dtype in _DENSE_SP_FUSED_DTYPES
             and weight.ndim == 2
@@ -162,7 +165,7 @@ class DenseSpMmReduceScatterOp(CustomRowParallelOp):
     def _can_fuse(self, input_parallel: torch.Tensor) -> bool:
         weight = self.layer.weight
         return (
-            _pure_prefill_batch()
+            _prefill_sized_batch()
             and input_parallel.ndim == 2
             and input_parallel.dtype in _DENSE_SP_FUSED_DTYPES
             and weight.ndim == 2

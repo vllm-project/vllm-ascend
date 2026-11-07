@@ -526,6 +526,49 @@ class TestDenseSpFusedColumnOp:
         assert _FakeDeviceOperator.calls == []
         torch.testing.assert_close(output, gathered @ weight.t())
 
+    def test_mixed_chunked_prefill_batch_fuses(self, monkeypatch):
+        # Chunked-prefill + decode batches carry prefill-sized work: their
+        # prefill chunk supplies the large M the fused kernels want, and the
+        # decode rows ride along through the same shapes. They run eagerly
+        # under the FULL_DECODE_ONLY demotion, so fusing them is capture-safe.
+        gen = torch.Generator().manual_seed(7)
+        weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
+        gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
+        shard = torch.randn(3, 4, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+        monkeypatch.setattr(
+            patch_qwen3_5,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=2, num_decodes=3)),
+        )
+
+        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight))
+        output, _ = op.apply(shard)
+
+        assert [call[0] for call in _FakeDeviceOperator.calls] == ["all_gather_mm"]
+        torch.testing.assert_close(output, gathered @ weight.t())
+
+    def test_decode_only_batch_falls_back(self, monkeypatch):
+        # Decode-only batches (every request classified as decode, e.g. the
+        # uniform-decode graphs' capture-time metadata) keep the unfused
+        # layout: small M has no fusion gain and the comm-resource
+        # allocation must stay out of decode graph capture.
+        gen = torch.Generator().manual_seed(8)
+        weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
+        gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+        monkeypatch.setattr(
+            patch_qwen3_5,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=0, num_decodes=5)),
+        )
+
+        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight))
+        output, _ = op.apply(torch.randn(3, 4, generator=gen, dtype=torch.float64))
+
+        assert _FakeDeviceOperator.calls == []
+        torch.testing.assert_close(output, gathered @ weight.t())
+
 
 class TestDenseSpFusedRowOp:
     @pytest.fixture(autouse=True)
@@ -602,6 +645,22 @@ class TestDenseSpFusedRowOp:
         output, _ = op.apply(x)
 
         assert _FakeDeviceOperator.calls == []
+        torch.testing.assert_close(output, (x @ weight.t())[:3])
+
+    def test_mixed_chunked_prefill_batch_fuses(self, monkeypatch):
+        gen = torch.Generator().manual_seed(9)
+        weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
+        x = torch.randn(6, 6, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(
+            patch_qwen3_5,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=2, num_decodes=3)),
+        )
+
+        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        output, _ = op.apply(x)
+
+        assert [call[0] for call in _FakeDeviceOperator.calls] == ["mm_reduce_scatter"]
         torch.testing.assert_close(output, (x @ weight.t())[:3])
 
 
@@ -823,11 +882,13 @@ class TestFusedDecoderFlow:
 
 
 class TestDenseSpGraphModeDemotion:
-    """Plain FULL also captures prefill batches, and the fused matmul-
-    collective projections cannot be captured into those graphs, so dense SP
-    demotes FULL to FULL_DECODE_ONLY: decode keeps its graphs (the fused ops
-    fall back inside decode capture) and prefill runs the fused path
-    eagerly."""
+    """Plain FULL captures prefill batches into mixed-mode graphs without the
+    fused matmul-collective kernels, and FULL_AND_PIECEWISE compiles prefill
+    pieces that the dense-SP collectives / fused projections cannot trace
+    (no registered custom ops or fake impls), failing the fullgraph compile.
+    Dense SP therefore demotes both to FULL_DECODE_ONLY: decode keeps its
+    graphs (the fused ops fall back inside decode capture) and prefill and
+    mixed batches run the fused path eagerly."""
 
     @staticmethod
     def _make_mode_config(
@@ -879,14 +940,18 @@ class TestDenseSpGraphModeDemotion:
         assert mode == CUDAGraphMode.FULL_DECODE_ONLY
         assert mode.decode_mode() == CUDAGraphMode.FULL
 
-    def test_full_and_piecewise_keeps_piecewise_prefill(self, monkeypatch):
-        # Prefill runs the compiled pieces eagerly between the piecewise
-        # graphs, so the fused ops branch at runtime and keep the fusion.
+    def test_full_and_piecewise_also_demoted(self, monkeypatch):
+        # The dense-SP decoder path is not dynamo-traceable on this branch
+        # (sp_all_gather and the DeviceOperator fused wrappers have no
+        # registered custom op / fake impl), so piecewise compilation of the
+        # prefill pieces would fail the fullgraph compile outright. Demoting
+        # keeps the deployment bootable with eager prefill fusion.
         monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
         mode = self._run_update_compilation_modes(
             self._make_mode_config(cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE)
         )
-        assert mode == CUDAGraphMode.FULL_AND_PIECEWISE
+        assert mode == CUDAGraphMode.FULL_DECODE_ONLY
+        assert mode.decode_mode() == CUDAGraphMode.FULL
 
     def test_quantized_checkpoint_keeps_full(self, monkeypatch):
         # A quantized checkpoint never installs the fused projections, so
