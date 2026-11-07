@@ -1,0 +1,36 @@
+model_name: "IQuestLab/IQuest-Coder-V1-40B-Instruct"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.85
+  trust_remote_code: true
+  enforce_eager: true
+  hf_overrides:
+    architectures:
+      - "LlamaForCausalLM"
+
+tasks:
+- name: "humaneval"
+  metrics:
+  - name: "pass@1,create_test"
+    value: 0.689
+- name: "mbpp"
+  metrics:
+  - name: "pass_at_1,none"
+    value: 0.724
+
+# Thresholds calibrated locally on Atlas A2 TP2 (3 runs, median, RTOL=0.05):
+# humaneval 0.6768/0.689/0.6951 -> 0.689; mbpp 0.718/0.734/0.724 -> 0.724.
+# Per-task fewshot defaults are used (humaneval: 0-shot, mbpp: 3-shot):
+# a global num_fewshot: 0 here forced mbpp into 0-shot and scored 0.0.
+# Completion mode, not chat: with apply_chat_template=true the reasoning
+# preamble of this model is truncated by humaneval's until sequences
+# ("\ndef", "\nclass", ...) before any code is written, yielding 0.0 pass@1.
+# Completion mode gives real code generations (verified: 3/3 pass@1 in probe).
+apply_chat_template: false
+fewshot_as_multiturn: true
+batch_size: "auto"

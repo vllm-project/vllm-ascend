@@ -55,6 +55,7 @@ def build_model_args(eval_config, tp_size):
         "enforce_eager",
         "enable_thinking",
         "quantization",
+        "hf_overrides",
     ]:
         val = serve_cfg.get(s, None)
         if val is not None:
@@ -124,6 +125,9 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
         "limit": eval_config.get("limit", None),
         "batch_size": eval_config.get("batch_size", "auto"),
+        # humaneval/mbpp metric (code_eval) executes model-generated code;
+        # the nightly harness runs in a controlled environment on purpose.
+        "confirm_run_unsafe_code": True,
     }
     for s in ["num_fewshot", "fewshot_as_multiturn", "apply_chat_template"]:
         val = eval_config.get(s, None)
@@ -141,6 +145,15 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         for metric in task["metrics"]:
             metric_name = metric["name"]
             ground_truth = metric["value"]
+            if metric_name not in task_result:
+                # lm_eval metric keys differ across versions (pass@1 vs
+                # pass_at_1); fall back to a notation-normalized match.
+                print(f"WARNING: metric {metric_name!r} not in results keys {sorted(task_result)!r}")
+                stem = metric_name.split(",")[0].replace("_at_", "@")
+                matched = [k for k in task_result if k.split(",")[0].replace("_at_", "@") == stem]
+                if not matched:
+                    raise KeyError(f"metric {metric_name!r} not found; have {sorted(task_result)!r}")
+                metric_name = matched[0]
             measured_value = round(task_result[metric_name], 4)
             task_success = bool(np.isclose(ground_truth, measured_value, rtol=RTOL))
             success = success and task_success
