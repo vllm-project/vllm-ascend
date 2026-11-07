@@ -16,11 +16,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from typing import Any
+
 import torch
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
+from vllm_ascend.core.kv_cache_interface import declared_kwarg
 from vllm_ascend.ops.triton.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
@@ -51,6 +54,7 @@ class AscendBlockTables(BlockTables):
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
+        sliding_window_reach: list[int] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -68,12 +72,17 @@ class AscendBlockTables(BlockTables):
             max_num_blocks * blocks_per_kv_block
             for max_num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
         ]
-        # vLLM main added a per-group ``dcp_sharded`` flag to BlockTables;
-        # older releases have no such parameter, so only forward it
-        # when the caller supplies it.
-        super_kwargs: dict[str, list[bool]] = {}
+        # vLLM main added per-group ``dcp_sharded`` and
+        # ``sliding_window_reach`` flags to BlockTables; older releases have no
+        # such parameters, so forward each only when the caller supplies it.
+        # ``sliding_window_reach`` drives upstream's nulling of block-table
+        # entries below a sliding-window draft's visible range; dropping it
+        # disables that masking while the KV manager still frees those blocks.
+        super_kwargs: dict[str, Any] = {}
         if dcp_sharded is not None:
             super_kwargs["dcp_sharded"] = dcp_sharded
+        if sliding_window_reach is not None:
+            super_kwargs.update(declared_kwarg(BlockTables, "sliding_window_reach", sliding_window_reach))
         # vLLM main's `BlockTables.__init__` has no `kernel_block_sizes`
         # parameter, so it is not forwarded; the kernel-block layout is
         # maintained here instead.

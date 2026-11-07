@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
@@ -189,6 +190,21 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
         for name, spec in kv_cache_spec.items()
         if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
     }
+    # Draft KV windowing converts draft attention specs to SlidingWindowSpec,
+    # which cannot share the target's scheduler block table. Reject the mixed
+    # grouping explicitly instead of silently falling back to generic grouping.
+    windowed_draft_layers = [
+        name
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, SlidingWindowSpec)
+    ]
+    if windowed_draft_layers and target_attention_specs:
+        raise ValueError(
+            "draft_kv_window is not supported with the Kimi K3 / DSpark mixed target+draft "
+            "KV cache grouping: the draft layers share the target's scheduler block table, "
+            "which a sliding-window draft group cannot join. Windowed draft layers: "
+            f"{windowed_draft_layers}. Disable draft_kv_window for this model."
+        )
     mamba_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
