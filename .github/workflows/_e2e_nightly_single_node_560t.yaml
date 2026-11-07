@@ -381,7 +381,17 @@ jobs:
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
+          case "${{ inputs.tests }}" in
+            tests/e2e/nightly/single_node/ops/singlecard_ops|tests/e2e/nightly/single_node/ops/singlecard_ops/)
+              python3 .github/workflows/scripts/run_singlecard_shards.py \
+                --tests "${{ inputs.tests }}" \
+                --runner "$VLLM_CI_RUNNER" \
+                2>&1 | tee /tmp/test-logs/pytest-driven.log
+              ;;
+            *)
+              pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
+              ;;
+          esac
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
