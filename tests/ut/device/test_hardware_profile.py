@@ -57,11 +57,13 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.DSV41_RING_COMPRESSOR,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.DSV41_RING_COMPRESSOR,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FP32 C2 ring compressor, ratio-1 path, and fused RMS normalization."""
+"""C2 uses AscendC BF16 projections on A2/A3 and FP32 projections with Triton on A5.
+
+Both C2 backends keep FP32 ring state. C1 keeps its BF16 projection path.
+"""
 
 import torch
 from torch import nn
@@ -9,6 +12,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS, uses_a5_packed_cache
 
 
@@ -18,10 +22,12 @@ class DeepseekV41Compressor(nn.Module):
         self.ratio = ratio
         self.width = config.head_dim
         dim = config.hidden_size
-        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.float32 if ratio == 2 else torch.bfloat16)
+        self.use_native_compressor = get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR)
+        projection_dtype = torch.float32 if ratio == 2 and not self.use_native_compressor else torch.bfloat16
+        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=projection_dtype)
         self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
-            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
+            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=projection_dtype)
             # Allocate persistent output before memory profiling, so its footprint
             # is included in the cache budget rather than added after allocation.
             if vllm_config is not None:
@@ -47,12 +53,27 @@ class DeepseekV41Compressor(nn.Module):
                 )
 
     def prepare_ring_compressor(self, max_tokens, device):
-        """Resolve ring-compressor hardware before capture."""
-        from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num
+        """Resolve A5 Triton cores or validate A2/A3 AscendC before capture.
 
-        self._ring_num_cores = _cube_core_num()
+        max_tokens and device are retained for the model runner interface.
+        """
+        if not self.use_native_compressor:
+            if not uses_a5_packed_cache():
+                raise ValueError("V4.1 C2 compression supports AscendC on A2/A3 and Triton on A5 only")
+            from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num
+
+            self._ring_num_cores = _cube_core_num()
+        else:
+            dim = self.wkv.in_features
+            if self.width not in (128, 512) or not 1024 <= dim <= 10240 or dim % 512:
+                raise ValueError("AscendC compressor requires D=128/512 and H=1024..10240 aligned to 512")
+            if not get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
+                raise ValueError("AscendC V4.1 ring compression is currently supported on A2/A3 only")
+            if not hasattr(torch.ops._C_ascend, "compressor_v2"):
+                raise RuntimeError("Rebuild vllm-ascend custom ops to enable CompressorV2")
 
     def pool_projected(self, kv, scores, metadata):
+        """Pool A5 FP32 projections with Triton, then apply RMSNorm."""
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
         pooled = compressor_from_projected(
@@ -66,6 +87,38 @@ class DeepseekV41Compressor(nn.Module):
         )
         return self.norm(pooled)
 
+    def compress_native(self, x, metadata):
+        """Map A2/A3 AscendC compact groups back to the cache writer's token rows.
+
+        Metadata stays on device, including for padded graph replay and batches
+        with no completed groups. RMSNorm and RoPE remain outside the operator.
+        """
+        tokens = x.shape[0]
+        if tokens == 0:
+            return self.norm(self._ring_pooled[:0])
+        ring = metadata.c2_ring_metadata
+        # The native ABI requires the final offset to include graph padding;
+        # seqused, not that final offset, determines which tokens update state.
+        cu_seqlens = torch.cat((ring[3], ring.new_full((1,), tokens)))
+        compact = torch.ops._C_ascend.compressor_v2(
+            x.to(torch.bfloat16).contiguous(),
+            self.wkv.weight,
+            self.wgate.weight,
+            self.state_cache.kv_cache[0].squeeze(-2),
+            ring[4],
+            cu_seqlens,
+            ring[1],
+            ring[0],
+            self.ratio,
+        )
+        complete = metadata.c2_complete_mask[:tokens]
+        rows = (complete.cumsum(0, dtype=torch.int64) - 1).clamp_min(0)
+        pooled = self._ring_pooled[:tokens]
+        torch.index_select(compact, 0, rows, out=pooled)
+        # Unused compact rows are uninitialized, so mask rather than multiply.
+        pooled.masked_fill_(~complete.unsqueeze(-1), 0)
+        return self.norm(pooled)
+
     def forward(self, x):
-        """Project an uncompressed source; ratio-2 uses ``pool_projected``."""
+        """Project C1; C2 uses ``compress_native`` on A2/A3 or ``pool_projected`` on A5."""
         return self.norm(self.wkv(x))
