@@ -67,18 +67,103 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 grouped_block_size=[16],
             )
 
-    def test_pcp_rejects_layer_sharded_kvpp(self):
-        config = self.make_config()
-        config.parallel_config.prefill_context_parallel_size = 4
-        config.additional_config = {"enable_kvpp": True}
-        with self.assertRaisesRegex(ValueError, "layer-sharded caches"):
-            MooncakeBackend.bind_layerwise_keys(
+    def test_pcp_kvpp_folds_pcp_and_covers_every_owner(self):
+        for pp_size in (1, 2):
+            for pcp_size in (1, 2, 4):
+                with self.subTest(pp_size=pp_size, pcp_size=pcp_size):
+                    config = self.make_config(pp_size)
+                    config.additional_config = {"enable_kvpp": True}
+                    config.parallel_config.prefill_context_parallel_size = pcp_size
+                    builder = MooncakeBackend.bind_layerwise_keys(
+                        vllm_config=config,
+                        kv_cache_config=self.make_cache_config(1),
+                        model_name="model",
+                        use_hybrid=False,
+                        grouped_block_size=[16],
+                    )
+                    kvpp_size = 2 * pcp_size
+                    self.assertTrue(builder.kvpp)
+                    # KVPP folds the PCP coordinate into kvpp_rank, so the key
+                    # space keeps a single PCP value regardless of engine PCP.
+                    self.assertEqual(builder.pcp_size, 1)
+                    owners = [
+                        builder.make_full_key(0, "hash", owner, stage)
+                        for stage in range(pp_size)
+                        for owner in range(kvpp_size)
+                    ]
+                    self.assertEqual(builder.make_hit_check_keys(0, "hash", kvpp_size), owners)
+                    for key in owners:
+                        self.assertNotIn("@pcp_size", key)
+                        self.assertNotIn("@pcp_rank", key)
+                    if pp_size == 1:
+                        # PP=1 exposes the readable KVPP namespace directly.
+                        self.assertIn(f"@kvpp-tp2-pcp{pcp_size}@", owners[0])
+                    else:
+                        # PP>1 folds every topology input into the namespace hash.
+                        self.assertIn("@mooncake_pp_v3:", owners[0])
+
+    def test_kvpp_topology_isolates_pcp_sizes_and_plain_pcp_keys(self):
+        builders = {}
+        for pcp_size in (1, 2, 4):
+            config = self.make_config()
+            config.additional_config = {"enable_kvpp": True}
+            config.parallel_config.prefill_context_parallel_size = pcp_size
+            builders[pcp_size] = MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=self.make_cache_config(1),
                 model_name="model",
                 use_hybrid=False,
                 grouped_block_size=[16],
             )
+        plain = self.make_config()
+        plain.parallel_config.prefill_context_parallel_size = 2
+        plain_builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=plain,
+            kv_cache_config=self.make_cache_config(1),
+            model_name="model",
+            use_hybrid=False,
+            grouped_block_size=[16],
+        )
+        self.assertFalse(plain_builder.kvpp)
+        self.assertEqual(plain_builder.pcp_size, 2)
+        # Topology isolation between PCP sizes is carried by the KVPP namespace.
+        subsets = [set(builders[pcp_size].make_hit_check_keys(0, "hash", 2 * pcp_size)) for pcp_size in (1, 2, 4)]
+        for left in range(len(subsets)):
+            for right in range(left + 1, len(subsets)):
+                self.assertTrue(subsets[left].isdisjoint(subsets[right]))
+        # KVPP objects can never be reused by a non-KVPP topology and vice versa.
+        self.assertTrue(set(plain_builder.make_hit_check_keys(0, "hash", 2)).isdisjoint(subsets[1]))
+
+    def test_kvpp_hybrid_layout_binds_without_pcp_suffix(self):
+        config = self.make_config()
+        config.additional_config = {"enable_kvpp": True}
+        config.parallel_config.prefill_context_parallel_size = 2
+        builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=config,
+            kv_cache_config=self.make_cache_config(2),
+            model_name="model",
+            use_hybrid=True,
+            grouped_block_size=[16, 32],
+        )
+        self.assertTrue(builder.kvpp)
+        self.assertEqual(builder.pcp_size, 1)
+        keys = builder.make_hit_check_keys(1, "hash", 4)
+        self.assertEqual(len(keys), 4)
+        plain = self.make_config()
+        plain.parallel_config.prefill_context_parallel_size = 2
+        plain_builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=plain,
+            kv_cache_config=self.make_cache_config(2),
+            model_name="model",
+            use_hybrid=True,
+            grouped_block_size=[16, 32],
+        )
+        plain_keys = plain_builder.make_hit_check_keys(1, "hash", 2)
+        for key in keys:
+            self.assertIn("@mooncake_hybrid_v1:", key)
+            self.assertNotIn("@pcp_size", key)
+            self.assertNotIn(key, plain_keys)
+            self.assertNotEqual(key, plain_keys[0])
 
     def test_kvpp_lookup_covers_every_owner_and_uses_separate_layout_keys(self):
         for pp_size in (1, 2):
@@ -110,10 +195,15 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
 
     @staticmethod
     def make_config(pp_size=1):
+        def layers_start_end(parallel_config):
+            # vLLM rank layout is DP x PP x PCP x TP.
+            stride = parallel_config.tensor_parallel_size * getattr(parallel_config, "prefill_context_parallel_size", 1)
+            return ((0, 3), (3, 7))[parallel_config.rank // stride]
+
         return SimpleNamespace(
             parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size, tensor_parallel_size=2, rank=0),
             model_config=SimpleNamespace(
-                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // 2],
+                get_layers_start_end_indices=layers_start_end,
                 get_total_num_hidden_layers=lambda: 7,
                 compute_hash=lambda: "model-config",
             ),

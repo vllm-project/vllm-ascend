@@ -26,7 +26,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
     set_scheduler_device,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import (
+    LayerwiseKeyBuilder,
+    resolve_layerwise_topology,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -324,19 +327,19 @@ class MooncakeBackend(Backend):
             value = getattr(parallel, name, 1)
             return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
-        dimensions = (("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),)
-        unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
-        if unsupported:
+        dcp_size = parallel_size("decode_context_parallel_size")
+        if dcp_size > 1:
             raise ValueError(
                 "Mooncake block-key layerwise supports TP/PP/PCP, but not decode context parallelism; unsupported "
-                + ", ".join(unsupported)
+                + f"decode_context_parallel_size={dcp_size}"
             )
         mooncake_layerwise.validate_pp_groups(kv_cache_config, parallel)
         namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
         pp_size = parallel.pipeline_parallel_size
-        pcp_size = parallel_size("prefill_context_parallel_size")
-        if pcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
-            raise ValueError("Mooncake layerwise PCP does not support enable_kvpp layer-sharded caches")
+        topology = resolve_layerwise_topology(vllm_config)
+        # KVPP folds PCP into the writer coordinate, so the bound key space has a
+        # single PCP value; non-KVPP keys keep the historical PCP suffix.
+        pcp_size = topology.key_pcp_size
         if pp_size > 1:
             logger.info(
                 "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
@@ -347,6 +350,14 @@ class MooncakeBackend(Backend):
                 [mooncake_layerwise.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
                 if kv_cache_config is not None
                 else [],
+            )
+        if topology.use_kvpp:
+            logger.info(
+                "Mooncake layerwise KVPP keys: tp=%d pcp=%d kvpp_size=%d pcp_suffix=%s",
+                parallel_size("tensor_parallel_size"),
+                parallel_size("prefill_context_parallel_size"),
+                topology.kvpp_size,
+                "disabled (folded into kvpp_rank)",
             )
         if use_hybrid:
             layout = mooncake_layerwise.hybrid_layout_id(
@@ -365,12 +376,12 @@ class MooncakeBackend(Backend):
                     pp_rank=stage if pp_size > 1 else None,
                 )
 
-            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size)
+            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, topology.use_kvpp)
 
         def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size)
+        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, topology.use_kvpp)
 
     @classmethod
     def send_fence_backlog(cls) -> int:

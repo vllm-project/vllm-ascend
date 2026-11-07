@@ -44,10 +44,15 @@ class TestMooncakePipeline(unittest.TestCase):
         cache_block_size=16,
         pcp_size=1,
         pcp_rank=0,
+        layers=None,
+        num_layers=None,
+        pp_partition=(3, 4),
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
-        layers = list(range(3)) if stage == 0 else list(range(3, 7 + int(draft)))
+        layers = (
+            list(layers) if layers is not None else (list(range(3)) if stage == 0 else list(range(3, 7 + int(draft))))
+        )
         names = [f"model.layers.{layer}.kv" for layer in layers]
         spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
         groups = [KVCacheGroupSpec(names, spec)]
@@ -73,12 +78,12 @@ class TestMooncakePipeline(unittest.TestCase):
         with patch.object(BaseKVPoolWorker, "_build_cache_coordinator", return_value=None):
             worker = make_worker(
                 self,
-                num_layers=(3, 4)[stage],
+                num_layers=num_layers if num_layers is not None else (3, 4)[stage],
                 num_hidden_layers=7,
                 kv_cache_config=config,
                 use_layerwise=True,
                 pp_rank=stage,
-                pp_partition=(3, 4),
+                pp_partition=pp_partition,
                 tp_size=2,
                 tp_rank=tp_rank,
                 num_kv_heads=1 if mla else 2,
