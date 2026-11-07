@@ -1,0 +1,4 @@
+pr: 20572
+entries:
+  - category: bugfix
+    text: Prevented MRv1 structured-output speculative decoding from accepting drafts checked against all-permissive grammar filler rows.

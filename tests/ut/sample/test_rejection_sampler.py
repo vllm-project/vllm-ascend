@@ -890,6 +890,47 @@ def test_ascend_rejection_sampler_methods():
         logger.debug.assert_called()
 
 
+def test_ascend_rejection_sampler_masks_invalid_grammar_drafts():
+    rs = AscendRejectionSampler.__new__(AscendRejectionSampler)
+    rs.sampler = MagicMock()
+    rs.sampler.logprobs_mode = "raw_logits"
+    rs.sampler.return_value = SimpleNamespace(
+        sampled_token_ids=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+        logprobs_tensors=SimpleNamespace(logprobs=torch.zeros(1, 3)),
+    )
+    rs.top_k = None
+    rs.synthetic_mode = False
+    rs.synthetic_conditional_rates = None
+    rs.is_processed_logprobs_mode = False
+    rs.apply_logits_processors = lambda values, *args, **kwargs: values
+
+    metadata = SimpleNamespace(
+        max_spec_len=2,
+        bonus_logits_indices=torch.tensor([2]),
+        target_logits_indices=torch.tensor([0, 1]),
+        draft_token_ids=torch.tensor([7, 8, 9], dtype=torch.int32),
+        num_draft_tokens=[1, 2],
+        cu_num_draft_tokens=torch.tensor([1, 3]),
+    )
+    logits = torch.tensor([[0.1, 0.9], [0.2, 0.8], [0.3, 0.7]])
+    invalid_drafts = torch.tensor([False, True, True])
+    with (
+        patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
+            return_value=logits[:2],
+        ),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.rejection_sample",
+            return_value=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+        ) as rejection_sample,
+    ):
+        output = rs.forward(metadata, None, logits, SimpleNamespace(max_num_logprobs=-1), invalid_drafts)
+
+    assert output.sampled_token_ids.tolist() == [[1, 2, 3]]
+    assert rejection_sample.call_args.args[0].tolist() == [7, -1, -1]
+
+
 def test_rejection_sample_constraint_and_helper_paths():
     with _pin_memory_stack():
         logits = torch.tensor([[0.1, 0.9, 0.0], [0.8, 0.2, 0.0]])

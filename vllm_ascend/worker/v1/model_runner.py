@@ -306,6 +306,49 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 v41_metadata_builder_type: type[AscendDSAV41MetadataBuilder] = AscendDSAV41MetadataBuilder
 v41_cache_layer_type: type[DeepseekV41CacheLayer] = DeepseekV41CacheLayer
 
+
+def _build_grammar_invalid_drafts(
+    scheduler_output: "SchedulerOutput",
+    grammar_output: "GrammarOutput",
+    spec_decode_metadata: SpecDecodeMetadata,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Build a flat mask for drafts checked against a filler grammar row."""
+    if spec_decode_metadata is None:
+        return None
+
+    grammar_req_ids = getattr(grammar_output, "structured_output_request_ids", None)
+    if not grammar_req_ids:
+        return None
+
+    acceptable_drafts = getattr(grammar_output, "num_acceptable_drafts", None)
+    if acceptable_drafts is not None and len(acceptable_drafts) != len(grammar_req_ids):
+        raise ValueError(
+            "num_acceptable_drafts does not match structured_output_request_ids: "
+            f"{len(acceptable_drafts)} != {len(grammar_req_ids)}"
+        )
+
+    total_drafts = int(spec_decode_metadata.draft_token_ids.shape[0])
+    invalid_drafts = torch.zeros(total_drafts, dtype=torch.bool, device=device)
+    offset = 0
+    has_invalid_drafts = False
+    for grammar_index, req_id in enumerate(grammar_req_ids):
+        draft_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())
+        num_drafts = len(draft_token_ids)
+        acceptable = (
+            min(int(acceptable_drafts[grammar_index]), num_drafts)
+            if acceptable_drafts is not None
+            else 0
+        )
+        if acceptable < num_drafts:
+            invalid_drafts[offset + acceptable : offset + num_drafts] = True
+            has_invalid_drafts = True
+        offset += num_drafts
+
+    assert offset == total_drafts, "Spec decode metadata and scheduled drafts are misaligned"
+    return invalid_drafts if has_invalid_drafts else None
+
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -2926,9 +2969,17 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to("cpu").float()
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
+            invalid_drafts = _build_grammar_invalid_drafts(
+                scheduler_output,
+                grammar_output,
+                spec_decode_metadata,
+                self.device,
+            )
+        else:
+            invalid_drafts = None
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(logits, spec_decode_metadata, invalid_drafts)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -3070,7 +3121,7 @@ class NPUModelRunner(GPUModelRunner):
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
-    def _sample(self, logits, spec_decode_metadata):
+    def _sample(self, logits, spec_decode_metadata, invalid_drafts=None):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3090,6 +3141,7 @@ class NPUModelRunner(GPUModelRunner):
             draft_probs,
             logits,
             sampling_metadata,
+            invalid_drafts,
         )
         return sampler_output
 

@@ -57,7 +57,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner, _build_grammar_invalid_drafts
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -4439,6 +4439,29 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
         self.assertEqual(k.storage_offset(), 128)
         self.assertTrue(all(view.stride(0) == spec.page_size_bytes // 2 for view in (k, v, ks, vs)))
         group.backend.get_kv_cache_shape.assert_not_called()
+
+
+def test_build_grammar_invalid_drafts_marks_filler_rows():
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"r1": [7], "r2": [8, 9]},
+    )
+    grammar_output = SimpleNamespace(
+        structured_output_request_ids=["r1", "r2"],
+        num_acceptable_drafts=[1, 0],
+    )
+    spec_decode_metadata = SimpleNamespace(
+        draft_token_ids=torch.zeros(3, dtype=torch.int32),
+    )
+
+    invalid_drafts = _build_grammar_invalid_drafts(
+        scheduler_output,
+        grammar_output,
+        spec_decode_metadata,
+        torch.device("cpu"),
+    )
+
+    assert invalid_drafts is not None
+    assert invalid_drafts.tolist() == [False, True, True]
 
 
 if __name__ == "__main__":
