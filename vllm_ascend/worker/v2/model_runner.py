@@ -68,6 +68,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.dsa_attn_kv_plan import supports_dsa_target_metadata_graph
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -477,6 +478,9 @@ class NPUModelRunner(GPUModelRunner):
             if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
             else None
         )
+        if supports_dsa_target_metadata_graph(self.vllm_config):
+            self.model_state.device_metadata = TargetDeviceMetadata(full_graph_only=True)
+            logger.info("DSA target metadata producers will be captured in FULL graphs.")
 
         # Register the exact bound state-copy layouts; kernel_warmup owns
         # compilation before model dummy runs and graph capture.

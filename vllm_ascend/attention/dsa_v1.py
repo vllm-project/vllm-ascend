@@ -1,5 +1,6 @@
 import math
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
@@ -732,6 +733,27 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     """
 
     _request_capacity_factor: ClassVar[int] = 1
+    _device_metadata_in_graph: bool = False
+
+    @contextmanager
+    def defer_device_metadata(self, *, in_graph: bool = False):
+        # Keep role-specific builders and their shared output buffers. The
+        # MRV1 asynchronous producer switch selects a different builder path.
+        was_in_graph = self._device_metadata_in_graph
+        self._device_metadata_in_graph = in_graph
+        try:
+            yield
+        finally:
+            self._device_metadata_in_graph = was_in_graph
+
+    def _publish_graph_metadata(
+        self, stage: DeviceMetadataStage, output: torch.Tensor, build: Callable[[], torch.Tensor]
+    ) -> torch.Tensor:
+        def run() -> None:
+            output[:DSA_METADATA_BUFFER_SIZE].copy_(build())
+
+        self._device_metadata_tasks += (DeviceMetadataTask(stage, run, id(output)),)
+        return output
 
     def _use_specialized_metadata(self) -> bool:
         # Deferred device tasks and vision models keep their existing metadata path.
@@ -1286,7 +1308,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common.num_reqs
         actual_reqs = num_reqs if num_actual_reqs is None else min(num_actual_reqs, num_reqs)
         self.block_table[actual_reqs:num_reqs].zero_()
-        self._device_metadata_tasks = ()
+        if not self._device_metadata_in_graph:
+            self._device_metadata_tasks = ()
         return AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs],
             seq_lens=self.seq_lens[:num_reqs],
@@ -1342,6 +1365,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         full_graph_mode: bool,
     ) -> tuple[int, int]:
         self._prepare_rope(common_attn_metadata, req, can_use_rope_cache, full_graph_mode)
+        if self._device_metadata_in_graph:
+            # TND SAS/QLI use cu_seqlens_q and seqused_k[v], including padded
+            # requests. These scalar fallback lengths are never read. Avoid
+            # CPU reductions (or a device-to-host copy) before every replay.
+            return 0, 0
         metadata_cache = self.common_ratio_to_sas_metadata
         assert metadata_cache is not None
         num_reqs = common_attn_metadata.num_reqs
@@ -1720,6 +1748,13 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
         output_key = ("sas_output", key)
         if use_specialized_metadata and output_key in metadata_cache:
             return metadata_cache[output_key]
+        output = self.sas_metadata_buffer
+        if use_specialized_metadata:
+            # A single builder can encounter both causal and DSpark groups.
+            # Each variant needs its own capture-stable output address.
+            if key not in self._sas_variant_buffers:
+                self._sas_variant_buffers[key] = torch.empty_like(output)
+            output = self._sas_variant_buffers[key]
         sas_metadata = metadata_cache.get(key)
         if sas_metadata is None:
             tp_size = get_tensor_model_parallel_world_size()
@@ -1735,46 +1770,46 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compressor_ratio)
             metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+
             # Explicit DSpark indices give every query in a draft block the
             # same visible KV set. Plan it as non-causal attention over that
             # set, including when a short context crosses an S2 tile boundary.
-            sas_seq_lens = seq_lens
-            if dspark_swa:
-                query_lens = query_start_loc[1:] - query_start_loc[:-1]
-                sas_seq_lens = torch.minimum(seq_lens, query_lens + self.model_config.hf_config.sliding_window)
-            sas_metadata = metadata_op(
-                **metadata_kwargs,
-                num_heads_q=n_local_heads,
-                num_heads_kv=1,
-                head_dim=self.model_config.get_head_size(),
-                cu_seqlens_q=query_start_loc,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=self.seqused_q,
-                seqused_kv=sas_seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                batch_size=len(seq_lens),
-                cmp_topk=index_topk if self.compressor_ratio == 4 else 0,
-                cmp_ratio=cmp_ratio,
-                ori_mask_mode=0 if dspark_swa else 4,
-                cmp_mask_mode=3,  # 3:causal
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
-                layout_q="TND",
-                layout_kv=_dsa_layout_kv(self.vllm_config),
-                has_ori_kv=True,
-                has_cmp_kv=self.compressor_ratio > 1,
-            )
+            def build_sas():
+                sas_seq_lens = seq_lens
+                if dspark_swa:
+                    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+                    sas_seq_lens = torch.minimum(seq_lens, query_lens + self.model_config.hf_config.sliding_window)
+                return metadata_op(
+                    **metadata_kwargs,
+                    num_heads_q=n_local_heads,
+                    num_heads_kv=1,
+                    head_dim=self.model_config.get_head_size(),
+                    cu_seqlens_q=query_start_loc,
+                    cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                    cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                    seqused_q=self.seqused_q,
+                    seqused_kv=sas_seq_lens,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    batch_size=len(seq_lens),
+                    cmp_topk=index_topk if self.compressor_ratio == 4 else 0,
+                    cmp_ratio=cmp_ratio,
+                    ori_mask_mode=0 if dspark_swa else 4,
+                    cmp_mask_mode=3,  # 3:causal
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
+                    layout_q="TND",
+                    layout_kv=_dsa_layout_kv(self.vllm_config),
+                    has_ori_kv=True,
+                    has_cmp_kv=self.compressor_ratio > 1,
+                )
+
+            if self._device_metadata_in_graph:
+                metadata_cache[output_key] = output
+                return self._publish_graph_metadata(DeviceMetadataStage.ATTENTION, output, build_sas)
+            sas_metadata = build_sas()
             metadata_cache[key] = sas_metadata
 
-        output = self.sas_metadata_buffer
-        if use_specialized_metadata:
-            # A single builder can encounter both causal and DSpark groups.
-            # Each variant needs its own capture-stable output address.
-            if key not in self._sas_variant_buffers:
-                self._sas_variant_buffers[key] = torch.empty_like(output)
-            output = self._sas_variant_buffers[key]
         output[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
         if use_specialized_metadata:
             metadata_cache[output_key] = output
@@ -2014,18 +2049,15 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
         if use_specialized_metadata and "qli_output" in metadata_cache:
             return metadata_cache["qli_output"][0]
         # Share the tiling output AND its length/residual buffers for this batch.
-        seq_lens_i32 = seq_lens
-        if seq_lens_i32.dtype != torch.int32:
-            seq_lens_i32 = seq_lens_i32.to(torch.int32)
-        num_reqs = seq_lens_i32.shape[0]
+        num_reqs = seq_lens.shape[0]
         qli_seqused_k = self.qli_seqused_k[:num_reqs]
         qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
-        torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
-        torch.remainder(seq_lens_i32, 4, out=qli_cmp_residual_k)
 
-        qli_metadata = metadata_cache.get("qli")
-        if qli_metadata is None:
-            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+        def build_qli():
+            seq_lens_i32 = seq_lens.to(torch.int32)
+            torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
+            torch.remainder(seq_lens_i32, 4, out=qli_cmp_residual_k)
+            return torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,  # 128
@@ -2043,7 +2075,19 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
                 cmp_ratio=4,
                 device=str(self.seqused_q.device),
             )
+
+        if self._device_metadata_in_graph:
+            metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
+            return self._publish_graph_metadata(DeviceMetadataStage.INDEXER, self.qli_metadata_buffer, build_qli)
+
+        qli_metadata = metadata_cache.get("qli")
+        if qli_metadata is None:
+            qli_metadata = build_qli()
             metadata_cache["qli"] = qli_metadata
+        else:
+            seq_lens_i32 = seq_lens.to(torch.int32)
+            torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
+            torch.remainder(seq_lens_i32, 4, out=qli_cmp_residual_k)
 
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
         if use_specialized_metadata:
