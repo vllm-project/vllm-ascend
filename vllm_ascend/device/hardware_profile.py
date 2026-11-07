@@ -84,6 +84,9 @@ class HardwareCapability(Enum):
     DSV4_COMPRESSED_CACHE = auto()
     # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
     DSV41_PACKED_CACHE = auto()
+    # Fuse DeepSeek-V4.1 BF16 SWA RMSNorm, interleaved RoPE, and strided
+    # paged-cache publication in the Triton kernel used by the standard path.
+    DSV41_SWA_CACHE_FUSION = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
@@ -268,6 +271,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.DSV41_SWA_CACHE_FUSION,
         HardwareCapability.FLA_GDN_PREFILL,
         HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
