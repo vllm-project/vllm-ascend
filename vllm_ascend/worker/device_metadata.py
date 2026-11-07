@@ -180,13 +180,18 @@ class TargetDeviceMetadata:
     Every producer is joined before the next async step may reuse its inputs.
     """
 
-    def __init__(self):
+    def __init__(self, *, full_graph_only: bool = False):
         self.executor = DeviceMetadataExecutor(capture_producers=True)
+        self.full_graph_only = full_graph_only
         self._tasks: tuple[DeviceMetadataTask, ...] = ()
         self._failed = False
 
     def run_build(self, build_fn, **kwargs):
         full_graph = kwargs.get("full_graph_mode", False) or kwargs.get("for_cudagraph_capture", False)
+        if self.full_graph_only and not full_graph:
+            # Eager/piecewise metadata is already produced on the model stream;
+            # do not attach an executor whose frontiers were never submitted.
+            return build_fn(**kwargs)
         with self.build(kwargs["attn_groups"], full_graph):
             metadata = build_fn(**kwargs)
             for resource in metadata.values():
