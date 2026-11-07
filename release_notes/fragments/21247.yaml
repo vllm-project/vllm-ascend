@@ -1,0 +1,4 @@
+pr: 21247
+entries:
+  - category: bugfix
+    text: Preserve early Mooncake layerwise receive notifications until the decode worker registers the request, preventing requests from waiting indefinitely after transfer completion.
