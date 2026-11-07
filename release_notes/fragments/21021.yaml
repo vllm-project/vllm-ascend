@@ -1,0 +1,8 @@
+pr: 21021
+entries:
+  - category: performance
+    text: >-
+      Avoided allocating the unused BF16/FP16 origin output in MX SwiGLU
+      quantization. With quant_mode=2 and output_origin=False, the third output
+      is now a zero-element tensor with the input dtype and device.
+    hardware: [A5]
