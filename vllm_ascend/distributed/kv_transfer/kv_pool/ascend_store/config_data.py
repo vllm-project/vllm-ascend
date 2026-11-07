@@ -12,6 +12,8 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
@@ -19,6 +21,27 @@ HYBRID_CACHE_C128_CHUNK_CONFIG_KEY = "hybrid_cache_c128_chunk"
 HYBRID_CACHE_C128_CHUNK_MULTIPLIER = 4
 HYBRID_CACHE_C128_TRANSFER_NAMESPACE = "hybrid_c128_chunk_v1"
 HYBRID_CACHE_C128_FAMILY = "c128"
+
+
+def get_store_cache_group_ids(kv_cache_groups: Any) -> tuple[int, ...]:
+    """Store persists prefix-cacheable groups, preserving their original IDs."""
+    if kv_cache_groups is None:
+        return (0,)
+    return tuple(i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec))
+
+
+def store_replay_enabled(vllm_config: Any, kv_cache_config: Any, *, use_layerwise: bool) -> bool:
+    if not getattr(vllm_config.cache_config, "swa_bounded_replay", False) or kv_cache_config is None:
+        return False
+    windows = [getattr(group.kv_cache_spec, "prefix_replay_tokens", 0) for group in kv_cache_config.kv_cache_groups]
+    if not any(isinstance(window, int) and window > 0 for window in windows):
+        return False
+    parallel = vllm_config.parallel_config
+    if use_layerwise or parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+        raise ValueError("AscendStore SWA replay currently requires request-level transfer with PCP=1 and DCP=1")
+    if vllm_config.kv_transfer_config.kv_connector_extra_config.get(HYBRID_CACHE_C128_CHUNK_CONFIG_KEY, False):
+        raise ValueError("AscendStore SWA replay does not support hybrid_cache_c128_chunk")
+    return True
 
 
 @dataclass(frozen=True)

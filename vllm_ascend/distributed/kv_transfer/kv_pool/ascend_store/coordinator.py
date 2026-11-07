@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     _block_hash_to_bytes,
     get_block_hashes,
+    get_store_cache_group_ids,
 )
 
 _CACHE_MISSING = object()
@@ -27,10 +28,11 @@ _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by external AscendStore key existence."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(self, hash_block_size: int, exists: set[tuple[int, bytes]] | None = None) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
@@ -45,6 +47,17 @@ class ExternalCachedBlockPool:
         if all((group_id, h) in self._exists for group_id in group_ids):
             return [self._present_block] * len(group_ids)
         return None
+
+    def with_hash_block_size(self, hash_block_size: int) -> ExternalCachedBlockPool:
+        # block_hashes_for_spec has already grouped external object hashes.
+        # Native managers must not group those a second time. Preserve null
+        # identity because callers derive transfer masks from it.
+        if hash_block_size == self.hash_block_size:
+            return self
+        view = ExternalCachedBlockPool(hash_block_size, self._exists)
+        view.null_block = self.null_block
+        view._present_block = self._present_block
+        return view
 
 
 class AscendStoreCoordinator:
@@ -74,6 +87,7 @@ class AscendStoreCoordinator:
         )
 
         self.kv_cache_groups = kv_cache_groups
+        self.prefix_cacheable_group_ids = get_store_cache_group_ids(kv_cache_groups)
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
@@ -89,12 +103,16 @@ class AscendStoreCoordinator:
             if transfer_chunk_tokens is not None
             else self.group_effective_block_sizes.copy()
         )
-        for effective_block_size, transfer_size, family in zip(
-            self.group_effective_block_sizes,
-            self.group_transfer_chunk_sizes,
-            group_cache_families,
-            strict=True,
+        for group_id, (effective_block_size, transfer_size, family) in enumerate(
+            zip(
+                self.group_effective_block_sizes,
+                self.group_transfer_chunk_sizes,
+                group_cache_families,
+                strict=True,
+            )
         ):
+            if group_id not in self.prefix_cacheable_group_ids:
+                continue
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
             assert transfer_size % hash_block_size == 0, "transfer chunk size must be divisible by hash_block_size"
             assert scheduler_block_size % transfer_size == 0, (
@@ -128,6 +146,8 @@ class AscendStoreCoordinator:
                 # CompressAttentionManager.find_longest_cache_hit().
                 transfer_spec = replace(transfer_spec, compress_ratio=1)
             self.group_effective_specs.append(effective_spec)
+            if group_id not in self.prefix_cacheable_group_ids:
+                continue
             manager_cls = _get_manager_class(spec)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
@@ -178,11 +198,13 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return tuple(
-            [True] * _num_chunks(token_len, self.group_transfer_chunk_sizes[group_id])
+            [False] * _num_chunks(token_len, self.group_transfer_chunk_sizes[group_id])
+            if group_id not in self.prefix_cacheable_group_ids
+            else [True] * _num_chunks(token_len, self.group_transfer_chunk_sizes[group_id])
             if not _uses_reachable_mask(self.group_cache_families[group_id])
             else mask
             for group_id, mask in enumerate(masks)
@@ -202,6 +224,9 @@ class AscendStoreCoordinator:
             effective_block_size = self.group_effective_block_sizes[group_id]
             num_chunks = aligned_token_len // effective_block_size
             transfer_num_chunks = aligned_token_len // transfer_size
+            if group_id not in self.prefix_cacheable_group_ids:
+                masks.append([False] * transfer_num_chunks)
+                continue
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append([True] * transfer_num_chunks)
                 continue
@@ -260,15 +285,17 @@ class AscendStoreCoordinator:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
+        if not self.attention_groups:
+            return tuple([] for _ in self.kv_cache_groups), 0
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = _find_longest_cache_hit(
+            hit_blocks, hit_length = _find_longest_cache_hit(
                 manager_cls,
                 block_hashes=hashes,
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
-                block_pool=cast(BlockPool, cached_block_pool),
+                block_pool=cast(BlockPool, cached_block_pool.with_hash_block_size(spec.block_size)),
                 kv_cache_spec=spec,
                 drop_eagle_block=0 in eagle_indices,
                 alignment_tokens=spec.block_size,
@@ -276,7 +303,7 @@ class AscendStoreCoordinator:
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[group_id] = blocks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            return tuple(blocks_by_group), hit_length
 
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
@@ -299,17 +326,16 @@ class AscendStoreCoordinator:
                 if drop_eagle_block:
                     max_group_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = _find_longest_cache_hit(
+                hit_blocks, new_hit_length = _find_longest_cache_hit(
                     manager_cls,
                     block_hashes=hashes,
                     max_length=max_group_length,
                     kv_cache_group_ids=group_ids,
-                    block_pool=cast(BlockPool, cached_block_pool),
+                    block_pool=cast(BlockPool, cached_block_pool.with_hash_block_size(spec.block_size)),
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
-                new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(index)
                 elif new_hit_length < curr_hit_length:
@@ -410,14 +436,18 @@ def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
 def _find_longest_cache_hit(
     manager_cls: type[SingleTypeKVCacheManager],
     **kwargs: Any,
-) -> tuple[list[KVCacheBlock], ...]:
+) -> tuple[tuple[list[KVCacheBlock], ...], int]:
     try:
-        return manager_cls.find_longest_cache_hit(**kwargs)
+        result = manager_cls.find_longest_cache_hit(**kwargs)
     except TypeError as exc:
         if "drop_eagle_block" not in str(exc):
             raise
         kwargs["use_eagle"] = kwargs.pop("drop_eagle_block")
-        return manager_cls.find_longest_cache_hit(**kwargs)
+        result = manager_cls.find_longest_cache_hit(**kwargs)
+    if len(result) == 2 and isinstance(result[1], int):
+        return result
+    # Older managers returned only the per-group blocks.
+    return result, len(result[0]) * kwargs["kv_cache_spec"].block_size
 
 
 def _reachable_block_mask(

@@ -521,6 +521,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock,
         get_c128_staging_value: Callable[[int], tuple[list[int], list[int]]] | None = None,
         merge_c128_staging_chunk: Callable[[int, TransferChunkWithBlockId], None] | None = None,
+        *,
+        report_request_failures: bool = False,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
@@ -529,8 +531,28 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock
         self._get_c128_staging_value = get_c128_staging_value
         self._merge_c128_staging_chunk = merge_c128_staging_chunk
+        self.report_request_failures = report_request_failures
+        self.failed_requests: set[str] = set()
+
+    def get_and_clear_failed_requests(self) -> set[str]:
+        with self.done_task_lock:
+            failed = self.failed_requests.copy()
+            self.failed_requests.clear()
+        return failed
 
     def _handle_request(self, req_meta: ReqMeta):
+        try:
+            self._load_request(req_meta)
+        except Exception:
+            if not self.report_request_failures:
+                raise
+            logger.exception("AscendStore receive failed for request %s", req_meta.req_id)
+            with self.done_task_lock:
+                self.failed_requests.add(req_meta.req_id)
+        self.set_finished_request(req_meta.req_id)
+        self.request_queue.task_done()
+
+    def _load_request(self, req_meta: ReqMeta):
         transfer_config = getattr(self.token_database, "hybrid_cache_c128_config", None)
         if transfer_config is not None and transfer_config.enabled:
             self._handle_hybrid_c128_request(req_meta)
@@ -574,8 +596,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 size_list.append(size)
                 block_id_list.append(block_id)
         if not key_list:
-            self.set_finished_request(req_id)
-            self.request_queue.task_done()
             return
         key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
         addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
@@ -592,38 +612,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             key_list_c[:3],
         )
         ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
-        if ret is not None and any(r != 0 for r in ret):
-            missing_block_ids = record_failed_blocks(
-                block_id_list_c,
-                ret,
-            )
-            if len(req_meta.block_ids_by_group) == 1:
-                with self._invalid_block_ids_lock:
-                    self._invalid_block_ids.update(missing_block_ids)
-            elif missing_block_ids:
-                logger.error(
-                    "KV load failed for hybrid request %s. "
-                    "Skip invalid-block fallback to avoid scheduler crash. "
-                    "failed_blocks=%s",
-                    req_id,
-                    missing_block_ids,
-                )
-        elif ret is None:
-            missing_block_ids = record_failed_blocks(
-                block_id_list_c,
-                [1] * len(block_id_list_c),
-            )
-            if len(req_meta.block_ids_by_group) == 1:
-                with self._invalid_block_ids_lock:
-                    self._invalid_block_ids.update(missing_block_ids)
-            elif missing_block_ids:
-                logger.error(
-                    "KV load failed for hybrid request %s. "
-                    "Skip invalid-block fallback to avoid scheduler crash. "
-                    "failed_blocks=%s",
-                    req_id,
-                    missing_block_ids,
-                )
+        self._record_load_failures(req_meta, block_id_list_c, ret)
         logger.debug(
             "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
             req_id,
@@ -631,8 +620,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             req_meta.kv_cache_group_ids or [0],
             len(key_list_c),
         )
-        self.set_finished_request(req_id)
-        self.request_queue.task_done()
 
     def _record_load_failures(
         self,
@@ -640,9 +627,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_ids: list[int],
         results: list[int] | None,
     ) -> None:
-        if results is None:
+        if results is None or len(results) != len(block_ids):
             results = [1] * len(block_ids)
         if not any(result != 0 for result in results):
+            return
+        if self.report_request_failures:
+            with self.done_task_lock:
+                self.failed_requests.add(req_meta.req_id)
             return
         missing_block_ids = record_failed_blocks(block_ids, results)
         if len(req_meta.block_ids_by_group) == 1:
@@ -662,7 +653,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         assert transfer_config.chunk_tokens is not None
 
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
-        req_id = req_meta.req_id
         group_ids = req_meta.kv_cache_group_ids or [0]
         load_masks = self._load_mask(req_meta, token_len)
         addr_list: list[list[int]] = []
@@ -704,8 +694,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 block_id_list.append(block_id)
 
         if not key_list and not c128_chunks:
-            self.set_finished_request(req_id)
-            self.request_queue.task_done()
             return
 
         if key_list:
@@ -748,10 +736,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             page_block_ids = page_block_ids[rotation:] + page_block_ids[:rotation]
             results = self.m_store.get(page_keys, page_addrs, page_sizes)
             self._record_load_failures(req_meta, page_block_ids, results)
-
-        self.set_finished_request(req_id)
-        self.request_queue.task_done()
-
 
 class KVCacheStoreLayerSendingThread(KVTransferThread):
     def __init__(

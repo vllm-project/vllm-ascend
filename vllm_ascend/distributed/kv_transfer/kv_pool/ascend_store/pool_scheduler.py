@@ -2,6 +2,7 @@ import math
 from typing import Any, cast
 
 import vllm.envs as envs
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -30,9 +31,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_cache_family_granularity,
+    get_store_cache_group_ids,
     infer_group_cache_families,
     normalize_block_ids_by_group,
     resolve_hybrid_cache_c128_config,
+    store_replay_enabled,
 )
 
 
@@ -45,6 +48,7 @@ class KVPoolScheduler:
     ):
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
+        self.swa_bounded_replay = store_replay_enabled(vllm_config, kv_cache_config, use_layerwise=use_layerwise)
         extra_config = (
             vllm_config.kv_transfer_config.kv_connector_extra_config or {}
         )
@@ -86,9 +90,13 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        if self.swa_bounded_replay:
+            self.load_async = True
         self.client = LookupKeyClient(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
+        self._loading_requests: set[str] = set()
+        self._failed_load_requests: set[str] = set()
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
@@ -108,8 +116,20 @@ class KVPoolScheduler:
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
         ) * cp_scale
-        for group_block_size in self.grouped_block_size:
+        if self.swa_bounded_replay:
+            _, self.hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+        store_groups = None if kv_cache_config is None else kv_cache_config.kv_cache_groups
+        store_group_ids = get_store_cache_group_ids(store_groups)
+        for group_id, group_block_size in enumerate(self.grouped_block_size):
+            if self.swa_bounded_replay and group_id not in store_group_ids:
+                continue
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        if self.swa_bounded_replay:
+            logger.info_once(
+                "AscendStore SWA replay: asynchronous loads restore groups %s; "
+                "missing windows are rebuilt after receive.",
+                store_group_ids,
+            )
         self._block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -278,6 +298,11 @@ class KVPoolScheduler:
         """
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
+        if request.request_id in self._failed_load_requests:
+            return 0, False
+        if self.swa_bounded_replay and num_computed_tokens % self.cache_transfer_granularity:
+            # A whole-page Store load must not overwrite a shared local prefix.
+            return 0, False
 
         if self._discard_partial_chunks:
             token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
@@ -363,6 +388,11 @@ class KVPoolScheduler:
             )
             return
 
+        if self.swa_bounded_replay:
+            # Admission may align down an external hit before allocating.
+            self.load_specs[request.request_id].kvpool_cached_tokens = (
+                self.load_specs[request.request_id].vllm_cached_tokens + num_external_tokens
+            )
         assert (
             num_external_tokens > 0
             and num_external_tokens
@@ -376,6 +406,7 @@ class KVPoolScheduler:
         )
 
         self.load_specs[request.request_id].can_load = True
+        self._loading_requests.add(request.request_id)
         logger.debug(
             "KV pool load spec enabled req=%s num_external_tokens=%d vllm_cached=%d kvpool_cached=%d groups=%s",
             request.request_id,
@@ -396,19 +427,28 @@ class KVPoolScheduler:
         force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
 
         for finished_req_id in scheduler_output.finished_req_ids:
+            self._loading_requests.discard(finished_req_id)
+            self._failed_load_requests.discard(finished_req_id)
+            self.load_specs.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
             self._preempted_req_ids.discard(finished_req_id)
 
+        admitted = {request.req_id for request in scheduler_output.scheduled_new_reqs}
+        admitted.update(scheduler_output.scheduled_cached_reqs.req_ids)
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
-            self._unfinished_requests.pop(req_id, None)
+            # MRV2 can re-admit in this very output. update_state_after_alloc
+            # has already installed the new ownership; do not erase it.
+            if req_id not in admitted:
+                self._unfinished_requests.pop(req_id, None)
 
         meta = AscendConnectorMetadata(self._unfinished_request_ids, scheduler_output.preempted_req_ids)
 
         for request in scheduler_output.scheduled_new_reqs:
+            self._preempted_req_ids.discard(request.req_id)
             # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
             if load_spec is not None:
@@ -606,6 +646,8 @@ class KVPoolScheduler:
         """
         hand the connector_output, free non-null mamba blocks and so on.
         """
+        self._failed_load_requests.update(connector_output.failed_recving & self._loading_requests)
+        self._loading_requests.difference_update(connector_output.finished_recving or ())
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return

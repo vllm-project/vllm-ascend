@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.forward_context import ForwardContext
@@ -28,7 +29,10 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import AscendStoreKVConnectorWorkerMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    AscendStoreKVConnectorWorkerMetadata,
+    get_store_cache_group_ids,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -123,6 +127,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        groups = None if self._kv_cache_config is None else self._kv_cache_config.kv_cache_groups
+        return get_store_cache_group_ids(groups)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
@@ -275,6 +283,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Return KV block IDs that failed to load on the worker."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        sending, receiving = self.get_finished(finished_req_ids)
+        worker = self.connector_worker
+        failed = set()
+        if worker.swa_bounded_replay and worker.kv_recv_thread is not None:
+            failed = worker.kv_recv_thread.get_and_clear_failed_requests()
+        return KVConnectorTransferResults(
+            finished_sending=set(sending or ()), finished_recving=set(receiving or ()), failed_recving=failed
+        )
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
         """

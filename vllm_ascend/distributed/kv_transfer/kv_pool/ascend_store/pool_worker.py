@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
 import importlib
 import math
 import threading
 from collections.abc import Generator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import torch
 import vllm.envs as envs
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
@@ -27,34 +28,23 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.attention.cache_layout import stable_model_fingerprint
-
-from vllm_ascend.attention.cache_layout import stable_model_fingerprint
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
-    aggregate_c128_page_chunks,
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
     TransferChunkWithBlockId,
+    aggregate_c128_page_chunks,
+    build_layerwise_store_key,
     get_block_hashes,
     get_cache_family_granularity,
+    get_store_cache_group_ids,
     infer_group_cache_families,
-    build_layerwise_store_key,
     resolve_hybrid_cache_c128_config,
+    store_replay_enabled,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_session import (
-    ChunkStoreSession,
-    PutBinding,
-    PutClaim,
-    RequestStoreLease,
-    StoreCommitError,
-    StorePutRegistry,
-    StoreReadLeaseRegistry,
-)
-from vllm_ascend.distributed.kv_transfer.layer_workspace_fence import RequestChunkKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
@@ -67,6 +57,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     record_failed_blocks,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_session import (
+    ChunkStoreSession,
+    PutBinding,
+    PutClaim,
+    RequestStoreLease,
+    StoreCommitError,
+    StorePutRegistry,
+    StoreReadLeaseRegistry,
+)
+from vllm_ascend.distributed.kv_transfer.layer_workspace_fence import RequestChunkKey
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -123,6 +123,7 @@ class KVPoolWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.kv_cache_config = kv_cache_config
+        self.swa_bounded_replay = store_replay_enabled(vllm_config, kv_cache_config, use_layerwise=use_layerwize)
         self.model_config = model_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -152,6 +153,8 @@ class KVPoolWorker:
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        if self.swa_bounded_replay:
+            self.load_async = True
         self._invalid_block_ids: set[int] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -176,7 +179,13 @@ class KVPoolWorker:
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
         ) * cp_scale
-        for group_block_size in self.grouped_block_size:
+        if self.swa_bounded_replay:
+            _, self.hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+        store_groups = None if kv_cache_config is None else kv_cache_config.kv_cache_groups
+        store_group_ids = get_store_cache_group_ids(store_groups)
+        for group_id, group_block_size in enumerate(self.grouped_block_size):
+            if self.swa_bounded_replay and group_id not in store_group_ids:
+                continue
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
@@ -1101,6 +1110,7 @@ class KVPoolWorker:
                     self._invalid_block_ids_lock,
                     self._get_c128_staging_value,
                     self._merge_c128_staging_chunk,
+                    report_request_failures=self.swa_bounded_replay,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -2008,6 +2018,8 @@ class KVPoolWorker:
 
         exists: set[tuple[int, bytes]] = set()
         for group_id in kv_cache_group_ids:
+            if group_id not in self.cache_coordinator.prefix_cacheable_group_ids:
+                continue
             keys: list[str] = []
             chunk_hashes: list[str] = []
             variant_counts: list[int] = []
@@ -2045,7 +2057,7 @@ class KVPoolWorker:
         _, hit_length = self.cache_coordinator.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(exists),
+            ExternalCachedBlockPool(self.hash_block_size, exists),
             apply_eagle=False,
         )
         logger.info(

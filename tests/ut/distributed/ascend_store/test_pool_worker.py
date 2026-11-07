@@ -160,7 +160,9 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker = object.__new__(cls)
         worker.hybrid_cache_c128_config = HybridCacheC128Config(enabled=True, c128_slots_per_page=128)
         worker.num_kv_cache_groups = 1
+        worker.hash_block_size = 128
         worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.prefix_cacheable_group_ids = (0,)
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
