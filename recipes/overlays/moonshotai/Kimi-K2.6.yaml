@@ -1,0 +1,262 @@
+# Migrated from https://github.com/vllm-project/recipes/pull/1170
+# Source head: 57f458067d08c8d86a04131f1c6fe3e47f5db109
+meta:
+  hardware:
+    ascend_950dt: supported
+    ascend_910c: supported
+hardware_opt_in_features:
+  ascend_950dt:
+    - spec_decoding
+  ascend_910c:
+    - spec_decoding
+variants:
+  default:
+    hardware_overrides:
+      ascend_910c:
+        support: unsupported
+      ascend_950dt:
+        support: unsupported
+  fp8:
+    hardware_overrides:
+      ascend_910c:
+        support: unsupported
+      ascend_950dt:
+        support: unsupported
+  nvfp4:
+    hardware_overrides:
+      ascend_910c:
+        support: unsupported
+      ascend_950dt:
+        support: unsupported
+  redhat_nvfp4:
+    hardware_overrides:
+      ascend_910c:
+        support: unsupported
+      ascend_950dt:
+        support: unsupported
+  w4a8_ascend:
+    model_id: Eco-Tech/Kimi-K2.6-w4a8
+    precision: int4
+    label: W4A8 (Ascend)
+    min_vllm_version: 0.30.0
+    vram_minimum_gb: 714
+    description: Ascend W4A8 checkpoint on ModelScope, documented and validated on Atlas 800 A3 (16 x 64 GB NPUs) in the vLLM-Ascend Kimi-K2.6 tutorial. The 714 GB VRAM requirement remains an estimate.
+    supported_hardware:
+      - ascend_950dt
+      - ascend_910c
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    extra_args:
+      - '--quantization'
+      - ascend
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip:
+            note: >-
+              Source installation for 910C (A3). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
+            command: |
+              # Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+              npu-smi info
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
+
+              sudo apt-get update
+              sudo apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq python3-venv
+              python3 -m venv vllm-ascend-env
+              source vllm-ascend-env/bin/activate
+              python -m pip install --upgrade pip
+
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
+              cd vllm
+              VLLM_TARGET_DEVICE=empty pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
+              cd ..
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
+              cd vllm-ascend
+              git submodule update --init --recursive
+              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+              cd ..
+
+              pip uninstall -y triton triton-ascend
+              pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.6.0.post2"
+              pip install --no-deps --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "flash-linear-attention-npu-a3==26.9.1"
+              pip check
+              python -c 'import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")'
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: vllm serve
+        install:
+          pip:
+            note: >-
+              Source installation for 950DT (A5). Requires matching host drivers/firmware, CANN Toolkit and hardware-specific Ops plus NNAL. Use the actual set_env.sh paths if installed elsewhere. Use a fresh working directory. Kernel wheels require glibc >= 2.34 and GLIBCXX_3.4.29.
+            command: |
+              # Run on Ubuntu with Python 3.12 and the matching CANN 9.2.1 Toolkit/Ops and NNAL already installed.
+              npu-smi info
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
+
+              sudo apt-get update
+              sudo apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq python3-venv
+              python3 -m venv vllm-ascend-env
+              source vllm-ascend-env/bin/activate
+              python -m pip install --upgrade pip
+
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm.git
+              cd vllm
+              VLLM_TARGET_DEVICE=empty pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
+              cd ..
+              git clone --depth 1 --branch v0.30.0 https://github.com/vllm-project/vllm-ascend.git
+              cd vllm-ascend
+              git submodule update --init --recursive
+              pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+              cd ..
+
+              pip uninstall -y triton triton-ascend
+              pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.6.0.post2"
+              pip install --no-deps --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "flash-linear-attention-npu-a5==26.9.1"
+              pip check
+              python -c 'import torch, vllm, vllm_ascend; assert torch.npu.is_available(); print("vLLM Ascend environment: OK")'
+strategy_hardware:
+  pd_cluster:
+    ascend_950dt: unsupported
+  multi_node_tp:
+    ascend_950dt: unsupported
+  multi_node_tp_pp:
+    ascend_950dt: unsupported
+  multi_node_dep:
+    ascend_950dt: unsupported
+  multi_node_tep:
+    ascend_950dt: unsupported
+guide_sections:
+  ascend: |
+    ### Huawei Ascend 910C
+
+    The [official 910C example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)
+    uses one Atlas 800 A3 node (16 x 64 GB NPUs) with TP=4, DP=4 and EP.
+    Download the W4A8 checkpoint and use its local path if needed.
+
+    - **Ports:** the standalone command below serves on 8000; the DEP builder uses
+      service port 8100 behind a router on 8000.
+    - **Spec Decoding:** off by default. On 910C, enabling it selects DFlash;
+      confirm draft compatibility first. On 950DT, the contributor tested Eagle3
+      with one speculative token. Replace the draft placeholder
+      `/path/to/kimi-k2.6-w4a8` with the actual Eagle3 draft directory.
+      The 950DT result does not validate 910C draft compatibility.
+    - **Tuning:** CPU/sysctl tuning and profiling are Guide-only; host tuning
+      requires appropriate permissions. Generated commands were not rerun on NPUs
+      for this update.
+
+    #### Installation requirements (910C / Atlas 800 A3)
+
+    Use vLLM/vLLM-Ascend 0.30.0 with compatible host drivers and firmware:
+
+    ```bash
+    npu-smi info
+    docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3
+    ```
+
+    The image includes user-space dependencies. For source installation, use
+    the top **INSTALL** block or the [official installation guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html).
+    This A3 environment is the 910C reference, not a validated 950DT configuration.
+
+    #### Launch command
+
+    ```bash
+    #!/bin/sh
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
+
+    export HCCL_BUFFSIZE=600
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
+        --quantization ascend \
+        --enable-auto-tool-choice \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --allowed-local-media-path /data/media \
+        --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+        --trust-remote-code \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 4 \
+        --no-enable-prefix-caching \
+        --enable-expert-parallel \
+        --port 8000 \
+        --max-num-seqs 4 \
+        --max-model-len 15000 \
+        --max-num-batched-tokens 16384 \
+        --gpu-memory-utilization 0.87 \
+        --seed 42 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
+        --mm-processor-cache-gb 0 \
+        --mm-encoder-tp-mode data \
+        --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
+    ```
+  huawei_prerequisites: |
+    - **Huawei support:** 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C). Official reference environment: vLLM 0.30.0 and vLLM-Ascend 0.30.0; host Ascend HDK 26.1.1.
+  ascend_references: |
+    - [Kimi-K2.6 on ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2.6)
+    - [Eco-Tech Kimi-K2.6-W4A8 on ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-w4a8)
+    - [vLLM-Ascend Kimi-K2.6 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html)
+
+strategy_overrides:
+  single_node_dep:
+    hardware_overrides:
+      ascend_910c:
+        extra_args:
+          - '--tensor-parallel-size'
+          - '4'
+          - '--data-parallel-size'
+          - '4'
+          - '--allowed-local-media-path'
+          - /data/media
+          - '--served-model-name'
+          - Eco-Tech/Kimi-K2.6-w4a8
+          - '--no-enable-prefix-caching'
+          - '--max-num-seqs'
+          - '4'
+          - '--max-model-len'
+          - '15000'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--gpu-memory-utilization'
+          - '0.87'
+          - '--seed'
+          - '42'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--mm-processor-cache-gb'
+          - '0'
+          - '--additional-config'
+          - '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
+        extra_env:
+          HCCL_OP_EXPANSION_MODE: AIV
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_BUFFSIZE: '600'
+features:
+  spec_decoding:
+    hardware_overrides:
+      ascend_950dt:
+        args:
+          - '--speculative-config'
+          - '{"method":"eagle3","model":"/path/to/kimi-k2.6-w4a8","num_speculative_tokens":1}'
+      ascend_910c:
+        args:
+          - '--speculative-config'
+          - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
