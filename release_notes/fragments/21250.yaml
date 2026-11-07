@@ -1,0 +1,5 @@
+pr: 21250
+entries:
+  - category: bugfix
+    text: Fixed native OffloadingConnector CPU memory budgeting for DeepSeek V4.1 with SWA bounded replay and removed unused page padding from split-layout CPU cache mirrors.
+    model: deepseek-v4.1
