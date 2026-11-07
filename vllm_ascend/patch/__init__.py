@@ -312,6 +312,22 @@
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
 #
+#   3. `vllm.v1.core.kv_cache_planning._get_kv_cache_groups_uniform_page_size`
+#      `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
+#    Why:
+#       The generic hybrid grouping heuristic creates 36 independent target
+#       groups for a 36-layer target plus one EAGLE draft. On CANN 9.1, FIA
+#       wraps paged block IDs at 32768, so the resulting large pool corrupts KV.
+#    How:
+#       For draft_kv_window only, place three target layers in each group and
+#       keep the windowed draft in its own group. Cap explicitly enlarged pools
+#       to 32768 blocks; reject larger num_gpu_blocks_override values.
+#    Related PR (if no, explain why):
+#       No upstream PR; this works around a CANN FIA limit in Ascend planning.
+#    Future Plan:
+#       Remove the custom grouping and cap when CANN FIA supports larger pools
+#       without block-ID wraparound.
+#
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`

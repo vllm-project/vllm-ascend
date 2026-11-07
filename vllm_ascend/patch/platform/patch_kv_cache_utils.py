@@ -23,10 +23,12 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import (
     is_prefix_cacheable,
 )
@@ -57,6 +59,9 @@ from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
+_DRAFT_KV_WINDOW_FULL_GROUP_SIZE = 3
+# CANN 9.1 FIA wraps paged block IDs at 32768 (block 32768 reads block 0).
+_FIA_PAGED_BLOCK_LIMIT = 32768
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = _kv_cache_planning._get_kv_cache_groups_uniform_page_size
 _orig_get_kv_cache_groups = _kv_cache_planning.get_kv_cache_groups
@@ -181,6 +186,21 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
         for name, spec in kv_cache_spec.items()
         if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
     }
+    # Draft KV windowing converts draft attention specs to SlidingWindowSpec,
+    # which cannot share the target's scheduler block table. Reject the mixed
+    # grouping explicitly instead of silently falling back to generic grouping.
+    windowed_draft_layers = [
+        name
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, SlidingWindowSpec)
+    ]
+    if _draft_kv_window_enabled() and windowed_draft_layers and target_attention_specs:
+        raise ValueError(
+            "draft_kv_window is not supported with the Kimi K3 / DSpark mixed target+draft "
+            "KV cache grouping: the draft layers share the target's scheduler block table, "
+            "which a sliding-window draft group cannot join. Windowed draft layers: "
+            f"{windowed_draft_layers}. Disable draft_kv_window for this model."
+        )
     mamba_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -247,12 +267,90 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     return groups
 
 
+def _draft_kv_window_enabled() -> bool:
+    try:
+        return get_ascend_config().draft_kv_window is not None
+    except RuntimeError:
+        return False
+
+
+def _get_compact_draft_kv_window_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    if not _draft_kv_window_enabled():
+        return None
+    full_layers = defaultdict(list)
+    draft_layers = defaultdict(list)
+    for layer_name, spec in kv_cache_spec.items():
+        if type(spec) is FullAttentionSpec:
+            full_layers[spec].append(layer_name)
+        elif type(spec) is SlidingWindowSpec:
+            draft_layers[spec].append(layer_name)
+        else:
+            return None
+    if len(full_layers) != 1 or len(draft_layers) != 1:
+        return None
+
+    # The generic hybrid heuristic creates one target group per draft layer.
+    # With 36 target layers that produces >32768 shared blocks and triggers
+    # CANN FIA's block-ID wrap. Compact target groups retain the shared pool
+    # and memory budget while keeping every paged block ID below that limit.
+    full_spec, full_names = next(iter(full_layers.items()))
+    draft_spec, draft_names = next(iter(draft_layers.items()))
+    num_full_groups = cdiv(len(full_names), _DRAFT_KV_WINDOW_FULL_GROUP_SIZE)
+    groups = [
+        KVCacheGroupSpec(layer_names=full_names[i::num_full_groups], kv_cache_spec=full_spec)
+        for i in range(num_full_groups)
+    ]
+    groups.append(KVCacheGroupSpec(layer_names=draft_names, kv_cache_spec=draft_spec))
+    logger.info(
+        "Using draft KV window groups: %d target layers in %d groups + %d draft layers",
+        len(full_names),
+        num_full_groups,
+        len(draft_names),
+    )
+    return groups
+
+
+def _cap_draft_kv_window_fia_pool(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> int:
+    if not _draft_kv_window_enabled() or not any(
+        type(spec) is SlidingWindowSpec
+        for group in kv_cache_groups
+        for spec in (
+            group.kv_cache_spec.kv_cache_specs.values()
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else (group.kv_cache_spec,)
+        )
+    ):
+        return available_memory
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    if override is not None and override > _FIA_PAGED_BLOCK_LIMIT:
+        raise ValueError(
+            f"draft_kv_window requires num_gpu_blocks_override <= {_FIA_PAGED_BLOCK_LIMIT} "
+            "because CANN FIA wraps larger paged block IDs."
+        )
+    max_memory = _FIA_PAGED_BLOCK_LIMIT * _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    if available_memory > max_memory:
+        logger.info_once(
+            "Limiting draft KV window pool to %d blocks to avoid CANN FIA block-ID wrap.",
+            _FIA_PAGED_BLOCK_LIMIT,
+        )
+    return min(available_memory, max_memory)
+
+
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     kimi_k3_groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
     if kimi_k3_groups is not None:
         return kimi_k3_groups
+    draft_window_groups = _get_compact_draft_kv_window_groups(kv_cache_spec)
+    if draft_window_groups is not None:
+        return draft_window_groups
     return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
 
@@ -718,6 +816,7 @@ def _ascend_get_kv_cache_config_from_groups(
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif not _is_deepseek_v4_groups(kv_cache_groups):
+        available_memory = _cap_draft_kv_window_fia_pool(vllm_config, kv_cache_groups, available_memory)
         kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     else:
         num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(

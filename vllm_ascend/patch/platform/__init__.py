@@ -83,10 +83,13 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Why:
 #       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
 #       topology, where MLA and compressed indexer caches share block IDs while
-#       indexer-state and Mamba caches use independent groups.
+#       indexer-state and Mamba caches use independent groups. Its 36:1 grouping
+#       heuristic also exceeds CANN FIA's 32768-block limit for draft KV windows.
 #    How:
 #       Use GLM-Next-specific grouping, tensor layout, and memory accounting.
-#       Other models continue to use the original vLLM implementation.
+#       For draft_kv_window, group three target layers per group, keep the draft
+#       separate, and cap FIA pools at 32768 blocks. Other models continue to use
+#       the original vLLM implementation.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/53906
 #       https://github.com/vllm-project/vllm/pull/55219
