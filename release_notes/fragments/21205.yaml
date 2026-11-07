@@ -1,0 +1,7 @@
+pr: 21205
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect draft acceptance in MRV2 stochastic block verification
+      with full draft logits on vLLM 0.32.0 by computing the final required
+      residual-probability row.
