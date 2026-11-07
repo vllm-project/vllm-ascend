@@ -2,7 +2,94 @@
 
 ## **Introduction**
 
-Suffix Decoding is an optimization technique for speculative decoding based on pattern matching. It simultaneously retrieves repetitive sequences from both the prompt and the generated content, using frequency statistics to predict the most likely token continuations. Unlike traditional speculative decoding methods, Suffix Decoding runs entirely on the CPU, eliminating the need for additional GPU resources or draft models, which results in superior acceleration for repetitive tasks such as AI agents and code generation.
+Suffix Decoding proposes continuations from repeated patterns without an additional draft model. Model Runner V1 uses CPU-based Arctic Inference. The experimental Ascend Model Runner V2 implementation searches request history and a device-resident completed-response corpus on the NPU.
+
+## Model Runner V2
+
+V2 requires the complete upstream [vLLM #60339](https://github.com/vllm-project/vllm/pull/60339)
+configuration and request-lifecycle interfaces. Use a vLLM revision containing
+merge `190df0b90007eead441d97d3abf6270f84f2c63e` or a validated complete backport.
+The older repository pin is not sufficient; the factory reports an actionable
+dependency error when the required protocol is absent. V2 remains an explicit
+opt-in, so existing V1 deployments retain their behavior.
+
+### Native implementation
+
+- **Ingest:** completed responses, including up to three prompt-tail tokens,
+  enter the corpus in sorted request-ID order. Exclusive records are sorted by
+  address and reduced with three exact int64 segmented-max kernels instead of
+  contended atomic index updates. State is published after the current-stream
+  chain. This mitigates the observed suffix-ingest timeout path; it is not a
+  claim that the compiler's underlying defect has been conclusively identified.
+- **Address-key bound:** float32 sort keys are exact only while the index has at
+  most `2**24` cells, including an exactly representable sentinel. Larger corpus
+  configurations are rejected before allocating the large buffers. Payloads
+  remain int64. Scratch is sized from the configured request/model limits;
+  sorting additionally allocates its outputs.
+- **Local scan:** matching stops when no candidate remains active or maximum
+  depth is reached, preserving longest-match and rightmost-occurrence ordering.
+- **Continuous K/V:** qualified suffix FIA layers use the existing split-buffer
+  allocator and typed views. This does not enable the separate PA algorithm.
+- **BSH verification:** eligible fixed-K4 FULL captures use aliasing BSH query
+  and output views, with immutable per-metadata-build length/table snapshots.
+  Each padding row has its own valid length and zero block-table row. Workspace
+  covers the model/table limit rather than only the dummy capture lengths.
+- **Explicit HND:** the existing `VLLM_KV_CACHE_LAYOUT=HND` selects head-major
+  cache storage and a stride-aware BF16 writer for the qualified domain. NHD is
+  the default candidate; changing layouts requires a fresh service/cache.
+
+The cache/BSH fast path is currently qualified only for A3, Qwen3 BF16, K4,
+32 query heads / 8 KV heads / head size 128, block size 128, and single-rank
+TP/PP/DP/PCP/DCP. It excludes shared/quantized/offloaded caches, sliding-window,
+sink, pooling and dynamic/adaptive configurations. Other configurations keep
+their existing attention/allocation paths; they are not claimed qualified by
+these tests. HND is an option, not an all-workload throughput guarantee.
+
+### Qualified single-card configuration
+
+On a compatible upstream runtime and an available A3 device:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 VLLM_KV_CACHE_LAYOUT=NHD OMP_NUM_THREADS=16 \
+vllm serve Qwen/Qwen3-8B \
+  --dtype bfloat16 --seed 0 --generation-config vllm \
+  --tensor-parallel-size 1 --data-parallel-size 1 \
+  --max-model-len 11776 --block-size 128 \
+  --max-num-seqs 128 --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.90 \
+  --enable-prefix-caching --enable-chunked-prefill --async-scheduling \
+  --additional-config '{"weight_nz_mode":2}' \
+  --speculative-config '{"method":"suffix","num_speculative_tokens":4}'
+```
+
+For the HND candidate, change only `VLLM_KV_CACHE_LAYOUT` to `HND` and restart
+with isolated caches. Neither choice uses private startup monkey-patches.
+
+### Validation boundaries
+
+Kernel, metadata, graph and service evidence must name the implementation and
+upstream/toolchain revisions actually exercised. The earlier private-candidate
+runs are not automatically clean-native-head qualification. Adaptive
+verification still has a known CANN 9.1 observer compiler failure and is not a
+qualified configuration; its diagnostic-scoped expected failures are not
+passing behavior. TP consistency and unsupported model/cache combinations need
+their own hardware evidence before support is claimed.
+
+Use identical tokenized inputs and thinking settings, full-dataset warmup, fresh
+cache salts, and matching service settings for layout comparisons. Record EOS,
+truncation, output token count, latency and accepted-draft length alongside
+throughput. Seeded or cross-scheduling output identity is not established by a
+successful request count or JSON parsing alone.
+
+Related compiler work: [Triton-Ascend #2817](https://github.com/triton-lang/triton-ascend/pull/2817)
+and its merged counterpart [#2829](https://github.com/triton-lang/triton-ascend/pull/2829)
+address lock-workspace initialization ordering. Their contribution to the
+observed ingest incident has not been established by a paired device experiment.
+
+## Model Runner V1 tutorial and benchmarks
+
+The following deployment instructions and published benchmark table describe
+the legacy V1 path. They are not measurements of the V2 optimizations above.
 
 This document provides step-by-step guidance on how to deploy and benchmark the Suffix Decoding speculative inference technology supported by `vllm-ascend` on Atlas A2 hardware. The setup utilizes a single Atlas 800T A2 node with a 4-card deployment of the Qwen3-32B model instance. Benchmarking is conducted using authentic open-source datasets covering the following categories:
 

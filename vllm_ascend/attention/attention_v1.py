@@ -23,7 +23,9 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
@@ -48,10 +50,13 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.suffix_bsh_attention import capture_bsh
+from vllm_ascend.attention.suffix_bsh_attention import eligible as suffix_bsh_eligible
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     is_dcp_enabled,
+    is_suffix_fia_cache_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -59,6 +64,7 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
+    _ACTIVE_GRAPH,
     get_capture_resource,
     register_task,
 )
@@ -683,6 +689,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
+        if (
+            _EXTRA_CTX.capturing
+            and not _EXTRA_CTX.is_draft_model
+            and _ACTIVE_GRAPH.get() is not None
+            and get_forward_context().cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and suffix_bsh_eligible(self, query, attn_metadata)
+            and output.shape == query.shape
+            and output.dtype == query.dtype
+            and output.device == query.device
+        ):
+            return capture_bsh(
+                self,
+                query,
+                key,
+                value,
+                attn_metadata,
+                output,
+                layer_name=self._graph_metadata_layer_name(layer),
+            )
+
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -1268,14 +1294,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
-            DeviceOperator.reshape_and_cache(
-                key=key_to_cache,
-                value=value_to_cache,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_mapping=slots_to_cache,
-                use_bnsd=self.use_bnsd_kv_cache,
-            )
+            if (
+                self.use_bnsd_kv_cache
+                and is_suffix_fia_cache_enabled(self.vllm_config, self)
+                and self.key_cache.ndim == 4
+                and self.key_cache.shape[0] > 0
+                and tuple(self.key_cache.shape[1:]) == (8, 128, 128)
+                and self.key_cache.shape == self.value_cache.shape
+                and self.key_cache.is_contiguous()
+                and self.value_cache.is_contiguous()
+                and slots_to_cache.ndim == 1
+                and slots_to_cache.stride(0) == 1
+            ):
+                from vllm_ascend.ops.triton.spec_decode.suffix_kv_cache import scatter
+
+                scatter(
+                    key_to_cache,
+                    value_to_cache,
+                    self.key_cache,
+                    self.value_cache,
+                    slots_to_cache,
+                    head_major=True,
+                )
+            else:
+                DeviceOperator.reshape_and_cache(
+                    key=key_to_cache,
+                    value=value_to_cache,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_mapping=slots_to_cache,
+                    use_bnsd=self.use_bnsd_kv_cache,
+                )
             notify_kv_cache_written()
         return query, key, value, output
 

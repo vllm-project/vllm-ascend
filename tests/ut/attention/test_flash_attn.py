@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -172,6 +173,7 @@ def dflash2_config():
 
 def make_impl(query, *, num_kv_heads=1, window=None, layout="PA_BBND", sinks=None):
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
+    impl.vllm_config = Mock(spec=VllmConfig, speculative_config=None)
     impl.num_heads, impl.num_kv_heads = query.shape[1], num_kv_heads
     impl.scale, impl.sliding_window = query.shape[-1] ** -0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", sinks

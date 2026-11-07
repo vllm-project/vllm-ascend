@@ -26,6 +26,35 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
 
+def _validate_suffix_runtime(speculative_config) -> None:
+    """Reject partial upstream #60339 installs before allocating NPU state."""
+    required_fields = (
+        "num_speculative_tokens",
+        "suffix_decoding_max_tree_depth",
+        "suffix_decoding_max_cached_requests",
+        "suffix_decoding_corpus_tokens",
+        "enable_adaptive_verification",
+    )
+    missing = [f"SpeculativeConfig.{name}" for name in required_fields if not hasattr(speculative_config, name)]
+    try:
+        from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+    except ImportError as exc:
+        raise RuntimeError(
+            "MRV2 suffix requires the complete upstream vLLM #60339 integration "
+            "(configuration, BaseSpeculator lifecycle hooks, and runner wiring)."
+        ) from exc
+    for name in ("add_request", "on_requests_finished", "reset_state"):
+        if not callable(getattr(BaseSpeculator, name, None)):
+            missing.append(f"BaseSpeculator.{name}")
+    if missing:
+        raise RuntimeError(
+            "MRV2 suffix requires the complete upstream vLLM #60339 integration "
+            "(configuration, BaseSpeculator lifecycle hooks, and runner wiring); "
+            f"missing: {', '.join(missing)}. Install a vLLM build with that "
+            "complete integration, not only the suffix configuration fields."
+        )
+
+
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
@@ -36,10 +65,20 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method == "suffix":
+        if req_states is None:
+            raise ValueError("MRV2 suffix speculative decoding requires request states")
+        _validate_suffix_runtime(speculative_config)
     if speculative_config.enforce_eager:
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
+    if speculative_config.method == "suffix":
+        from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (
+            SuffixSpeculator,
+        )
+
+        return SuffixSpeculator(vllm_config, device, req_states)
     if speculative_config.method in ("ngram", "ngram_gpu"):
         if req_states is None:
             raise ValueError("MRV2 n-gram speculative decoding requires request states")

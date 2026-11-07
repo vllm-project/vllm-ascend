@@ -194,7 +194,7 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
     )
     op_name = "npu_fused_infer_attention_score_v2" if v2 else "npu_fused_infer_attention_score"
     with (
-        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False)),
+        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False, capturing=True)),
         patch.object(attn_module.torch_npu, op_name, create=True),
         patch.object(attn_module.torch_npu, workspace_name, create=True) as get_workspace,
         patch.object(attn_module, "get_capture_resource", side_effect=lambda _, factory, *args: factory()),
