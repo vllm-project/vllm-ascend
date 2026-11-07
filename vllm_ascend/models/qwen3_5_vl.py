@@ -394,7 +394,8 @@ class _AscendVLPreprocessMixin:
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class AscendQwen3_5ForConditionalGeneration(_AscendVLPreprocessMixin, Qwen3_5ForConditionalGeneration):
-    pass
+    # Validation opt-in for the dense-SP mm gate (see utils._mm_arch_supports_dense_sp).
+    supports_dense_sp = True
 
 
 @MULTIMODAL_REGISTRY.register_processor(

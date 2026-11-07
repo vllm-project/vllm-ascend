@@ -20,6 +20,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -47,6 +48,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -65,6 +67,39 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+
+def _install_full_token_draft_embedding(draft_model: torch.nn.Module) -> None:
+    """Restore full-token rows at the drafter's own embedding seam.
+
+    Under dense sequence parallelism the drafter shares the target's
+    sequence-parallel embedding (``maybe_share_target_embed``), whose output
+    arrives on the rank-local token shard — zero rows beyond the true count.
+    Draft heads run the stock full-token layout (their per-step token counts
+    are not runner-padded to the TP multiple), so the core predictor's
+    ``embed_input_ids`` must return full rows. One instance-level wrap covers
+    both consumers: the speculator's pre-computed ``inputs_embeds`` path
+    (which goes through the wrapper's ``embed_input_ids`` delegating to the
+    core's) and the forward's self-embedding branch. Gated on the shared
+    embedding's ``dense_sp_entry`` flag, so draft heads that keep their own
+    (non-shared, full-token) embedding — and every non-SP deployment — keep
+    the stock path. Generic across MTP families: the flag carries the
+    layout, not the family.
+    """
+    core = getattr(draft_model, "model", None)
+    if core is None or not hasattr(core, "embed_input_ids") or not hasattr(core, "embed_tokens"):
+        return
+    if not getattr(core.embed_tokens, "dense_sp_entry", False):
+        return
+    original_embed = core.embed_input_ids
+
+    @wraps(original_embed)
+    def full_token_embed_input_ids(input_ids, *args, **kwargs):
+        embeds = original_embed(input_ids, *args, **kwargs)
+        embeds = sp_all_gather(embeds)
+        return embeds[: input_ids.shape[0]]
+
+    core.embed_input_ids = full_token_embed_input_ids
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -200,6 +235,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             target_attn_layer_names,
         )
         self._maybe_remove_d2t(draft_model)
+        _install_full_token_draft_embedding(draft_model)
         return draft_model
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

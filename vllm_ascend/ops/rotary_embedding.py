@@ -37,7 +37,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
+from vllm_ascend.utils import enable_dense_sp, enable_sp, has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -326,7 +326,9 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
-        if is_draft_model and self.use_mtp and enable_sp():
+        if is_draft_model and self.use_mtp and enable_sp() and not enable_dense_sp():
+            # MoE-SP layouts shard the drafter's positions; dense SP runs the
+            # drafter stock full-token, so gathering here would double rows.
             tp_group = get_tp_group()
             positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
 

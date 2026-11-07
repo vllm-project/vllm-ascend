@@ -19,12 +19,13 @@
 
 from collections.abc import Callable, Collection
 from contextlib import contextmanager, nullcontext
-from functools import partial
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -43,9 +44,86 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
+from vllm_ascend.utils import enable_dense_sp, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+
+
+def _validate_dense_sp_projections(model: nn.Module) -> None:
+    """Fail fast if a decoder projection is not in the dense-SP name tables.
+
+    Under dense SP the embedding entry shards the token dim; a decoder stack
+    containing an unwrapped residual-stream projection would compute on the
+    shard with metadata built for the full sequence — a cryptic kernel error
+    or, on backends that clamp, silently wrong output. The row wrapper's
+    shape check only fires when a listed row projection exists downstream;
+    families whose row projection is also unlisted (e.g. ChatGLM's
+    ``query_key_value``/``dense``, GPT-NeoX's ``dense_h_to_4h``) would pass
+    silently. This validation walks the model once at load and lists every
+    unrecognized name.
+    """
+    from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+
+    from vllm_ascend.ops.linear_op import _DENSE_SP_COLUMN_PROJECTIONS, _DENSE_SP_ROW_PROJECTIONS
+
+    missing: list[str] = []
+    for name, module in model.named_modules():
+        if ".layers." not in name:
+            continue
+        leaf = name.rsplit(".", 1)[-1]
+        if isinstance(module, (ColumnParallelLinear, RowParallelLinear)) and not hasattr(module, "custom_op"):
+            if leaf in _DENSE_SP_COLUMN_PROJECTIONS or leaf in _DENSE_SP_ROW_PROJECTIONS:
+                continue
+            if leaf not in missing:
+                missing.append(leaf)
+    if missing:
+        raise ValueError(
+            f"dense sequence parallelism is enabled but this checkpoint has decoder "
+            f"projections not in the wrapper name tables: {missing}. The embedding "
+            "entry would shard tokens while these projections run unwrapped on "
+            "the shard. Report these names (from the model definition) to extend "
+            "the tables, or disable the FlashComm switch for this model."
+        )
+
+
+def _install_full_token_mm_text_embedding(model: nn.Module) -> None:
+    """Restore full-token rows at the mm wrapper's text-embedding seam.
+
+    Under dense sequence parallelism the language model's embedding arrives on
+    the rank-local token shard. For mm-capable models the V2 runner always
+    pre-computes inputs_embeds (the multimodal merge happens full-token side,
+    before the model), so the language model's self-embedding path is dead
+    and its ``embed_input_ids`` only serves the wrapper's merge via
+    ``_embed_text_input_ids(input_ids, self.language_model.embed_input_ids,
+    ...)`` — install an instance-level gather there so the merge sees full
+    rows, generically for every mm family. Text-only models keep the stock
+    path (their self-embedding feeds the sequence-parallel decoder and must
+    stay sharded); the shared embedding's ``dense_sp_entry`` flag carries the
+    layout.
+    """
+    language_model = None
+    get_language_model = getattr(model, "get_language_model", None)
+    if callable(get_language_model):
+        language_model = get_language_model()
+    if language_model is None:
+        language_model = getattr(model, "language_model", None)
+    if language_model is None or not hasattr(language_model, "embed_input_ids"):
+        return
+    embed_tokens = getattr(getattr(language_model, "model", None), "embed_tokens", None) or getattr(
+        language_model, "embed_tokens", None
+    )
+    if embed_tokens is None or not getattr(embed_tokens, "dense_sp_entry", False):
+        return
+    original_embed = language_model.embed_input_ids
+
+    @wraps(original_embed)
+    def full_token_embed_input_ids(input_ids, *args, **kwargs):
+        embeds = original_embed(input_ids, *args, **kwargs)
+        embeds = sp_all_gather(embeds)
+        return embeds[: input_ids.shape[0]]
+
+    language_model.embed_input_ids = full_token_embed_input_ids
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
@@ -76,6 +154,10 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+
+    # Class-level default so __new__-constructed test doubles (which skip
+    # __init__) read the SP-off layout instead of raising AttributeError.
+    _dense_sp: bool = False
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
@@ -117,6 +199,14 @@ class AscendModelState(DefaultModelState):
                 )
                 self._offload_request_states = CopySfaRequestStates()
         self._initialize_decoder_replay()
+        # Cache the dense-SP decision: the predicate walks ~13 structural
+        # gates (and resolves the model registry for VL checkpoints), too
+        # expensive to re-run per batch on the prepare/dummy hot paths.
+        self._dense_sp = enable_dense_sp(vllm_config)
+        if self._dense_sp:
+            _validate_dense_sp_projections(model)
+            if self.supports_mm_inputs:
+                _install_full_token_mm_text_embedding(model)
 
     def _initialize_decoder_replay(self) -> None:
         self.decoder_replay: AscendDecoderReplayLayers | None = getattr(self.model, "decoder_replay_layers", None)
@@ -382,7 +472,26 @@ class AscendModelState(DefaultModelState):
         set_embedding_num_tokens_padded = getattr(self.model, "set_embedding_num_tokens_padded", None)
         if set_embedding_num_tokens_padded is not None:
             set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
-        return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+        inputs_embeds = super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+        if inputs_embeds is not None and self._dense_sp:
+            # Dense sequence parallelism: the runner pre-computes inputs_embeds
+            # (text embed + multimodal merge, full-token side) only for
+            # mm-capable / prompt-embeds models, and the decoder stack's
+            # projections expect the rank-local token shard. Mirror upstream's
+            # SP-MoE entry (sequence_parallel_chunk at the top of the model
+            # forward) for every dense family at this one seam.
+            inputs_embeds = sp_shard(inputs_embeds)
+        return inputs_embeds
+
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        inputs_embeds = super().dummy_inputs_embeds(num_tokens)
+        if self._dense_sp:
+            # Same boundary as prepare_inputs_embeds for the dummy/capture
+            # forwards; upstream's prepare_dummy_inputs and the execute_model
+            # dummy path both route through this method, so the shard covers
+            # graph capture, warmup and profile runs with one override.
+            inputs_embeds = sp_shard(inputs_embeds)
+        return inputs_embeds
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)

@@ -241,6 +241,12 @@ def clear_enable_sp():
     enable_pcp_o_proj_weight_sharding.cache_clear()
     enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
+    # The cached MoE/VL verdicts are config-scoped: a config re-init must
+    # invalidate them, or the next reader sees the stale verdict of the
+    # previous config.
+    global _IS_MOE_MODEL, _IS_VL_MODEL
+    _IS_MOE_MODEL = None
+    _IS_VL_MODEL = None
 
 
 _IS_RC_DEVICE: bool | None = None
@@ -1004,6 +1010,136 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
 
+def _flashcomm_switch_enabled(vllm_config) -> bool:
+    """Whether the user explicitly turned on the FlashComm switch.
+
+    Mirrors the ``enable_flashcomm1`` resolution in
+    ``AscendConfig.derive_and_validate`` (additional_config first, then the
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var).
+    """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    switch = additional_config.get("enable_flashcomm1", False) if isinstance(additional_config, dict) else False
+    if isinstance(switch, str):
+        switch = switch.strip().lower() in ("1", "true")
+    else:
+        switch = bool(switch)
+    return switch or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+
+
+def _building_draft_model() -> bool:
+    """Whether the module under construction belongs to a draft head.
+
+    ``load_eagle_model`` builds draft heads inside the
+    ``set_model_tag("eagle_head")`` context. Draft heads run the stock
+    full-token layout: their per-step token counts are not runner-padded to
+    the TP multiple, and their embeddings must stay full even when shared
+    with the target.
+    """
+    from vllm.compilation.backends import model_tag as _current_model_tag
+
+    return _current_model_tag == "eagle_head"
+
+
+def _mm_arch_supports_dense_sp(vllm_config) -> bool:
+    """Whether the registered model class opted into the dense-SP wiring.
+
+    The multimodal merge happens full-token side before the model forward;
+    an mm-capable checkpoint runs dense SP only when its registered model
+    class wires the boundary (``supports_dense_sp``).
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    architectures = getattr(model_config, "architectures", None) or []
+    for architecture in architectures:
+        try:
+            from vllm.model_executor.models.registry import ModelRegistry
+
+            model_cls, _ = ModelRegistry.resolve_model_cls((architecture,), model_config)
+        except Exception:
+            continue
+        if getattr(model_cls, "supports_dense_sp", False):
+            return True
+    return False
+
+
+def dense_sp_unavailable_reason(vllm_config) -> str | None:
+    """Name the first structural gate that blocks dense sequence parallelism.
+
+    Returns None when the topology allows dense SP (the FlashComm switch may
+    still be off — that is a user choice, not unavailability).
+    """
+    from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+    if not use_v2_model_runner(vllm_config):
+        return "the V1 model runner (dense SP requires the V2 runner)"
+
+    parallel_config = vllm_config.parallel_config
+    if getattr(parallel_config, "tensor_parallel_size", 1) <= 1:
+        return "tensor_parallel_size <= 1"
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+    if pp_size != 1:
+        return f"pipeline_parallel_size = {pp_size} (dense SP requires PP == 1)"
+    if getattr(parallel_config, "use_sequence_parallel_moe", False):
+        return "use_sequence_parallel_moe is on (upstream SP-MoE owns the layout)"
+    if getattr(parallel_config, "prefill_context_parallel_size", 1) > 1:
+        return "prefill_context_parallel_size > 1"
+    if getattr(parallel_config, "decode_context_parallel_size", 1) > 1:
+        return "decode_context_parallel_size > 1"
+    if getattr(parallel_config, "enable_dbo", False):
+        return "enable_dbo is on"
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None:
+        method = getattr(speculative_config, "method", None)
+        if method != "mtp":
+            return f"speculative method {method!r} is not wired for dense SP (only mtp)"
+    if getattr(vllm_config, "lora_config", None) is not None:
+        return "LoRA is enabled"
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return "model_config is missing"
+    if is_vl_model(vllm_config) and not _mm_arch_supports_dense_sp(vllm_config):
+        return (
+            "multimodal checkpoint without a dense-SP-wired model class "
+            "(the multimodal merge needs full-token rows before the model)"
+        )
+    if getattr(model_config, "is_encoder_decoder", False):
+        return "encoder-decoder checkpoint (cross-attention consumes full-token encoder states)"
+    if getattr(model_config, "use_mla", False):
+        return "MLA checkpoint (stacked projections break the gather-per-block invariant)"
+    if getattr(model_config, "hf_text_config", None) is None:
+        return "hf_text_config is missing"
+    if is_moe_model(vllm_config):
+        return "MoE checkpoint (upstream SP-MoE owns the layout)"
+    return None
+
+
+def enable_dense_sp(vllm_config=None) -> bool:
+    """Dense-model sequence parallelism driven by the FlashComm switch.
+
+    The generic path shards the token dim across TP ranks between the
+    layer projections (embedding reduce-scatter entry, column-projection
+    all-gather, row-projection reduce-scatter, runner/sample-time exit
+    all-gather), so any dense checkpoint sharing the standard decoder
+    skeleton is covered regardless of family. Structural gates replace a
+    model_type whitelist; see ``dense_sp_unavailable_reason`` for the
+    full exclusion list.
+    """
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    if vllm_config is None:
+        return False
+
+    # Switch first: the structural verdict is only meaningful for opted-in
+    # deployments, and probe configs (e.g. unittest mocks of the current
+    # vllm config) must stay comparable without every gate being mock-safe.
+    return _flashcomm_switch_enabled(vllm_config) and dense_sp_unavailable_reason(vllm_config) is None
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -1016,7 +1152,7 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe) or enable_dense_sp(vllm_config)
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
