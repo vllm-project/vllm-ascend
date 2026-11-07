@@ -459,6 +459,8 @@ class NPUModelRunner(GPUModelRunner):
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
+        self._mamba_accepted_by_request: dict[str, int] = {}
+        self._mamba_pending_accepted_rows: dict[str, int] | None = None
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
@@ -998,7 +1000,42 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         ).unsqueeze(1)
 
+    def _use_mamba_accepted_state_cache(self) -> bool:
+        return (
+            self.use_async_scheduling
+            and self.speculative_config is not None
+            and self.model_config.is_hybrid
+            and self.need_accepted_tokens
+            and self.num_spec_tokens > 0
+            and self.cache_config.mamba_cache_mode == "align"
+        )
+
+    def _invalidate_mamba_accepted_state(self, scheduler_output: "SchedulerOutput") -> None:
+        if not self._use_mamba_accepted_state_cache():
+            return
+        invalidated = set(scheduler_output.finished_req_ids)
+        invalidated.update(scheduler_output.preempted_req_ids or ())
+        invalidated.update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+        invalidated.update(req.req_id for req in scheduler_output.scheduled_new_reqs)
+        for req_id in invalidated:
+            self._mamba_accepted_by_request.pop(req_id, None)
+            # A prior lifetime's D2H may still be pending. It must not restore
+            # the invalidated value when the existing event is synchronized.
+            if self._mamba_pending_accepted_rows is not None:
+                self._mamba_pending_accepted_rows.pop(req_id, None)
+
+    def _record_mamba_accepted_rows(self, num_reqs: int) -> None:
+        if not self._use_mamba_accepted_state_cache():
+            return
+        # postprocess writes D2H in this full batch order, independently of the
+        # sampled-token mapping and of later InputBatch row removal/compaction.
+        self._mamba_pending_accepted_rows = {
+            req_id: row
+            for row, req_id in enumerate(self.input_batch.req_ids[:num_reqs])
+        }
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        self._invalidate_mamba_accepted_state(scheduler_output)
         self._update_replay_requests(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -1049,6 +1086,7 @@ class NPUModelRunner(GPUModelRunner):
         # Keep the asynchronous D2H result in the previous iteration's row order,
         # independently of InputBatch, until the existing event is synchronized.
         num_reqs = output_token_ids.size(0)
+        self._record_mamba_accepted_rows(num_reqs)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
             mamba_utils.postprocess_mamba_align_gpu(
@@ -1086,6 +1124,26 @@ class NPUModelRunner(GPUModelRunner):
         if not self.use_async_scheduling:
             # Synchronous scheduling already updates counts in current batch order.
             accepted[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            return
+
+        if self._use_mamba_accepted_state_cache():
+            # The caller has already synchronized num_accepted_tokens_event.
+            # Read every submitted row before reordering/overwriting the shared
+            # D2H buffer, including requests paused in the current batch.
+            pending_rows = self._mamba_pending_accepted_rows
+            if pending_rows is not None:
+                for req_id, row in pending_rows.items():
+                    self._mamba_accepted_by_request[req_id] = int(accepted[row])
+                self._mamba_pending_accepted_rows = None
+            accepted[:num_reqs] = np.fromiter(
+                (
+                    self._mamba_accepted_by_request.get(req_id, 1)
+                    for req_id in self.input_batch.req_ids[:num_reqs]
+                ),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
             return
 
         if has_prev_mapping:
