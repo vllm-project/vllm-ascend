@@ -1,0 +1,10 @@
+build/
+build_out/
+kernel_meta/
+*.run
+# opc staging 需要；由 build.sh vendor_common_kernels 从 k2q_csr_common 生成
+k2q_csr_meta/op_kernel/common/
+k2q_csr_hist/op_kernel/common/
+k2q_csr_row_prefix/op_kernel/common/
+k2q_csr_tile_prefix/op_kernel/common/
+k2q_csr_scatter/op_kernel/common/
