@@ -378,6 +378,102 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
+### LLM-Compressor Qwen3-32B-W8A8 on 310P
+
+The `compressed-tensors` path supports dense symmetric INT8 per-channel
+weights with dynamic per-token INT8 activations and FP16 model execution.
+Do not pass `--quantization ascend` for an LLM-Compressor checkpoint.
+ModelSlim continues to use its existing quantization configuration and NZ
+weight layout; compressed-tensors uses a separate contiguous NK scheme.
+
+The following real-weight configuration was tested on Ascend310P3 with
+**two devices**, CANN/NNAL 9.2.1, driver 25.5.0, Python 3.12.16,
+PyTorch 2.10.0, torch-npu 2.10.0.post4, Transformers 5.19.0 and
+compressed-tensors 0.17.0. The source was vLLM Ascend main snapshot
+`24a76e8` plus this change, with native extensions built, and the verified
+vLLM main commit `544f182d9f0c9bfe8bd7645525951d5e3692a542`.
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1
+export VLLM_USE_V2_MODEL_RUNNER=1
+vllm serve ramblingpolymath/Qwen3-32B-W8A8 \
+    --revision c97ec599f6d17967bb1049180d81d8a3e959fc97 \
+    --served-model-name qwen3-w8a8 \
+    --dtype float16 --tensor-parallel-size 2 \
+    --max-model-len 2048 --max-num-seqs 1 \
+    --max-num-batched-tokens 2048 --gpu-memory-utilization 0.8 \
+    --enforce-eager --port 8000
+```
+
+Default Model Runner V2 offline generation returned `56` and `Paris`; input
+and generated token IDs matched the independent CPU reference exactly.
+Both eager and decode-graph serving passed `/v1/models`, four HTTP 200 chat
+requests and three completed serial streaming requests. The model checkpoint
+revision above was fixed, with all seven safetensors LFS SHA256 hashes verified.
+
+| Evaluation | Configuration | Result |
+| --- | --- | --- |
+| MMLU computer_security | Full 100-question test split, 0-shot, raw prompt, eager TP2/FP16, Model Runner V1, max sequences 8 | 86/100 |
+| Backend selection audit | Both TP workers, actual loaded model | 256 dedicated compressed-tensors 310P schemes per rank; contiguous INT8 weights |
+| Eager streaming | Model Runner V2, three serial requests, 93 output tokens each | TPOT 0.5999–0.6007 s/token; 1.63–1.65 tokens/s |
+| Eager memory snapshot | After the chat smoke requests; device 0/device 1 totals | 27827/28073 MB |
+
+For decode-graph execution, set `TORCHINDUCTOR_COMPILE_THREADS=1` and replace
+`--enforce-eager` with
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'`.
+All other model, batching and concurrency settings remain the same.
+
+| Model Runner V2 mode | Streaming TPOT | Output throughput | Device 0/device 1 memory snapshot |
+| --- | --- | --- | --- |
+| Eager | 0.5999–0.6007 s/token | 1.63–1.65 tokens/s | 27827/28073 MB |
+| Decode graph `[1]` | 0.5985–0.5992 s/token | 1.63–1.65 tokens/s | 27995/28242 MB |
+
+These are three serial streaming requests per mode on the same board and
+software versions in separate runs. They establish graph compatibility;
+the small latency difference does not establish a reliable performance gain.
+Graph capture reported 4 seconds and 0.27 GiB. Other capture sizes were not
+tested. TTFT is measured to the first non-empty streaming delta; the eager
+samples were 0.6528/1.2411/1.2306 seconds and graph samples were
+0.6450/1.2361/1.2270 seconds. TPOT is estimated from the first and last
+non-empty deltas divided by completion tokens minus one; generated token
+counts include template delimiters. HTTP, scheduling and generation overhead
+are included in these request-level measurements.
+
+The MMLU score is uncorrected. **Use Model Runner V1 for scoring** by setting
+`VLLM_USE_V2_MODEL_RUNNER=0`: the current 310P V2 sampler explicitly rejects
+logprobs and logits processors, including allowed-token constraints. This
+is a sampler capability limit; ordinary V2 generation and serving were tested
+separately. The validation driver verified that all four answer continuations
+are single tokens and preserve the prompt tokenization boundary, so restricted
+greedy selection has the same choice argmax as continuation log-likelihood.
+The test parquet SHA256 was
+`a6ad5774acf5133ac88cf1bb066c60db8668abee2d6a724cf2f9dfa7cb4f103d`.
+The opt-in model config is
+`tests/e2e/models/configs/Qwen3-32B-W8A8-CompressedTensors-310P.yaml`.
+For the full repository evaluation flow, select it with
+`VLLM_USE_V2_MODEL_RUNNER=0 pytest -sv tests/e2e/models/test_lm_eval_correctness.py --config tests/e2e/models/configs/Qwen3-32B-W8A8-CompressedTensors-310P.yaml --tp-size 2`.
+The reported score used the independent equivalent-choice driver, rather than
+this full pytest flow.
+
+An independent Transformers 4.57.6 / compressed-tensors 0.20.1 CPU FP16
+fake-quant reference loaded the same checkpoint with a 12 GiB CPU memory
+budget and disk offload. Both smoke outputs matched exactly. On the fixed
+MMLU subset at indices 0, 10, ..., 90, all 10 answer choices matched the NPU
+run, including two questions both implementations answered incorrectly.
+This is a ten-question alignment check, not a full 100-question reference
+score or an unquantized-model accuracy comparison. An earlier CANN 9.1 / vLLM
+0.23.0 / Ascend 0.23.0.post1 feature backport also scored 86/100; all 100
+input token sequences and predictions matched the main-stack V1 run.
+
+The memory values are snapshots, not peak allocation measurements. The
+configured context limit is 2048 tokens, with MMLU prompts of 44–221 tokens;
+these runs do not establish maximum-length inference. The reported KV-cache
+allocation capacity does not establish 40960-token inference or eight concurrent
+maximum-length requests. Static W8A8, W4A8, FP8/MXFP, BF16 activation and
+quantized MoE are outside this compressed-tensors support scope. See the
+[quantization guide](../../user_guide/feature_guide/quantization.md) for the
+capability matrix.
+
 ### 7.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
