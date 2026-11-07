@@ -383,7 +383,7 @@ class NPUOffloadingWorker(OffloadingWorker):
 
         slot_ranges = getattr(self._mmap_region, "iter_worker_slot_ranges", None)
         use_worker_slots = bool(worker_slot_only and self._mmap_region.rank is not None and slot_ranges is not None)
-        if use_worker_slots:
+        if use_worker_slots and slot_ranges is not None:
             try:
                 tensors = [self._mmap_region.base_tensor[offset : offset + length] for offset, length in slot_ranges()]
             except Exception:
