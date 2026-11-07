@@ -25,6 +25,9 @@ import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.patch.platform.patch_kv_guard import apply_patch as _apply_kv_guard
+
+_apply_kv_guard()
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH):
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa

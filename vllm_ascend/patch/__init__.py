@@ -1872,3 +1872,20 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** File: platform/patch_kv_guard.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler`
+#    Why:
+#       Optional KV address diagnostics need allocation generations and request
+#       bindings independently of worker attention metadata.
+#    How:
+#       Wrap the constructor once, then instrument allocation, release, and
+#       schedule only for instances with additional_config.kv_guard_config.enabled.
+#       Attach changed bindings and token ranges to SchedulerOutput.
+#       Include receive-only allocation snapshots and explicit prefix replay ranges.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; this is the opt-in Ascend KV Guard integration.
+#    Future Plan:
+#       Replace the wrappers with upstream allocation lifecycle and scheduler
+#       output extension points that provide the same independent evidence.
+#
