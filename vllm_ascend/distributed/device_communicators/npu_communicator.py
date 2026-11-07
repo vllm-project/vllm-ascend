@@ -18,6 +18,13 @@
 import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.logger import logger
+
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import Mxfp8AllReduce
+from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+    QuantizedAllReduce,
+)
 
 
 class _NpuAll2AllManager:
@@ -60,3 +67,33 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
+        # Select one opt-in backend; existing configs retain the INT8 path.
+        # Both wrappers use payload/shape gates and the existing process group.
+        quantized_cfg = get_ascend_config().quantized_all_reduce_config
+        self.quantized_ar: QuantizedAllReduce | Mxfp8AllReduce | None = None
+        if quantized_cfg.enable:
+            backend = QuantizedAllReduce if quantized_cfg.quant_dtype == "int8" else Mxfp8AllReduce
+            self.quantized_ar = backend(
+                self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
+            )
+            if self.quantized_ar.supported:
+                if quantized_cfg.quant_dtype == "int8":
+                    logger.info_once(
+                        "INT8 quantized all-reduce enabled (group=%s, min_numel=%d, max_q=%d).",
+                        self.unique_name,
+                        self.quantized_ar.min_numel,
+                        self.quantized_ar.max_q,
+                    )
+                else:
+                    logger.info_once(
+                        "MXFP8 AllToAll quantized all-reduce enabled "
+                        "(group=%s, min_numel=%d, dequant_dtype=bf16, sum_output_dtype=bf16).",
+                        self.unique_name,
+                        self.quantized_ar.min_numel,
+                    )
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.quantized_ar is not None and self.world_size > 1:
+            return self.quantized_ar.all_reduce(input_)
+        dist.all_reduce(input_, group=self.device_group)
+        return input_

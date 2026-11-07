@@ -42,6 +42,7 @@ from vllm_ascend.ascend_config import (
     FinegrainedTPConfig,
     KVPPConfig,
     ProfilingChunkConfig,
+    QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
@@ -112,6 +113,70 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestQuantizedAllReduceConfig(TestBase):
+    def test_defaults(self):
+        config = QuantizedAllReduceConfig()
+        self.assertFalse(config.enable)
+        self.assertEqual(config.min_numel, 16777216)
+        self.assertEqual(config.quant_dtype, "int8")
+
+    def test_explicit_values_and_lax_bool(self):
+        config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
+        self.assertTrue(config.enable)
+        self.assertEqual(config.min_numel, 2097152)
+
+    def test_rejects_unknown_key(self):
+        with self.assertRaises(ValueError):
+            QuantizedAllReduceConfig(enable=True, min_numels=1)  # type: ignore[call-arg]
+
+    def test_rejects_non_positive_min_numel(self):
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                QuantizedAllReduceConfig(min_numel=value)
+
+    def test_quant_dtype_selection(self):
+        self.assertEqual(QuantizedAllReduceConfig(quant_dtype="mxfp8").quant_dtype, "mxfp8")
+        for value in ("fp16", "alltoall", "auto"):
+            with self.subTest(quant_dtype=value), self.assertRaises(ValueError):
+                QuantizedAllReduceConfig(quant_dtype=value)
+
+    def test_mxfp8_requires_a5(self):
+        config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
+        vllm_config = VllmConfig()
+        vllm_config.parallel_config.tensor_parallel_size = 2
+        with (
+            patch("vllm_ascend.ascend_config.is_950", return_value=False),
+            self.assertRaisesRegex(ValueError, "requires Atlas A5"),
+        ):
+            config._validate_preconditions(vllm_config)
+
+    def test_mxfp8_tp_validation(self):
+        config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
+        vllm_config = VllmConfig()
+        with patch("vllm_ascend.ascend_config.is_950", return_value=True):
+            for tp_size in (1, 2, 4, 8):
+                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                config._validate_preconditions(vllm_config)
+            vllm_config.parallel_config.tensor_parallel_size = 3
+            with self.assertRaisesRegex(ValueError, "TP=2/4/8"):
+                config._validate_preconditions(vllm_config)
+
+    def test_rejects_tp_above_common_limit(self):
+        config = QuantizedAllReduceConfig(enable=True)
+        vllm_config = VllmConfig()
+        vllm_config.parallel_config.tensor_parallel_size = 16
+        with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
+            config._validate_preconditions(vllm_config)
+
+    def test_accepts_same_tp_sizes_on_a5(self):
+        config = QuantizedAllReduceConfig(enable=True)
+        with patch("vllm_ascend.ascend_config.is_950", return_value=True):
+            for tp_size in (1, 2, 4, 8):
+                vllm_config = VllmConfig()
+                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                config._validate_preconditions(vllm_config)
 
 
 class TestAscendConfig(TestBase):
@@ -361,6 +426,43 @@ class TestAscendConfig(TestBase):
         for name in ("z_score", "use_covariance", "hysteresis_enabled"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 EplbConfig(stair_config={name: 0})
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "min_numel": 2097152}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.quantized_all_reduce_config.enable)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 2097152)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_bad_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_rejects_unsupported_tp_at_config_time(self, mock_fix_incompatible_config):
+        # The TP degree is validated here, not when a parallel group is built:
+        # an EP/MC2 group of DP x PCP x TP ranks must never gate the feature.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True}}
+        with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_unsupported_tp_ok_when_disabled(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": False}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
