@@ -1612,3 +1612,15 @@ def test_the_swa_cache_carries_the_replay_flag_into_its_spec(monkeypatch):
     assert spec.bounded_replay
     assert not spec.prefix_cacheable
     assert spec.prefix_replay_tokens == REPLAY_WINDOW
+
+
+@pytest.mark.parametrize("block_size", [16, 256])
+def test_swa_cache_rejects_unsupported_block_size(block_size):
+    with pytest.raises(ValueError, match="only supports block sizes 32, 64, and 128"):
+        AscendDeepseekV41SWACache(
+            head_dim=8,
+            window_size=128,
+            dtype=torch.bfloat16,
+            prefix="model.layers.0.self_attn.swa_cache",
+            cache_config=SimpleNamespace(block_size=block_size, cache_dtype="bfloat16"),
+        )
