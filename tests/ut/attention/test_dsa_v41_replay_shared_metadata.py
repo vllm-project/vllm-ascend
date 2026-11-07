@@ -33,7 +33,7 @@ class TestReplayVisibleLengthsReuse:
         seq_lens = torch.tensor([6, 5])
         query_start_loc = torch.tensor([0, 3, 5])
         replay_start = torch.tensor([3, 3])
-        batch_cache = {}
+        batch_cache: dict[str, object] = {}
         results = [_prepare(_builder(batch_cache), seq_lens[:], query_start_loc[:], replay_start[:]) for _ in range(20)]
         assert build.call_count == 1
         assert all(result is results[0] for result in results)
@@ -47,7 +47,7 @@ class TestReplayVisibleLengthsReuse:
         seq_lens = torch.tensor([6, 5])
         query_start_loc = torch.tensor([0, 3, 5])
         replay_start = torch.zeros(2, dtype=torch.int64)
-        batch_cache = {}
+        batch_cache: dict[str, object] = {}
         first = _prepare(_builder(batch_cache), seq_lens, query_start_loc, replay_start)
         window_size = 4
         expected = [4, 4, 4, 4, 4]
