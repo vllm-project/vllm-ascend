@@ -43,12 +43,12 @@
 
 ```bash
 pytest -q tests/ut/models/minimax_m3
-pytest -q tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_qknorm_rope_cache.py
 ```
 
 Unit tests cover the fusion guard, fallback, dummy and fake forwards, separate index projections, and cache-insertion order. NPU tests cover 1 to 8192 tokens, several head layouts, partial and full RoPE, shuffled and negative slots, untouched cache regions, non-contiguous inputs, empty inputs, and graph replay after `positions` or slots change. A3 large-prefill validation additionally samples output/cache correctness and latency at 32768, 65536, 131072, and 262144 tokens. Dynamic-cache cases use 3, 64, 5392, and 8192 blocks. Two FP8 cases are skipped when A5 is not available.
 
-## Compilation and performance regression tests
+## Compilation reuse tests
 
 The request-size test uses a fresh real JIT function in a single process. After
 one warmup it independently varies launch token count, `NUM_SLOTS` (including
@@ -66,17 +66,6 @@ remain compile-time parameters intentionally. Kernel reuse does not imply that
 ACLGraph capture buckets or captured scalar arguments change automatically.
 
 ```bash
-pytest -sv tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py \
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_qknorm_rope_cache.py \
   -k 'compiled_variant or layout_variants'
-pytest -sv tests/e2e/nightly/single_node/ops/test_minimax_qknorm_rope_cache_performance.py \
-  -o junit_family=legacy --junitxml=/tmp/minimax-qk-performance.xml
 ```
-
-The nightly test compares runtime `NUM_SLOTS` with a generated constexpr
-reference that uses exactly the same kernel body. It checks bit-exact outputs
-and cache writes, then alternates timing order across five samples. Measurements
-use 20 captured calls and 10 replays with NPU Events, excluding compilation.
-The 8/16-head cases cover 1, 4, 8, 16, 32, 64, 128, 192, 256 and 512 tokens with
-5392 cache blocks. JSON records and JUnit properties include both timings and
-the percentage change; no hardware-independent microsecond threshold is imposed.
-Performance coverage lives in e2e rather than a separate `benchmarks/` script.
