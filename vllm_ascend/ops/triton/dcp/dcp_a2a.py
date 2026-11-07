@@ -301,6 +301,7 @@ def pack_dcp_output_lse(
     softmax_lse: torch.Tensor,
     dcp_size: int,
     scatter_dim: int,
+    max_vector_cores: int | None = None,
 ) -> torch.Tensor:
     """Pack strided partial output and FP32 LSE into one HCCL payload."""
     num_tokens, num_heads, head_dim, local_scatter_size, replicated_size = _validate_dcp_inputs(
@@ -315,7 +316,11 @@ def pack_dcp_output_lse(
     total_rows = num_tokens * num_heads
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
-    grid_size = total_rows if total_rows < vector_cores else vector_cores
+    if max_vector_cores is not None:
+        if isinstance(max_vector_cores, bool) or not isinstance(max_vector_cores, int) or max_vector_cores <= 0:
+            raise ValueError("max_vector_cores must be a positive integer")
+        vector_cores = min(vector_cores, max_vector_cores)
+    grid_size = min(total_rows, vector_cores)
     # Keep enough row tiles to occupy the A5 vector cores. Feature-strided
     # loads can regress with batching, especially for wide heads.
     batched = (
@@ -482,6 +487,7 @@ def dcp_a2a_fused_combine(
     pcp_group: GroupCoordinator | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    pack_vector_cores: int | None = None,
 ) -> torch.Tensor:
     """Pack, scatter over DCP or TP, optionally gather over PCP, then merge.
 
@@ -505,6 +511,7 @@ def dcp_a2a_fused_combine(
         softmax_lse,
         scatter_size,
         scatter_dim=scatter_dim,
+        max_vector_cores=pack_vector_cores,
     )
     if scatter_size > 1:
         if scatter_group is None:
@@ -535,6 +542,7 @@ def dcp_a2a_fused(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    pack_vector_cores: int | None = None,
 ) -> torch.Tensor:
     """Fused DCP output merge, optionally gathering contributions across PCP.
 
@@ -578,6 +586,7 @@ def dcp_a2a_fused(
         pcp_group=pcp_group,
         return_lse=return_lse,
         defer_combine=defer_combine,
+        pack_vector_cores=pack_vector_cores,
     )
 
 
@@ -590,6 +599,7 @@ def dcp_a2a_fused_fake(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
+    pack_vector_cores: int | None = None,
 ) -> torch.Tensor:
     """Propagate output metadata for torch.compile without running HCCL.
 

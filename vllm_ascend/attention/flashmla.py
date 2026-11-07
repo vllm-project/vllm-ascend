@@ -9,7 +9,9 @@ Callers own stream ordering and persistent KV writes. Tensor-content checks belo
 in preflight tests: the decode hot path must not copy lengths or tables to the CPU.
 """
 
+import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +24,14 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import BatchReqState
+
+logger = logging.getLogger(__name__)
+
+# FlashMLA MIX scheduling uses one Cube and two Vector cores per group.
+FLASHMLA_VECTOR_PER_CUBE = 2
+FLASHMLA_ATTENTION_CORE_DIVISOR = 2
+FLASHMLA_MAX_PACK_ROWS_PER_CORE = 16
+
 
 FLASHMLA_QK_DIM = 576
 FLASHMLA_V_DIM = 512
@@ -272,6 +282,50 @@ class FlashMLAImpl:
                 raise ValueError("FlashMLA inputs must be on the same device")
 
 
+@dataclass(frozen=True)
+class FlashMLACoreBudget:
+    stream: "torch.npu.Stream"
+    pack_vector_cores: int
+    max_pack_rows: int
+
+
+def _create_core_budget(device: torch.device) -> FlashMLACoreBudget | None:
+    """Probe once before capture, preserving caller/process resource ceilings."""
+    stream = None
+    try:
+        with torch.npu.device(device):
+            index = torch.npu.current_device()
+            props = torch.npu.get_device_properties(index)
+            process = torch.npu.get_device_limit(index)
+            parent = torch.npu.get_stream_limit(torch.npu.current_stream())
+            cubes = props.cube_core_num, process["cube_core_num"], parent["cube_core_num"]
+            vectors = props.vector_core_num, process["vector_core_num"], parent["vector_core_num"]
+            if any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in (*cubes, *vectors)):
+                raise ValueError("invalid reported core counts")
+            cube, vector = min(cubes), min(vectors)
+            if vector <= FLASHMLA_VECTOR_PER_CUBE:
+                raise ValueError("no room for both FlashMLA MIX and history pack")
+            groups = min(cube, vector // FLASHMLA_VECTOR_PER_CUBE)
+            attention_cube = max(1, groups // FLASHMLA_ATTENTION_CORE_DIVISOR)
+            attention_vector = attention_cube * FLASHMLA_VECTOR_PER_CUBE
+            # Check cleanup support before changing a pooled stream. A partial
+            # setter failure must be reset before falling back to shared streams.
+            reset_limit = torch.npu.reset_stream_limit
+            stream = torch.npu.Stream(device=device)
+            torch.npu.set_stream_limit(stream, cube_num=attention_cube, vector_num=attention_vector)
+            actual = torch.npu.get_stream_limit(stream)
+            if actual["cube_core_num"] != attention_cube or actual["vector_core_num"] != attention_vector:
+                raise ValueError(f"stream core limit readback differs: {actual}")
+    except (AttributeError, RuntimeError, ValueError, TypeError, AssertionError, KeyError) as exc:
+        if stream is not None:
+            reset_limit(stream)
+        logger.warning("FlashMLA DCP core limits unavailable; using unrestricted overlap: %s", exc)
+        return None
+    pack = vector - attention_vector
+    logger.info("FlashMLA DCP resources: attention AIC=%d AIV=%d, pack AIV<=%d", attention_cube, attention_vector, pack)
+    return FlashMLACoreBudget(stream, pack, FLASHMLA_MAX_PACK_ROWS_PER_CORE * vector)
+
+
 @dataclass
 class FlashMLACurrent:
     """Replicated current chunk, independent of persistent KV and prefix pages."""
@@ -283,6 +337,7 @@ class FlashMLACurrent:
     block_table: torch.Tensor
     slots: torch.Tensor
     attn_mask: torch.Tensor
+    core_budget: FlashMLACoreBudget | None = None
 
 
 @dataclass
@@ -319,6 +374,9 @@ class FlashMLAMetadataBuilder:
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
         adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        self.core_budget = None
+        if self.dcp_size > 1 and self.use_spec_decode:
+            self.core_budget = _create_core_budget(device)
         self.current_adapter = adapter
         history_adapter = replace(
             adapter,
@@ -332,7 +390,14 @@ class FlashMLAMetadataBuilder:
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
 
+    def _core_budget_for(self, tokens: int) -> FlashMLACoreBudget | None:
+        rows = tokens * self.current_adapter.config.num_heads * self.dcp_size
+        if self.core_budget is not None and rows <= self.core_budget.max_pack_rows:
+            return self.core_budget
+        return None
+
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
+        core_budget = self._core_budget_for(tokens)
         ints = {"dtype": torch.int32, "device": self.device}
         adapter = self.adapters[causal]
         cu = torch.zeros(rows + 1, **ints)
@@ -366,11 +431,13 @@ class FlashMLAMetadataBuilder:
             # As in split DCP attention, each rank retains every current row.
             # Only persistent history writes use the runner's rank-owned slots.
             block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
-            current_schedule = self.current_adapter.build_metadata(
-                torch.empty_like(used, device="meta"),
-                torch.empty_like(cu, device="meta"),
-                torch.empty_like(used, device="meta"),
-            )
+            resource_context = torch.npu.stream(core_budget.stream) if core_budget is not None else nullcontext()
+            with resource_context:
+                current_schedule = self.current_adapter.build_metadata(
+                    torch.empty_like(used, device="meta"),
+                    torch.empty_like(cu, device="meta"),
+                    torch.empty_like(used, device="meta"),
+                )
             flash.current = FlashMLACurrent(
                 adapter=self.current_adapter,
                 query=torch.empty(
@@ -387,6 +454,7 @@ class FlashMLAMetadataBuilder:
                 block_table=torch.zeros((rows, block_columns), **ints),
                 slots=torch.full_like(flash.slots, -1),
                 attn_mask=self.attn_mask,
+                core_budget=core_budget,
             )
         return flash
 
@@ -400,6 +468,7 @@ class FlashMLAMetadataBuilder:
         tokens = num_decode_tokens if has_prefill else max(common.num_actual_tokens, common.num_input_tokens)
         rows = num_decodes + 1 if has_prefill else max(num_decodes, min(tokens, self.max_num_reqs)) + 1
         columns = common.block_table_tensor.shape[1]
+        # The resource plan is fixed for this builder and selected by token capacity.
         key = tokens, rows, columns, common.causal
         if has_prefill:
             if retain_for_graph:
@@ -467,7 +536,20 @@ class FlashMLAMetadataBuilder:
                 requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
                 current.slots.masked_fill_(~flash.token_live, -1)
-                current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                if current.core_budget is None:
+                    current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                else:
+                    # Generate the plan under the same resources as its consumer.
+                    # Join before returning: every layer and graph sees ready data.
+                    main = torch.npu.current_stream()
+                    stream = current.core_budget.stream
+                    stream.wait_event(main.record_event())
+                    with torch.npu.stream(stream):
+                        for tensor in (flash.used_q, flash.cu, current.schedule):
+                            tensor.record_stream(stream)
+                        current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                        ready = stream.record_event()
+                    main.wait_event(ready)
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.
