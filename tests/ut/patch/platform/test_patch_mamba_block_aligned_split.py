@@ -19,10 +19,21 @@ import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
 
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
+from vllm_ascend.patch.platform import patch_kv_cache_coordinator as coordinator_mod
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
 )
+
+
+@pytest.fixture(autouse=True)
+def current_main(monkeypatch):
+    monkeypatch.setattr(coordinator_mod, "vllm_version_is", lambda version: False)
+
+
+@pytest.fixture
+def legacy_v032(monkeypatch, current_main):
+    monkeypatch.setattr(coordinator_mod, "vllm_version_is", lambda version: version == "0.32.0")
 
 
 def _scheduler(
@@ -31,7 +42,9 @@ def _scheduler(
     is_kv_producer: bool | None = None,
     uses_sparse_index_kpool: bool = False,
 ):
-    kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
+    kv_transfer_config = (
+        None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer, is_kv_producer=False)
+    )
     if kv_transfer_config is not None and is_kv_producer is not None:
         kv_transfer_config.is_kv_producer = is_kv_producer
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
@@ -242,7 +255,7 @@ def _fake_original_recording(observed: dict):
     return _fake_original
 
 
-def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
+def test_legacy_producer_clears_drop_knobs_around_upstream_call(monkeypatch, legacy_v032):
     observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
@@ -255,7 +268,7 @@ def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
     assert scheduler.use_eagle_block_drop is True
 
 
-def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
+def test_legacy_standalone_clears_drop_knobs_around_upstream_call(monkeypatch, legacy_v032):
     observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=None)
@@ -287,7 +300,7 @@ def test_consumer_keeps_drop_knobs_around_upstream_call(monkeypatch):
     assert observed == {"use_eagle": True, "use_eagle_block_drop": True}
 
 
-def test_producer_restores_drop_knobs_on_exception(monkeypatch):
+def test_legacy_producer_restores_drop_knobs_on_exception(monkeypatch, legacy_v032):
     def _boom(self, request, num_new_tokens, nlc=0, nec=0):
         raise RuntimeError("boom")
 
@@ -299,7 +312,7 @@ def test_producer_restores_drop_knobs_on_exception(monkeypatch):
     assert scheduler.use_eagle_block_drop is True
 
 
-def test_producer_handles_missing_drop_attributes(monkeypatch):
+def test_legacy_producer_handles_missing_drop_attributes(monkeypatch, legacy_v032):
     monkeypatch.setattr(
         mod,
         "_original_mamba_block_aligned_split",
@@ -312,3 +325,67 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize("partial_cache_hit, expected", [(False, 372), (True, 256)])
+def test_legacy_consumer_continued_prefill_boundary(partial_cache_hit, expected):
+    scheduler = _scheduler(is_kv_consumer=True)
+    scheduler.vllm_config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+    scheduler.mamba_partial_cache_hit = partial_cache_hit
+    result = _mamba_block_aligned_split(
+        scheduler,
+        _request(num_computed_tokens=128, num_prompt_tokens=500, num_tokens=500),
+        num_new_tokens=372,
+    )
+    # Partial reuse must materialize state at 384 before continuing prefill.
+    assert result == expected
+
+
+@pytest.mark.parametrize("partial_cache_hit, expected", [(False, 384), (True, 64)])
+def test_sparse_kpool_partial_shared_prefix_checkpoint(partial_cache_hit, expected):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.mamba_partial_cache_hit = partial_cache_hit
+    scheduler.mamba_shared_prefix_checkpoint = True
+    scheduler.hash_block_size = 64
+    request = _request(num_computed_tokens=384, num_prompt_tokens=1000, num_tokens=1000)
+    request.shared_prefix_boundary = 448
+    result = _mamba_block_aligned_split(scheduler, request, num_new_tokens=616)
+    # Partial mode saves the junction at 448; legacy-hash drop stops coarse mode at 768.
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "lookahead, effective_drop",
+    [(0, True), (1, False), (0, False)],
+    ids=["legacy-hashes-or-disable-lookahead", "lookahead", "disable-eagle-block-drop"],
+)
+@pytest.mark.parametrize("producer", [False, True], ids=["standalone", "producer"])
+def test_main_passes_resolved_policy_to_native_split(monkeypatch, lookahead, effective_drop, producer):
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
+    scheduler = _scheduler(is_kv_consumer=False if producer else None, is_kv_producer=producer)
+    scheduler.num_hash_lookahead_tokens = lookahead
+    scheduler.use_eagle_block_drop = effective_drop
+    assert _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8) == 42
+    assert observed == {"use_eagle": True, "use_eagle_block_drop": effective_drop}
+    assert scheduler.num_hash_lookahead_tokens == lookahead
+
+
+@pytest.mark.parametrize("sparse", [False, True], ids=["native", "sparse"])
+@pytest.mark.parametrize(
+    "lookahead, effective_drop, prompt, expected",
+    [
+        (0, True, 500, 256),
+        (1, False, 500, 384),
+        (0, False, 500, 384),
+        (1, False, 512, 384),
+    ],
+    ids=["disable-lookahead", "lookahead", "disable-drop", "lookahead-exact-block-end"],
+)
+def test_main_checkpoint_boundary_respects_resolved_policy(sparse, lookahead, effective_drop, prompt, expected):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True, uses_sparse_index_kpool=sparse)
+    scheduler.cache_config.block_size = scheduler.block_size = scheduler.hash_block_size = 128
+    scheduler.num_hash_lookahead_tokens = lookahead
+    scheduler.use_eagle_block_drop = effective_drop
+    request = _request(num_computed_tokens=0, num_prompt_tokens=prompt, num_tokens=prompt)
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=prompt) == expected

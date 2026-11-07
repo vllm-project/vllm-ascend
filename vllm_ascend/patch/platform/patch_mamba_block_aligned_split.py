@@ -20,23 +20,21 @@ speculative verifier window before Mamba alignment is applied. If the window
 starts mid-block, the alignment split can shorten its physical width while the
 request still advertises all ``K`` speculative placeholders.
 
-Decode consumers preserve the complete verifier window. Sparse index-kpool
-producers align against the resolved common cache-group boundary because their
-physical indexer-state block is smaller than the Mamba checkpoint interval.
-Other models retain the upstream behavior.
+Decode consumers preserve the complete verifier window. When core enables
+partial cache hits, native splitting chooses prompt-tail and shared-prefix
+checkpoints for continued prefill. Coarse-cache sparse index-kpool producers
+retain the resolved common cache-group alignment. Other models retain the
+upstream behavior.
 
-On a pure PD prefill producer or a standalone instance the EAGLE one-block
-backoff of the last cacheable position is suppressed: matched content-hash
-blocks are always verified prompt blocks there, while the backoff would leave
-the final full mamba-align state page unmaterialized across the chunk boundary
-(copy-on-write in MambaManager.allocate_new_blocks), pinning hybrid prefix
-hits one full page (or entirely) short.
+Current vLLM resolves MTP lookahead hashing and checkpoint backoff together.
+Only the v0.32 pairing retains its legacy producer/standalone exemption.
 """
 
 import functools
 import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -45,6 +43,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _EXPECTED_PARAMETERS = (
     "self",
@@ -65,64 +64,42 @@ def _mamba_block_aligned_split(
     num_new_local_computed_tokens: int = 0,
     num_external_computed_tokens: int = 0,
 ) -> int:
-    """Preserve PD windows and align sparse index-kpool cache groups.
-
-    On a pure PD prefill producer or a standalone instance the EAGLE
-    one-block backoff of the last cacheable position is suppressed.
-    ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
-    mamba-align page off by one block (and, on newer vLLM revisions, shifts
-    the partial-tail checkpoint boundary) whenever the EAGLE block drop is
-    active. Consequently a producer prefill can never end a chunk at its
-    final full-page boundary. In mamba "align" mode the recurrent state of a
-    page is only materialized across a chunk boundary (copy-on-write in
-    ``MambaManager.allocate_new_blocks``), so the suppressed split leaves the
-    final full state page unhashed. Hybrid coordinator hits reconcile to the
-    per-group minimum: even with the full-attention group fixed by the
-    coordinator exemption, the mamba groups report one full page less
-    (1600-token prompts -> 0 hit, 3200-token prompts -> 1536 with 1536-token
-    align pages) - the observed MTP prefix-cache kill band.
-
-    Rather than copy the scheduler method (its body moves between vLLM
-    revisions), invoke the original with the drop bit temporarily cleared:
-    every read of the bit inside the method exists solely to compensate for
-    the block drop, and on the producer matched blocks are always verified
-    prompt blocks and the coordinator never drops. Scheduling is
-    single-threaded per scheduler instance, so the temporary toggle is safe.
-    vLLM 0.28.x names the bit ``use_eagle``; newer revisions expose the
-    dedicated ``use_eagle_block_drop`` knob.
-
-    The suppression self-gates at call time on
-    ``self.vllm_config.kv_transfer_config`` via ``_skips_eagle_block_drop``
-    (the same PD role source used by the coordinator and the neighboring
-    mamba split logic), so consumers and ``kv_both`` instances pass straight
-    through with upstream behavior. Standalone instances (no connector)
-    suppress the backoff too: the coordinator never drops there, so backing
-    the split off would only erase cacheable hit length.
-    """
+    """Preserve Ascend verifier windows and native checkpoint boundaries."""
     kv_transfer_config = self.vllm_config.kv_transfer_config
     # A consumer only needs the unsplit verifier window after some prefix has
     # already been computed locally or loaded from the connector.  ``kv_both``
     # also handles cold prefills; bypassing alignment for those requests means
     # no reusable Mamba state is ever materialized, so neither HBM nor the KV
     # pool can cache the prefix.
-    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
+    num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    if (
+        kv_transfer_config is not None
+        and kv_transfer_config.is_kv_consumer
+        and num_computed_tokens > 0
+        and (not self.mamba_partial_cache_hit or num_computed_tokens >= request.num_tokens - 1)
+    ):
         return num_new_tokens
 
-    # Pure PD prefill producer or standalone instance: suppress the EAGLE
-    # one-block backoff (see the docstring). The sparse index-kpool
-    # early-return path below must observe it too (it previously ran under
-    # a temporary bit clear from the outer producer wrapper).
-    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
-        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    # Native partial-cache eligibility also owns the prompt-tail/shared-prefix
+    # checkpoint stops. Do not bypass those stops with physical-page splitting.
+    if not self.mamba_partial_cache_hit and _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
         if num_computed_tokens < max(
             request.num_prompt_tokens,
             request.num_tokens - 1,
         ):
             block_size = self.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
-                last_cache_position = max(last_cache_position - block_size, 0)
+            drop_eagle = getattr(self, "use_eagle_block_drop", self.use_eagle)
+            if vllm_version_is("0.32.0"):
+                last_cache_position = request.num_tokens - request.num_tokens % block_size
+                if drop_eagle and not _skips_eagle_block_drop(kv_transfer_config):
+                    last_cache_position = max(last_cache_position - block_size, 0)
+            else:
+                last_cache_position = get_mamba_prefill_checkpoint_position(
+                    request.num_tokens,
+                    block_size,
+                    drop_eagle,
+                    self.num_hash_lookahead_tokens,
+                )
             scheduled_end = num_computed_tokens + num_new_tokens
             if scheduled_end < last_cache_position:
                 chunked_tokens = num_new_tokens // block_size * block_size

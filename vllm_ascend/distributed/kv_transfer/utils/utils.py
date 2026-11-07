@@ -392,8 +392,17 @@ def tensor_storage_key(tensor: torch.Tensor) -> int:
             return tensor.data_ptr()
 
 
+def align_register_start(start: int, storage_key: int, alignment: int) -> int:
+    """Align an IPC registration inside the runner-owned backing allocation."""
+    aligned = start // alignment * alignment
+    assert aligned >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
+    return aligned
+
+
 def collect_storage_merged_register_regions(
     kv_caches: dict[str, Any],
+    *,
+    alignment: int | None = None,
 ) -> RegisterRegions:
     """Collect HCCL/Mooncake register regions with storage-aware merging.
 
@@ -426,7 +435,10 @@ def collect_storage_merged_register_regions(
     register_ptrs: list[int] = []
     register_lengths: list[int] = []
 
-    for ranges in ranges_by_storage.values():
+    for storage_key, ranges in ranges_by_storage.items():
+        if alignment is not None:
+            for region in ranges:
+                region.start = align_register_start(region.start, storage_key, alignment)
         ranges.sort(key=lambda r: r.start)
 
         merged_start = ranges[0].start

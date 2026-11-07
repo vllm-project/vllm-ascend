@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any, NamedTuple
 
 import regex as re
@@ -22,6 +23,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MIN,
     Backend,
     BatchResultShapeError,
+    StoreCapacityError,
+    TransferCompletionUnknown,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
     set_scheduler_device,
@@ -384,9 +387,11 @@ class MooncakeBackend(Backend):
         lazy_init: bool = False,
         contribute_memory: bool = True,
         extra_config: dict[str, Any] | None = None,
+        *,
+        store_config: "MooncakeStoreConfig | None" = None,
     ):
         self.parallel_config = parallel_config
-        self.config = MooncakeStoreConfig.load_from_env()
+        self.config = MooncakeStoreConfig.load_from_env() if store_config is None else store_config
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
         _inject_store_qos(extra_config)
@@ -405,12 +410,32 @@ class MooncakeBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._prefetch_conf = SsdPrefetchConf.disabled()
+        self._shared_te_registered_ptrs: set[int] = set()
+        self._closed = False
+        self._completion_unknown = False
 
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
 
+    def close_native_store(self) -> None:
+        if self._completion_unknown:
+            raise TransferCompletionUnknown("Cannot unregister buffers while DMA completion is unknown")
+        if self.store is not None:
+            self.set_device()
+            # The worker drains transfers before close. Keep the Store handle
+            # and remaining registrations on failure so close can be retried.
+            for pointer in tuple(self._shared_te_registered_ptrs):
+                status = self.unregister_buffer_checked(pointer)
+                if status != 0:
+                    raise RuntimeError(f"Failed to unregister shared transfer-engine buffer {pointer}: {status}")
+            self.store.close()
+            self.store = None
+        self._closed = True
+
     def ensure_initialized(self):
+        if self._closed:
+            raise RuntimeError("Mooncake backend is closed")
         if self._store_initialized:
             return
 
@@ -692,6 +717,107 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
+    def register_buffer_checked(self, ptrs: list[int], lengths: list[int]) -> None:
+        self.ensure_initialized()
+        if len(ptrs) != len(lengths):
+            raise ValueError("registration addresses and lengths must align")
+        if self._use_fabric_mem:
+            # Match register_buffer: FabricMem does not preregister device KV.
+            return
+        if self.store is None or not callable(getattr(self.store, "register_buffer", None)):
+            raise RuntimeError("Mooncake client lacks checked buffer registration")
+        shared_engine = not self._use_store_independent_te and not self._prefetch_conf.use_dict_setup
+        register = (
+            global_te.get_transfer_engine(get_ip(), device_name=None).register_memory
+            if shared_engine
+            else self.store.register_buffer
+        )
+        for pointer, length in zip(ptrs, lengths):
+            status = register(pointer, length)
+            if isinstance(status, bool) or not isinstance(status, Integral) or status != 0:
+                raise RuntimeError(f"Mooncake buffer registration failed for {pointer:#x}: {status}")
+            if not self._use_store_independent_te and not self._prefetch_conf.use_dict_setup:
+                self._shared_te_registered_ptrs.add(pointer)
+
+    def unregister_buffer_checked(self, pointer: int) -> int:
+        if self._completion_unknown:
+            raise TransferCompletionUnknown("Cannot unregister buffers while DMA completion is unknown")
+        if self._use_fabric_mem:
+            return 0
+        self.set_device()
+        if pointer in self._shared_te_registered_ptrs:
+            engine = global_te.transfer_engine
+            assert engine is not None
+            status = engine.unregister_memory(pointer)
+            if status == 0:
+                self._shared_te_registered_ptrs.remove(pointer)
+            return status
+        store = self.store
+        assert store is not None
+        return store.unregister_buffer(pointer)
+
+    def put_checked(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        replicate_config: Any | None = None,
+    ) -> None:
+        self.ensure_initialized()
+        if not keys:
+            return
+        if len(keys) != len(addrs) or len(keys) != len(sizes):
+            raise ValueError("PUT descriptors must align with keys")
+        if self.store is None:
+            raise RuntimeError("Mooncake store is not initialized")
+        config = self._build_replicate_config() if replicate_config is None else replicate_config
+        try:
+            statuses = require_aligned_batch_results(
+                "batch_put_from_multi_buffers",
+                keys,
+                self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config),
+            )
+        except (BatchResultShapeError, TransferCompletionUnknown) as exc:
+            self._completion_unknown = True
+            raise TransferCompletionUnknown("PUT completion is unknown") from exc
+        if any(status not in (0, -200) for status in statuses):
+            # In particular, a transfer timeout need not mean DMA has stopped.
+            self._completion_unknown = True
+            raise TransferCompletionUnknown(f"PUT did not complete successfully: {statuses}")
+        if -200 in statuses:
+            # NO_AVAILABLE_HANDLE is a BatchPutStart allocation rejection.
+            # The SDK skips submission for those rows; rows with status 0 completed.
+            raise StoreCapacityError(statuses)
+
+    def get_checked(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int]:
+        self.ensure_initialized()
+        if not keys:
+            return []
+        if len(keys) != len(addrs) or len(keys) != len(sizes):
+            raise ValueError("GET descriptors must align with keys")
+        if self.store is None:
+            raise RuntimeError("Mooncake store is not initialized")
+        try:
+            counts = require_aligned_batch_results(
+                "batch_get_into_multi_buffers",
+                keys,
+                self.store.batch_get_into_multi_buffers(keys, addrs, sizes),
+            )
+        except (BatchResultShapeError, TransferCompletionUnknown) as exc:
+            self._completion_unknown = True
+            raise TransferCompletionUnknown("GET completion is unknown") from exc
+        # OBJECT_NOT_FOUND (-704) is a metadata miss before transfer submission.
+        # Preserve it for the receiver's normal failed-completion path; other
+        # errors may leave DMA in flight and must retain the destination.
+        if any(count < 0 and count != -704 for count in counts):
+            self._completion_unknown = True
+            raise TransferCompletionUnknown(f"GET has unconfirmed completion: {counts}")
+        if any(count > sum(parts) for count, parts in zip(counts, sizes, strict=True)):
+            self._completion_unknown = True
+            raise TransferCompletionUnknown("GET reported more bytes than the registered destination")
+        return counts
+
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
         self.ensure_initialized()
         assert self.store is not None
@@ -791,6 +917,9 @@ class MooncakeStoreConfig:
     # Mooncake keeps its own default (cooldown 5s, dedup 30s).
     ssd_prefetch_cooldown_sec: int | None = None
     ssd_prefetch_dedup_ttl_sec: int | None = None
+    # Native Store topology and staging policy; legacy setup is unchanged.
+    mode: str | None = None
+    enable_offload: bool = False
 
     def __post_init__(self) -> None:
         if not self.enable_ssd_offload:
@@ -809,6 +938,8 @@ class MooncakeStoreConfig:
         master_server_address = os.getenv("MOONCAKE_MASTER", None)
         global_segment_size_env = os.getenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", None)
         return MooncakeStoreConfig(
+            mode=config.get("mode"),
+            enable_offload=bool(config.get("enable_offload", False)),
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
                 global_segment_size_env
@@ -927,3 +1058,64 @@ def _convert_to_bytes(number_str: str, multiplier: int, original_input: str) -> 
     except OverflowError:
         raise ValueError(f"Storage size too large: '{original_input}'")
     return byte_count
+
+
+class NativeMooncakeStoreAdapter:
+    """Expose the upstream Store API through Ascend's checked SDK contract.
+
+    Unknown completion remains an exception. The upstream transfer worker must
+    retain the job and its block references until it can prove DMA completion.
+    """
+
+    def __init__(self, backend: MooncakeBackend):
+        self.backend = backend
+        self._transfer_error: Exception | None = None
+
+    def fail_transfer(self, error: Exception) -> None:
+        self._transfer_error = error
+
+    def raise_if_failed(self) -> None:
+        if self._transfer_error is not None:
+            raise self._transfer_error
+        if self.backend._completion_unknown:
+            raise TransferCompletionUnknown("Native Store transfer completion is unknown; retain request blocks")
+
+    def batch_is_exist(self, keys: list[str]) -> list[int]:
+        return require_aligned_batch_results("batch_is_exist", keys, self.backend.exists(keys))
+
+    def batch_put_from_multi_buffers(self, keys, addrs, sizes, config=None) -> list[int]:
+        try:
+            self.backend.put_checked(keys, addrs, sizes, replicate_config=config)
+        except StoreCapacityError as exc:
+            return list(exc.results)
+        return [0] * len(keys)
+
+    def batch_get_into_multi_buffers(self, keys, addrs, sizes) -> list[int]:
+        counts = self.backend.get_checked(keys, addrs, sizes)
+        expected = [sum(parts) for parts in sizes]
+        if any(0 <= count < size for count, size in zip(counts, expected, strict=True)):
+            # Upstream treats any nonnegative result as success. A completed
+            # short read is a load failure, not an unknown-DMA failure.
+            raise RuntimeError(f"Short Store GET: received {counts}, expected {expected}")
+        return counts
+
+    def register_buffer(self, pointer: int, length: int) -> int:
+        self.backend.register_buffer_checked([pointer], [length])
+        return 0
+
+    def unregister_buffer(self, pointer: int) -> int:
+        return self.backend.unregister_buffer_checked(pointer)
+
+    def batch_get_replica_desc(self, keys):
+        store = self.backend.store
+        assert store is not None
+        return store.batch_get_replica_desc(keys)
+
+    def remove_all(self, force: bool = True) -> None:
+        if not force:
+            raise ValueError("Native Store reset requires force=True")
+        self.backend.remove_all()
+
+    def close(self) -> None:
+        self.raise_if_failed()
+        self.backend.close_native_store()
