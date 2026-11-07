@@ -18,6 +18,7 @@ class TestReuseSnapshotIdentity(unittest.TestCase):
         worker.layerwise_offload = True
         worker.num_kv_cache_groups = 1
         worker.group_uses_align_state = [False]
+        worker.grouped_block_size = [128]
         spec = LoadSpec(6, 6, True, layerwise_snapshot_end_token=7, layerwise_snapshot_block_index=0)
         request = ReqMeta("request", target_token_len=7, load_spec=spec)
         self.assertEqual(worker._resolve_layerwise_load_partial(request, 0, 6, 128, 0), (0, 7))

@@ -30,7 +30,14 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.utils import vllm_version_is
+
+# NPUModelRunner._allocate_int8_cache_tensor reserves this many extra bytes
+# per backing when KV transfer requires a 2 MiB aligned address.
+GLM5_NEXT_CACHE_ALIGNMENT = 2 * 1024 * 1024
 
 # vLLM #61183 moved these helpers to `kv_cache_planning` on main; the v0.32.0
 # lane still ships them in `kv_cache_utils`.
@@ -395,9 +402,12 @@ def get_glm5_next_kv_cache_groups(
     return groups
 
 
-def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
+def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec], vllm_config: VllmConfig | None = None) -> int:
     """Return physical bytes represented by one global block ID."""
 
+    if vllm_config is not None:
+        plan = _build_glm5_next_kv_cache_config(vllm_config, groups)
+        return sum(tensor.size for tensor in plan.kv_cache_tensors)
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
@@ -411,17 +421,25 @@ def get_glm5_next_kv_cache_config(
 ) -> KVCacheConfig:
     """Describe one standard unpacked tensor per physical cache slot."""
 
+    plan = _build_glm5_next_kv_cache_config(vllm_config, groups)
+    bytes_per_block = sum(tensor.size for tensor in plan.kv_cache_tensors)
+    plan.num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    for tensor in plan.kv_cache_tensors:
+        tensor.size *= plan.num_blocks
+    return plan
+
+
+def _build_glm5_next_kv_cache_config(vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]) -> KVCacheConfig:
+    """Build one physical block before applying the memory budget."""
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
 
-    bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
     tensors: list[KVCacheTensor] = []
 
-    def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
+    def make_tensor(page_size: int, layer_names: list[str]) -> KVCacheTensor:
         return KVCacheTensor(
-            size=size,
+            size=page_size,
             layers=layer_names,
             offset=0,
             layer_stride=0,
@@ -439,28 +457,38 @@ def get_glm5_next_kv_cache_config(
         for group in layout.mamba_groups:
             if slot < len(group.layer_names):
                 shared_by.append(group.layer_names[slot])
-        tensors.append(
-            make_tensor(
-                layout.main_page_size * num_blocks,
-                shared_by,
-                layout.main_page_size,
-            )
-        )
+        tensors.append(make_tensor(layout.main_page_size, shared_by))
 
     for indexer_name, tail_name in zip(layout.indexer_names, layout.tail_names):
-        tensors.append(
-            make_tensor(
-                layout.small_page_size * num_blocks,
-                [indexer_name, tail_name],
-                layout.small_page_size,
-            )
-        )
+        tensors.append(make_tensor(layout.small_page_size, [indexer_name, tail_name]))
 
-    return KVCacheConfig(
-        num_blocks=num_blocks,
+    plan = KVCacheConfig(
+        num_blocks=1,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
     )
+    parallel = vllm_config.parallel_config
+    if getattr(parallel, "tensor_parallel_size", 1) == 1 and parallel.prefill_context_parallel_size > 1:
+        # GLM KDA, unlike its attention caches, partitions heads over PCP at TP=1.
+        # Declare that model layout rather than inferring it in a store backend.
+        plan.layerwise_head_sharded_groups = frozenset(
+            group_id
+            for group_id, group in enumerate(groups)
+            if any(
+                isinstance(spec, MambaSpec) and not getattr(spec, "tp_replicated", False)
+                for spec in (
+                    group.kv_cache_spec.kv_cache_specs.values()
+                    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                    else (group.kv_cache_spec,)
+                )
+            )
+        )
+        if plan.layerwise_head_sharded_groups:
+            plan.layerwise_key_namespace = f"@pcp{parallel.prefill_context_parallel_size}-tp1"
+    if getattr(vllm_config, "kv_transfer_config", None) is not None:
+        plan.kv_cache_allocation_alignment = GLM5_NEXT_CACHE_ALIGNMENT
+        apply_layerwise_kv_cache_plan(plan, vllm_config)
+    return plan
 
 
 def get_glm5_next_max_memory_usage(
@@ -480,4 +508,4 @@ def get_glm5_next_max_memory_usage(
         // group.kv_cache_spec.page_size_bytes
         for group in groups
     )
-    return blocks * get_glm5_next_pool_bytes_per_block(groups)
+    return blocks * get_glm5_next_pool_bytes_per_block(groups, vllm_config)

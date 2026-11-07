@@ -1735,6 +1735,87 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64) for block_ids in block_ids_by_group],
         )
 
+    def test_terminal_prefill_keeps_public_pages_without_new_private_tail(self):
+        for align_state in (False, True):
+            with self.subTest(align_state=align_state):
+                worker = self._make_gva_worker()
+                worker.group_uses_align_state = [align_state]
+                worker.m_store.batch_alloc.side_effect = lambda keys, *args: [101] * len(keys)
+                request = self._make_gva_request(can_save=True)
+                request.target_token_len = 20
+                request.num_prompt_tokens = 20
+                request.block_ids_by_group = [[7, 8]]
+                request.block_ids_by_group_np = [np.array([7, 8])]
+                request.layerwise_recompute_start_token = 0
+                request.needs_private_snapshot = False
+
+                worker._alloc_gvas_for_save([request])
+                worker._process_save_for_layer_batch([request], 1)
+
+                self.assertEqual(request.save_keys, [worker._make_layerwise_full_key(0, "h0")])
+                self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [101, 0])
+                self.assertEqual(request.partial_save_gva_per_group, [0])
+                self.assertEqual(len(worker.m_store.batch_alloc.call_args_list), 1)
+                self.assertTrue(
+                    all(
+                        br.partial_block_index is None
+                        for task in worker.layer_save_tasks[1]
+                        for br in task.block_ranges
+                    )
+                )
+
+    def test_terminal_prefill_still_loads_previous_execution_private_page(self):
+        worker = self._make_gva_worker()
+        request = self._make_gva_request(load_spec=LoadSpec(16, 16, can_load=True, layerwise_previous_step=True))
+        request.layerwise_recompute_start_token = 0
+        request.needs_private_snapshot = False
+        info = MagicMock()
+        info.size.return_value = 64
+        info.gva_list.return_value = [401]
+        worker.m_store.batch_get_key_info.return_value = [info]
+        worker.m_store.batch_add_lease.return_value = [0]
+
+        worker._prepare_load_gvas([request])
+
+        expected = worker._layerwise_execution_full_key(request, 0, 0, "h0")
+        self.assertEqual(worker.m_store.batch_get_key_info.call_args.args[0], [expected])
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [401])
+
+    def test_terminal_prefill_with_only_private_tail_has_no_pool_save(self):
+        worker = self._make_gva_worker()
+        request = self._make_gva_request(can_save=True)
+        request.target_token_len = 1
+        request.save_end_token = 0
+        request.block_hashes = []
+        request.needs_private_snapshot = False
+
+        worker._alloc_gvas_for_save([request])
+        worker._process_save_for_layer_batch([request], 1)
+
+        self.assertEqual(request.save_keys, [])
+        self.assertEqual(worker.layer_save_tasks[1], [])
+        worker.m_store.batch_alloc.assert_not_called()
+
+    def test_public_writer_is_unique_across_terminal_and_continuing_requests(self):
+        for private_flags in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(private_flags=private_flags):
+                worker = self._make_gva_worker()
+                worker.m_store.batch_alloc.side_effect = lambda keys, *args: list(range(101, 101 + len(keys)))
+                requests = []
+                for index, needs_private in enumerate(private_flags):
+                    request = self._make_gva_request(can_save=True)
+                    request.req_id = f"r{index}"
+                    request.layerwise_recompute_start_token = 0
+                    request.needs_private_snapshot = needs_private
+                    requests.append(request)
+
+                worker._alloc_gvas_for_save(requests)
+
+                public_key = worker._make_layerwise_full_key(0, "h0")
+                allocated = [key for call in worker.m_store.batch_alloc.call_args_list for key in call.args[0]]
+                self.assertEqual(allocated.count(public_key), 1)
+                self.assertEqual(sum(public_key in request.save_keys for request in requests), 1)
+
     def _make_dspark_gva_worker(self, mixed):
         worker = self._make_gva_worker(num_groups=3)
         target_names = ["model.layers.0.attn", "model.layers.1.attn"]
