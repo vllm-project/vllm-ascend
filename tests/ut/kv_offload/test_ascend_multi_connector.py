@@ -1,11 +1,12 @@
 """Tests for Ascend-specific MultiConnector allocation fan-out."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-pytest.importorskip("torch")
+torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
@@ -332,6 +333,70 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     connector.wait_for_layer_load("model.layers.7.self_attn")
 
     assert call_order == ["provider", "sibling"]
+
+
+@pytest.mark.parametrize("store_first", [False, True])
+def test_prefill_reuse_preserves_pd_and_pool_payloads(store_first):
+    """The next layer must not overwrite a slot while PD still reads it."""
+    shared = torch.arange(8, dtype=torch.float32)
+    expected = shared.clone()
+    next_layer = shared + 100
+    allow_send = threading.Event()
+    reuse_waiting = threading.Event()
+    restored = threading.Event()
+    snapshots = {}
+    errors: list[Exception] = []
+
+    def wait_for_reuse(_layer):
+        reuse_waiting.set()
+        if not allow_send.wait(timeout=5):
+            raise RuntimeError("PD still owns the shared slot")
+        snapshots["pd"] = shared.clone()
+
+    def set_waiter(waiter):
+        store.waiter = waiter
+        return True
+
+    def restore(_name):
+        try:
+            store.waiter(0)
+            shared.copy_(next_layer)
+            restored.set()
+        except Exception as error:
+            errors.append(error)
+
+    provider = SimpleNamespace(
+        is_producer=True,
+        connector_worker=object(),
+        supports_layerwise_buffer_reuse=True,
+        wait_for_layer_reuse=wait_for_reuse,
+        save_kv_layer=MagicMock(),
+    )
+    store = SimpleNamespace(
+        set_external_slot_release_waiter=set_waiter,
+        wait_for_layer_load=restore,
+        save_kv_layer=lambda *_args, **_kwargs: snapshots.update(pool=shared.clone()),
+    )
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [store, provider] if store_first else [provider, store]
+    connector._configure_layerwise_reuse_completion()
+    connector.save_kv_layer("model.layers.0.self_attn", shared, None)
+    provider.save_kv_layer.assert_called_once()
+    restore_thread = threading.Thread(target=connector.wait_for_layer_load, args=("model.layers.1.self_attn",))
+    restore_thread.start()
+    try:
+        assert reuse_waiting.wait(timeout=5)
+        assert not restored.is_set()
+        torch.testing.assert_close(shared, expected)
+    finally:
+        allow_send.set()
+        restore_thread.join(timeout=5)
+    assert not errors
+    assert restored.is_set()
+    assert not restore_thread.is_alive()
+    torch.testing.assert_close(snapshots["pd"], expected)
+    torch.testing.assert_close(snapshots["pool"], expected)
+    torch.testing.assert_close(shared, next_layer)
 
 
 def test_mamba_state_copy_runs_after_all_connector_loads():
