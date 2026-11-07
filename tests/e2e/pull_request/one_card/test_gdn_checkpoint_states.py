@@ -7,12 +7,23 @@ import torch
 
 from vllm_ascend.ops.triton.fla.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.utils import enable_custom_op
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _init_triton_device_properties() -> None:
     # Standalone kernel tests bypass the worker's device initialization.
     init_device_properties_triton()
+
+
+@pytest.fixture(scope="module")
+def _init_checkpoint_prefill_ops() -> None:
+    # Registration must happen in this pytest process, as in worker startup.
+    if not enable_custom_op():
+        pytest.fail("GDN checkpoint prefill tests require the vllm-ascend custom ops extension")
+    assert hasattr(torch.ops._C_ascend, "chunk_fwd_o_vllm"), (
+        "The installed vllm-ascend extension does not register chunk_fwd_o_vllm"
+    )
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
@@ -90,6 +101,7 @@ def test_shared_exporter_preserves_ascend_conv_layout_and_mtp_slots():
     assert (recurrent[0] == -42).all()
 
 
+@pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
 @pytest.mark.parametrize("layout", ["head_first", "token_slice"])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
 def test_checkpoint_prefill_matches_dense_inputs_and_restored_tail(layout, cache_dtype):
