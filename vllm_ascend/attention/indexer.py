@@ -36,6 +36,8 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.li_quant_cache import try_li_quant_cache
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -49,6 +51,7 @@ from vllm_ascend.utils import (
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
+LI_QUANT_CACHE_ROWS = 6
 
 
 @dataclass
@@ -224,6 +227,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             and self.c8_k_cache_dtype == torch.int8  # INT8 config uses FP16 scales; C8 may also be FP8.
             and self.head_dim & (self.head_dim - 1) == 0  # Full-row tl.arange requires a power-of-two width.
         )
+        self._use_fused_quant_cache = (
+            self._use_fused_cache_store
+            and get_ascend_config().enable_li_quant_cache_fusion
+            and get_current_hardware_profile().supports(HardwareCapability.LI_QUANT_CACHE)
+        )
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
         # mem-pool is active and are read by every forward, so they must survive
@@ -316,6 +324,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         sin: torch.Tensor,
         *,
         defer_scale_cast: bool = False,
+        defer_quant: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
@@ -356,11 +365,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.enable_sparse_li_quant:
-            if defer_scale_cast:
+            if defer_quant:
+                # Only the non-PCP INT8 decode path may defer quantization to
+                # the following cache write. Retain the native Hadamard input.
+                assert self.q_hadamard is not None
+                k_li = (k_li @ self.q_hadamard).view(-1, self.head_dim)
+                k_li_scale = None
+            elif defer_scale_cast:
                 k_li, k_li_scale = self._quantize_li_tensor(k_li, defer_scale_cast=True)
             else:
                 k_li, k_li_scale = self._quantize_li_tensor(k_li)
-            if self.enable_sparse_li_c8:
+            if self.enable_sparse_li_c8 and k_li_scale is not None:
                 k_li_scale = k_li_scale.unsqueeze(-1)
         else:
             k_li_scale = None
@@ -422,12 +437,30 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             and indexer_metadata.num_actual_tokens > 0
             and indexer_metadata.num_decode_tokens == indexer_metadata.num_actual_tokens
         )
-        if fuse_store:
+        fuse_quant = fuse_store and self._use_fused_quant_cache and k_hidden_states.shape[0] == LI_QUANT_CACHE_ROWS
+        if fuse_quant:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin, defer_quant=True)
+        elif fuse_store:
             k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin, defer_scale_cast=True)
         else:
             k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
-        if fuse_store:
+        fused_outputs = None
+        if fuse_quant:
+            fused_outputs = try_li_quant_cache(
+                k_li,
+                slot_mapping,
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+            )
+            if fused_outputs is None:
+                # Unsupported metadata or an older extension: quantization was
+                # deferred, so restore the existing native + fused-store path.
+                k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li, dst_type=self.c8_k_cache_dtype)
+                k_li_scale = k_li_scale.unsqueeze(-1)
+        if fused_outputs is not None:
+            k_li, k_li_scale = fused_outputs
+        elif fuse_store:
             assert k_li_scale is not None
             store_indexer_key_scale(
                 k_li,

@@ -59,6 +59,9 @@ class HardwareCapability(Enum):
     BGMV_SGMV_META_REGISTRATION = auto()
     # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
     SCATTER_ND_CACHE_STORE = auto()
+    # Native-equivalent BF16/FP16 [6,128] LI INT8 quantization and FP16-scale
+    # cache write, validated on A3. This does not cover FP8 or PCP layouts.
+    LI_QUANT_CACHE = auto()
     # Extend SK cache writes to non-overlapping row-strided destinations.
     # A5 is excluded until arch35 handles their storage bounds correctly.
     SCATTER_ND_STRIDED_CACHE_STORE = auto()
@@ -292,6 +295,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.LI_QUANT_CACHE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
