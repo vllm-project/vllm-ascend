@@ -39,6 +39,20 @@ class BatchResultShapeError(RuntimeError):
     """Raised when a backend returns malformed per-key batch results."""
 
 
+class TransferCompletionUnknown(RuntimeError):
+    """DMA termination is unproven; referenced buffers must remain alive."""
+
+    transfer_completion_unknown = True
+
+
+class StoreCapacityError(RuntimeError):
+    """PUT allocation was rejected; all other batch rows completed."""
+
+    def __init__(self, results: list[int]) -> None:
+        self.results = tuple(results)
+        super().__init__(f"PUT allocation rejected: {results}")
+
+
 def require_aligned_batch_results(
     operation: str,
     keys: list[str],
@@ -200,6 +214,17 @@ class Backend(ABC):
 
     def batch_get_end(self, keys: list[str]) -> int:
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
+
+    def register_buffer_checked(self, ptrs: list[int], lengths: list[int]) -> None:
+        raise NotImplementedError(f"{type(self).__name__} has no checked registration")
+
+    def put_checked(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> None:
+        """Return only on full success; unknown DMA completion must raise."""
+        raise NotImplementedError(f"{type(self).__name__} has no checked pointer PUT")
+
+    def get_checked(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int]:
+        """Return completed per-key byte counts, preserving short reads."""
+        raise NotImplementedError(f"{type(self).__name__} has no checked pointer GET")
 
     @abstractmethod
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:

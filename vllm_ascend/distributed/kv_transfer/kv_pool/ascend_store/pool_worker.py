@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.utils.utils import align_register_start
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -654,10 +655,7 @@ class BaseKVPoolWorker(ABC):
         alignment = 2 * 1024 * 1024
         for storage_key in registered_regions:
             start, end = registered_regions[storage_key]
-            new_start = start // alignment * alignment
-            # Because the addresses of raw tensors are aligned to 2MB,
-            # all shared sub-tensors, when aligned downwards, should theoretically not exceed the address bounds.
-            assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
+            new_start = align_register_start(start, storage_key, alignment)
             registered_regions[storage_key] = (new_start, end)
 
     def _recoverssm_store_caches(self, kv_caches):

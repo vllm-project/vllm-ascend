@@ -258,6 +258,8 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
 
     def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
         """Collect worker-side KV cache events from all child connectors."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import MooncakeStoreKVEvents
+
         combined = None
         for connector in self._connectors:
             events = connector.get_kv_connector_kv_cache_events()
@@ -266,6 +268,8 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             if combined is None:
                 combined = events
             else:
+                if isinstance(combined, MooncakeStoreKVEvents) or isinstance(events, MooncakeStoreKVEvents):
+                    raise NotImplementedError("State Store KV events require a single event-producing connector")
                 combined.add_events(events.get_all_events())
                 combined.increment_workers(events.get_number_of_workers())
         return combined

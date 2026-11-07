@@ -1,0 +1,5 @@
+pr: 20755
+entries:
+  - category: feature
+    text: Added Ascend cache-view and device bindings for the native Mooncake Store connector, reusing upstream scheduling, MTP lookahead hashes, and hybrid checkpoint lifecycles.
+    hardware: [A3]
