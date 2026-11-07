@@ -246,6 +246,19 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
+        if get_ascend_config().enable_deepgemm_mega_moe:
+            return MoEWeights(
+                w1=layer.deepgemm_l1[0],
+                w1_scale=layer.deepgemm_l1[1],
+                w2=layer.deepgemm_l2[0],
+                w2_scale=layer.deepgemm_l2[1],
+                w1_scale_bias=None,
+                w2_scale_bias=None,
+            )
+        if _EXTRA_CTX.use_mega_moe:
+            # MegaMoe consumes the non-transposed per-expert weight/scale lists
+            # built in process_weights_after_loading (the non-mega path uses the
+            # transposed single tensors below).
             return MoEWeights(
                 w1=w1,
                 w2=w2,
@@ -573,3 +586,21 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
             num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
         )
         return param_dict
+
+    def process_weights_after_loading(self, layer):
+        if get_ascend_config().enable_deepgemm_mega_moe:
+            # Load the optional extension only in the NPU worker.
+            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import prepare_weights
+
+            if hasattr(layer, "deepgemm_l1"):
+                raise RuntimeError("DeepGEMM MegaMoE weight reload is not supported")
+            layer.deepgemm_l1, layer.deepgemm_l2 = prepare_weights(
+                layer.w13_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight,
+                layer.w2_weight_scale,
+            )
+            for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"):
+                dispose_tensor(getattr(layer, name))
+            return
+        return super().process_weights_after_loading(layer)
