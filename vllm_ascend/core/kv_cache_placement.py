@@ -186,6 +186,21 @@ def map_kvpp_layers_to_owners(vllm_config: VllmConfig, local_layer_names: Iterab
     return layer_owner_ranks
 
 
+def validate_kvpp_owner_coverage(layer_owner_ranks: dict[str, int], kvpp_size: int) -> None:
+    """Fail closed when a KVPP owner would persist no target layer.
+
+    The layerwise pool reports a hit only when every owner's object is
+    readable. An owner without any target layer never writes one, so the
+    hit check could never succeed and pooled reuse would silently stop.
+    """
+    missing_owners = set(range(kvpp_size)) - set(layer_owner_ranks.values())
+    if missing_owners:
+        raise ValueError(
+            "KVPP requires every owner to persist at least one target layer; "
+            f"missing owners={sorted(missing_owners)} (kvpp_size={kvpp_size})."
+        )
+
+
 def create_kvpp_cache_allocation_plan(
     vllm_config: VllmConfig,
     worker_spec: dict[str, KVCacheSpec],

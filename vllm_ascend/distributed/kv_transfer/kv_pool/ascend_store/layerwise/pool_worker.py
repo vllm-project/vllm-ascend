@@ -756,8 +756,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
+        # KVPP folds the PCP coordinate into ``kvpp_rank``; the bound key space
+        # then has a single PCP value and must not append the local PCP rank.
+        # Partially constructed workers (unit tests, legacy paths) may not set
+        # ``use_kvpp``; those never run a KVPP key space.
+        pcp_rank = 0 if getattr(self, "use_kvpp", False) else self.pcp_rank
         return self.layerwise_keys.make_full_key(
-            group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank, self.pcp_rank
+            group_id, block_hash_hex, self.metadata[group_id].head_or_tp_rank, self.pp_rank, pcp_rank
         )
 
     def _make_layerwise_partial_key(

@@ -26,7 +26,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.ascend_config import KVPPConfig
-from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+from vllm_ascend.core.kv_cache_placement import (
+    map_kvpp_layers_to_owners,
+    validate_kvpp_owner_coverage,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
@@ -147,6 +150,7 @@ class BaseKVPoolWorker(ABC):
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
+        self.kvpp_size = self.tp_size * self.pcp_size if self.use_kvpp else 1
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
@@ -252,12 +256,19 @@ class BaseKVPoolWorker(ABC):
             # Every owner saves all blocks of its layer shard, including its MTP replica.
             self.head_or_tp_rank = self.kvpp_rank
             self.put_step = 1
-        self.my_key_index = (
-            self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
-            + self.dcp_rank * (self.tp_size // self.put_step)
-            + self.head_or_tp_rank
-        )
-        self.num_ranks_per_layer = self.pcp_size * self.dcp_size * (self.tp_size // self.put_step)
+        if self.use_kvpp:
+            # kvpp_rank already encodes the PCP coordinate; applying the PCP
+            # multiplier again would double count it and overflow the writer
+            # index space.
+            self.my_key_index = self.kvpp_rank
+            self.num_ranks_per_layer = self.kvpp_size
+        else:
+            self.my_key_index = (
+                self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
+                + self.dcp_rank * (self.tp_size // self.put_step)
+                + self.head_or_tp_rank
+            )
+            self.num_ranks_per_layer = self.pcp_size * self.dcp_size * (self.tp_size // self.put_step)
 
         extra_cfg = self._extra_config
         tp_mismatch_info = infer_tp_mismatch_info(
@@ -693,6 +704,10 @@ class BaseKVPoolWorker(ABC):
         if self.use_kvpp:
             self.physical_layer_to_group_layers.clear()
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            # An owner with no target layer never writes its object, so the
+            # all-owner hit check could never succeed. Fail closed instead of
+            # reporting permanent misses.
+            validate_kvpp_owner_coverage(owners, self.kvpp_size)
             kv_caches = {
                 name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
             }

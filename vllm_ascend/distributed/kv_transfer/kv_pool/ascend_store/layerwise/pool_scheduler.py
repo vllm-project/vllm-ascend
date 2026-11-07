@@ -10,6 +10,9 @@ from vllm.v1.request import Request
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import (
+    resolve_layerwise_topology,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -49,6 +52,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        # Shared with the worker: KVPP folds PCP into kvpp_rank and the hit
+        # check must enumerate every layer owner, exactly like the writer set.
+        self.layerwise_topology = resolve_layerwise_topology(vllm_config)
+        self.use_kvpp = self.layerwise_topology.use_kvpp
+        self.kvpp_size = self.layerwise_topology.kvpp_size
         self.load_async = False
         if self.use_layerwise_transfer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
@@ -313,9 +321,14 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        head_or_tp_ranks = (
-            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
-        )
+        if getattr(self, "use_kvpp", False):
+            # One writer per KVPP owner: target layers are sharded across the
+            # TP x PCP replica domain and every owner persists its own shard.
+            head_or_tp_ranks = self.kvpp_size
+        else:
+            head_or_tp_ranks = (
+                self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
+            )
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))
