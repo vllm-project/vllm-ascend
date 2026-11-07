@@ -47,7 +47,7 @@ from tools.bisect.config import (
 )
 from tools.bisect.coordinator import Coordinator
 from tools.bisect.verdict import RunOutcome
-from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter, VersionPolicy
+from tools.bisect.version_compat import VersionAdaptationError
 
 logger = logging.getLogger(__name__)
 
@@ -133,16 +133,6 @@ class BaseRunner:
         self.opt = opt
         self.builder = builder
         self.repo = opt.repo_dir
-        self.version_adapter = VersionAdapter(opt)
-        self.version_policy = VersionPolicy()
-
-    def configure_version_policy(self, policy: VersionPolicy) -> None:
-        self.version_policy = policy
-
-    def _ensure_versions(self, commit: str, log_path: Path) -> None:
-        if not self.version_policy.enabled:
-            return
-        self.version_adapter.ensure_at_commit(self.repo, commit, self.version_policy, log_path)
 
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -172,6 +162,8 @@ class BaseRunner:
         raise NotImplementedError
 
     def teardown(self) -> None:
+        if self.opt.mock_tests:
+            return
         kill_stray_servers()
 
     def finish(self) -> None:  # multi-node overrides to release workers
@@ -181,8 +173,19 @@ class BaseRunner:
 class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-        decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
-        self._ensure_versions(candidate.commit, log_path)
+        self.builder.decide(candidate.commit)  # fail before changing dependencies when the image cannot match
+        try:
+            decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+        except DEPLOY_ERRORS:
+            self.builder.invalidate_baseline()
+            raise
+
+        if self.opt.mock_tests:
+            with open(log_path, "a", encoding="utf-8") as out:
+                out.write("\n[mock-tests] Environment prepared; pytest and model serving were not run.\n")
+            outcome = RunOutcome(exit_code=0)
+            outcome.rebuilt = decision.rebuild  # type: ignore[attr-defined]
+            return outcome
 
         # Run the WHOLE yaml (all test_cases): nightly cannot select a single
         # case, so we don't pass -k. Each case writes its own benchmark JSON
@@ -236,7 +239,6 @@ class MultiNodeRunner(BaseRunner):
         # a SKIP command so both sides stay in lockstep instead.
         try:
             decision = self.builder.decide(candidate.commit)
-            version_targets = self.version_adapter.targets_at(self.repo, candidate.commit, self.version_policy)
         except DEPLOY_ERRORS:
             self.coord.publish_command(round_idx, candidate.commit, rebuild=False, action="SKIP")
             self._abort_round(round_idx)
@@ -246,17 +248,11 @@ class MultiNodeRunner(BaseRunner):
             candidate.commit,
             decision.rebuild,
             action="RUN",
-            version_targets=version_targets,
-            version_checks=self.version_policy.checked_packages,
         )
         try:
             self.builder.prepare(candidate.commit, log_path)
-            self.version_adapter.ensure_targets(
-                version_targets,
-                self.version_policy.checked_packages,
-                log_path,
-            )
         except DEPLOY_ERRORS:
+            self.builder.invalidate_baseline()
             self._abort_round(round_idx)
             raise
 
@@ -266,6 +262,11 @@ class MultiNodeRunner(BaseRunner):
             self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
         except (TimeoutError, RuntimeError) as exc:
             self._abort_round(round_idx)
+            if "worker-deploy-failed" in str(exc):
+                raise BisectFatalError(
+                    f"Worker environment transition failed on round {round_idx}; "
+                    f"inspect worker_logs for the failed node: {exc}"
+                ) from exc
             # No worker EVER signalled ready (any round): they are gone or never
             # joined. SKIP-scanning the remaining range would burn the full
             # barrier timeout per round for nothing -> abort the whole search.

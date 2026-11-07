@@ -22,7 +22,7 @@ sentinel so workers know whether to continue or exit.
 
 Protocol files under ``<coord_dir>/round_<N>/``::
 
-    command.json                {round, commit, rebuild, action, version_targets, version_checks}
+    command.json                {round, commit, rebuild, action}
     ready_<idx>.json            {node, head}
     start.json                  {}                                  (master, after the barrier)
     verdict.json                {verdict}            (master, after the trial)
@@ -97,18 +97,12 @@ class Coordinator:
         commit: str,
         rebuild: bool,
         action: str = "RUN",
-        version_targets: dict[str, str] | None = None,
-        version_checks: tuple[str, ...] | list[str] | None = None,
     ) -> None:
         """Publish the per-round command. ``action`` is "RUN" (deploy + run the
         distributed test) or "SKIP" (this commit is pre-skipped, e.g. vLLM
         mismatch -- workers consume the command but do not deploy/run, keeping
         leader/worker rounds in lockstep)."""
         command = {"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}
-        if version_targets is not None:
-            command["version_targets"] = version_targets
-        if version_checks is not None:
-            command["version_checks"] = list(version_checks)
         path = self._round_dir(rnd) / "command.json"
         _atomic_write(path, json.dumps(command))
         logger.info("[coord] published command round=%d commit=%s action=%s", rnd, commit[:12], action)
