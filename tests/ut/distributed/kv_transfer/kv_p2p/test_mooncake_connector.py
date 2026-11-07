@@ -4166,8 +4166,9 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(local_ids, [([2, 3, 4],)])
         self.assertEqual(remote_ids, [([7, 8, 9],)])
 
-    def _build_worker_for_pd_case(self, case, tp_rank, pcp_rank=0, dcp_rank=0):
+    def _build_worker_for_pd_case(self, case, tp_rank, pcp_rank=0, dcp_rank=0, *, role="kv_consumer"):
         with (
+            patch.object(self.vllm_config.kv_transfer_config, "kv_role", role),
             patch.object(self.vllm_config.parallel_config, "tensor_parallel_size", case["decode_tp_size"]),
             patch.object(
                 self.vllm_config.kv_transfer_config,
@@ -4495,7 +4496,10 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 for pcp_rank in range(pcp_size):
                     for tp_rank in range(prefill_tp_size):
                         sender = self._build_worker_for_pd_case(
-                            {**case, "decode_tp_size": prefill_tp_size, "pcp_size": pcp_size}, tp_rank, pcp_rank
+                            {**case, "decode_tp_size": prefill_tp_size, "pcp_size": pcp_size},
+                            tp_rank,
+                            pcp_rank,
+                            role="kv_producer",
                         )
                         sender._decode_tp_size = decode_tp_size
                         sender.kv_send_thread = KVCacheSendingThread.__new__(KVCacheSendingThread)
