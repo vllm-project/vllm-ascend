@@ -9,7 +9,6 @@ import torch
 from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadata,
-    AscendSFAPCPDCPImpl,
     DCPGatherContext,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
@@ -97,15 +96,16 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
     )
 
 
-@pytest.mark.parametrize("impl_type", [AscendSFADCPImpl, AscendSFAPCPDCPImpl])
+@pytest.mark.parametrize("pcp_enabled", [False, True])
 @pytest.mark.parametrize("dcp_size", [4, 16])
 @pytest.mark.parametrize("total_heads", [64, 128])
-def test_replicated_pcp_query_heads_and_output_merge(impl_type, dcp_size, total_heads):
+def test_replicated_pcp_query_heads_and_output_merge(pcp_enabled, dcp_size, total_heads):
     # The base class is also used by the MTP draft with logical PCP=1.
     # Physical PCP=4 must not duplicate its TP-local query heads.
     from vllm_ascend.attention.context_parallel import sfa_cp
 
-    impl = impl_type.__new__(impl_type)
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.pcp_enabled = pcp_enabled
     impl.dcp_size = dcp_size
     impl.dcp_group = SimpleNamespace(world_size=dcp_size, unique_name="dcp:0")
     pcp = SimpleNamespace(world_size=4, unique_name="pcp:0")
@@ -217,12 +217,13 @@ def test_nope_dcp_query_gather_accepts_absent_or_empty_rope(pcp_size, missing_ro
     assert empty_rope.shape == (*actual.shape[:-1], 0)
 
 
-@pytest.mark.parametrize("impl_type", [AscendSFADCPImpl, AscendSFAPCPDCPImpl])
+@pytest.mark.parametrize("pcp_enabled", [False, True])
 @pytest.mark.parametrize("prefill", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8])
 @pytest.mark.parametrize("padded", [False, True], ids=["valid", "poison_padding"])
-def test_nope_dcp_executes_single_cache_attention_with_existing_device_helper(impl_type, prefill, dtype, padded):
-    impl = impl_type.__new__(impl_type)
+def test_nope_dcp_executes_single_cache_attention_with_existing_device_helper(pcp_enabled, prefill, dtype, padded):
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.pcp_enabled = pcp_enabled
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_turboquant = False
     impl.scale = 0.25
@@ -321,3 +322,75 @@ def test_a5_nope_quantized_attention_accepts_absent_rope(return_lse):
     assert actual is result
     assert execute.call_args.args[2] is None
     assert execute.call_args.kwargs["return_lse"] is return_lse
+
+
+@pytest.mark.parametrize("turboquant", [False, True])
+@pytest.mark.parametrize("prefetched", [False, True])
+@pytest.mark.parametrize("wait_fails", [False, True])
+def test_dcp_prefill_consumes_gather_once_for_prefetched_and_direct_attention(turboquant, prefetched, wait_fails):
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.dcp_group = object()
+    impl.qk_rope_head_dim = 1
+    impl.enable_sparse_sfa_turboquant = turboquant
+    impl._start_dcp_query_gather = Mock()
+    impl._merge_dcp_outputs = Mock()
+    query = torch.ones(2, 1, 1)
+    lengths = torch.tensor([2])
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.num_prefills = 1
+    metadata.pcp_has_global_prefill = False
+    metadata.dcp_context = SimpleNamespace(gather_context=None, kv_gather_block_table=torch.tensor([[0, 1]]))
+    failure = RuntimeError("injected gather wait failure")
+
+    def wait():
+        assert metadata.dcp_context.gather_context is None
+        if wait_fails:
+            raise failure
+
+    handle = SimpleNamespace(wait=Mock(side_effect=wait))
+    gathered = torch.arange(8.0).reshape(2, 1, 1, 4)
+    context = DCPGatherContext(gathered, handle, None, (4,) if turboquant else (2, 2))
+
+    def start(cache, attn_metadata):
+        assert attn_metadata is metadata
+        assert attn_metadata.dcp_context.gather_context is None
+        attn_metadata.dcp_context.gather_context = context
+
+    impl._record_dcp_kv_gather_context = Mock(side_effect=start)
+    if prefetched:
+        metadata.dcp_context.gather_context = context
+
+    def attention(*args, **kwargs):
+        handle.wait.assert_called_once()
+        assert metadata.dcp_context.gather_context is None
+        assert kwargs["sparse_mode"] == 3
+        return (query, None, None) if turboquant else query
+
+    impl._tq_rotate_query = Mock(return_value=query)
+    impl._turboquant_sfa = Mock(side_effect=attention)
+    impl.turboquant = SimpleNamespace(inverse=Mock(side_effect=lambda value: value + 1))
+    with patch(
+        "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.execute_sparse_flash_attention_process",
+        side_effect=attention,
+    ) as execute:
+        if wait_fails:
+            with pytest.raises(RuntimeError) as error:
+                impl._execute_sparse_flash_attention_process(
+                    query, query, (gathered,), None, metadata, lengths, lengths
+                )
+            assert error.value is failure
+            execute.assert_not_called()
+            impl._turboquant_sfa.assert_not_called()
+        else:
+            output = impl._execute_sparse_flash_attention_process(
+                query, query, (gathered,), None, metadata, lengths, lengths
+            )
+            torch.testing.assert_close(output, query + int(turboquant))
+            assert execute.call_count == int(not turboquant)
+            assert impl._turboquant_sfa.call_count == int(turboquant)
+            assert impl.turboquant.inverse.call_count == int(turboquant)
+    handle.wait.assert_called_once()
+    assert impl._record_dcp_kv_gather_context.call_count == int(not prefetched)
+    assert metadata.dcp_context.gather_context is None
+    impl._start_dcp_query_gather.assert_not_called()
+    impl._merge_dcp_outputs.assert_not_called()
