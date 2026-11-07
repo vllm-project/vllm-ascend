@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
+from vllm_ascend._310p.worker.v2.categorical import CategoricalSampler310
 from vllm_ascend._310p.worker.v2.sample import (
     apply_top_k_top_p,
     gather_logprobs,
@@ -32,9 +33,6 @@ from vllm_ascend._310p.worker.v2.sample.penalties import (
     apply_penalties,
     build_penalty_token_tensors,
     use_penalty,
-)
-from vllm_ascend._310p.worker.v2.sample_utils import (
-    _random_sample_310p,
 )
 
 _NP_INT64_MIN = np.iinfo(np.int64).min
@@ -68,6 +66,7 @@ class Ascend310PSampler:
         elif not isinstance(device, torch.device):
             device = torch.device(device)
         self.device = device
+        self.categorical_sampler = CategoricalSampler310()
 
         temperature_gpu = torch.zeros(max_num_reqs, dtype=torch.float32, device=device)
         seeds_gpu = torch.zeros(max_num_reqs, dtype=torch.int64, device=device)
@@ -124,7 +123,7 @@ class Ascend310PSampler:
         self._bad_words_token_ids: dict[int, list[list[int]]] = {}
         self._num_logprobs = np.full(max_num_reqs, fill_value=-1, dtype=np.int32)
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
-        # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
+        # Source generators keyed by req_idx (request-owned device RNG).
         self._source_generators: dict[int, torch.Generator] = {}
 
     def add_request(
@@ -207,7 +206,7 @@ class Ascend310PSampler:
         self._sampling_state_dirty = True
 
         if self._seeds_set[req_idx]:
-            source = torch.Generator(device="cpu")
+            source = torch.Generator(device=self.device)
             source.manual_seed(int(seed))
             self._source_generators[req_idx] = source
         else:
@@ -389,7 +388,7 @@ class Ascend310PSampler:
         self,
         expanded_idx_mapping_np: np.ndarray,
     ) -> dict[int, torch.Generator]:
-        """Map logit-row index → CPU generator for seeded random requests."""
+        """Map logit-row index → device generator for seeded random requests."""
         sources: dict[int, torch.Generator] = {}
         for row_idx, req_idx in enumerate(expanded_idx_mapping_np.tolist()):
             if req_idx < 0:
@@ -445,12 +444,12 @@ class Ascend310PSampler:
         if not self._any_random(idx_mapping_np):
             sampled = processed.argmax(dim=-1).to(torch.int32)
         else:
-            # Greedy rows keep argmax; random rows use MRV1 inverse-CDF sampling.
+            # Greedy rows keep argmax; random rows use device sampling.
             greedy = processed.argmax(dim=-1)
             probs = processed.softmax(dim=-1, dtype=torch.float32)
-            expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
+            expanded_np = np.repeat(idx_mapping_np, np.diff(input_batch.cu_num_logits_np[: num_reqs + 1]))
             generators = self._build_row_generators(expanded_np)
-            random_sampled = _random_sample_310p(probs, generators)
+            random_sampled = self.categorical_sampler(probs, generators)
             is_random = self.sampling_states.temperature.gpu[expanded_idx_mapping] >= _SAMPLING_EPS
             sampled = torch.where(is_random, random_sampled, greedy).to(torch.int32)
 

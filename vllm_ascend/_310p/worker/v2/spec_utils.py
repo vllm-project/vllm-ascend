@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
+from vllm_ascend.sample.sampler import random_sample
+
 
 def expand_idx_mapping_cpu(
     idx_mapping_np: np.ndarray,
@@ -185,23 +187,18 @@ def greedy_rejection_sample_cpu(
     )
 
 
-def _draw_uniform_cpu(generator: torch.Generator | None) -> float:
-    if generator is None:
-        u = torch.rand((), dtype=torch.float32)
-    else:
-        u = torch.rand((), dtype=torch.float32, generator=generator)
-    return float(u.clamp_min_(_UNIFORM_TINY).item())
+def _draw_uniform(generator: torch.Generator | None, device: torch.device) -> float:
+    uniform = torch.rand((1,), dtype=torch.float32, device=device, generator=generator)
+    return float(uniform.clamp_min_(_UNIFORM_TINY).item())
 
 
-def _sample_from_probs_row_cpu(probs_row: torch.Tensor, generator: torch.Generator | None) -> int:
-    """Inverse-CDF sample one token from a 1-D probability row (CPU)."""
-    row = probs_row.detach().to(dtype=torch.float32, device="cpu")
-    total = float(row.sum().item())
-    if total <= 0.0:
-        return int(row.argmax().item())
-    u = _draw_uniform_cpu(generator) * total
-    cdf = row.cumsum(dim=-1)
-    return int(torch.searchsorted(cdf, torch.tensor([u], dtype=torch.float32), right=True).item())
+def _sample_from_probs_row(probs_row: torch.Tensor, generator: torch.Generator | None) -> int:
+    """Sample on the logits device and return the token for CPU bookkeeping."""
+    generators = {0: generator} if generator is not None else {}
+    # The shared sampler divides probabilities in place. Preserve the caller's
+    # probability row, which may be a view into the rejection sampling batch.
+    sampled = random_sample(probs_row.unsqueeze(0).clone(), generators)
+    return int(sampled.item())
 
 
 def probabilistic_rejection_sample_cpu(
@@ -222,8 +219,6 @@ def probabilistic_rejection_sample_cpu(
 
     ``target_logits`` must already include temperature / top-k / top-p processing.
     """
-    from vllm_ascend._310p.worker.v2.sample_utils import _prepare_cpu_generators_310p
-
     cu_np = cu_num_logits_np
     num_reqs = cu_np.shape[0] - 1
     max_tokens = num_speculative_steps + 1
@@ -235,10 +230,6 @@ def probabilistic_rejection_sample_cpu(
     target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
     draft_cpu = draft_sampled_cpu.to(dtype=torch.int32).numpy()
 
-    # Prepare CPU RNG keyed by request-state index (MRV1 generator cache).
-    sources = {int(req): gen for req, gen in source_generators.items()}
-    prepared = _prepare_cpu_generators_310p(sources) if sources else {}
-
     for batch_idx in range(num_reqs):
         start = int(cu_np[batch_idx])
         end = int(cu_np[batch_idx + 1])
@@ -246,7 +237,7 @@ def probabilistic_rejection_sample_cpu(
             continue
         req_state_idx = int(idx_mapping_np[batch_idx])
         is_greedy = float(temperature_np[req_state_idx]) < _SAMPLING_EPS
-        gen = prepared.get(req_state_idx)
+        gen = source_generators.get(req_state_idx)
 
         accepted = 0
         for logit_idx in range(start, end):
@@ -268,26 +259,26 @@ def probabilistic_rejection_sample_cpu(
                 draft_token = int(draft_cpu[logit_idx + 1])
                 if draft_token < 0:
                     # Invalid pad draft → force recover/bonus path.
-                    row = probs[logit_idx].detach().cpu()
-                    sampled_cpu[batch_idx, accepted] = _sample_from_probs_row_cpu(row, gen)
+                    row = probs[logit_idx]
+                    sampled_cpu[batch_idx, accepted] = _sample_from_probs_row(row, gen)
                     accepted += 1
                     break
                 p_draft = float(probs[logit_idx, draft_token].item())
-                u = _draw_uniform_cpu(gen)
+                u = _draw_uniform(gen, target_logits.device)
                 if u < p_draft:
                     sampled_cpu[batch_idx, accepted] = draft_token
                     accepted += 1
                     continue
                 # Reject: sample recovered token from residual (zero draft mass).
-                row = probs[logit_idx].detach().cpu().clone()
+                row = probs[logit_idx].clone()
                 row[draft_token] = 0.0
-                sampled_cpu[batch_idx, accepted] = _sample_from_probs_row_cpu(row, gen)
+                sampled_cpu[batch_idx, accepted] = _sample_from_probs_row(row, gen)
                 accepted += 1
                 break
 
             # Bonus token (all drafts accepted) or final logit.
-            row = probs[logit_idx].detach().cpu()
-            sampled_cpu[batch_idx, accepted] = _sample_from_probs_row_cpu(row, gen)
+            row = probs[logit_idx]
+            sampled_cpu[batch_idx, accepted] = _sample_from_probs_row(row, gen)
             accepted += 1
             break
 

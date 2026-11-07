@@ -34,7 +34,7 @@ class RejectionSampler310V2(RejectionSampler):
     - ``temperature≈0``: greedy argmax verify on NPU.
     - ``temperature>0``: Leviathan / IS_NGRAM path aligned with MRV1
       ``AscendRejectionSampler310`` (accept iff ``u < p(draft)``, else recovered
-      token from residual; bonus via inverse-CDF).
+      token from residual; bonus via device sampling).
     """
 
     def __init__(
