@@ -1,0 +1,4 @@
+pr: 20492
+entries:
+  - category: bugfix
+    text: Fixed fine-grained TP rank grouping with pipeline parallelism so groups no longer mix ranks from different pipeline stages.

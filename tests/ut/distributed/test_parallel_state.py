@@ -148,6 +148,57 @@ def test_get_global_rank_defaults_to_current_config():
         assert get_global_rank() == 7
 
 
+@pytest.mark.parametrize("group_size", [1, 2])
+def test_finegrained_tp_groups_stay_in_one_pipeline_stage(monkeypatch, group_size):
+    """Fine-grained TP follows upstream DP x PP layout, not PP x DP.
+
+    For dp=2 and pp=2, PP-first grouping creates [0, 1] and [2, 3], mixing
+    pipeline stages. The correct DP shards are [0, 2] and [1, 3].
+    """
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=group_size,
+            mlp_tensor_parallel_size=0,
+        ),
+    )
+    calls = {}
+
+    def init_group(ranks, local_rank, backend, *, group_name):
+        calls[group_name] = ranks
+        return MagicMock()
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 4)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=0, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=2,
+            data_parallel_size=2,
+            prefill_context_parallel_size=1,
+        )
+    )
+
+    if group_size == 1:
+        assert "emtp" not in calls
+    else:
+        assert calls["emtp"] == [[0, 2], [1, 3]]
+    parallel_state.destroy_ascend_model_parallel()
+
+
 @pytest.mark.parametrize("size", [1, 4])
 @pytest.mark.parametrize("pcp_size", [1, 2])
 def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
