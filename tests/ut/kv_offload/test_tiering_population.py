@@ -49,9 +49,18 @@ def test_tiering_matches_upstream_population_api(monkeypatch, replicated, worker
     if segment_constant is not None:
         monkeypatch.setattr(npu_mod.cpu_spec, segment_constant, 4, raising=False)
     region = object()
-    events = []
-    region_factory = Mock(side_effect=lambda **kwargs: events.append("region") or region)
-    worker_factory = Mock(side_effect=lambda **kwargs: events.append("worker") or object())
+    events: list[str] = []
+
+    def create_region(**kwargs):
+        events.append("region")
+        return region
+
+    def create_worker(**kwargs):
+        events.append("worker")
+        return object()
+
+    region_factory = Mock(side_effect=create_region)
+    worker_factory = Mock(side_effect=create_worker)
     monkeypatch.setattr(npu_mod.cpu_spec, "_all_workers_barrier", lambda: events.append("barrier"))
     monkeypatch.setattr(npu_mod, "SharedOffloadRegion", region_factory)
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", worker_factory)
@@ -83,7 +92,7 @@ def test_parallel_population_and_scheduler_share_same_region(monkeypatch, replic
     gate = Barrier(4, timeout=10)
     lock = Lock()
     populations = defaultdict(list)
-    barrier_calls = Counter()
+    barrier_calls: Counter[int] = Counter()
     regions = []
     manager = None
     segment_constant = next(
@@ -148,7 +157,7 @@ def test_parallel_population_and_scheduler_share_same_region(monkeypatch, replic
         assert barrier_calls == {index: 1 for index in range(4)}
 
         # Only bulk worker population is counted here, excluding the scheduler.
-        pages = Counter()
+        pages: Counter[int] = Counter()
         for index in range(4):
             for offset, length in populations[index]:
                 pages.update(range(offset // page_size, (offset + length) // page_size))
