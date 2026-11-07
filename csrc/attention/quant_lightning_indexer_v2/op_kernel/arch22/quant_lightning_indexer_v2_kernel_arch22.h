@@ -147,6 +147,9 @@ protected:
                                             __gm__ uint8_t *cmpResidualK);
     // ================================Split Core================================
     __aicore__ inline void SplitCore();
+    __aicore__ inline bool TrySplitQueryCore();
+    __aicore__ inline void ResolveQueryGroup(uint32_t group, uint32_t &batchIdx, uint32_t &localGroup,
+                                             uint32_t &queryCount, uint32_t &keyCount, uint32_t &originalKeyCount);
     __aicore__ inline uint32_t GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size, uint32_t actS2SizeOrig,
                                                        uint32_t &validS2Len);
     __aicore__ inline uint32_t GetTotalBaseBlockNum();
@@ -355,11 +358,131 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetTotalBaseBlockNum()
     return totalBlockNum;
 }
 
+// 将全局query组编号映射到请求及请求内的组编号，保持各请求的因果K范围独立。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Preload<QLIV2T>::ResolveQueryGroup(uint32_t group, uint32_t &batchIdx,
+                                                               uint32_t &localGroup, uint32_t &queryCount,
+                                                               uint32_t &keyCount, uint32_t &originalKeyCount)
+{
+    localGroup = group;
+    for (batchIdx = 0; batchIdx < constInfo.batchSize; ++batchIdx) {
+        GetS1S2ActualSeqLen(batchIdx, queryCount, keyCount, originalKeyCount);
+        const uint32_t batchGroups = CeilDiv(queryCount, constInfo.s1BaseSize);
+        if (localGroup < batchGroups) {
+            return;
+        }
+        localGroup -= batchGroups;
+    }
+}
+
+// 小query场景下，metadata未切分K时会有大量空闲核。
+// Token Top-K的分核独立于候选过滤；候选生成模式还需累加块级Top-K，继续使用原调度。
+template <typename QLIV2T>
+__aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
+{
+    const uint32_t cores = GetBlockNum();
+    constexpr uint32_t MIN_SPLIT_TILES = 2;
+    constexpr uint32_t MIN_CORES_PER_GROUP = 2;
+    // 限制标量读取长度元数据的开销，大batch沿用metadata调度。
+    if ((constInfo.candidateMode != CANDIDATE_MODE_CONSUMER &&
+         constInfo.candidateMode != CANDIDATE_MODE_OFF) ||
+        constInfo.batchSize >= cores || constInfo.kHeadNum != 1 ||
+        constInfo.kSeqSize < MIN_SPLIT_TILES * constInfo.s2BaseSize) {
+        return false;
+    }
+    uint32_t queryCount, keyCount, originalKeyCount;
+    uint32_t groups = 0;
+    for (uint32_t batchIdx = 0; batchIdx < constInfo.batchSize; ++batchIdx) {
+        GetS1S2ActualSeqLen(batchIdx, queryCount, keyCount, originalKeyCount);
+        if constexpr (Q_LAYOUT_T != LI_LAYOUT::TND) {
+            // BSND填充行需要由唯一负责的核清理，因此保留metadata调度。
+            if (queryCount != constInfo.qSeqSize) {
+                return false;
+            }
+        }
+        groups += CeilDiv(queryCount, constInfo.s1BaseSize);
+        if (groups >= cores || (queryCount != 0 && keyCount < MIN_SPLIT_TILES * constInfo.s2BaseSize)) {
+            return false;
+        }
+    }
+    // 每个query组至少分配两个核，避免单核组成为延迟瓶颈，
+    // 而其他组仍需承担额外的归约开销。
+    if (groups == 0 || groups > cores / MIN_CORES_PER_GROUP) {
+        return false;
+    }
+    const uint32_t coresPerGroup = cores / groups;
+    const uint32_t extraGroups = cores % groups;
+    const uint32_t largerGroupCores = (coresPerGroup + 1) * extraGroups;
+    const uint32_t group = aiCoreIdx < largerGroupCores ? aiCoreIdx / (coresPerGroup + 1) :
+        extraGroups + (aiCoreIdx - largerGroupCores) / coresPerGroup;
+    const uint32_t firstCore = group * coresPerGroup + Min(group, extraGroups);
+    const uint32_t shard = aiCoreIdx - firstCore;
+    uint32_t batchIdx = 0;
+    uint32_t localGroup = group;
+    if (constInfo.batchSize > 1) {
+        ResolveQueryGroup(group, batchIdx, localGroup, queryCount, keyCount, originalKeyCount);
+    }
+    uint32_t validLength = 0;
+    const uint32_t tiles = constInfo.attenMaskFlag ?
+        GetS2BaseBlockNumOnMask(localGroup, queryCount, originalKeyCount, validLength) :
+        CeilDiv(keyCount, constInfo.s2BaseSize);
+    const uint32_t shards = Min(coresPerGroup + static_cast<uint32_t>(group < extraGroups), tiles);
+    coreZeroEnable = 1;
+    constInfo.coreEnable = shard < shards;
+    constInfo.bN2Start = batchIdx;
+    constInfo.bN2End = batchIdx;
+    constInfo.gS1Start = localGroup;
+    constInfo.gS1End = localGroup;
+    if (constInfo.coreEnable) {
+        constInfo.s2Start = shard * tiles / shards;
+        constInfo.s2End = (shard + 1) * tiles / shards;
+    }
+    ldInfo.saveWorkSpaceIdx = aiCoreIdx;
+    ldInfo.preferLaterShard = true;
+    if ASCEND_IS_AIV {
+        // 每个S1组由两个AIV执行归约，分别负责不同的输出行。
+        const uint32_t reduceGroup = tmpBlockIdx / 2;
+        ldInfo.isLdCoreEnable = reduceGroup < groups;
+        if (ldInfo.isLdCoreEnable) {
+            localGroup = reduceGroup;
+            if (constInfo.batchSize > 1) {
+                ResolveQueryGroup(reduceGroup, batchIdx, localGroup, queryCount, keyCount, originalKeyCount);
+            }
+            const uint32_t rows = Min(constInfo.s1BaseSize, queryCount - localGroup * constInfo.s1BaseSize);
+            const uint32_t firstRows = CeilDiv(rows, 2U);
+            ldInfo.mStart = (tmpBlockIdx % 2) * firstRows;
+            ldInfo.mNum = (tmpBlockIdx % 2) == 0 ? firstRows : rows / 2;
+            ldInfo.isLdCoreEnable = ldInfo.mNum != 0;
+            ldInfo.bn2Idx = batchIdx;
+            ldInfo.bIdx = batchIdx;
+            ldInfo.n2Idx = 0;
+            ldInfo.mIdx = localGroup;
+            ldInfo.workspaceIdx = reduceGroup * coresPerGroup + Min(reduceGroup, extraGroups);
+            const uint32_t reduceTiles = constInfo.attenMaskFlag ?
+                GetS2BaseBlockNumOnMask(localGroup, queryCount, originalKeyCount, validLength) :
+                CeilDiv(keyCount, constInfo.s2BaseSize);
+            ldInfo.workspaceNum = Min(coresPerGroup + static_cast<uint32_t>(reduceGroup < extraGroups), reduceTiles);
+            ldInfo.isLdCoreEnable = ldInfo.isLdCoreEnable && ldInfo.workspaceNum > 1;
+            uint64_t queryPrefix;
+            if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
+                queryPrefix = batchIdx == 0 ? 0 : actualSeqLengthsGmQ.GetValue(batchIdx);
+            } else {
+                queryPrefix = static_cast<uint64_t>(batchIdx) * constInfo.qSeqSize;
+            }
+            ldInfo.indiceOutCoreOffset = (queryPrefix + localGroup * constInfo.s1BaseSize) * constInfo.sparseCount;
+        }
+    }
+    return true;
+}
+
 // 多核版本，双闭区间。基本原则：计算每个核最少处理的块数,
 // 剩余的部分前面的核每个核多处理一块
 template <typename QLIV2T>
 __aicore__ void inline QLIV2Preload<QLIV2T>::SplitCore()
 {
+    if (TrySplitQueryCore()) {
+        return;
+    }
     constInfo.coreEnable = metadataGm.GetValue(GetAttrAbsIndex(aiCoreIdx, QLI_V2_CORE_ENABLE_INDEX, false));
     if (aiCoreIdx != 0) {
         constInfo.bN2Start = metadataGm.GetValue(GetAttrAbsIndex(aiCoreIdx, QLI_V2_BN2_START_INDEX, false));
