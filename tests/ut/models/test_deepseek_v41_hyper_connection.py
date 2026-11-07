@@ -63,8 +63,10 @@ def test_v41_hc_pre_dispatches_fused_operator_with_pre_mix():
     )
 
 
-def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
+@pytest.mark.parametrize("fuse_post", [False, True])
+def test_v41_forward_threads_pre_mix_through_fused_hc_pre(fuse_post):
     layer = _layer()
+    layer.fuse_ffn_hc_post = fuse_post
     hidden_states = torch.randn(2, 4, 8, dtype=torch.bfloat16)
     incoming_pre = torch.randn(2, 4, dtype=torch.float32)
     attn_pre = torch.randn(2, 4, dtype=torch.float32)
@@ -89,7 +91,7 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
     normalized_fp32 = normalized.float()
     layer.rms_norm_cast = MagicMock(return_value=(normalized, normalized_fp32))
     layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
-    layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
+    layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: hidden_states if fuse_post else value)
     layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
 
     input_ids = torch.tensor([11, 22])
@@ -105,7 +107,9 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
         input_ids=input_ids,
         hidden_states_fp32=normalized_fp32,
         already_sequence_parallel=False,
+        **({"hc_post_inputs": (hidden_states, post, comb)} if fuse_post else {}),
     )
+    assert layer.hc_post.call_count == (1 if fuse_post else 2)
 
 
 def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
