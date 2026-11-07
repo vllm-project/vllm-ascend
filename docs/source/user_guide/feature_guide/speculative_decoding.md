@@ -373,6 +373,14 @@ A few important things to consider when using DFlash2 draft models:
    target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
    `enforce_eager` is unset or false.
 
+   On A5, GLM MoE DSA targets (including GLM-5.3) with DFlash2 can also use
+   CANN FlashAttn for full draft graphs. Device length normalization and a
+   shared tiling plan per attention group and geometry are captured in the
+   graph, so replay does not rebuild host attention metadata. Q must be FP16
+   or BF16 and draft KV must be unquantized; the existing FlashAttn backend
+   restrictions still apply. Other target/draft pairs retain their existing
+   backend and graph support.
+
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size

@@ -1,0 +1,6 @@
+pr: 20858
+entries:
+  - category: feature
+    text: Enabled CANN FlashAttn selection for GLM MoE DSA targets with DFlash2 full ACL graph drafting on Ascend A5.
+    model: glm-5.3
+    hardware: [A5]
