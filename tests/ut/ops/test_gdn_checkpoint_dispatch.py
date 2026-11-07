@@ -307,6 +307,117 @@ class CheckpointDispatchTest(unittest.TestCase):
                 )
                 self.assertEqual(exporter.export.call_count, int(creates_checkpoint))
 
+    def test_builder_checkpoint_capability_handles_missing_or_none_context(self):
+        # Compile the real constructor preamble as a method so zero-argument
+        # super() retains its class cell, without importing NPU dependencies.
+        path = ROOT / "vllm_ascend/ops/gdn_attn_builder.py"
+        tree = ast.parse(path.read_text())
+        cls = next(
+            n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendGDNAttentionMetadataBuilder"
+        )
+        init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        end = next(
+            i
+            for i, n in enumerate(init.body)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "sequence_index_capacity" for t in n.targets)
+        )
+        init.body = init.body[:end]
+        for arg in init.args.args:
+            arg.annotation = None
+        cls.body = [init]
+        cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
+
+        class Base:
+            def __init__(self, *args):
+                pass
+
+        scope: dict = {"Base": Base}
+        module = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
+        exec(compile(module, str(path), "exec"), scope)
+        builder_cls = scope[cls.name]
+        capable = SimpleNamespace(_ascend_internal_checkpoint_enabled=True)
+        fallback = SimpleNamespace(_ascend_internal_checkpoint_enabled=False)
+        for context, expected in (
+            (None, False),
+            ({}, False),
+            ({"layer0": capable}, False),
+            ({"layer0": capable, "layer1": fallback}, False),
+            ({"layer0": capable, "layer1": capable}, True),
+        ):
+            with self.subTest(context=context):
+                config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=context))
+                # A normal spec must not enable the checkpoint path regardless
+                # of whether the layers support internal checkpoints.
+                builder = builder_cls(
+                    SimpleNamespace(num_prefill_checkpoint_blocks=0), ["layer0", "layer1"], config, None
+                )
+                self.assertFalse(builder._ascend_gdn_checkpoints)
+                ascend_config = ModuleType("vllm_ascend.ascend_config")
+                ascend_config.__dict__["get_ascend_config"] = lambda: SimpleNamespace(
+                    gdn_internal_prefill_checkpoints=True
+                )
+                with patch.dict(sys.modules, {ascend_config.__name__: ascend_config}):
+                    spec = SimpleNamespace(num_prefill_checkpoint_blocks=1)
+                    if expected:
+                        self.assertTrue(builder_cls(spec, ["layer0", "layer1"], config, None)._ascend_gdn_checkpoints)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "checkpoint-capable layers"):
+                            builder_cls(spec, ["layer0", "layer1"], config, None)
+        config = SimpleNamespace(compilation_config=SimpleNamespace())
+        builder = builder_cls(SimpleNamespace(num_prefill_checkpoint_blocks=0), ["layer0"], config, None)
+        self.assertFalse(builder._ascend_gdn_checkpoints)
+
+    def test_checkpoint_workspace_handles_missing_or_none_context(self):
+        ensure = function_from_source(
+            ROOT / "vllm_ascend/ops/gdn_checkpoint.py",
+            "ensure_gdn_checkpoint_workspace",
+            {"torch": SimpleNamespace(float32="fp32")},
+        )
+        for compilation in (
+            SimpleNamespace(),
+            SimpleNamespace(static_forward_context=None),
+            SimpleNamespace(static_forward_context={}),
+        ):
+            with self.subTest(compilation=compilation):
+                workspace = object()
+                tensor = SimpleNamespace(new_empty=Mock(return_value=workspace))
+                layer = SimpleNamespace(
+                    _exports_checkpoints=True,
+                    _ascend_checkpoint_workspace=None,
+                    vllm_config=SimpleNamespace(
+                        scheduler_config=SimpleNamespace(max_num_seqs=32), compilation_config=compilation
+                    ),
+                    num_v_heads=8,
+                    tp_size=2,
+                    head_v_dim=128,
+                    head_k_dim=128,
+                )
+                ensure(layer, tensor)
+                self.assertIs(layer._ascend_checkpoint_workspace, workspace)
+                ensure(layer, tensor)
+                tensor.new_empty.assert_called_once_with((32, 4, 128, 128), dtype="fp32")
+
+    def test_checkpoint_workspace_preserves_model_fallback_and_missing_capability(self):
+        ensure = function_from_source(
+            ROOT / "vllm_ascend/ops/gdn_checkpoint.py",
+            "ensure_gdn_checkpoint_workspace",
+            {},
+        )
+        # A layer may support checkpoints while another layer forces the
+        # whole model to use split prefills. Do not allocate scratch then.
+        for attributes in ({}, {"_exports_checkpoints": False}):
+            with self.subTest(attributes=attributes):
+                layer = SimpleNamespace(
+                    _ascend_internal_checkpoint_enabled=True,
+                    _ascend_checkpoint_workspace=None,
+                    **attributes,
+                )
+                tensor = SimpleNamespace(new_empty=Mock(side_effect=AssertionError("fallback allocated scratch")))
+                ensure(layer, tensor)
+                self.assertIsNone(layer._ascend_checkpoint_workspace)
+                tensor.new_empty.assert_not_called()
+
     def test_checkpoint_workspace_is_shared_only_for_matching_device_and_shape(self):
         context: dict[str, SimpleNamespace] = {}
         config = SimpleNamespace(

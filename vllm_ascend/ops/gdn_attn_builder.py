@@ -397,7 +397,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        context = getattr(vllm_config.compilation_config, "static_forward_context", {})
+        context = getattr(vllm_config.compilation_config, "static_forward_context", {}) or {}
         self._ascend_gdn_checkpoints = (
             bool(layer_names)
             and all(getattr(context.get(name), "_ascend_internal_checkpoint_enabled", False) for name in layer_names)

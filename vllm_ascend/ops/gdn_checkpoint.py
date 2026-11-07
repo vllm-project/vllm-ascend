@@ -56,7 +56,7 @@ def initialize_gdn_checkpoints(layer) -> None:
 
 
 def ensure_gdn_checkpoint_workspace(layer, tensor):
-    if layer._exports_checkpoints and layer._ascend_checkpoint_workspace is None:
+    if getattr(layer, "_exports_checkpoints", False) and layer._ascend_checkpoint_workspace is None:
         # Allocate during the profiling forward, including when its metadata is
         # None, so KV-cache sizing accounts for the persistent FP32 snapshots.
         shape = (
@@ -67,7 +67,7 @@ def ensure_gdn_checkpoint_workspace(layer, tensor):
         )
         # With ubatching excluded, layer export is ordered before the next
         # layer's recurrence on the worker stream. Share scratch, not KV state.
-        context = layer.vllm_config.compilation_config.static_forward_context
+        context = getattr(layer.vllm_config.compilation_config, "static_forward_context", None) or {}
         for candidate in context.values():
             workspace = getattr(candidate, "_ascend_checkpoint_workspace", None)
             if (
