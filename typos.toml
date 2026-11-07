@@ -180,3 +180,10 @@ extend-ignore-re = []
 windo = "windo"
 
 [type.vimscript.extend-words]
+
+# Preserve the upstream CANN identifier in the exact-source experiment patch.
+[type.cann-experiment-patch]
+extend-glob = ["optional_input_fix.patch"]
+
+[type.cann-experiment-patch.extend-identifiers]
+CheckDtypeVaild = "CheckDtypeVaild"
