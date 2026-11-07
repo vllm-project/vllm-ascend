@@ -1,0 +1,5 @@
+pr: 21259
+entries:
+  - category: performance
+    text: Reduced DeepSeek V4 decode CPU overhead by capturing supported target-model metadata producers in full graphs, avoiding repeated executor construction during replay.
+    model: deepseek-v4
