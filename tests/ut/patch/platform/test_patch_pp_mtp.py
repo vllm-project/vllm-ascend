@@ -347,6 +347,55 @@ def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_as
     assert request.spec_token_ids == [301, 302]
 
 
+def test_pp_decode_fence_waits_for_final_prefill(monkeypatch):
+    from vllm.v1.core.sched.scheduler import Scheduler as scheduler_cls
+
+    request = SimpleNamespace(
+        num_computed_tokens=0,
+        num_in_flight_tokens=0,
+        next_decode_eligible_step=0,
+        is_prefill_chunk=True,
+    )
+    scheduler = scheduler_cls.__new__(scheduler_cls)
+    scheduler.use_pp = True
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        speculative_config=None,
+        use_v2_model_runner=False,
+    )
+    scheduler.requests = {"req-0": request}
+
+    def schedule_chunk(_scheduler, output):
+        width = output.num_scheduled_tokens["req-0"]
+        request.num_computed_tokens += width
+        request.num_in_flight_tokens += width
+        request.is_prefill_chunk = request.num_computed_tokens < 6
+
+    def complete_chunk(_scheduler, output, _model_runner_output):
+        request.num_in_flight_tokens -= output.num_scheduled_tokens["req-0"]
+
+    monkeypatch.setattr(scheduler_cls, "_update_after_schedule", schedule_chunk)
+    monkeypatch.setattr(scheduler_cls, "update_from_output", complete_chunk)
+    _patch_scheduler_update_after_schedule()
+    _patch_scheduler_update_from_output()
+
+    intermediate = SimpleNamespace(num_scheduled_tokens={"req-0": 4})
+    final = SimpleNamespace(num_scheduled_tokens={"req-0": 2})
+    scheduler._update_after_schedule(intermediate)
+    assert request.next_decode_eligible_step == 0
+    scheduler._update_after_schedule(final)
+    fence = request.next_decode_eligible_step
+    assert fence > 0
+
+    scheduler.update_from_output(intermediate, None)
+    assert request.num_in_flight_tokens == 2
+    assert request.next_decode_eligible_step == fence
+
+    scheduler.update_from_output(final, None)
+    assert request.num_in_flight_tokens == 0
+    assert request.next_decode_eligible_step == 0
+
+
 def test_pp_mtp_helpers_and_patch_reentry():
     assert _is_pd_prefill_node(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_role="kv_producer"))) is True
     vllm_config = SimpleNamespace(
