@@ -3,6 +3,7 @@
 """Shared host registration lifecycle; ACL operations are mocked on CPU."""
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -169,7 +170,7 @@ def test_worker_constructor_and_shutdown_release_in_order(monkeypatch, pin_ops, 
         tensors=[SimpleNamespace(tensor=torch.empty((4, 4), dtype=torch.int8), page_size_bytes=4)],
         group_data_refs=[],
     )
-    kwargs = dict(kv_caches=kv_caches, blocks_per_chunk=2, num_cpu_blocks=2, mmap_region=region)
+    kwargs: dict[str, Any] = dict(kv_caches=kv_caches, blocks_per_chunk=2, num_cpu_blocks=2, mmap_region=region)
     if handler_failure:
         with pytest.raises(RuntimeError, match="load handler failed"):
             cpu_npu_mod.NPUOffloadingWorker(**kwargs)
