@@ -20,6 +20,13 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 ### Generative Models
 
+=== "A3"
+
+|Model|Support|Graph Mode|~~|~~|
+|----|----|------|------|----|
+|_|_|PIECEWISE|FULL|FULL_AND_PIECEWISE|
+|DeepSeek|√|√|√|√|
+
 #### Core Supported Models
 
 === "950PR&950DT Products"
