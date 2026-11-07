@@ -312,6 +312,11 @@ class GeneralizedQLIV2:
         return_value,
         split_s1=DEFAULT_SPLIT_S1,
         s1size=DEFAULT_S1SIZE,
+        dcp_enable=False,
+        cp_world=1,
+        cp_rank=0,
+        cp_interleave=1,
+        causal_seqlens_kv_global=None,
     ):
         self.batch_size = batch_size
         self.q_seq = q_seq
@@ -346,6 +351,13 @@ class GeneralizedQLIV2:
         self.return_value = return_value
         self.split_s1 = split_s1  # 是否切分S1轴 / Whether to split the S1 axis
         self.s1size = s1size  # S1轴切分块大小 / S1 axis chunk size
+        # DCP (Decode Context Parallel, 解码上下文并行): 本地 KV 是全局序列按 rank 轮转分片后的子集
+        self.dcp_enable = dcp_enable
+        self.cp_world = cp_world
+        self.cp_rank = cp_rank
+        self.cp_interleave = cp_interleave
+        self.causal_seqlens_kv_global = causal_seqlens_kv_global
+        self._dcp_batch_idx = 0
 
         if layout_query == "BSND":
             self.q_shape = [batch_size, q_seq, q_head_num, head_dim]
@@ -1035,6 +1047,23 @@ class GeneralizedQLIV2:
     def create_mask(self, m_shape, act_k, S1):
         atten_masks = torch.zeros(tuple(m_shape), dtype=torch.uint8)
         cmp_ratio = self.cmp_ratio
+        if self.dcp_enable:
+            # DCP: 每行可见长度 = min(L, (u // (P*S))*S + clamp(u % (P*S) - r*S, 0, S)),
+            # u = C - Q_len + i + 1; 本地 KV 序号按时间序排列, 可见部分仍是前缀。
+            local_len = int(act_k // cmp_ratio)
+            global_end = int(self.causal_seqlens_kv_global[self._dcp_batch_idx])
+            period = int(self.cp_world) * int(self.cp_interleave)
+            for i in range(S1):
+                u = max(global_end - S1 + i + 1, 0)
+                if u <= 0 or period <= 0:
+                    visible = 0
+                else:
+                    full_rounds = (u // period) * int(self.cp_interleave)
+                    rem = u % period - int(self.cp_rank) * int(self.cp_interleave)
+                    tail = min(max(rem, 0), int(self.cp_interleave))
+                    visible = min(local_len, full_rounds + tail)
+                atten_masks[i, visible:] = 1
+            return atten_masks
         tmp_pos_orig = act_k - S1
 
         for i in range(S1):
@@ -1065,6 +1094,7 @@ class GeneralizedQLIV2:
             next_tokens = S2 - S1
             next_tokens_list.append(next_tokens)
             act_k = actualSeqLengthsK[i] * cmp_ratio + cmp_residual_k[i]
+            self._dcp_batch_idx = i
             atten_masks = self.create_mask(m_shape, act_k, S1)
             re_mask_batch.append(np.array(atten_masks, dtype=np.bool_))
         re_mask_np = np.array(re_mask_batch, dtype=np.bool_)

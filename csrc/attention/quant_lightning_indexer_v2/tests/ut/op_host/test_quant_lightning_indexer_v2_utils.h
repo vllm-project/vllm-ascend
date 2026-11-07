@@ -42,6 +42,7 @@ struct CaseParam {
     std::vector<int64_t> blockTable = {2, 2};
     std::vector<int64_t> idxOffset;
     std::vector<int64_t> metadata = {1024};
+    std::vector<int64_t> causalLens;  // DCP: 每请求全局 exclusive 上界 C, 空表示不传
     ge::DataType qType = ge::DT_INT8;
     ge::DataType kType = ge::DT_INT8;
     ge::DataType wType = ge::DT_FLOAT16;
@@ -64,6 +65,11 @@ struct CaseParam {
     int64_t maskMode = 0;
     int64_t cmpRatio = 1;
     int64_t returnValue = 0;
+    // DCP (Decode Context Parallel, 解码上下文并行)
+    bool enableDcp = false;
+    int64_t cpWorld = 1;
+    int64_t cpRank = 0;
+    int64_t cpInterleave = 1;
 };
 
 inline gert::StorageShape ToStorageShape(const std::vector<int64_t> &dims)
@@ -95,7 +101,8 @@ inline void RunTilingCase(const CaseParam &p, ge::graphStatus expect)
         {Desc(p.qShape, p.qType), Desc(p.kShape, p.kType), Desc(p.wShape, p.wType), Desc(p.qScaleShape, p.qScaleType),
          Desc(p.kScaleShape, p.kScaleType), Desc(p.cuSeqQ, p.cuSeqQType), Desc(p.cuSeqK, p.cuSeqKType),
          Desc(p.sequsedQ, p.sequsedQType), Desc(p.sequsedK, p.sequsedKType), Desc(p.cmpResidual, p.cmpResidualType),
-         Desc(p.blockTable, p.blockTableType), Desc(p.idxOffset, p.idxOffsetType), Desc(p.metadata, ge::DT_INT32)},
+         Desc(p.blockTable, p.blockTableType), Desc(p.idxOffset, p.idxOffsetType), Desc(p.metadata, ge::DT_INT32),
+         Desc(p.causalLens, ge::DT_INT32)},
         {Desc(p.outShape, p.outType), Desc(p.valuesShape, p.valuesType)},
         {{"topk", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.topk)},
          {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.quantMode)},
@@ -104,7 +111,11 @@ inline void RunTilingCase(const CaseParam &p, ge::graphStatus expect)
          {"layout_k", Ops::Transformer::AnyValue::CreateFrom<std::string>(p.layoutK)},
          {"mask_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.maskMode)},
          {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.cmpRatio)},
-         {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.returnValue)}},
+         {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.returnValue)},
+         {"enable_dcp", Ops::Transformer::AnyValue::CreateFrom<bool>(p.enableDcp)},
+         {"cp_world", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.cpWorld)},
+         {"cp_rank", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.cpRank)},
+         {"cp_kv_cache_interleave_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.cpInterleave)}},
         &compileInfo, p.soc, p.coreNum, p.ubSize, p.l2Size);
     ExecuteTestCase(para, expect, SKIP_TILING_KEY);
 }
