@@ -79,6 +79,21 @@ class TestMooncakeDCP(unittest.TestCase):
                 np.testing.assert_array_equal(array[[3, 4]], saved[name][[1, 2]])
         self.assertFalse(store.open_reads)
 
+    def test_inconsistent_dcp_rank_is_rejected(self):
+        store = hybrid_tests.MemoryRangeStore()
+        with self.assertRaisesRegex(ValueError, "DCP rank mapping mismatch"):
+            pipeline_tests.TestMooncakePipeline.make_stage(
+                self,
+                0,
+                store,
+                hybrid=False,
+                draft=False,
+                mla=True,
+                tp_rank=0,
+                dcp_size=2,
+                dcp_rank=1,
+            )
+
 
 if __name__ == "__main__":
     raise SystemExit(__import__("pytest").main([__file__, "-v"]))

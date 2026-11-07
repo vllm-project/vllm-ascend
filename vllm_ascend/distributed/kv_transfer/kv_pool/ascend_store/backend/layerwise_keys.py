@@ -7,6 +7,24 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
+def layerwise_dcp_rank(tp_rank: int, pcp_rank: int, pcp_size: int, dcp_size: int) -> int:
+    """Return the DCP rank that owns a layerwise worker's context shard.
+
+    vLLM builds DCP groups over the (TP, PCP) rank plane after transposing the
+    last two dimensions and slicing every ``dcp_size`` entries. Flattening that
+    plane row-major gives ``tp_rank * pcp_size + pcp_rank``, so the rank inside
+    its DCP group is that flat index modulo ``dcp_size``. With the standalone
+    layout accepted by Mooncake layerwise pooling (``pcp_size == 1``) this
+    reduces to ``tp_rank % dcp_size``.
+
+    This is the single source of truth for the worker's shard coordinate. The
+    scheduler-side hit check requires an object for every DCP rank, and the
+    worker validates its own rank against this mapping at startup, so a key
+    can never be written under a coordinate that the scheduler does not query.
+    """
+    return (tp_rank * pcp_size + pcp_rank) % dcp_size
+
+
 @dataclass(frozen=True)
 class LayerwiseKeyBuilder:
     # The backend binds model/layout identity; callers supply only coordinates.
