@@ -1,0 +1,13 @@
+pr: 21116
+entries:
+  - category: feature
+    text: >-
+      The existing use_layerwise option now automatically selects experimental
+      cross-layer KV prefetch for compatible shared-source models such as
+      DeepSeek-V4.1, while DS4 retains the physical-layer path.
+    model: deepseek-v4.1
+  - category: other
+    text: >-
+      Memcache 1.3 retains atomic bulk saves because incremental saves require
+      exclusive allocation. Source layers derive from model parameters, and
+      registered consumer hooks are validated before enabling pipelined loads.

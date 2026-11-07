@@ -949,6 +949,45 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
+    **Automatic layerwise strategy selection:** `use_layerwise=true` keeps
+    the existing physical-layer path for models such as DeepSeek-V4 and
+    selects `cross_layer_kv` for models with shared KV sources, such as
+    DeepSeek-V4.1. Both use `LayerwiseKVPoolScheduler`; no additional public
+    switch is required. `use_layerwise=false` retains ordinary bulk transfers.
+
+    The cross-layer strategy derives source positions/count and the replay
+    cut from `kv_source_layer_ids` and `num_hidden_layers`. It validates the
+    registered cache layout and consumer hooks, without fixed layer numbers
+    or a model-name allowlist. Model implementations that reuse the same
+    cache and hook contract adapt to topology changes automatically.
+
+    With Memcache, full cache blocks, and `--enforce-eager`, dependency loads
+    are submitted before forward and copied in first-consumer order. Each
+    layer waits only for the data it needs. The scheduler and worker use
+    synchronous admission (`load_async` is internally set to false), while
+    later copies overlap earlier computation. Physical-layer buffer reuse,
+    offload snapshots, and KVPP layer hooks are not enabled for shared sources.
+
+    With `swa_bounded_replay=true`, target SWA is reconstructed by replay and
+    is excluded from pool storage. Otherwise SWA saves follow the existing
+    window/block retention masks at reusable prefix boundaries, rather than
+    keeping only the final 128 tokens of the request. The configured window,
+    block size, and retention interval determine how many blocks are saved.
+
+    Memcache release/1.3 returns shared GVAs for duplicate allocations, so
+    **saves remain on the existing atomic bulk path**. Incremental session
+    saves require a backend that guarantees exclusive allocation. On such a
+    backend, producer slices can overlap later computation, and publication
+    waits for all slices. The replay cut uses the final step write event.
+
+    Unsupported backends, PP/PCP/DCP/KVPP, sequence parallelism, microbatching,
+    speculative decoding/MTP, graph execution, partial objects, or missing
+    consumer hooks retain group-object bulk transfers within this strategy.
+    A load failure after computation begins fails the step; automatic state
+    rollback/retry is not supported. NPU correctness and performance evidence
+    are required before production use. See the
+    [cross-layer KV design and SDK contract](../../developer_guide/Design_Documents/cross_layer_kv_pool.md).
+
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
     Expected output: Same as Mooncake scenario, returns OpenAI Completions API JSON response.

@@ -75,6 +75,10 @@ class Backend(ABC):
     layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
+    # Positive batch_alloc results must belong exclusively to this writer
+    # before enabling incremental publication. Memcache 1.3 returns shared
+    # GVA allocations for duplicate keys and intentionally keeps this false.
+    supports_exclusive_allocation: bool = False
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
