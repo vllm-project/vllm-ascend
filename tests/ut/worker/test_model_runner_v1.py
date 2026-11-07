@@ -3914,6 +3914,66 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
 
+    @patch("vllm_ascend.worker.v1.model_runner.get_ascend_config")
+    @patch("vllm_ascend.worker.v1.model_runner.lmhead_tp_enable")
+    def test_sample_updates_async_spec_token_ids_before_rejection_sampler(
+        self, mock_lmhead_tp_enable, mock_get_ascend_config
+    ):
+        """Verify the draft token ids from the previous step are copied into
+        spec_token_ids under async scheduling + spec decode, as upstream does."""
+        mock_lmhead_tp_enable.return_value = False
+        mock_get_ascend_config.return_value = MagicMock()
+
+        input_batch = MagicMock()
+        input_batch.sampling_metadata.output_token_ids = [[1, 2, 3, -1]]
+        input_batch.num_reqs = 1
+
+        runner = self._build_runner()
+        runner.input_batch = input_batch
+        runner.use_async_scheduling = True
+        runner._draft_token_req_ids = ["req0"]
+        runner._get_draft_token_ids_cpu = MagicMock(return_value=([[11, 12, 13]], ["req0"]))
+        runner._get_spec_decode_draft_probs = MagicMock(return_value=None)
+        runner.rejection_sampler = MagicMock(return_value=MagicMock())
+
+        runner._sample(
+            logits=torch.randn(4, 32000),
+            spec_decode_metadata=MagicMock(logits_indices=[0, 1, 2, 3]),
+        )
+
+        runner._get_draft_token_ids_cpu.assert_called_once()
+        input_batch.update_async_spec_token_ids.assert_called_once_with([[11, 12, 13]])
+        runner.rejection_sampler.assert_called_once()
+
+    @patch("vllm_ascend.worker.v1.model_runner.get_ascend_config")
+    @patch("vllm_ascend.worker.v1.model_runner.lmhead_tp_enable")
+    def test_sample_skips_async_spec_token_ids_without_async_scheduling(
+        self, mock_lmhead_tp_enable, mock_get_ascend_config
+    ):
+        """Without async scheduling spec_token_ids are already up to date."""
+        mock_lmhead_tp_enable.return_value = False
+        mock_get_ascend_config.return_value = MagicMock()
+
+        input_batch = MagicMock()
+        input_batch.sampling_metadata.output_token_ids = [[1, 2, 3]]
+        input_batch.num_reqs = 1
+
+        runner = self._build_runner()
+        runner.input_batch = input_batch
+        runner.use_async_scheduling = False
+        runner._draft_token_req_ids = ["req0"]
+        runner._get_draft_token_ids_cpu = MagicMock()
+        runner._get_spec_decode_draft_probs = MagicMock(return_value=None)
+        runner.rejection_sampler = MagicMock(return_value=MagicMock())
+
+        runner._sample(
+            logits=torch.randn(4, 32000),
+            spec_decode_metadata=MagicMock(logits_indices=[0, 1, 2, 3]),
+        )
+
+        runner._get_draft_token_ids_cpu.assert_not_called()
+        input_batch.update_async_spec_token_ids.assert_not_called()
+
     def test_placeholder_spec_tokens_are_sanitized_only_for_forward(self):
         runner = self._build_runner()
         runner.input_ids = SimpleNamespace(
