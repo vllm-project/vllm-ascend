@@ -1,0 +1,4 @@
+pr: 19790
+entries:
+  - category: bugfix
+    text: Fixed legacy MiniMax vision checkpoint parameter names and matching quantization descriptions.
