@@ -55,6 +55,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -63,11 +64,14 @@ from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
+    MOE_PADDING_TOKEN_ID,
+    prepare_sp_routing_input_ids,
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -102,6 +106,38 @@ from .indexer import DeepseekV41Indexer
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
     return engram_enabled(config) and vllm_config.engram_config is not None
+
+
+def _can_reuse_routing_input_ids(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    return (
+        parallel.use_sequence_parallel_moe
+        and parallel.data_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and not parallel.use_ubatching
+        # Zero admits the low-token MC2 path in the communication selectors.
+        # If it still selects ALLGATHER, increasing the batch cannot enable MC2.
+        and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
+    )
+
+
+def _can_skip_moe_padding(vllm_config: VllmConfig) -> bool:
+    """Filter replicated padding routes only in the supported fixed layout."""
+    parallel = vllm_config.parallel_config
+    speculative = vllm_config.speculative_config
+    ascend_config = get_ascend_config()
+    return (
+        use_v2_model_runner(vllm_config)
+        and _can_reuse_routing_input_ids(vllm_config)
+        and parallel.enable_expert_parallel
+        and parallel.tensor_parallel_size > 1
+        and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
+        and parallel.expert_placement_strategy == "linear"
+        and not parallel.enable_eplb
+        and not ascend_config.mix_placement
+        and not ascend_config.enable_force_eplb
+        and (speculative is None or not speculative.enable_adaptive_verification)
+    )
 
 
 class DeepseekV41MLP(nn.Module):
@@ -1016,6 +1052,21 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.reuse_routing_input_ids = _can_reuse_routing_input_ids(vllm_config)
+        self.skip_moe_padding = _can_skip_moe_padding(vllm_config) and (
+            getattr(self.config, "scoring_func", "softmax") == "sqrtsoftplus"
+        )
+        if self.reuse_routing_input_ids:
+            # With no DP/PCP redistribution, every TP rank already has the
+            # complete input IDs. Match the gathered SP row layout once rather
+            # than gathering and normalizing the IDs again in every layer.
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                layer.mlp.experts.router.input_ids_are_global = True
+                if self.skip_moe_padding:
+                    # Every rank has the same rows. Send padding to a legal
+                    # expert outside its local range so InitRouting drops it.
+                    moe = layer.mlp
+                    moe.experts.router.padding_expert_id = moe.n_local_physical_experts if moe.ep_rank == 0 else 0
         topology = build_layer_plan(self.config)
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
@@ -1580,6 +1631,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_mask = token_mask[:full_num_tokens]
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
+            if self.skip_moe_padding:
+                # Embedding and Engram already consumed the real IDs. Mark
+                # graph padding before sp_padding_mask shards the context mask.
+                input_ids = input_ids.masked_fill(get_forward_context().is_padding, MOE_PADDING_TOKEN_ID)
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
@@ -1587,7 +1642,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)
+            if self.reuse_routing_input_ids:
+                input_ids = prepare_sp_routing_input_ids(
+                    input_ids, padding_value=MOE_PADDING_TOKEN_ID if self.skip_moe_padding else 0
+                )
+            else:
+                input_ids = sp_shard(input_ids)
             token_mask = sp_shard(token_mask)
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
