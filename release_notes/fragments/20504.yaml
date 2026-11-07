@@ -1,0 +1,4 @@
+pr: 20504
+entries:
+  - category: bugfix
+    text: Data parallel deployments now report the process that holds the data parallel RPC port instead of failing with a bare "Address already in use", so an engine that did not exit cleanly can be stopped and the engine restarted.
