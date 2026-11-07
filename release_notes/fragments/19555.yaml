@@ -1,0 +1,5 @@
+pr: 19555
+entries:
+  - category: performance
+    text: Reduced DCP combine latency for eligible BF16 head-scatter shapes by merging ranks in a tiled kernel. A5 shapes already covered by the batched combine keep that path.
+    hardware: [A2, A3, A5]

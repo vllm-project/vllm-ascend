@@ -80,7 +80,12 @@ It first finds the maximum valid LSE, then accumulates
 `exp(lse - lse_max) * partial_output`. Invalid LSE rows contribute zero; when
 all ranks are invalid, the output row is zero.
 The eligible A5 BF16 path batches eight rows per program and masks partial
-tiles; other valid shapes use the scalar-row kernels.
+tiles. When that path does not apply, eligible BF16 head-scatter shapes with
+DCP size 4–16 and a contiguous local contribution use the rank-tiled kernel in
+`dcp_a2a_rank_tiled.py`: one feature tile and one rank tile per job, with the
+FP32 temporary bounded by 2048 elements. Its parallel reduction can round
+differently from the scalar FMA loop. Every other valid shape uses the
+scalar-row kernel.
 
 ## Custom-op registration and graph tracing
 
