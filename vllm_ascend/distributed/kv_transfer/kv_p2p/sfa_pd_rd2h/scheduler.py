@@ -299,6 +299,7 @@ class SFAPDRD2HScheduler:
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
         self._dspark_pending_recv: set[str] = set()
+        self._d2h_pending_releases: dict[str, int] = {}
         self._deferred_finished_req_ids: set[str] = set()
         self.executor = ThreadPoolExecutor(32)
         self._metaserver_futures = {}
@@ -512,8 +513,31 @@ class SFAPDRD2HScheduler:
                     dspark_draft_group_ids=(self._dspark_context_groups if req_id in context_requests else ()),
                     dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
                 )
+        # __new__-style light construction (upstream unit tests) skips
+        # __init__; tolerate a missing ledger the same way _d2h_delayed_free
+        # tolerates its missing cache below.
+        pending_releases = getattr(self, "_d2h_pending_releases", None)
+        if pending_releases:
+            for req_id, pool_slot in pending_releases.items():
+                meta.add_d2h_release(req_id, pool_slot)
         self._reqs_need_recv.clear()
         return meta
+
+    def _d2h_delayed_free(self) -> bool:
+        """Whether resident-row release must wait for delayed D2H retirement."""
+        cached = getattr(self, "_d2h_delayed_free_cached", None)
+        if cached is None:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            try:
+                offload_config = get_ascend_config().sparse_kv_offload_config
+            except RuntimeError:
+                # Config-less contexts (unit tests) keep the legacy lifecycle.
+                offload_config = None
+            cached = self._d2h_delayed_free_cached = bool(
+                getattr(offload_config, "delayed_d2h", False)
+            )
+        return cached
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:
         return self.request_finished_all_groups(request, (block_ids,))
@@ -528,13 +552,32 @@ class SFAPDRD2HScheduler:
             # retains the KV blocks; retain the connector's destinations too.
             self._deferred_finished_req_ids.add(request.request_id)
             return True, None
+        allocator = getattr(self, "_copy_sfa_slot_allocator", None)
+        binding = getattr(self, "_copy_sfa_bindings", {}).get(request.request_id)
+        if self._d2h_delayed_free() and allocator is not None and binding is not None:
+            # Terminal requests keep both their vLLM blocks and the
+            # request-owned Copy-SFA row until every worker has retired any
+            # D2H batch that can still reference the row. Entries are
+            # released by update_connector_output() on finished_sending.
+            self._d2h_pending_releases[request.request_id] = binding[0]
+            return True, None
         self._cleanup_finished_request(request.request_id)
         return False, None
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        for req_id in connector_output.finished_sending or ():
+            if req_id in self._d2h_pending_releases:
+                # The worker retired every D2H batch referencing the row and
+                # released it; now drop the binding and free the allocator.
+                self._d2h_pending_releases.pop(req_id, None)
+                self._cleanup_finished_request(req_id)
         completed = set(connector_output.finished_recving or ())
         self._dspark_pending_recv.difference_update(completed)
         for request_id in completed & self._deferred_finished_req_ids:
+            # The dspark drain path releases the slot allocator without the
+            # finished_sending handshake; drop the delayed D2H release entry
+            # too, or it is resent forever and re-reserves the reused slot.
+            getattr(self, "_d2h_pending_releases", {}).pop(request_id, None)
             self._cleanup_finished_request(request_id)
 
     def _cleanup_finished_request(self, request_id: str) -> None:

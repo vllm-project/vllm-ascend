@@ -89,6 +89,19 @@ def _validate_fused_copy_sfa_config(vllm_config: VllmConfig, cfg: SparseKVOffloa
             "the dense short-sequence layout only lines up with the circular "
             f"tail slots when topk_buffer_size is a multiple of {COPY_SFA_TAIL_TOKENS}"
         )
+    if cfg.delayed_d2h:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        has_connector = getattr(kv_transfer_config, "has_connector", None)
+        has_remote_d2h = (
+            has_connector("SfaRemoteD2HConnector")
+            if callable(has_connector)
+            else getattr(kv_transfer_config, "kv_connector", None) == "SfaRemoteD2HConnector"
+        )
+        if not has_remote_d2h:
+            raise ValueError(
+                "delayed_d2h currently requires SfaRemoteD2HConnector to provide "
+                "delayed-free lifecycle protection for resident rows"
+            )
 
 
 @dataclass
@@ -203,6 +216,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             supports_dcp_with_varlen,
         )
         self.use_fused_copy_sfa = cfg.use_fused_copy_sfa
+        self.delayed_d2h = cfg.delayed_d2h
         if self.use_fused_copy_sfa:
             self._init_copy_sfa_metadata_buffers(vllm_config, device)
         kv_transfer_config = vllm_config.kv_transfer_config
@@ -352,10 +366,19 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
-        prefix = (
-            torch.div((seq_lens - widths).clamp_min(0), LIM_CACHE_BLOCK_SIZE, rounding_mode="floor")
-            * LIM_CACHE_BLOCK_SIZE
-        )
+        if getattr(self, "delayed_d2h", False):
+            # The resident working table lags computed tokens by up to two
+            # blocks; only retired full blocks may leave the resident tail,
+            # so geometry follows the runner-owned stable prefixes.
+            stable_prefixes = common_attn_metadata.req_topk_buffer_stable_prefixes
+            if stable_prefixes is None:
+                raise RuntimeError("delayed D2H requires runner-owned stable prefixes")
+            prefix = torch.where(active, stable_prefixes[:count], 0)
+        else:
+            prefix = (
+                torch.div((seq_lens - widths).clamp_min(0), LIM_CACHE_BLOCK_SIZE, rounding_mode="floor")
+                * LIM_CACHE_BLOCK_SIZE
+            )
         is_short = prefix < self.copy_sfa_hot_tokens
         cache = torch.where(active, torch.where(is_short, 0, prefix.clamp_max(self.copy_sfa_hot_tokens)), LIM_TOPK)
         logical = torch.where(active, torch.where(is_short, seq_lens, cache + seq_lens - prefix), 0)
@@ -534,6 +557,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.block_size = self.vllm_config.cache_config.block_size
         self.use_fused_overlap = offload_cfg.use_fused_overlap
         self.use_fused_copy_sfa = offload_cfg.use_fused_copy_sfa
+        self.delayed_d2h = offload_cfg.delayed_d2h
         self.lim_indexer_owner = self
         self._copy_sfa_metadata: AscendSFAOffloadMetadata | None = None
         if self.use_fused_copy_sfa:
@@ -862,9 +886,50 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
     ):
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         if self._is_decode_only(attn_metadata):
-            k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             manager = get_sparse_kv_offload_manager()
             layer_name = self._offload_layer_name()
+            if attn_metadata.fused_copy_sfa_enabled and self.delayed_d2h:
+                # Fused normalize/rotate/write: current-token KV is scattered
+                # directly into the resident tail pages by one operator.
+                assert self.kv_a_layernorm is not None
+                layer_id = manager._get_offload_layer_id(layer_name)
+                resident_k = manager.topk_buffers_k[layer_id].view(
+                    -1,
+                    self.block_size,
+                    self.num_kv_heads,
+                    self.kv_lora_rank,
+                )
+                resident_v = manager.topk_buffers_v[layer_id].view(
+                    -1,
+                    self.block_size,
+                    self.num_kv_heads,
+                    self.qk_rope_head_dim,
+                )
+                batch = kv_no_split.shape[0]
+                kv_no_split = kv_no_split.view(
+                    batch,
+                    self.num_kv_heads,
+                    1,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                )
+                device_slots = attn_metadata.copy_sfa_device_slots
+                assert device_slots is not None
+                _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+                    kv_no_split,
+                    self.kv_a_layernorm.weight,
+                    cos,
+                    sin,
+                    device_slots[:batch].to(torch.int64),
+                    resident_v,
+                    resident_k,
+                    epsilon=self.kv_a_layernorm.variance_epsilon,
+                    cache_mode="PA",
+                    is_output_kv=True,
+                )
+                # Resident tails are the source of truth. Full blocks are
+                # copied once by the graph-external delayed D2H pipeline.
+                return k_pe, k_nope
+            k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             if attn_metadata.fused_copy_sfa_enabled:
                 layer_id = manager._get_offload_layer_id(layer_name)
