@@ -15,10 +15,6 @@ variants:
     extra_args:
       - '--data-parallel-size'
       - '4'
-      # single_node_dep only emits --data-parallel-size, so the TP half of the
-      # DP4 x TP4 layout on the 16 dies has to be declared as an explicit arg.
-      - '--tensor-parallel-size'
-      - '4'
       - '--enable-expert-parallel'
       - '--quantization'
       - ascend
@@ -112,7 +108,7 @@ hardware_notes:
       href: '#huawei-ascend-950pr-8x'
   ascend_910c:
     title: vLLM Ascend A3 image required
-    body: All 16 Ascend 910C dies of one Atlas 800T A3 node run DP4+TP4 with expert parallelism, serving the ModelSlim W8A8 checkpoint from Eco-Tech. The int8 Lightning Indexer KV cache keeps the 1M context inside 64 GB per die. Use quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 (vLLM 0.30.0), set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and pull the weights through ModelScope. Measured on A3 with AISBench GSM8K over 1319 prompts, where MTP k=1 scores 96.44; DSpark k=7 scores 96.59 with a different checkpoint but is not selectable here until the core recipe lists it (vllm-ascend#20563). Start only the vllm serve command on port 8100 — the single_node_dep strategy also renders a vLLM Router companion that this tutorial does not use. Multi-node PD separation is documented separately.
+    body: All 16 Ascend 910C dies of one Atlas 800T A3 node run DP4+TP4 with expert parallelism, serving the ModelSlim W8A8 checkpoint from Eco-Tech. The int8 Lightning Indexer KV cache keeps the 1M context inside 64 GB per die. Use quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 (vLLM 0.30.0), set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and pull the weights through ModelScope. Measured on A3 with AISBench GSM8K over 1319 prompts, where MTP k=1 scores 96.44; DSpark k=7 scores 96.59 with a different checkpoint but is not selectable here until the core recipe lists it (vllm-ascend#20563). Everything runs in one vllm serve process, so no vLLM Router is needed; multi-node PD separation is documented separately.
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
@@ -121,12 +117,26 @@ strategy_hardware:
     npu: unsupported
   single_node_tep:
     npu: unsupported
+    ascend_910c: supported
+  # vLLM Ascend serves DP4+TP4 from one process, so the DEP preset (which adds a
+  # vLLM Router companion) is the wrong shape here; TEP above renders the
+  # measured command without the extra router step.
+  single_node_dep:
+    ascend_910c: unsupported
   multi_node_dep:
     npu: unsupported
   pd_cluster:
     npu: unsupported
     ascend_910c: supported
 strategy_overrides:
+  single_node_tep:
+    hardware_overrides:
+      ascend_910c:
+        # TEP derives --tensor-parallel-size from the card count; pin the
+        # measured TP4 explicitly so the rendered command cannot drift.
+        extra_args:
+          - '--tensor-parallel-size'
+          - '4'
   single_node_dep:
     hardware_overrides:
       # The A5 args cannot stay under the brand-level `npu` key: brand values
@@ -174,14 +184,6 @@ strategy_overrides:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
           - '--additional-config'
           - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
-      ascend_910c:
-        extra_env:
-          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15'
-        extra_args:
-          - '--kv-cache-dtype'
-          - auto
-          - '--compilation-config'
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 features:
   spec_decoding:
     modes:
