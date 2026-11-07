@@ -45,10 +45,10 @@
 
 ## Origin and Differences
 
-- **Origin**: adapted from vLLM's GPU implementation `vllm/v1/worker/gpu/sample/logprob.py` (recorded in the file header). The Ascend version is installed over the upstream symbols by `vllm_ascend/patch/worker/patch_triton.py` (`logprob.compute_token_logprobs`, and `compute_topk_logprobs` for `sampler`, `prompt_logprob` and `rejection_sampler`).
+- **Origin**: adapted from vLLM's GPU implementation `vllm/v1/worker/gpu/sample/logprob.py` (recorded in the file header). The Ascend version is installed over the upstream symbols by `vllm_ascend/patch/worker/patch_triton.py` (`logprob.compute_token_logprobs`, and `compute_topk_scores` in `logprob`, `sampler`, `prompt_logprob` and `rejection_sampler`).
 - **Differences**:
     - NPU adaptation for performance: the vocabulary tile is pinned to `BLOCK_SIZE = 12944` and the kernel is launched with `multibuffer=False`, both sized against the UB budget of the vector core; `tl.maximum` carries `propagate_nan=tl.PropagateNan.ALL` as a compatibility workaround after the NPU-IR upgrade. The companion `_ranks_kernel` used by `compute_topk_logprobs` is parallelized over `get_vectorcore_num()` cores with a `rows_per_core` row loop (and `do_not_specialize` on `batch_size` / `rows_per_core`) instead of one program per request, because an NPU has far fewer, much wider cores than a GPU has SMs.
-    - Modified for a specific vllm-ascend logic or different input parameters: `compute_topk_logprobs` builds `logprob_token_ids` with `torch.topk` + `torch.cat` and then calls this kernel once for the concatenated ids. The upstream `logprob_token_ids_state` / `expanded_idx_mapping` / `max_per_req_token_ids` path is accepted for signature compatibility but not implemented — a non-zero `max_per_req_token_ids` logs a warn-once and falls back to the default token ids.
+    - Modified for a specific vllm-ascend logic or different input parameters: `compute_topk_logprobs` builds `logprob_token_ids` with `torch.topk` + `torch.cat` and then calls this kernel once for the concatenated ids. Custom candidate requests use the Ascend fill kernel and `expanded_idx_mapping` to preserve request-specific token order. Default requests in a mixed batch retain top-k behavior. Invalid columns are masked to negative infinity; logits mode gathers scores without normalization.
 
 ## Test Cases
 
@@ -63,3 +63,15 @@ The reference is `torch.nn.functional.log_softmax` in fp32 followed by `torch.ga
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_token_logprobs.py
 ```
+
+### Selected-token ranks
+
+`selected_token_ranks` counts real vocabulary entries whose logits are greater
+than or equal to the selected logit. A unique maximum ranks 1; both members of a
+two-way top tie rank 2. NaN comparisons follow `>=` semantics.
+
+The last vocabulary tile is padded with negative infinity. When the selected
+logit is negative infinity, the kernel subtracts the padding count after the
+reduction. This avoids an extra vector predicate that exceeds the A3 UB
+budget with Triton-Ascend 3.2.2 and preserves the count of real entries even
+when a row contains NaN.

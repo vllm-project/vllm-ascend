@@ -6,11 +6,12 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
 
-
-@pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
+
+
 @pytest.mark.parametrize(
     "batch_size,vocab_size,num_logprobs",
     [
@@ -50,7 +51,8 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     ref_logprobs = torch.gather(ref_all_logprobs, dim=1, index=ref_token_ids)
 
     sampled_logits = torch.gather(logits, 1, sampled_token_ids.unsqueeze(-1))
-    ref_ranks = (logits > sampled_logits).sum(dim=1).to(torch.int64)
+    # Match the upstream vocabulary-rank convention, including ties.
+    ref_ranks = (logits >= sampled_logits).sum(dim=1).to(torch.int64)
 
     # ========== 4. Verify results ==========
     assert torch.equal(triton_output.logprob_token_ids, ref_token_ids), (
@@ -65,3 +67,19 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
         f"Logprobs values differ between Triton and PyTorch.\n"
         f"Max diff: {torch.max(torch.abs(triton_output.logprobs - ref_logprobs))}"
     )
+
+
+@pytest.mark.parametrize("vocab_size", [1519, 8192, 20000])
+def test_selected_token_rank_preserves_nan_comparisons(vocab_size):
+    """Padding correction must not count real NaN lanes as >= a selected -inf."""
+    init_device_properties_triton()
+    logits = torch.zeros(2, vocab_size, device="npu", dtype=torch.float32)
+    logits[:, 0] = float("-inf")
+    logits[:, 1] = float("nan")
+    sampled_token_ids = torch.tensor([0, 1], device="npu", dtype=torch.int64)
+
+    output = compute_topk_logprobs(logits, 0, sampled_token_ids)
+    torch.npu.synchronize()
+
+    # A real NaN does not compare >= -inf; a selected NaN compares >= nothing.
+    assert output.selected_token_ranks.cpu().tolist() == [vocab_size - 1, 0]

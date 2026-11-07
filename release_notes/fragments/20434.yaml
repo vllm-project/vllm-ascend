@@ -1,0 +1,6 @@
+pr: 20434
+entries:
+  - category: bugfix
+    text: >-
+      Preserve requested custom-token scores through the Ascend MRV2 score
+      implementation, including mixed request batches and logits output modes.
