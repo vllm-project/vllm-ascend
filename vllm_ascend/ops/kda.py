@@ -21,7 +21,7 @@ def run_recurrent_kda(
     beta: torch.Tensor,
     state: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    state_indices: torch.Tensor,
+    state_indices: torch.Tensor | None,
     a_log: torch.Tensor,
     dt_bias: torch.Tensor,
     *,

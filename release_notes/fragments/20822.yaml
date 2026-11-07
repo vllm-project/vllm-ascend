@@ -1,0 +1,7 @@
+pr: 20822
+entries:
+  - category: performance
+    text: >-
+      Reuse device sequence offsets and recurrent KDA for GLM-5.3-Flash
+      prefill tensors of at most eight token rows without empty-segment
+      compaction, reducing short-prefill KDA overhead.

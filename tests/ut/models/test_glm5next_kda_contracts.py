@@ -121,3 +121,65 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         torch.testing.assert_close(state[1], saved[1])
     else:
         assert (state[1] == 17).all()
+
+
+@pytest.mark.parametrize("tokens,compact", [(4, False), (8, False), (9, False), (8, True)])
+def test_short_prefill_reuses_offsets_and_keeps_state_ownership(monkeypatch, tokens, compact):
+    q = torch.ones(1, tokens, 1, 2)
+    starts = torch.tensor([0, 1, 1, tokens - 1] if compact else [0, 1, tokens - 1], dtype=torch.int32)
+    slots = torch.tensor([3, 2, 1] if compact else [3, 1], dtype=torch.int32)
+    initial = torch.tensor([True, True, False] if compact else [True, False])
+    state = torch.arange(16, dtype=torch.float32).reshape(4, 1, 2, 2)
+    saved = state.clone()
+    metadata = SimpleNamespace(
+        keep_meta=torch.tensor([True, False, True]) if compact else None,
+        cu_seqlens_host=tuple(starts.tolist()),
+        cu_seqlens_kern=(0, 1, tokens - 1) if compact else None,
+        chunk_indices_chunk64_host=(),
+    )
+    calls = []
+
+    def check_scratch(scratch):
+        torch.testing.assert_close(scratch[0], saved[3])
+        assert torch.count_nonzero(scratch[1]) == 0
+        assert scratch.data_ptr() != state.data_ptr()
+
+    def recurrent(q, k, v, gate, beta, scratch, offsets, indices, *args, **kwargs):
+        calls.append("recurrent")
+        assert offsets is starts  # No new tensor or host upload in the layer.
+        assert indices is None and kwargs["beta_is_preprocessed"] is False
+        check_scratch(scratch)
+        scratch.fill_(17)
+        out = q.clone()
+        out[:, tokens - 1 :] = float("nan")
+        return out
+
+    def chunk(q, k, v, gate, beta, scratch, *args, **kwargs):
+        calls.append("chunk")
+        check_scratch(scratch)
+        return q, torch.full_like(scratch, 17)
+
+    monkeypatch.setattr(kda, "run_recurrent_kda", recurrent)
+    monkeypatch.setattr(kda, "run_chunk_kda", chunk)
+    out = kda.chunk_kda(
+        q,
+        q,
+        q,
+        q,
+        torch.zeros(1, tokens, 1),
+        state,
+        slots,
+        initial,
+        metadata,
+        torch.zeros(1),
+        torch.zeros(2),
+        -5,
+        query_start_loc=starts,
+    )
+    use_recurrent = tokens <= 8 and not compact
+    assert calls == ["recurrent" if use_recurrent else "chunk"]
+    torch.testing.assert_close(state[[0, 2]], saved[[0, 2]])
+    assert (state[[3, 1]] == 17).all()
+    torch.testing.assert_close(out[:, : tokens - 1], q[:, : tokens - 1])
+    if use_recurrent:
+        assert torch.count_nonzero(out[:, tokens - 1 :]) == 0
