@@ -699,7 +699,6 @@ def _candidate_cann_metadata_files() -> list[Path]:
                 root.parent / "version.info",
             ]
         )
-    candidates.append(Path("/etc/ascend_install.info"))
 
     unique: list[Path] = []
     seen: set[str] = set()
