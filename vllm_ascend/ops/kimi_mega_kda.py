@@ -24,7 +24,6 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND
 
 MEGA_KDA_NZ_FORMAT = 29
 MEGA_KDA_ABI_POSITIONAL_ARGS = 20
-MEGA_KDA_CACHE_ALIGNMENT_BYTES = 16
 
 
 class MegaKDAFirstVerifyTracker:
@@ -71,142 +70,6 @@ class MegaKDAFirstVerifyTracker:
             self.context[NULL_BLOCK_ID : NULL_BLOCK_ID + 1].fill_(-1)
             self.first[NULL_BLOCK_ID : NULL_BLOCK_ID + 1].fill_(1)
         return torch.where(valid, first, 0)
-
-
-class MegaKDACacheWorkspace:
-    """Bounded staging storage, shared by sequential KDA layers on one worker.
-
-    Allocate during model loading, before KV sizing. Hybrid pages remain owned by
-    the scheduler; only the current batch is gathered into this dense ABI view.
-    Row zero is reserved locally as well as in the scheduler pool.
-    """
-
-    def __init__(self, max_batch, spec_len, conv_shape, recurrent_shape, device):
-        self.max_batch = max_batch
-        self.spec_len = spec_len
-        self.conv = torch.zeros((max_batch + 1, *conv_shape), dtype=torch.bfloat16, device=device)
-        self.recurrent = torch.zeros((max_batch * spec_len + 1, *recurrent_shape), dtype=torch.float32, device=device)
-        self.conv_indices = torch.arange(1, max_batch + 1, dtype=torch.int32, device=device)
-        self.recurrent_indices = torch.arange(1, max_batch * spec_len + 1, dtype=torch.int32, device=device)
-
-
-@dataclass(frozen=True)
-class MegaKDAPagedBatch:
-    conv: torch.Tensor
-    recurrent: torch.Tensor
-    conv_indices: torch.Tensor
-    recurrent_indices: torch.Tensor
-    global_conv_indices: torch.Tensor
-    global_recurrent_indices: torch.Tensor
-
-
-def _mega_cache_layout(state):
-    return (
-        state.device,
-        state.dtype,
-        tuple(state.shape),
-        tuple(state.stride()),
-        state.data_ptr() % MEGA_KDA_CACHE_ALIGNMENT_BYTES,
-    )
-
-
-class MegaKDAPagedCache:
-    """Adapt page-strided V2 caches without changing physical block ownership."""
-
-    def __init__(self, cache, workspace, conv_plan, recurrent_plan):
-        self.workspace = workspace
-        self.conv_plan = conv_plan
-        self.recurrent_plan = recurrent_plan
-        self.layouts = tuple(_mega_cache_layout(state) for state in cache)
-
-    def supports(self, cache, spec_len, batch):
-        return (
-            spec_len == self.workspace.spec_len
-            and batch <= self.workspace.max_batch
-            and tuple(_mega_cache_layout(state) for state in cache) == self.layouts
-        )
-
-    @staticmethod
-    def _indices(indices, num_slots):
-        # Graph padding must neither read nor overwrite the shared null page.
-        valid = (indices >= 0) & (indices != NULL_BLOCK_ID) & (indices < num_slots)
-        return torch.where(valid, indices, -1).to(torch.int32).contiguous()
-
-    def gather(self, cache, conv_indices, recurrent_indices, batch, spec_len):
-        if not self.supports(cache, spec_len, batch):
-            raise RuntimeError("MegaKDA paged cache layout changed; reinitialize the V2 worker")
-        workspace = self.workspace
-        conv = workspace.conv[: batch + 1]
-        recurrent = workspace.recurrent[: batch * spec_len + 1]
-        global_conv = self._indices(conv_indices, cache[0].shape[0])
-        global_recurrent = self._indices(recurrent_indices, cache[1].shape[0])
-        self.conv_plan.gather_into(cache[0].unsqueeze(1), conv[1:].unsqueeze(1), global_conv)
-        self.recurrent_plan.gather_into(cache[1], recurrent[1:], global_recurrent)
-        return MegaKDAPagedBatch(
-            conv,
-            recurrent,
-            workspace.conv_indices[:batch],
-            workspace.recurrent_indices[: batch * spec_len],
-            global_conv,
-            global_recurrent,
-        )
-
-    def scatter(self, cache, batch):
-        # Each live destination is unique; invalid / null rows are skipped by
-        # the prepared kernels, including all graph-padding destinations.
-        self.conv_plan.scatter(cache[0].unsqueeze(1), batch.conv[1:].unsqueeze(1), batch.global_conv_indices)
-        self.recurrent_plan.scatter(cache[1], batch.recurrent[1:], batch.global_recurrent_indices)
-
-
-def initialize_mega_kda_cache(static_forward_context):
-    """Prepare V2's cache adapters after binding and before graph capture.
-
-    Reuse the existing sealed KDA state-copy kernels; preparation touches only
-    disposable rows. Disabled or zero-copy layers need no additional plans.
-    """
-    layers = [
-        layer for layer in static_forward_context.values() if getattr(layer, "_mega_cache_workspace", None) is not None
-    ]
-    if not layers:
-        return
-    for layer in layers:
-        layer._mega_cache_adapter = None
-    # Lazy to keep normal GDN/backend imports free of copy-plan dependencies.
-    from vllm_ascend.ops.kda_state_copy_plan import (
-        KDAStateCopyPlan,
-        StridedKDAFallbackPlan,
-        cache_signature,
-        supports_kda_state_copy,
-    )
-
-    plans = {}
-    bindings = []
-    for layer in layers:
-        cache = layer.kv_cache
-        if len(cache) != 2:
-            continue
-        if all(state.is_contiguous() for state in cache):
-            continue
-        workspace = layer._mega_cache_workspace
-        if tuple(cache[0].shape[1:]) != tuple(workspace.conv.shape[1:]) or tuple(cache[1].shape[1:]) != tuple(
-            workspace.recurrent.shape[1:]
-        ):
-            continue
-        layer_plans = []
-        for state, limit in (
-            (cache[0].unsqueeze(1), workspace.max_batch),
-            (cache[1], workspace.max_batch * workspace.spec_len),
-        ):
-            plan_type = KDAStateCopyPlan if supports_kda_state_copy(state) else StridedKDAFallbackPlan
-            key = (plan_type, cache_signature(state), limit)
-            if key not in plans:
-                plans[key] = plan_type.prepare(state, limit)
-            layer_plans.append(plans[key])
-        bindings.append((layer, MegaKDAPagedCache(cache, workspace, *layer_plans)))
-    for plan in plans.values():
-        plan.seal()
-    for layer, adapter in bindings:
-        layer._mega_cache_adapter = adapter
 
 
 def _as_int32_contiguous(tensor: torch.Tensor) -> torch.Tensor:
@@ -304,6 +167,13 @@ def run_mega_recurrent_kda(
     ``hidden_states`` is ``[batch, spec_len, hidden]``.  The return value is
     the partial (pre-TP-reduction) ``[batch * spec_len, hidden]`` output with
     the output projection already applied.
+
+    Conv/SSM tensors are the runner-owned views, including their original
+    strides and storage offsets; block IDs retain scheduler pool identity.
+    The operator must address those views correctly and skip NULL_BLOCK_ID.
+    No cache staging, layout conversion or retry after mutation is performed.
+    A future fused ReplaySSM export belongs at this boundary once its state
+    and metadata ABI is defined; the current export still uses snapshots.
     """
     output = operator(
         hidden_states,

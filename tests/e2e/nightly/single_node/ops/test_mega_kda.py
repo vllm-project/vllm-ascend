@@ -18,8 +18,6 @@ from torch import nn
 from vllm_ascend.ops.kda import run_chunk_kda
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 from vllm_ascend.ops.kimi_mega_kda import (
-    MegaKDACacheWorkspace,
-    initialize_mega_kda_cache,
     load_mega_kda_operator,
     run_mega_recurrent_kda,
 )
@@ -212,9 +210,10 @@ def test_mega_kda_output_and_cache_lifecycle(batch, spec_len, cache_spec_len, re
 
 
 @pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("layout", ["contiguous", "page_strided"])
 @torch.inference_mode()
-def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
-    """Real sealed copy kernels + Mega ABI on V2 page-strided shared storage.
+def test_mega_kda_v2_original_cache_graph_lifecycle(capture, layout, record_property):
+    """Real Mega ABI receives the original cache, with no adapter or copies.
 
     Graph replay changes indices, acceptance, input and padding in place.
     CPU contracts separately exercise V2's metadata builder and planner;
@@ -246,31 +245,36 @@ def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
         reference_cache[1].shape,
         (page_bytes // 4, *reference_cache[1].stride()[1:]),
     )
+    if layout == "contiguous":
+        # Disjoint dense arrays in the same disposable allocation. This
+        # controls for an installed binary that only accepts dense state.
+        conv = raw[: num_slots * conv_bytes].view(torch.bfloat16).view_as(reference_cache[0])
+        recurrent = raw[num_slots * conv_bytes : num_slots * (conv_bytes + recurrent_bytes)]
+        recurrent = recurrent.view(torch.float32).view_as(reference_cache[1])
     layer.kv_cache = (conv, recurrent)
-    layer._mega_cache_workspace = MegaKDACacheWorkspace(batch, spec_len, conv_shape, recurrent_shape, conv.device)
-    initialize_mega_kda_cache({"kda": layer})
-    adapter = layer._mega_cache_adapter
-    assert adapter is not None
+    original_cache = layer.kv_cache
+    original_layouts = [(t.data_ptr(), t.stride(), t.storage_offset()) for t in original_cache]
     request_indices = torch.arange(1, num_slots, device="npu", dtype=torch.int32).reshape(batch, spec_len)
     _prefill(layer, batch, reference_cache, request_indices[:, 0])
     for target, source in zip(layer.kv_cache, reference_cache):
         target.copy_(source)
     initial_backing = backing.clone()
-    # Capture/warmup only touches staging: all physical destinations are NULL.
+    # All physical destinations are NULL during capture/warmup. The external
+    # operator must preserve that sentinel and the shared page guards.
     indices = torch.zeros_like(request_indices)
+    conv_indices = torch.zeros(batch, device="npu", dtype=torch.int32)
     hidden = torch.zeros(batch, spec_len, HIDDEN_SIZE, device="npu", dtype=torch.bfloat16)
     accepted = torch.ones(batch, device="npu", dtype=torch.int32)
     conv_accepted = torch.full_like(accepted, spec_len)
 
     def fused():
-        packed = adapter.gather(layer.kv_cache, indices[:, 0], indices.flatten(), batch, spec_len)
         output = run_mega_recurrent_kda(
             hidden,
             weights,
-            packed.conv,
-            packed.recurrent,
-            packed.conv_indices,
-            packed.recurrent_indices,
+            conv,
+            recurrent,
+            conv_indices,
+            indices.flatten(),
             conv_accepted,
             accepted,
             layer.A_log,
@@ -280,7 +284,6 @@ def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
             NORM_EPS,
             operator=operator,
         )
-        adapter.scatter(layer.kv_cache, packed)
         return output
 
     fused()
@@ -296,6 +299,7 @@ def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
         live = batch - 1 if round_index == 1 else batch
         indices.copy_(current)
         indices[live:].zero_()
+        conv_indices.copy_(indices[:, 0])
         hidden.normal_()
         accepted.copy_(1 + torch.arange(batch, device="npu", dtype=torch.int32) % spec_len)
         if round_index == 0:
@@ -306,7 +310,7 @@ def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
             layer, hidden[:live].reshape(-1, HIDDEN_SIZE), reference_cache, current[:live], accepted[:live]
         )
         if round_index == 2:
-            # A native round between graph replays must leave staged state fresh.
+            # A native round between replays must update the very same cache.
             actual = _baseline_step(layer, hidden.reshape(-1, HIDDEN_SIZE), layer.kv_cache, current, accepted)
         elif capture:
             graph.replay()
@@ -321,13 +325,19 @@ def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
         # omitted this round, page guards, null slot and both backing guards.
         untouched = torch.ones_like(backing, dtype=torch.bool)
         for slot in current[:live, 0].cpu().tolist():
-            start = guard_bytes + slot * page_bytes
+            start = guard_bytes + slot * (page_bytes if layout == "page_strided" else conv_bytes)
             untouched[start : start + conv_bytes] = False
         for slot in current[:live].flatten().cpu().tolist():
-            start = guard_bytes + slot * page_bytes + conv_bytes
+            start = guard_bytes + (
+                slot * page_bytes + conv_bytes
+                if layout == "page_strided"
+                else num_slots * conv_bytes + slot * recurrent_bytes
+            )
             untouched[start : start + recurrent_bytes] = False
         torch.testing.assert_close(backing[untouched], before[untouched], rtol=0, atol=0)
-    record_property("v2_cache_layout", "shared-page-strided")
+        assert layer.kv_cache is original_cache
+        assert [(t.data_ptr(), t.stride(), t.storage_offset()) for t in original_cache] == original_layouts
+    record_property("v2_cache_layout", layout)
     record_property("graph_replay", capture)
 
     def native():
@@ -341,7 +351,7 @@ def test_mega_kda_v2_paged_cache_graph_lifecycle(capture, record_property):
             native()
     for name, operation in (
         ("v2_native", native_graph.replay if capture else native),
-        ("v2_mega_with_page_copies", graph.replay if capture else fused),
+        ("v2_mega_direct_cache", graph.replay if capture else fused),
     ):
         for _ in range(BENCHMARK_WARMUP_ROUNDS):
             operation()

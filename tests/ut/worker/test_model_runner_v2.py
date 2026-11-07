@@ -1197,7 +1197,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         patch("vllm_ascend.worker.v2.model_runner.uses_a5_packed_cache", return_value=a5),
         patch("vllm_ascend.worker.v2.model_runner.TargetDeviceMetadata", return_value="metadata") as metadata_cls,
         patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
-        patch("vllm_ascend.ops.kimi_mega_kda.initialize_mega_kda_cache") as prepare_mega,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch.object(NPUModelRunner, "_can_skip_spec_cpu_length_sync", return_value=False) as can_skip_sync,
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
@@ -1210,7 +1209,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    prepare_mega.assert_called_once_with(runner.compilation_config.static_forward_context)
     can_skip_sync.assert_called_once_with()
     assert runner._skip_spec_cpu_length_sync is False
     assert runner.model_state.device_metadata == (
@@ -1269,7 +1267,6 @@ def test_initialize_kv_cache_forwards_allocation_context():
 
     with (
         patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
-        patch("vllm_ascend.ops.kimi_mega_kda.initialize_mega_kda_cache") as prepare_mega,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch.object(NPUModelRunner, "_can_skip_spec_cpu_length_sync", return_value=False),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
@@ -1281,7 +1278,6 @@ def test_initialize_kv_cache_forwards_allocation_context():
         runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    prepare_mega.assert_called_once_with(runner.compilation_config.static_forward_context)
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 

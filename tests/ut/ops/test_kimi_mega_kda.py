@@ -60,7 +60,6 @@ def runtime():
         "torch_npu": SimpleNamespace(npu_format_cast=lambda x, fmt: x),
         "ACL_FORMAT_FRACTAL_ND": 2,
         "MEGA_KDA_ABI_POSITIONAL_ARGS": 20,
-        "MEGA_KDA_CACHE_ALIGNMENT_BYTES": 16,
         "NULL_BLOCK_ID": 0,
     }
     _definitions(
@@ -68,10 +67,6 @@ def runtime():
         {
             "MegaKDAWeights",
             "MegaKDAFirstVerifyTracker",
-            "MegaKDACacheWorkspace",
-            "MegaKDAPagedBatch",
-            "MegaKDAPagedCache",
-            "_mega_cache_layout",
             "load_mega_kda_operator",
             "_as_int32_contiguous",
             "ensure_mega_kda_bf16",
@@ -89,10 +84,10 @@ def runtime():
         CUDAGraphMode=SimpleNamespace(NONE="none"),
         get_forward_context=MagicMock(),
         eager_break_during_capture=lambda f: f,
+        is_breakable_cudagraph_enabled=lambda: False,
         logger=MagicMock(),
         _PACKED_CONV_WEIGHT_NAME="ascend_conv1d_weight",
         _MEGA_KDA_MAX_BATCH_MULTIPLIER=32,
-        _MEGA_KDA_CACHE_ALIGNMENT_BYTES=16,
         MEGA_KDA_NZ_FORMAT=29,
         tensor_model_parallel_all_reduce=MagicMock(side_effect=lambda x: x + 1),
         wait_for_kv_layer_from_connector=MagicMock(),
@@ -358,8 +353,14 @@ def test_compiler_boundary_resolves_current_layer_and_metadata(runtime):
     runtime["get_forward_context"].assert_not_called()
 
 
-def test_torch_compile_does_not_freeze_profile_time_routing(runtime):
-    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda_with_output", "_kimi_kda_with_output_fake"}, runtime)
+@pytest.mark.parametrize("breakable", [False, True])
+def test_torch_compile_does_not_freeze_profile_time_routing(runtime, breakable):
+    _definitions(
+        "vllm_ascend/ops/kimi_kda.py",
+        {"_kimi_kda", "_kimi_kda_fake", "_kimi_kda_with_output", "_kimi_kda_with_output_fake"},
+        runtime,
+    )
+    runtime["is_breakable_cudagraph_enabled"] = lambda: breakable
     # Register the production schema with CPU dispatch for this isolated test.
     # This exercises real Dynamo/FakeTensor without pretending to execute NPU.
     library = torch.library.Library("vllm", "FRAGMENT")
@@ -368,22 +369,32 @@ def test_torch_compile_does_not_freeze_profile_time_routing(runtime):
     )
     library.impl("ascend_kimi_kda_with_output", runtime["_kimi_kda_with_output"], "CPU")
     torch.library.register_fake("vllm::ascend_kimi_kda_with_output", runtime["_kimi_kda_with_output_fake"], lib=library)
+    library.define(
+        "ascend_kimi_kda(Tensor hidden_states, Tensor positions, str layer_name, SymInt output_rows) -> Tensor"
+    )
+    library.impl("ascend_kimi_kda", runtime["_kimi_kda"], "CPU")
+    torch.library.register_fake("vllm::ascend_kimi_kda", runtime["_kimi_kda_fake"], lib=library)
     layer = _attention(runtime)
     _, hidden = _plan(runtime, layer, _metadata())
     context = runtime["get_forward_context"].return_value
     context.no_compile_layers = {layer.prefix: layer}
     layer._mega_operator.return_value = torch.zeros_like(hidden)
-    compiled = torch.compile(layer, backend="eager", fullgraph=True)
-    context.attn_metadata = None
-    torch.testing.assert_close(compiled(hidden, torch.arange(32)), layer._forward_default.return_value.to(hidden.dtype))
-    context.attn_metadata = {layer.prefix: _metadata()}
-    torch.testing.assert_close(compiled(hidden, torch.arange(32)), torch.ones_like(hidden))
-    assert layer._mega_operator.call_count == 1
+    layer._forward_default.return_value = layer._forward_default.return_value.to(hidden.dtype)
+    try:
+        compiled = torch.compile(layer, backend="eager", fullgraph=True)
+        context.attn_metadata = None
+        torch.testing.assert_close(compiled(hidden, torch.arange(32)), layer._forward_default.return_value)
+        context.attn_metadata = {layer.prefix: _metadata()}
+        torch.testing.assert_close(compiled(hidden, torch.arange(32)), torch.ones_like(hidden))
+        assert layer._mega_operator.call_count == 1
+    finally:
+        torch._dynamo.reset()
+        library._destroy()
 
 
 @pytest.mark.parametrize("conv_size", [3, 4, 5])
 @pytest.mark.parametrize("spec_len", [1, 4, 8])
-def test_cache_capacity_and_page_gaps_are_checked_before_launch(runtime, conv_size, spec_len):
+def test_cache_capacity_is_checked_without_rejecting_original_page_strides(runtime, conv_size, spec_len):
     layer = _attention(runtime, spec_len=spec_len)
     layer.conv_size = conv_size
     required = conv_size + spec_len - 2
@@ -392,10 +403,9 @@ def test_cache_capacity_and_page_gaps_are_checked_before_launch(runtime, conv_si
     assert not layer._mega_cache_supported(spec_len)
     layer.kv_cache = (torch.zeros(33, required, 24, dtype=torch.bfloat16), recurrent)
     assert layer._mega_cache_supported(spec_len)
-    # Same logical payload, different physical page stride: external ABI is
-    # not allowed to reinterpret the backing allocation as dense pages.
+    # Pass the runner's original page strides to the operator, as in the PR.
     layer.kv_cache = (torch.zeros(66, required, 24, dtype=torch.bfloat16)[::2], recurrent)
-    assert not layer._mega_cache_supported(spec_len)
+    assert layer._mega_cache_supported(spec_len)
 
 
 @pytest.mark.parametrize("reduction", ["all_reduce", "outer_reduce_scatter", "custom_reduce_scatter", "tp1"])
@@ -588,7 +598,7 @@ def test_contiguous_cache_slices_keep_their_original_storage(runtime):
 
 
 @pytest.mark.parametrize("operand", [0, 1])
-def test_unaligned_contiguous_cache_falls_back_before_mutation(runtime, operand):
+def test_cache_storage_offsets_are_not_rewritten_or_gated(runtime, operand):
     layer = _attention(runtime)
     cache = list(layer.kv_cache)
     state = cache[operand]
@@ -596,14 +606,14 @@ def test_unaligned_contiguous_cache_falls_back_before_mutation(runtime, operand)
     cache[operand] = backing[1:].view_as(state)
     assert cache[operand].is_contiguous() and cache[operand].data_ptr() % 16 != 0
     layer.kv_cache = tuple(cache)
-    assert not layer._mega_cache_supported(8)
+    assert layer._mega_cache_supported(8)
     plan, _ = _plan(runtime, layer, _metadata())
-    assert plan is None
+    assert plan is not None
     layer._mega_operator.assert_not_called()
 
 
 @pytest.mark.parametrize("graph_batch", [2, 4])
-def test_builder_uses_bound_capacity_and_resets_folded_prefill(runtime, graph_batch):
+def test_builder_uses_bound_capacity_and_resets_folded_prefill(runtime, graph_batch, monkeypatch):
     class BaseBuilder:
         def __init__(self, spec, names, config, device):
             self.vllm_config = config
@@ -611,9 +621,14 @@ def test_builder_uses_bound_capacity_and_resets_folded_prefill(runtime, graph_ba
             self.spec_sequence_indices = torch.arange(graph_batch)
             self.use_full_cuda_graph = graph_batch > 2
             self.use_spec_decode = True
+            self.num_spec = 7
 
         def build(self, *args):
-            return SimpleNamespace(num_spec_decodes=2, spec_state_indices_tensor=torch.zeros(graph_batch, 8))
+            return SimpleNamespace(
+                num_spec_decodes=2,
+                spec_state_indices_tensor=torch.zeros(graph_batch, 8),
+                num_accepted_tokens=torch.full((graph_batch,), 2, dtype=torch.int32),
+            )
 
     runtime.update(
         AscendGDNHostMetadataBuilder=BaseBuilder,
@@ -649,6 +664,7 @@ def test_builder_uses_bound_capacity_and_resets_folded_prefill(runtime, graph_ba
     common.unpadded = lambda *args: common
     common.compute_num_computed_tokens = lambda: common.seq_lens - torch.diff(common.query_start_loc)
     drafts = torch.tensor([7, 7])
+    monkeypatch.setattr(torch, "full_like", MagicMock(side_effect=AssertionError("per-step constant Fill")))
     metadata = builder.build(0, common, None, drafts)
     assert metadata.mega_query_lens == (8, 8)
     assert not metadata.mega_has_folded_prefills
@@ -735,10 +751,9 @@ def test_normal_decode_uses_one_accepted_token(runtime):
 
 @pytest.mark.parametrize("mega", [False, True])
 @pytest.mark.parametrize("padded", [False, True])
-def test_runner_binds_dense_cache_only_for_eligible_layers(mega, padded):
+def test_mega_does_not_change_v1_cache_layout(mega, padded):
     # Execute the production Mamba allocation branch without importing a worker.
-    # The dense view must remain inside the existing allocation and preserve
-    # the generic page layout whenever the layer did not opt in.
+    # Mega must never change the generic layout or raw page ownership.
     path = "vllm_ascend/worker/model_runner_v1.py"
     tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
     branch = next(
@@ -794,21 +809,11 @@ def test_runner_binds_dense_cache_only_for_eligible_layers(mega, padded):
     )
     exec(compile(module, path, "exec"), ns)
     result = ns["kv_caches"]["target"]
-    if padded or not mega:
-        assert result is strided_result
-        runner._adjust_kv_layout.assert_called_once()
-    else:
-        runner._adjust_kv_layout.assert_not_called()
-        assert [tuple(t.shape) for t in result] == [(4, 3, 24), (4, 2, 4, 4)]
-        assert all(t.is_contiguous() for t in result)
-        assert result[0].untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
-        assert result[1].storage_offset() * result[1].element_size() == result[0].numel() * 2
-        result[1].fill_(1)
-        assert result[0].count_nonzero() == 0
+    assert result is strided_result
+    runner._adjust_kv_layout.assert_called_once()
 
 
-@pytest.mark.parametrize("dense", [False, True])
-def test_v2_dense_cache_views_are_opt_in_and_stay_in_original_budget(runtime, dense):
+def test_v2_cache_views_always_preserve_physical_pages(runtime):
     fallback = MagicMock(return_value="page-strided")
     runtime.update(
         math=math,
@@ -820,18 +825,9 @@ def test_v2_dense_cache_views_are_opt_in_and_stay_in_original_budget(runtime, de
     spec = SimpleNamespace(
         page_size_padded=32, page_size_bytes=16, shapes=((4,), (2,)), dtypes=(torch.bfloat16, torch.float32)
     )
-    result = runtime["_reshape_mamba_kv_cache"](raw, spec, dense=dense)
-    if dense:
-        fallback.assert_not_called()
-        assert [t.shape for t in result] == [torch.Size([3, 4]), torch.Size([3, 2])]
-        assert all(t.is_contiguous() for t in result)
-        assert result[1].data_ptr() == raw.data_ptr() + 24
-        result[1].fill_(1)
-        assert result[0].count_nonzero() == 0
-        assert raw[48:].count_nonzero() == 0
-    else:
-        fallback.assert_called_once()
-        assert result == "page-strided"
+    result = runtime["_reshape_mamba_kv_cache"](raw, spec)
+    fallback.assert_called_once_with(raw, [(3, 4), (3, 2)], list(spec.dtypes), 32)
+    assert result == "page-strided"
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -883,6 +879,39 @@ def test_v2_shared_backing_never_changes_page_layout(shared, separate_view):
         kv_caches={},
         logger=MagicMock(),
     )
-    _definitions(path, {"_is_private_mamba_backing"}, ns)
     exec(compile(module, path, "exec"), ns)
-    reshape.assert_called_once_with(raw, spec, dense=not shared)
+    reshape.assert_called_once_with(raw, spec)
+
+
+def test_non_breakable_forward_returns_operator_storage_without_output_copy(runtime):
+    layer = _attention(runtime)
+    _, hidden = _plan(runtime, layer, _metadata())
+    layer.tp_size = 1
+    result = torch.randn_like(hidden)
+    layer._mega_operator.return_value = result
+    layer._allocate_mega_output = MagicMock(side_effect=AssertionError("redundant output allocation"))
+    layer._forward_mega_kda = MagicMock(side_effect=AssertionError("redundant output copy"))
+    assert layer.forward(hidden, torch.arange(32)).data_ptr() == result.data_ptr()
+
+
+def test_functional_fake_requires_only_shape_and_no_forward_context(runtime):
+    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda_fake"}, runtime)
+    hidden = torch.empty(32, 32, dtype=torch.bfloat16)
+    result = runtime["_kimi_kda_fake"](hidden, torch.arange(32), "target", 16)
+    assert result.shape == (16, 32) and result.dtype == hidden.dtype
+    runtime["get_forward_context"].assert_not_called()
+
+
+def test_planner_reuses_group_conv_acceptance_without_per_layer_device_ops(runtime, monkeypatch):
+    layer = _attention(runtime)
+    metadata = _metadata()
+    metadata.mega_conv_accepted_tokens = torch.tensor([8, 2, 8, 2], dtype=torch.int32)
+    hidden = torch.zeros(32, 32, dtype=torch.bfloat16)
+    runtime["get_forward_context"].return_value = SimpleNamespace(attn_metadata={layer.prefix: metadata})
+    monkeypatch.setattr(torch, "where", MagicMock(side_effect=AssertionError("per-layer Select")))
+    monkeypatch.setattr(torch, "full_like", MagicMock(side_effect=AssertionError("per-layer Fill")))
+    for _ in range(2):
+        plan = layer._plan_mega_kda(hidden)
+        assert plan.conv_num_accepted_tokens.data_ptr() == metadata.mega_conv_accepted_tokens.data_ptr()
+    metadata.mega_conv_accepted_tokens = metadata.mega_conv_accepted_tokens[:3]
+    assert layer._plan_mega_kda(hidden) is None

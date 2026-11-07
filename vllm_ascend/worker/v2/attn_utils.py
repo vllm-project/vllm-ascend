@@ -1501,23 +1501,9 @@ def allocate_kv_cache_main(
     )
 
 
-def _is_private_mamba_backing(layer_name: str, raw_cache: torch.Tensor, raw_tensors: dict[str, Any]) -> bool:
-    """Distinct tensor views can still overlay the V2 hybrid page pool."""
-    storage_ptr = raw_cache.untyped_storage().data_ptr()
-    return not any(
-        tensor.untyped_storage().data_ptr() == storage_ptr
-        for name, backing in raw_tensors.items()
-        if name != layer_name
-        for tensor in (backing if isinstance(backing, (tuple, list)) else (backing,))
-        if isinstance(tensor, torch.Tensor)
-    )
-
-
 def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
-    *,
-    dense: bool = False,
 ) -> list[torch.Tensor]:
     """Create logical state views over padded physical hybrid pages."""
     physical_page_size = (
@@ -1527,16 +1513,6 @@ def _reshape_mamba_kv_cache(
         raise ValueError("Mamba cache allocation is not a whole number of physical pages.")
     num_blocks = raw_cache.numel() // physical_page_size
     cache_shapes = [(num_blocks, *shape) for shape in kv_cache_spec.shapes]
-    if dense:
-        # MegaKDA has no page-stride operand. Only its private layer backing
-        # may use dense arrays; keep both states inside the existing budget.
-        states = []
-        offset = 0
-        for shape, dtype in zip(cache_shapes, kv_cache_spec.dtypes):
-            size = math.prod(shape) * get_dtype_size(dtype)
-            states.append(raw_cache[offset : offset + size].view(dtype).view(shape))
-            offset += size
-        return states
     return _adjust_dsv4_kv_layout(
         raw_cache,
         cache_shapes,
@@ -1776,11 +1752,7 @@ def _reshape_kv_cache_v2(
             if isinstance(kv_cache_spec, MambaSpec):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")
-                layer = vllm_config.compilation_config.static_forward_context.get(layer_name)
-                dense = bool(getattr(layer, "_requires_dense_kda_cache", False)) and _is_private_mamba_backing(
-                    layer_name, raw_cache, kv_cache_raw_tensors
-                )
-                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec, dense=dense)
+                mamba_cache = _reshape_mamba_kv_cache(raw_cache, kv_cache_spec)
                 if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
                     raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
                 kv_caches[layer_name] = mamba_cache

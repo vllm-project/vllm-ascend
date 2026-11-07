@@ -6069,22 +6069,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_raw_tensors.items()
                         )
                     )
-                    # The opt-in MegaKDA ABI indexes dense state arrays. Bind
-                    # dense views once inside this layer's existing allocation;
-                    # state-copy plans derive their strides from these views.
-                    # Shared physical pages must retain the generic layout.
-                    requires_dense_kda_cache = bool(
-                        getattr(
-                            self.compilation_config.static_forward_context.get(layer_name),
-                            "_requires_dense_kda_cache",
-                            False,
-                        )
-                    )
-                    if (
-                        self.hybrid_with_attn_and_mamba
-                        and not uses_same_raw_tensor
-                        and not requires_dense_kda_cache
-                    ):
+                    if self.hybrid_with_attn_and_mamba and not uses_same_raw_tensor:
                         shapes_with_blocks = tuple(
                             (num_blocks, *shape)
                             for shape in current_kv_cache_spec.shapes

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""V2 MegaKDA contracts; real metadata/dispatch code, CPU copy/kernel doubles.
+"""V2 MegaKDA contracts; real metadata/dispatch code, CPU operator doubles.
 
 No vLLM/NPU installation is required. These checks do not replace the real
 NPU cache, graph replay and checkpoint gates documented in the runbook.
@@ -8,11 +8,10 @@ NPU cache, graph replay and checkpoint gates documented in the runbook.
 
 import ast
 import math
-import sys
 from copy import copy
 from dataclasses import dataclass
 from enum import IntEnum
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -57,142 +56,72 @@ def _paged_layer(runtime, batch=4, spec_len=8):
             raw[conv_bytes:].view(torch.float32), recurrent.shape, (page_bytes // 4, *recurrent.stride()[1:])
         ),
     )
-    layer._mega_use_paged_cache = True
-    layer._mega_max_batch = batch
-    assert layer._prepare_mega_weights({})
-    layer._mega_cache_adapter = runtime["MegaKDAPagedCache"](
-        layer.kv_cache, layer._mega_cache_workspace, _CopyPlan(), _CopyPlan()
-    )
     return layer, backing, page_bytes
 
 
-def test_v2_workspace_is_shared_by_layers_and_prepared_before_cache_binding(runtime):
-    layers = [contracts._attention(runtime), contracts._attention(runtime)]
-    workspaces = {}
-    for layer in layers:
-        layer._mega_use_paged_cache = True
-        layer._mega_max_batch = 4
-        assert layer._prepare_mega_weights(workspaces)
-        assert layer._mega_cache_adapter is None
-    assert len(workspaces) == 1
-    assert layers[0]._mega_cache_workspace is layers[1]._mega_cache_workspace
-    workspace = layers[0]._mega_cache_workspace
-    assert workspace.conv.shape == (5, 10, 24)
-    assert workspace.recurrent.shape == (33, 2, 4, 4)
-
-
 @pytest.mark.parametrize("padding", [False, True])
-def test_v2_paged_update_preserves_unscheduled_pages_and_null_slot(runtime, padding):
+def test_v2_passes_original_cache_and_global_indices_without_staging(runtime, padding):
     layer, backing, page_bytes = _paged_layer(runtime)
     metadata = contracts._metadata()
     if padding:
         metadata.num_spec_decodes = 3
         metadata.num_actual_tokens = 24
-        metadata.mega_query_lens = (8, 8, 8)
+        metadata.mega_query_lens = (8,) * 3
         metadata.spec_state_indices_tensor[-1].zero_()
-        metadata.mega_first_verify[-1] = 0
     plan, hidden = contracts._plan(runtime, layer, metadata, rows=32)
     assert plan is not None
+    cache = layer.kv_cache
+    layouts = [(t.data_ptr(), t.stride(), t.storage_offset()) for t in cache]
     before = backing.clone()
-    old_conv, old_state = (state.clone() for state in layer.kv_cache)
+    original_conv, original_state = [t.clone() for t in cache]
 
     def operator(*args):
-        # Distinct dense staging rows, including graph padding. Real and null
-        # scheduler IDs must never be passed straight to these local buffers.
-        assert args[9].is_contiguous() and args[10].is_contiguous()
-        assert args[11].tolist() == [1, 2, 3, 4]
-        assert args[12].tolist() == list(range(1, 33))
-        args[9][1:] += 1
-        args[10][1:] += 2
+        assert args[9] is cache[0] and args[10] is cache[1]
+        assert not args[9].is_contiguous() and not args[10].is_contiguous()
+        assert args[11].tolist() == metadata.spec_state_indices_tensor[:, 0].tolist()
+        assert args[12].tolist() == metadata.spec_state_indices_tensor.flatten().tolist()
+        # This double verifies integration, not the external operator's stride
+        # support. The NPU release gate checks real arithmetic and page guards.
+        for state, indices, increment in ((args[9], args[11], 1), (args[10], args[12], 2)):
+            live = indices[indices > 0].long()
+            state.index_add_(0, live, torch.full_like(state[live], increment))
         return torch.zeros_like(hidden)
 
     layer._mega_operator.side_effect = operator
     layer.forward(hidden, torch.arange(32))
     expected = before.clone()
-    for slot in metadata.spec_state_indices_tensor[:, 0].unique().tolist():
-        if slot:
-            start = 32 + slot * page_bytes
-            payload = old_conv[slot] + 1
-            expected[start : start + payload.numel() * 2] = payload.reshape(-1).view(torch.int8)
-    conv_bytes = old_conv[0].numel() * 2
-    for slot in metadata.spec_state_indices_tensor.unique().tolist():
-        if slot:
-            start = 32 + slot * page_bytes + conv_bytes
-            payload = old_state[slot] + 2
-            expected[start : start + payload.numel() * 4] = payload.reshape(-1).view(torch.int8)
-    # Compare raw bytes, including null block 0, padding, guards and all other
-    # groups' unowned pages; matching logical output alone would miss overlap.
+    conv_bytes = original_conv[0].numel() * 2
+    for source, indices, offset, increment in (
+        (original_conv, metadata.spec_state_indices_tensor[:, 0], 0, 1),
+        (original_state, metadata.spec_state_indices_tensor.flatten(), conv_bytes, 2),
+    ):
+        for slot in indices[indices > 0].tolist():
+            start = 32 + slot * page_bytes + offset
+            payload = (source[slot] + increment).reshape(-1).view(torch.int8)
+            expected[start : start + payload.numel()] = payload
     torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+    assert layer.kv_cache is cache
+    assert [(t.data_ptr(), t.stride(), t.storage_offset()) for t in cache] == layouts
+    assert not hasattr(layer, "_mega_cache_workspace")
+    layer._mega_operator.assert_called_once()
 
 
-def test_v2_operator_failure_does_not_scatter_or_retry(runtime):
+def test_v2_partial_operator_failure_is_not_retried_or_rolled_back(runtime):
     layer, backing, _ = _paged_layer(runtime)
     _, hidden = contracts._plan(runtime, layer, contracts._metadata())
     before = backing.clone()
-    layer._mega_operator.side_effect = RuntimeError("partial staging write")
-    with pytest.raises(RuntimeError, match="partial staging"):
+
+    def operator(*args):
+        assert args[9] is layer.kv_cache[0]
+        args[9][1].fill_(3)
+        raise RuntimeError("partial cache write")
+
+    layer._mega_operator.side_effect = operator
+    with pytest.raises(RuntimeError, match="partial cache write"):
         layer.forward(hidden, torch.arange(32))
-    torch.testing.assert_close(backing, before, rtol=0, atol=0)
+    assert not torch.equal(backing, before)
+    layer._mega_operator.assert_called_once()
     layer._forward_default.assert_not_called()
-
-
-def test_v2_staging_capacity_is_checked_before_any_copy(runtime):
-    layer, backing, _ = _paged_layer(runtime)
-    layer._mega_cache_workspace.max_batch = 2
-    before = backing.clone()
-    plan, hidden = contracts._plan(runtime, layer, contracts._metadata())
-    assert plan is None
-    layer.forward(hidden, torch.arange(32))
-    layer._mega_operator.assert_not_called()
-    layer._forward_default.assert_called_once()
-    torch.testing.assert_close(backing, before, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("fail_seal", [False, True])
-def test_v2_adapter_initialization_prepares_once_and_publishes_only_after_seal(runtime, monkeypatch, fail_seal):
-    layers = [_paged_layer(runtime)[0] for _ in range(2)]
-    before = [[state.clone() for state in layer.kv_cache] for layer in layers]
-    prepared = []
-
-    class Plan(_CopyPlan):
-        @classmethod
-        def prepare(cls, state, limit):
-            plan = cls()
-            plan.limit = limit
-            plan.sealed = False
-            prepared.append(plan)
-            return plan
-
-        def seal(self):
-            assert all(layer._mega_cache_adapter is None for layer in layers)
-            if fail_seal:
-                raise RuntimeError("seal failed")
-            self.sealed = True
-
-    module = ModuleType("vllm_ascend.ops.kda_state_copy_plan")
-    module.KDAStateCopyPlan = module.StridedKDAFallbackPlan = Plan
-    module.supports_kda_state_copy = lambda state: True
-    module.cache_signature = runtime["_mega_cache_layout"]
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    contracts._definitions("vllm_ascend/ops/kimi_mega_kda.py", {"initialize_mega_kda_cache"}, runtime)
-    initialize = runtime["initialize_mega_kda_cache"]
-    context = {str(index): layer for index, layer in enumerate(layers)}
-    if fail_seal:
-        with pytest.raises(RuntimeError, match="seal failed"):
-            initialize(context)
-        assert all(layer._mega_cache_adapter is None for layer in layers)
-    else:
-        initialize(context)
-        assert len(prepared) == 2  # Conv and SSM, deduplicated across layers.
-        assert [plan.limit for plan in prepared] == [4, 32]
-        assert all(plan.sealed for plan in prepared)
-        assert layers[0]._mega_cache_adapter.conv_plan is layers[1]._mega_cache_adapter.conv_plan
-        # A cache rebind may change every address without changing its layout.
-        initialize(context)
-        assert all(layer._mega_cache_adapter.supports(layer.kv_cache, 8, 4) for layer in layers)
-    for layer, states in zip(layers, before):
-        for actual, expected in zip(layer.kv_cache, states):
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("plan_name", ["KDAStateCopyPlan", "StridedKDAFallbackPlan"])
@@ -442,15 +371,24 @@ def test_v2_hybrid_state_to_builder_to_planner_to_operator(runtime, mode, preced
         expected = state.num_accepted_tokens_gpu[batch.idx_mapping].tolist() + [1] * (4 - live)
         assert plan.num_accepted_tokens.tolist() == expected
         assert plan.conv_num_accepted_tokens.tolist() == ([8] * live + [1] * (4 - live) if first else expected)
+        assert plan.conv_num_accepted_tokens.data_ptr() == metadata.mega_conv_accepted_tokens.data_ptr()
+        assert plan.conv_state_block_ids.data_ptr() == metadata.mega_conv_state_block_ids.data_ptr()
+        assert plan.ssm_state_indices.data_ptr() == metadata.mega_ssm_state_indices.data_ptr()
+        assert plan.conv_state_block_ids.is_contiguous() and plan.conv_state_block_ids.dtype == torch.int32
+        torch.testing.assert_close(plan.conv_state_block_ids, metadata.spec_state_indices_tensor[:, 0])
+        torch.testing.assert_close(plan.ssm_state_indices, metadata.spec_state_indices_tensor.flatten())
         layer.forward(hidden, torch.arange(32))
+        args = layer._mega_operator.call_args.args
+        assert args[9] is layer.kv_cache[0] and args[10] is layer.kv_cache[1]
+        assert args[11].data_ptr() == metadata.mega_conv_state_block_ids.data_ptr()
+        assert args[12].data_ptr() == metadata.mega_ssm_state_indices.data_ptr()
         batch.seq_lens[:live] += 1
         batch.seq_lens_np[:live] += 1
     assert layer._mega_operator.call_count == 2
     layer._forward_default.assert_not_called()
-    if preceding_step == "capture":
-        assert builder._mega_tracker.context.eq(-1).all()  # Dummy NULL rows only.
-    else:
-        assert builder._mega_tracker is None  # Real V2 steps use request history.
+    # Capture supplies a synthetic first-verify flag; real V2 steps use
+    # request history. Neither should instantiate the V1 physical-slot tracker.
+    assert builder._mega_tracker is None
 
 
 def test_v2_request_index_zero_and_reuse_reset_independently(runtime):

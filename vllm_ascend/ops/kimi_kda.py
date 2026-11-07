@@ -15,7 +15,7 @@ import torch_npu
 from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture, is_breakable_cudagraph_enabled
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -43,7 +43,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendMegaKDAHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kimi_mega_kda import (
-    MegaKDACacheWorkspace,
     MegaKDAWeights,
     ensure_mega_kda_bf16,
     ensure_mega_kda_nd,
@@ -63,7 +62,6 @@ from vllm_ascend.utils import npu_stream_switch
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _MEGA_KDA_MAX_BATCH_MULTIPLIER = 32
-_MEGA_KDA_CACHE_ALIGNMENT_BYTES = 16
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
@@ -231,6 +229,31 @@ def _kimi_kda_with_output_fake(
     return
 
 
+def _kimi_kda(hidden_states: torch.Tensor, positions: torch.Tensor, layer_name: str, output_rows: int) -> torch.Tensor:
+    # The ordinary FULL/eager path can return the external operator's fresh
+    # result directly. Only breakable segments need a caller-owned buffer.
+    layer = get_forward_context().no_compile_layers[layer_name]
+    plan = layer._plan_mega_kda(hidden_states)
+    if plan is None:
+        return layer._forward_default(hidden_states, positions)
+    return layer._execute_mega_kda(hidden_states, positions, plan)
+
+
+def _kimi_kda_fake(
+    hidden_states: torch.Tensor, positions: torch.Tensor, layer_name: str, output_rows: int
+) -> torch.Tensor:
+    return hidden_states.new_empty((output_rows, hidden_states.shape[-1]))
+
+
+direct_register_custom_op(
+    op_name="ascend_kimi_kda",
+    op_func=_kimi_kda,
+    mutates_args=[],
+    fake_impl=_kimi_kda_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
 direct_register_custom_op(
     op_name="ascend_kimi_kda_with_output",
     op_func=_kimi_kda_with_output,
@@ -297,18 +320,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # the production checkpoint). Preserve the checkpoint contract used
         # by the validated v0.26 implementation.
         self.o_norm.eps = config.rms_norm_eps
-        self._requires_dense_kda_cache = False
         self._mega_weights: MegaKDAWeights | None = None
         self._mega_weight_signature: tuple | None = None
-        self._mega_cache_workspace = None
-        self._mega_cache_adapter = None
-        self._mega_use_paged_cache = self.use_mega_kda and bool(getattr(vllm_config, "use_v2_model_runner", False))
-        if self._mega_use_paged_cache:
-            max_seqs = vllm_config.scheduler_config.max_num_seqs
-            self._mega_max_batch = min(
-                ((max_seqs + self.tp_size - 1) // self.tp_size) * self.tp_size,
-                self.tp_size * _MEGA_KDA_MAX_BATCH_MULTIPLIER,
-            )
         # vLLM keeps the checkpoint-compatible FP32 [3C, 1, W] weight, while
         # fla_npu causal_conv1d consumes an activation-dtype [W, 3C]
         # tensor. Materialize that kernel layout once after weight loading.
@@ -351,11 +364,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if custom_op is not None and type(custom_op) is not KimiOProjMMReduceScatterOp:
                 return self._forward_default(hidden_states, positions)
             if torch.compiler.is_compiling():
+                if not is_breakable_cudagraph_enabled():
+                    rows = hidden_states.shape[0]
+                    if type(custom_op) is KimiOProjMMReduceScatterOp:
+                        rows = (rows + self.tp_size - 1) // self.tp_size
+                    return torch.ops.vllm.ascend_kimi_kda(hidden_states, positions, self.prefix, rows)
                 output = self._allocate_mega_output(hidden_states)
                 torch.ops.vllm.ascend_kimi_kda_with_output(hidden_states, positions, output, self.prefix)
                 return output
             plan = self._plan_mega_kda(hidden_states)
             if plan is not None:
+                if not is_breakable_cudagraph_enabled():
+                    return self._execute_mega_kda(hidden_states, positions, plan)
                 output = self._allocate_mega_output(hidden_states)
                 self._forward_mega_kda(hidden_states, positions, plan, output)
                 return output
@@ -455,29 +475,41 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             return None
         if accepted.numel() < batch:
             return None
-        if not self._mega_cache_supported(spec_len, batch):
+        if not self._mega_cache_supported(spec_len):
             logger.warning_once(
                 "MegaKDA requires BF16 Conv / FP32 recurrent caches with sufficient verify capacity "
-                "and a dense layout or a prepared V2 page adapter; "
                 "using the existing KDA path for %s. Cache layouts: %s",
                 self.prefix,
                 [(tuple(state.shape), state.stride(), state.dtype) for state in self.kv_cache],
             )
             return None
 
-        accepted = accepted[:batch].to(torch.int32)
+        accepted = accepted[:batch]
         first_verify = getattr(metadata, "mega_first_verify", None)
         if is_spec:
+            # V2 tracks request identity across physical block migration.
+            # Without this flag the first round could read the wrong Conv tail.
             if first_verify is None or first_verify.numel() != batch:
                 return None
-            conv_accepted = torch.where(
-                first_verify[:batch] > 0,
-                torch.full_like(accepted, spec_len),
-                accepted,
-            )
+            conv_accepted = getattr(metadata, "mega_conv_accepted_tokens", None)
+            if conv_accepted is None:
+                conv_accepted = torch.where(
+                    first_verify[:batch] > 0,
+                    torch.full_like(accepted, spec_len),
+                    accepted,
+                )
+            elif conv_accepted.numel() < batch:
+                return None
+            else:
+                conv_accepted = conv_accepted[:batch]
         else:
             conv_accepted = accepted
-        if state_indices.ndim == 1:
+        conv_state_block_ids = getattr(metadata, "mega_conv_state_block_ids", None)
+        ssm_state_indices = getattr(metadata, "mega_ssm_state_indices", None)
+        if conv_state_block_ids is not None and ssm_state_indices is not None:
+            conv_state_block_ids = conv_state_block_ids[:batch]
+            ssm_state_indices = ssm_state_indices[: batch * spec_len]
+        elif state_indices.ndim == 1:
             conv_state_block_ids = state_indices[:batch]
             ssm_state_indices = state_indices[:batch]
         else:
@@ -492,8 +524,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             num_accepted_tokens=accepted,
         )
 
-    def _mega_cache_supported(self, spec_len: int, batch: int = 1) -> bool:
-        """The external ABI does not advertise arbitrary cache-page strides."""
+    def _mega_cache_supported(self, spec_len: int) -> bool:
+        """Validate payload shapes/dtypes without changing runner-owned views.
+
+        The external operator must honor the original tensors' actual strides.
+        This adapter does not make a dense copy or reinterpret their storage.
+        """
         if len(self.kv_cache) != 2:
             return False
         conv, recurrent = self.kv_cache
@@ -505,15 +541,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             and recurrent.ndim == 4
             and recurrent.shape[1:] == (self.local_num_heads, self.head_dim, self.head_dim)
             and recurrent.dtype == torch.float32
-            and (
-                (conv.is_contiguous() and recurrent.is_contiguous())
-                or (
-                    self._mega_cache_adapter is not None
-                    and self._mega_cache_adapter.supports(self.kv_cache, spec_len, batch)
-                )
-            )
-            and conv.data_ptr() % _MEGA_KDA_CACHE_ALIGNMENT_BYTES == 0
-            and recurrent.data_ptr() % _MEGA_KDA_CACHE_ALIGNMENT_BYTES == 0
         )
 
     def _build_mega_weights(self) -> MegaKDAWeights:
@@ -559,13 +586,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             conv=conv.view(self.conv_size, 3, self.local_num_heads, self.head_dim).permute(1, 2, 0, 3).contiguous(),
         )
 
-    def _prepare_mega_weights(self, workspaces: dict | None = None) -> bool:
+    def _prepare_mega_weights(self) -> bool:
         """Called by the model post-load hook after *all* quant finalizers."""
         self._mega_weights = None
         self._mega_weight_signature = None
-        self._requires_dense_kda_cache = False
-        self._mega_cache_workspace = None
-        self._mega_cache_adapter = None
         if not self.use_mega_kda:
             return False
         layers = (self.in_proj_qkvgfab, self.o_proj)
@@ -592,21 +616,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         ):
             return False
         self._mega_weights = self._build_mega_weights()
-        if getattr(self, "_mega_use_paged_cache", False):
-            # Account for V2's bounded ABI workspace before memory profiling.
-            # Sequential KDA layers reuse it, preserving the shared page pool.
-            spec_len = self.num_spec + 1
-            conv_shape = (self.conv_size + spec_len - 2, 3 * self.local_projection_size)
-            recurrent_shape = (self.local_num_heads, self.head_dim, self.head_dim)
-            key = (self.in_proj_qkvgfab.weight.device, self._mega_max_batch, spec_len, conv_shape, recurrent_shape)
-            if workspaces is None:
-                workspaces = {}
-            if key not in workspaces:
-                workspaces[key] = MegaKDACacheWorkspace(
-                    self._mega_max_batch, spec_len, conv_shape, recurrent_shape, self.in_proj_qkvgfab.weight.device
-                )
-            self._mega_cache_workspace = workspaces[key]
-        self._requires_dense_kda_cache = True
         self._mega_weight_signature = self._current_mega_weight_signature()
         logger.info_once("MegaKDA BF16/NZ operands prepared after loading for %s", self.prefix)
         return True
@@ -672,22 +681,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
         wait_for_kv_layer_from_connector(self.prefix)
         record_attention_compute_start()
-        paged_batch = None
-        conv_indices = plan.conv_state_block_ids
-        recurrent_indices = plan.ssm_state_indices
-        if not (conv_state.is_contiguous() and recurrent_state.is_contiguous()):
-            paged_batch = self._mega_cache_adapter.gather(
-                self.kv_cache, conv_indices, recurrent_indices, plan.batch, plan.spec_len
-            )
-            conv_state, recurrent_state = paged_batch.conv, paged_batch.recurrent
-            conv_indices, recurrent_indices = paged_batch.conv_indices, paged_batch.recurrent_indices
+        # Pass the original cache views and scheduler block IDs to the operator.
         output = run_mega_recurrent_kda(
             hidden_states=hidden_states[: plan.batch * plan.spec_len].reshape(plan.batch, plan.spec_len, -1),
             weights=self._mega_weights,
             conv_state=conv_state,
             recurrent_state=recurrent_state,
-            conv_state_block_ids=conv_indices,
-            ssm_state_indices=recurrent_indices,
+            conv_state_block_ids=plan.conv_state_block_ids,
+            ssm_state_indices=plan.ssm_state_indices,
             conv_num_accepted_tokens=plan.conv_num_accepted_tokens,
             num_accepted_tokens=plan.num_accepted_tokens,
             a_log=self.A_log.detach().reshape(-1).contiguous(),
@@ -697,8 +698,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             o_norm_variance_epsilon=float(self.o_norm.eps),
             operator=self._mega_operator,
         )
-        if paged_batch is not None:
-            self._mega_cache_adapter.scatter(self.kv_cache, paged_batch)
         maybe_save_kv_layer_to_connector("", [])
         # Restore token rows before the collective, so the custom OProj's
         # shard contract remains identical to the original MM + RS path.

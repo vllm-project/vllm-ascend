@@ -1017,6 +1017,12 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         self._mega_layer_names = tuple(layer_names)
         self._mega_tracker = None
         self._mega_first_verify = torch.zeros_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_conv_accepted = torch.empty_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_full_accepted = torch.full_like(self.spec_sequence_indices, self.num_spec + 1, dtype=torch.int32)
+        self._mega_conv_block_ids = torch.empty_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_ssm_block_ids = torch.empty(
+            (self.spec_sequence_indices.numel(), self.num_spec + 1), dtype=torch.int32, device=device
+        )
 
     def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
         # Capture omits scheduler draft tokens, which would make _plan_mega_kda
@@ -1083,6 +1089,9 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         # Without scheduler phase information the first-round contract cannot
         # be established safely. Keep the existing KDA implementation.
         metadata.mega_first_verify = None
+        metadata.mega_conv_accepted_tokens = None
+        metadata.mega_conv_state_block_ids = None
+        metadata.mega_ssm_state_indices = None
         metadata.mega_has_folded_prefills = True
         metadata.mega_query_lens = ()
         if is_prefilling is None or (mega_first_verify is None and not self._ensure_mega_tracker()):
@@ -1114,11 +1123,37 @@ class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
             # already materialized NULL_BLOCK_ID padding in this state table.
             graph_batch = metadata.spec_state_indices_tensor.shape[0]
             first_buffer = self._mega_first_verify[:graph_batch]
-            first_buffer.zero_()
-            first_buffer[: metadata.num_spec_decodes].copy_(
-                first.index_select(0, self.spec_sequence_indices[: metadata.num_spec_decodes])
+            first_buffer[metadata.num_spec_decodes :].zero_()
+            torch.index_select(
+                first,
+                0,
+                self.spec_sequence_indices[: metadata.num_spec_decodes],
+                out=first_buffer[: metadata.num_spec_decodes],
             )
             metadata.mega_first_verify = first_buffer
+            # One preparation per metadata group/step, shared by every KDA
+            # layer. Keep the output address stable across FULL replays.
+            conv_accepted = self._mega_conv_accepted[:graph_batch]
+            torch.where(
+                first_buffer > 0,
+                self._mega_full_accepted[:graph_batch],
+                metadata.num_accepted_tokens[:graph_batch].to(torch.int32),
+                out=conv_accepted,
+            )
+            metadata.mega_conv_accepted_tokens = conv_accepted
+            # The first block-table column is strided. Normalize it once per
+            # step, rather than once in each layer's external-op wrapper.
+            # These are metadata buffers; the actual cache is never copied.
+            states = metadata.spec_state_indices_tensor[:, : self.num_spec + 1]
+            conv_ids = self._mega_conv_block_ids[:graph_batch]
+            conv_ids.copy_(states[:, 0])
+            metadata.mega_conv_state_block_ids = conv_ids
+            if states.dtype == torch.int32 and states.is_contiguous():
+                metadata.mega_ssm_state_indices = states.view(-1)
+            else:
+                ssm_ids = self._mega_ssm_block_ids[:graph_batch]
+                ssm_ids.copy_(states)
+                metadata.mega_ssm_state_indices = ssm_ids.view(-1)
         return metadata
 
 
