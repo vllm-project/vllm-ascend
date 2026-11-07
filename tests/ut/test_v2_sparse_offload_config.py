@@ -164,3 +164,47 @@ def test_overlap_does_not_apply_copy_sfa_kernel_limits(v2):
     )
     assert not config.use_fused_copy_sfa
     _validate_fused_copy_sfa_config(vllm_config, config)
+
+
+@pytest.mark.parametrize("max_num_seqs", [1, 4, 256])
+def test_dummy_ring_fits_history_at_small_capacity(max_num_seqs):
+    """Small-capacity fused Copy-SFA deployments must allocate in-bounds LIM
+    history arrays with no max_num_seqs minimum: the dummy rows occupy pool
+    indices capacity + [0, ring), so every history row indexed by pool
+    entries must exist."""
+    from unittest.mock import patch
+
+    import torch
+
+    from vllm_ascend.attention import sfa_kv_offload as sfa_module
+    from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
+    from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_dummy_ring_width
+
+    cfg = SparseKVOffloadConfig(enabled=True, topk_buffer_size=8192)
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs, max_num_batched_tokens=128),
+        speculative_config=None,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)),
+    )
+    builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+
+    def _stub_buffer(size, dtype, device=None, pin_memory=False):
+        return torch.empty(size, dtype=dtype)
+
+    with (
+        patch(f"{sfa_module.__name__}.get_ascend_config", return_value=SimpleNamespace(sparse_kv_offload_config=cfg)),
+        patch(f"{sfa_module.__name__}.CpuGpuBuffer", _stub_buffer),
+        patch(f"{sfa_module.__name__}.is_pin_memory_available", return_value=False),
+    ):
+        builder._init_copy_sfa_metadata_buffers(vllm_config, torch.device("cpu"))
+
+    capacity = builder.copy_sfa_pool_capacity
+    ring = copy_sfa_dummy_ring_width(max_num_seqs)
+    assert capacity == max_num_seqs + 2
+    assert builder.copy_sfa_dummy_ring == ring
+    # The ring width is capped by the capacity, so the highest dummy pool row
+    # stays a valid index into the 2 * requests-sized histories.
+    assert ring <= capacity
+    assert builder.lim_last_prefix.shape[1] == 2 * capacity
+    assert capacity + ring - 1 < builder.lim_last_prefix.shape[1]
+    assert builder.lim_last_cache.shape == builder.lim_last_prefix.shape
