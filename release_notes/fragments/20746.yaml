@@ -1,0 +1,14 @@
+pr: 20746
+entries:
+  - category: feature
+    text: >-
+      Added `kv_role="kv_both"` support to MooncakeHybridConnector, so symmetric
+      instances can act as both Prefill and Decode and exchange KV cache in both
+      directions.
+    model: deepseek-v4.1-flash
+  - category: config
+    text: >-
+      `kv_role="kv_both"` with MooncakeHybridConnector requires identical
+      prefill/decode TP and PP layouts matching the local engine and
+      `prefill_context_parallel_size=1`. Asymmetric layouts still require
+      `kv_producer`/`kv_consumer`.
