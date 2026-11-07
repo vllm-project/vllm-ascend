@@ -138,8 +138,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     char *keyLayoutPtr = const_cast<char *>(keyLayoutStr.c_str());
     int64_t returnValue = 0;
 
-    TORCH_CHECK(candidateMode >= 1 && candidateMode <= 3, "Invalid candidate_mode");
-    TORCH_CHECK(candidateMode != 2 || candidateTopkIndexIn.has_value(), "Consumer requires candidate blocks");
+    TORCH_CHECK(candidateMode >= 1 && candidateMode <= 4, "Invalid candidate_mode");
+    TORCH_CHECK((candidateMode != 2 && candidateMode != 4) || candidateTopkIndexIn.has_value(),
+                "Consumer requires candidate blocks");
     if (query.device().is_meta()) return {sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut};
 
     // A11: key 0 轴非连续 — aclnn 动态调用下 tiling 拿不到 tensor stride (仅 TensorV2/图模式可见),

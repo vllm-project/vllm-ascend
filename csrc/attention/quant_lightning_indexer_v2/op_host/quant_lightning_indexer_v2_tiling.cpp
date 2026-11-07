@@ -428,10 +428,11 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
     uint32_t candidateMode = (opParamInfo_.candidateMode != nullptr) ?
                                  static_cast<uint32_t>(*opParamInfo_.candidateMode) : CANDIDATE_MODE_OFF;
     OP_CHECK_IF((candidateMode != CANDIDATE_MODE_SOURCE) && (candidateMode != CANDIDATE_MODE_CONSUMER) &&
-                    (candidateMode != CANDIDATE_MODE_OFF),
+                    (candidateMode != CANDIDATE_MODE_OFF) && (candidateMode != CANDIDATE_MODE_CONSUMER_SKIP),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "candidate_mode",
                                                       std::to_string(candidateMode),
-                                                      "Candidate_mode only supports 1(source), 2(consumer) or 3(off)"),
+                                                      "Candidate_mode only supports 1(source), 2(consumer), "
+                                                      "3(off) or 4(consumer_skip)"),
                 return ge::GRAPH_FAILED);
     if (candidateMode != CANDIDATE_MODE_OFF) {
         // candidate 功能当前仅在 arch22 (910b/910_93) 实现
@@ -470,11 +471,11 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
                                                           std::to_string(candBlkSize),
                                                           "Candidate_block_size only supports 8 currently"),
                     return ge::GRAPH_FAILED);
-        if (candidateMode == CANDIDATE_MODE_CONSUMER) {
+        if (candidateMode == CANDIDATE_MODE_CONSUMER || candidateMode == CANDIDATE_MODE_CONSUMER_SKIP) {
             OP_CHECK_IF(opParamInfo_.candidateTopkIndex.tensor == nullptr,
                         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "candidate_topk_index",
                                                                  "candidate_topk_index input is required when "
-                                                                 "candidate_mode=2(consumer)"),
+                                                                 "candidate_mode=2(consumer)/4(consumer_skip)"),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -1722,8 +1723,9 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo *tilingI
     workSpaces[0] = workspaceSize;
 
     // -------------set tilingdata-----------------
-    // candidate (two-level topk) 输入校验: mode=2 时 candidate_topk_index 必须为 [B, S1, N2, candBlocks] int32
-    if (tilingInfo->candidateMode == CANDIDATE_MODE_CONSUMER) {
+    // candidate (two-level topk) 输入校验: mode=2/4 时 candidate_topk_index 必须为 [B, S1, N2, candBlocks] int32
+    if (tilingInfo->candidateMode == CANDIDATE_MODE_CONSUMER ||
+        tilingInfo->candidateMode == CANDIDATE_MODE_CONSUMER_SKIP) {
         OP_CHECK_IF(tilingInfo->opParamInfo.candidateTopkIndex.desc == nullptr ||
                         tilingInfo->opParamInfo.candidateTopkIndex.desc->GetDataType() != ge::DT_INT32,
                     OP_LOGE("QuantLightningIndexerV2", "candidate_topk_index dtype only supports int32."),
