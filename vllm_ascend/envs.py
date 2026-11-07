@@ -69,6 +69,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Log fused vision hit-rate/fallback counters every 1000 attention calls.
+    "VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS", "1"))
+    ),
+    # Triton fused producer tuning: core strategy, token tile, store, allocation.
+    "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE", "dynamic"),
+    "VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T", "4"),
+    "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", "block"),
+    "VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE", "fused"),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
