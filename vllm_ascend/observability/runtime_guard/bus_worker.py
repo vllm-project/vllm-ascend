@@ -56,9 +56,6 @@ class MergedBusRequest:
     is_first_rank: bool
     # Leader-only: build config JSON once the bus says config_due.
     build_config_payload: Callable[[], tuple[Any, bool]] | None = None
-    # Rank-local wave counter, carried in the due-broadcast payload so
-    # receivers can assert same-wave alignment (fail fast on skips).
-    wave_idx: int = -1
 
 
 @dataclass
@@ -190,7 +187,6 @@ class DueBitsBusWorker:
         config_due, dump_due = sync_due_bits_from_src(
             req.sync_group,
             [req.config_due_local, req.dump_due_local],
-            wave_idx=req.wave_idx,
         )
         leader_changed = False
         config_payload: Any | None = None

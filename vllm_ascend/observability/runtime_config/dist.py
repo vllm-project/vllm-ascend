@@ -24,9 +24,13 @@ Two concerns, one module (both are transport-layer, no config knowledge):
 
 Task-bus pattern (last-PP TP broadcast **wave-head**):
 
-1. **One** source-owned ``broadcast([wave_idx, due_0, due_1, …])`` from TP0 —
-   ask which lanes have work (``sync_due_bits_from_src``; the symmetric
-   ``all_reduce`` variant stays for the single-lane path)
+1. **One** source-owned ``broadcast([due_0, due_1, …])`` from TP0 — ask
+   which lanes have work (``sync_due_bits_from_src``; the symmetric
+   ``all_reduce`` variant stays for the single-lane path). The merged bus
+   always carries two bits ``(config_due, dump_due)`` and uses four
+   preallocated device tensors so the hot path avoids per-wave host fill /
+   alloc. Queue depth 1 + mandatory drain already serializes waves, so a
+   ``wave_idx`` payload slot is unnecessary.
 2. For each due lane → its own ``broadcast_object`` (config and dump stay
    separate)
 
@@ -46,9 +50,12 @@ _bg_reload_paths: set[str] = set()
 _rg_file_poll_fallback_logged = False
 _rg_non_last_pp_file_logged = False
 
-# Wave counters ride in a float32 payload slot; compare modulo 2**24 so
-# the comparison stays exact across long-lived serving sessions.
-_WAVE_IDX_MOD = 1 << 24
+# Merged config+dump due bus always carries two bits. Cache the four
+# (config_due, dump_due) ∈ {0,1}² device tensors + one reusable work buffer
+# per device so the wave-head path is D2D ``copy_`` + broadcast only.
+_MERGED_DUE_BITS = 2
+# device -> (presets[4], work)
+_merged_due_presets: dict[str, tuple[tuple[Any, ...], Any]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +258,34 @@ def _cpu_gate(group: Any) -> Any | None:
     return gate
 
 
+def _merged_due_buffers(device: str) -> tuple[tuple[Any, ...], Any]:
+    """Return ``(presets[4], work)`` float32 tensors on ``device``.
+
+    Preset ``i`` encodes bits ``(i & 1, (i >> 1) & 1)`` for
+    ``(config_due, dump_due)``. All ranks share one work buffer used as the
+    broadcast payload (source ``copy_``s the selected preset first).
+    """
+    cached = _merged_due_presets.get(device)
+    if cached is not None:
+        return cached
+
+    import torch
+
+    presets: list[Any] = []
+    for mask in range(1 << _MERGED_DUE_BITS):
+        presets.append(
+            torch.tensor(
+                [1.0 if (mask >> i) & 1 else 0.0 for i in range(_MERGED_DUE_BITS)],
+                dtype=torch.float32,
+                device=device,
+            )
+        )
+    work = torch.zeros(_MERGED_DUE_BITS, dtype=torch.float32, device=device)
+    entry = (tuple(presets), work)
+    _merged_due_presets[device] = entry
+    return entry
+
+
 def sync_due_bits(group: Any, due_locals: Sequence[bool]) -> list[bool]:
     """Agree on a due bit-vector via ``all_reduce(MAX)``.
 
@@ -287,8 +322,6 @@ def sync_due_bits(group: Any, due_locals: Sequence[bool]) -> list[bool]:
 def sync_due_bits_from_src(
     group: Any,
     due_locals: Sequence[bool],
-    *,
-    wave_idx: int | None = None,
 ) -> list[bool]:
     """Agree on a due bit-vector via one ``broadcast`` from rank 0 of ``group``.
 
@@ -298,8 +331,11 @@ def sync_due_bits_from_src(
     wave-tail drain tax seen with a symmetric ``all_reduce`` under TP CPU
     phase drift (C2 hot path); peers must still enter the collective.
 
-    ``wave_idx`` rides in the payload and is asserted on receivers so a rank
-    that skipped a wave fails fast instead of consuming a crossed payload.
+    The common two-bit merged-bus path (``config_due``, ``dump_due``) selects
+    among four preallocated device tensors and ``copy_``s into a reusable
+    work buffer before broadcasting — no per-wave ``torch.zeros`` / host fill
+    and no ``wave_idx`` payload slot. Depth-1 bus + mandatory drain already
+    keeps waves aligned.
     """
     bits = [bool(x) for x in due_locals]
     if not bits:
@@ -315,26 +351,26 @@ def sync_due_bits_from_src(
 
     # HCCL device_group only accepts NPU tensors; Gloo cpu_group accepts CPU.
     device = "npu" if gate == getattr(group, "device_group", None) else "cpu"
-    payload = torch.zeros(len(bits) + 1, dtype=torch.float32, device=device)
-    if _group_rank(group, 0) == 0:
-        payload[0] = float(int(wave_idx) % _WAVE_IDX_MOD) if wave_idx is not None else -1.0
+    is_src = _group_rank(group, 0) == 0
+    src = torch.distributed.get_process_group_ranks(gate)[0]
+
+    if len(bits) == _MERGED_DUE_BITS:
+        presets, work = _merged_due_buffers(device)
+        if is_src:
+            mask = 0
+            for i, b in enumerate(bits):
+                if b:
+                    mask |= 1 << i
+            work.copy_(presets[mask])
+        torch.distributed.broadcast(work, src=src, group=gate)
+        return [float(work[i].item()) >= 0.5 for i in range(_MERGED_DUE_BITS)]
+
+    payload = torch.zeros(len(bits), dtype=torch.float32, device=device)
+    if is_src:
         for i, b in enumerate(bits):
-            payload[i + 1] = 1.0 if b else 0.0
-    torch.distributed.broadcast(
-        payload,
-        src=torch.distributed.get_process_group_ranks(gate)[0],
-        group=gate,
-    )
-    out = [float(payload[i + 1].item()) >= 0.5 for i in range(len(bits))]
-    src_idx = int(payload[0].item())
-    if wave_idx is not None and int(wave_idx) >= 0 and src_idx != int(wave_idx) % _WAVE_IDX_MOD:
-        raise RuntimeError(
-            "[runtime_guard] merged-bus wave misalignment: source wave_idx="
-            f"{src_idx} but local wave_idx={int(wave_idx)} "
-            f"(rank_in_group={_group_rank(group, 0)}); a rank skipped a wave "
-            "and the collectives are crossed - aborting to avoid silent corruption"
-        )
-    return out
+            payload[i] = 1.0 if b else 0.0
+    torch.distributed.broadcast(payload, src=src, group=gate)
+    return [float(payload[i].item()) >= 0.5 for i in range(len(bits))]
 
 
 def broadcast_when_due(

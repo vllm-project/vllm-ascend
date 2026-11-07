@@ -112,7 +112,7 @@ Default `on_trigger` is `["report"]`. Per-detector overrides:
 }
 ```
 
-**KV dump rank coverage:** detection and reports stay on last-PP TP0. `dump_kv` captures **last PP × every TP rank**. **Only last-PP × all TP** join the merged due bus (config + dump); other processes poll the config JSON. Wave head **submits** one TP0-sourced `broadcast([wave_idx, config_due, dump_due])` (+ due-lane `broadcast_object`) to `DueBitsBusWorker`; **end-of-wave drains** (due-bcast ideally finished during forward). Detector dumps are delivered the **next** wave (+1); config apply lands at that wave's end-of-wave drain. Assemble shards from the `tp*` directories under the same `req_id`.
+**KV dump rank coverage:** detection and reports stay on last-PP TP0. `dump_kv` captures **last PP × every TP rank**. **Only last-PP × all TP** join the merged due bus (config + dump); other processes poll the config JSON. Wave head **submits** one TP0-sourced `broadcast([config_due, dump_due])` (+ due-lane `broadcast_object`) to `DueBitsBusWorker`; **end-of-wave drains** (due-bcast ideally finished during forward). Detector dumps are delivered the **next** wave (+1); config apply lands at that wave's end-of-wave drain. Assemble shards from the `tp*` directories under the same `req_id`.
 
 ## Performance
 

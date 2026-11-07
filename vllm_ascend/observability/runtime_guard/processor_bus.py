@@ -55,7 +55,6 @@ class RuntimeGuardBusMixin:
     _pending_merged_bus_dump_jobs: list[dict[str, Any]]
     _pending_merged_bus_can_dump: bool
     _pending_merged_bus_is_first: bool
-    _bus_wave_seq: int
     _merged_bus_warn_ts: float
 
     # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
@@ -181,8 +180,6 @@ class RuntimeGuardBusMixin:
         self._pending_merged_bus_dump_jobs = list(dump_jobs)
         self._pending_merged_bus_can_dump = can_dump
         self._pending_merged_bus_is_first = is_first
-        self._bus_wave_seq = int(self._bus_wave_seq) + 1
-        wave_seq = self._bus_wave_seq
         try:
             worker.submit(
                 MergedBusRequest(
@@ -193,7 +190,6 @@ class RuntimeGuardBusMixin:
                     hot_reload_enabled=bool(cfg.hot_reload_enabled),
                     is_first_rank=is_first,
                     build_config_payload=build,
-                    wave_idx=wave_seq,
                 )
             )
         except Exception:

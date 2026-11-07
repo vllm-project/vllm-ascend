@@ -148,73 +148,86 @@ def test_sync_due_bits_from_src_source_packs_without_rank_in_group(monkeypatch):
         seen["payload"] = [float(x) for x in tensor.tolist()]
 
     _patch_dist(monkeypatch, fake_broadcast)
+    dist._merged_due_presets.clear()
     group = SimpleNamespace(world_size=2, is_first_rank=True, cpu_group=object())
-    out = sync_due_bits_from_src(group, [True, False], wave_idx=3)
+    out = sync_due_bits_from_src(group, [True, False])
     assert out == [True, False]
-    assert seen["payload"][0] == 3.0
-    assert seen["payload"][1:] == [1.0, 0.0]
+    assert seen["payload"] == [1.0, 0.0]
 
 
 def test_sync_due_bits_from_src_none_group_returns_local():
     assert sync_due_bits_from_src(None, [False, True]) == [False, True]
-    assert sync_due_bits_from_src(None, [], wave_idx=3) == []
+    assert sync_due_bits_from_src(None, []) == []
 
 
 def test_sync_due_bits_from_src_world_size_one():
     group = SimpleNamespace(world_size=1)
-    assert sync_due_bits_from_src(group, [True, False], wave_idx=7) == [True, False]
+    assert sync_due_bits_from_src(group, [True, False]) == [True, False]
 
 
-def test_sync_due_bits_from_src_source_packs_payload(monkeypatch):
+def test_sync_due_bits_from_src_source_uses_preset_copy(monkeypatch):
     seen = {}
 
     def fake_broadcast(tensor, src=0, group=None):
         seen["src"] = src
         seen["payload"] = [float(x) for x in tensor.tolist()]
+        seen["tensor_id"] = id(tensor)
 
     _patch_dist(monkeypatch, fake_broadcast)
+    dist._merged_due_presets.clear()
     group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=object())
-    out = sync_due_bits_from_src(group, [True, False], wave_idx=(1 << 24) + 5)
+    out = sync_due_bits_from_src(group, [True, False])
     assert out == [True, False]
     assert seen["src"] == 7
-    assert seen["payload"][0] == 5.0  # wave_idx compared modulo 2**24
-    assert seen["payload"][1:] == [1.0, 0.0]
+    assert seen["payload"] == [1.0, 0.0]
+    # Broadcast uses the reusable work buffer, not a per-wave allocation id-only check:
+    # second call must reuse the same work tensor.
+    first_id = seen["tensor_id"]
+    out2 = sync_due_bits_from_src(group, [False, True])
+    assert out2 == [False, True]
+    assert seen["payload"] == [0.0, 1.0]
+    assert seen["tensor_id"] == first_id
 
 
 def test_sync_due_bits_from_src_receiver_applies_source_bits(monkeypatch):
     def fake_broadcast(tensor, src=0, group=None):
-        tensor[0] = 9.0
-        tensor[1] = 0.0
-        tensor[2] = 1.0
+        tensor[0] = 0.0
+        tensor[1] = 1.0
 
     _patch_dist(monkeypatch, fake_broadcast)
+    dist._merged_due_presets.clear()
     group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    assert sync_due_bits_from_src(group, [False, False], wave_idx=9) == [False, True]
+    assert sync_due_bits_from_src(group, [False, False]) == [False, True]
 
 
-def test_sync_due_bits_from_src_wave_mismatch_raises(monkeypatch):
+def test_sync_due_bits_from_src_all_four_presets(monkeypatch):
+    seen = {}
+
     def fake_broadcast(tensor, src=0, group=None):
-        tensor[0] = 8.0  # source is one wave behind
+        seen["payload"] = [float(x) for x in tensor.tolist()]
 
     _patch_dist(monkeypatch, fake_broadcast)
-    group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    with pytest.raises(RuntimeError, match="misalignment"):
-        sync_due_bits_from_src(group, [False, False], wave_idx=9)
+    dist._merged_due_presets.clear()
+    group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=object())
+    for bits in (
+        [False, False],
+        [True, False],
+        [False, True],
+        [True, True],
+    ):
+        assert sync_due_bits_from_src(group, bits) == bits
+        assert seen["payload"] == [1.0 if b else 0.0 for b in bits]
 
 
-def test_sync_due_bits_from_src_wraparound_matches(monkeypatch):
+def test_sync_due_bits_from_src_non_merged_len_allocates(monkeypatch):
+    """Odd bit lengths fall back to a per-call zeros payload (still no wave_idx)."""
+    seen = {}
+
     def fake_broadcast(tensor, src=0, group=None):
-        tensor[0] = 5.0
+        seen["payload"] = [float(x) for x in tensor.tolist()]
 
     _patch_dist(monkeypatch, fake_broadcast)
-    group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    assert sync_due_bits_from_src(group, [False, False], wave_idx=(1 << 24) + 5) == [
-        False,
-        False,
-    ]
-
-
-def test_sync_due_bits_from_src_unset_wave_skips_assert(monkeypatch):
-    _patch_dist(monkeypatch, lambda t, src=0, group=None: None)
-    group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    assert sync_due_bits_from_src(group, [True, False]) == [False, False]
+    group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=object())
+    out = sync_due_bits_from_src(group, [True, False, True])
+    assert out == [True, False, True]
+    assert seen["payload"] == [1.0, 0.0, 1.0]
