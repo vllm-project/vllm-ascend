@@ -25,6 +25,7 @@ class TestReusePublicationFence(unittest.TestCase):
                     worker.use_layerwise_transfer = transfer
                     worker.layerwise_offload = reuse
                     worker.tp_size = tp_size
+                    worker.pcp_size = 1
                     worker._save_disabled = threading.Event()
                     worker.kv_recv_thread = None
                     calls: list[str] = []
