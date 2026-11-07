@@ -63,7 +63,7 @@ def test_gqa_pcp_dcp_preserves_tp_local_heads_and_merges_pcp_shards(kv_heads) ->
     with patch("torch.ops.vllm.dcp_a2a_fused", return_value=query) as combine:
         actual = impl._merge_dcp_attention_output(query, lse)
     assert actual is query
-    combine.assert_called_once_with(query, lse, 1, 1, "tp-heads", "pcp-kv-shards", defer_combine=False)
+    combine.assert_called_once_with(query, lse, 1, "tp-heads", "pcp-kv-shards", defer_combine=False)
 
 
 @pytest.mark.parametrize("rank", [0, 1], ids=["head-tail", "middle"])
@@ -342,7 +342,6 @@ def test_gqa_chunked_prefill_uses_shared_dcp_merge_for_pcp_overlap() -> None:
     )
     combine.assert_called_once()
     assert combine.call_args.args == (packed_history, 2)
-    assert combine.call_args.kwargs["scatter_dim"] == 1
     torch.testing.assert_close(combine.call_args.kwargs["local_output"], current_output)
     torch.testing.assert_close(combine.call_args.kwargs["local_lse"], current_lse)
     torch.testing.assert_close(actual, merged)

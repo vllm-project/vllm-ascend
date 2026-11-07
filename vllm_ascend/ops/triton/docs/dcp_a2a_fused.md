@@ -3,8 +3,8 @@
 ## Purpose
 
 `dcp_a2a_fused` exchanges partial attention outputs and FP32 log-sum-exp (LSE)
-values across a context-parallel group. It returns the output slice owned by
-the local rank after combining contributions from every source rank. The same
+values across a context-parallel group. It returns the local rank's head slice
+after combining contributions from every source rank. The same
 operator can defer the merge so a caller can include a local contribution later.
 
 The implementation is in `vllm_ascend/ops/triton/dcp/dcp_a2a.py` and has three
@@ -34,20 +34,19 @@ scheduling and each layout route owns its kernel-specific selection policy.
 | `partial_output` | `[tokens, heads, head_dim]` | BF16, FP16, or FP32 partial attention output. Arbitrary positive strides are supported. |
 | `softmax_lse` | `[tokens, heads, 1]`, FP32 | LSE associated with each partial output row. |
 | `dcp_size` | positive `int` | Number of ranks in the All-to-All scatter group; with PCP, this can be the TP subgroup size. |
-| `scatter_dim` | `0` or `1` | Dimension sharded by the All-to-All: tokens for `0`, heads for `1`. |
 | `group_name` | `str` | Unique name of a live vLLM `GroupCoordinator`. |
 | `pcp_group_name` | `str` or `None` | Optional PCP group used to gather rank contributions after the scatter. |
 | `return_lse` | `bool` | Append merged LSE to an FP32 output for a later merge. |
 | `defer_combine` | `bool` | Return the packed receive buffer after exchange instead of merging it. |
 
 The merged result has the same dtype and `head_dim` as `partial_output`. Its
-token or head dimension is divided by `dcp_size`, according to `scatter_dim`.
+head count (axis 1) is divided by `dcp_size`; the token count is unchanged.
 `defer_combine` and `return_lse` cannot both be enabled.
 
 ## Packed payload
 
 The send buffer is laid out as
-`[dcp_size, local_scatter_size, replicated_size, packed_dim]`. The first
+`[dcp_size, local_heads, tokens, packed_dim]`. The first
 `head_dim` elements contain the partial output. The remaining elements contain
 the LSE representation.
 
@@ -92,11 +91,11 @@ not execute a collective.
 
 ## Validation
 
-The single-card nightly test covers BF16/FP16, both scatter dimensions,
+The single-card nightly test covers BF16/FP16, head scatter,
 head dimensions 96/128/160/256, non-contiguous inputs, invalid LSE rows, and
 finite FP32 LSE values outside FP16 range. The multi-card A3 nightly test starts
 a real two-rank HCCL group and invokes the registered custom operator end to
-end for both scatter dimensions.
+end for head scatter with both workload shapes.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
@@ -121,6 +120,6 @@ The output dtype follows the receive buffer (FP32 for split MLA).
 
 The default custom-op path still returns the merged output. Deferred mode and
 `return_lse=True` are mutually exclusive. The single-card test covers direct
-local contributions at DCP sizes 1/2/8, D=96/256/512, both scatter dimensions,
+local contributions at DCP sizes 1/2/8, D=96/256/512, head scatter,
 FP32/BF16/FP16 local output, strided inputs and invalid rows. The MLA unit test
 checks stream ordering, one final combine, and current-KV multiplicity.

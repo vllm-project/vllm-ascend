@@ -93,11 +93,6 @@ def _metadata(attn_state, *, global_prefill=False):
     return metadata
 
 
-def _prepare_forward(impl, metadata, hidden):
-    context = impl._get_parallel_forward_context(metadata, 1, hidden)
-    assert not hasattr(context, "gather_full_o_proj")
-
-
 def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):
     entry_modes: list[bool] = []
     modes: list[bool] = []
@@ -108,7 +103,7 @@ def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):
         entry_modes.append(impl._parallel_o_proj.uses_full_weight)
         if metadata is None:
             return output.zero_()
-        _prepare_forward(impl, metadata, hidden)
+        impl._prepare_o_proj_weights()
         modes.append(impl._parallel_o_proj.uses_full_weight)
         if impl._parallel_o_proj.uses_full_weight:
             with impl._parallel_o_proj.use_full_weights():
@@ -175,7 +170,7 @@ def test_sfa_pcp_forward_selects_batch_mode_before_attention(
     def forward(impl, name, hidden, cache, metadata, output):
         entry_modes.append(projection.mode)
         if metadata is not None:
-            _prepare_forward(impl, metadata, hidden)
+            impl._prepare_o_proj_weights()
             assert projection.mode is expected_mode
         return output.zero_()
 
@@ -199,7 +194,7 @@ def test_failed_sfa_prefill_restores_local_weights_and_next_decode(sfa_impl, mon
     weight_state = sfa_impl._parallel_o_proj._weight_switch_states[0][2]
 
     def forward(impl, name, hidden, cache, metadata, output):
-        _prepare_forward(impl, metadata, hidden)
+        impl._prepare_o_proj_weights()
         if metadata.attn_state == AscendAttentionState.DecodeOnly:
             assert not impl._parallel_o_proj.uses_full_weight
             assert not weight_state.handles

@@ -19,14 +19,13 @@ def _pack_dcp_output_lse_batched_kernel(
     lse_stride_t,
     lse_stride_h,
     send_stride_rank,
-    send_stride_scatter,
-    send_stride_replicated,
+    send_stride_h,
+    send_stride_t,
     send_stride_d,
-    local_scatter_size,
+    local_heads,
     head_dim,
     num_heads,
     total_rows,
-    SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
@@ -41,18 +40,10 @@ def _pack_dcp_output_lse_batched_kernel(
         token_idx = (linear_idx // num_heads).to(tl.int64)
         head_idx = (linear_idx % num_heads).to(tl.int64)
 
-        if SCATTER_TOKENS:
-            rank_idx = token_idx // local_scatter_size
-            scatter_idx = token_idx % local_scatter_size
-            replicated_idx = head_idx
-        else:
-            rank_idx = head_idx // local_scatter_size
-            scatter_idx = head_idx % local_scatter_size
-            replicated_idx = token_idx
+        rank_idx = head_idx // local_heads
+        local_head_idx = head_idx % local_heads
 
-        send_base = (
-            rank_idx * send_stride_rank + scatter_idx * send_stride_scatter + replicated_idx * send_stride_replicated
-        )
+        send_base = rank_idx * send_stride_rank + local_head_idx * send_stride_h + token_idx * send_stride_t
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         d_mask = (d_offsets < head_dim) & row_mask
         output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
@@ -120,8 +111,8 @@ def _fused_dcp_lse_combine_batched_kernel(
     local_lse_stride_t,
     local_lse_stride_h,
     recv_stride_rank,
-    recv_stride_scatter,
-    recv_stride_replicated,
+    recv_stride_h,
+    recv_stride_t,
     recv_stride_d,
     output_stride_t,
     output_stride_h,
@@ -153,9 +144,7 @@ def _fused_dcp_lse_combine_batched_kernel(
         local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
         lse_max = tl.where(local_valid, local_lse, -float("inf"))
         for rank_idx in tl.static_range(DCP_SIZE):
-            recv_base = (
-                rank_idx * recv_stride_rank + head_idx * recv_stride_scatter + token_idx * recv_stride_replicated
-            )
+            recv_base = rank_idx * recv_stride_rank + head_idx * recv_stride_h + token_idx * recv_stride_t
             exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(
                 tl.float32
             )
@@ -183,9 +172,7 @@ def _fused_dcp_lse_combine_batched_kernel(
         merged = tl.zeros([BLOCK_ROWS, BLOCK_D], dtype=tl.float32)
         d_mask = (d_offsets < head_dim) & row_mask
         for rank_idx in tl.static_range(DCP_SIZE):
-            recv_base = (
-                rank_idx * recv_stride_rank + head_idx * recv_stride_scatter + token_idx * recv_stride_replicated
-            )
+            recv_base = rank_idx * recv_stride_rank + head_idx * recv_stride_h + token_idx * recv_stride_t
             exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d, mask=row_mask, other=0.0).to(
                 tl.float32
             )

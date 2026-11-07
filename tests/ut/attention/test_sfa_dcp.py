@@ -23,32 +23,31 @@ def load_function(path, name, namespace):
 
 
 @pytest.mark.parametrize(
-    "tokens,ranks,scatter,supported,pcp",
+    "tokens,ranks,supported,pcp",
     [
-        (1, 8, 1, True, False),
-        (6, 8, 1, True, False),
-        (12, 8, 1, True, False),
-        (13, 8, 1, True, False),
-        (48, 8, 1, True, False),
-        (192, 8, 1, True, False),
-        (193, 8, 1, True, False),
-        (6, 2, 1, True, False),
-        (6, 4, 1, True, False),
-        (6, 16, 1, True, False),
-        (8, 8, 0, True, False),
-        (6, 8, 1, True, True),
-        (6, 1, 1, False, True),
-        (6, 1, 1, False, False),
+        (1, 8, True, False),
+        (6, 8, True, False),
+        (12, 8, True, False),
+        (13, 8, True, False),
+        (48, 8, True, False),
+        (192, 8, True, False),
+        (193, 8, True, False),
+        (6, 2, True, False),
+        (6, 4, True, False),
+        (6, 16, True, False),
+        (6, 8, True, True),
+        (6, 1, False, True),
+        (6, 1, False, False),
     ],
 )
 @pytest.mark.parametrize("a5", [False, True])
-def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, scatter, supported, pcp, a5):
+def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, supported, pcp, a5):
     # Device generation must not change the tensor/mode eligibility contract.
     calls = []
     group = object()
     output = torch.zeros(tokens, 64, 512, dtype=torch.bfloat16)
     lse = torch.zeros(tokens, 64, 1)
-    shape = (tokens, 64 // ranks, 512) if scatter else (tokens // ranks, 64, 512)
+    shape = (tokens, 64 // ranks, 512)
 
     def exchange(out, stats, selected_group):
         assert selected_group is group and out is output and stats is lse
@@ -75,9 +74,9 @@ def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, s
         return value
 
     pcp_group = SimpleNamespace(all_gather=pcp_gather) if pcp else None
-    result = run(output, lse, ranks, scatter, group, pcp_group)
+    result = run(output, lse, ranks, group, pcp_group)
     assert result.dtype == output.dtype and result.shape == shape
-    if scatter == 1 and supported and not pcp:
+    if supported and not pcp:
         assert calls == ["exchange"]
     else:
         assert calls == (["upstream_collective"] if ranks > 1 else []) + (["pcp_gather"] if pcp else [])
@@ -137,7 +136,7 @@ def test_exchange_gate_accepts_tiled_sizes(tokens, heads, head_dim, ranks, expec
 def test_custom_op_fake_retains_shape_dtype_and_does_not_collect():
     run = load_function("vllm_ascend/ops/triton/dcp/dcp_a2a.py", "dcp_a2a_fused_fake", {"torch": torch})
     output = torch.empty(6, 64, 512, dtype=torch.bfloat16)
-    result = run(output, torch.empty(6, 64, 1), 8, 1, "unused")
+    result = run(output, torch.empty(6, 64, 1), 8, "unused")
     assert result.shape == (6, 8, 512) and result.dtype == output.dtype
 
 
@@ -155,7 +154,7 @@ def test_missing_scatter_group_raises_without_communication(supported):
     }
     run = load_function("vllm_ascend/ops/triton/dcp/dcp_a2a.py", "dcp_a2a_fused_combine", namespace)
     with pytest.raises(ValueError, match="explicit All2All group"):
-        run(torch.empty(6, 64, 512, dtype=torch.bfloat16), torch.empty(6, 64, 1), 8, 1, None)
+        run(torch.empty(6, 64, 512, dtype=torch.bfloat16), torch.empty(6, 64, 1), 8, None)
 
 
 @pytest.mark.parametrize("defer", [False, True])
@@ -167,8 +166,8 @@ def test_new_main_merge_modes_never_take_output_only_fast_path(defer):
     def forbidden(*args, **kwargs):
         raise AssertionError("output-only fast path loses upstream merge state")
 
-    def combine(recv, head_dim, *, scatter_dim, return_lse):
-        assert recv.shape == packed.shape and head_dim == 512 and scatter_dim == 1
+    def combine(recv, head_dim, *, return_lse):
+        assert recv.shape == packed.shape and head_dim == 512
         assert return_lse
         calls.append("merge_lse")
         return torch.empty(6, 8, 513)
@@ -186,7 +185,6 @@ def test_new_main_merge_modes_never_take_output_only_fast_path(defer):
         torch.empty(6, 64, 512),
         torch.empty(6, 64, 1),
         8,
-        1,
         object(),
         return_lse=not defer,
         defer_combine=defer,
@@ -210,8 +208,8 @@ def test_registered_operator_forwards_group_and_fake_keeps_shape():
     lse = torch.empty(48, 64, 1)
     for ranks in (2, 4, 8):
         group.world_size = ranks
-        run(output, lse, ranks, 1, "dcp")
-        result = fake(output, lse, ranks, 1, "dcp")
+        run(output, lse, ranks, "dcp")
+        result = fake(output, lse, ranks, "dcp")
         assert result.shape == (48, 64 // ranks, 512) and result.dtype == output.dtype
     assert calls == [2, 4, 8]
 
@@ -225,7 +223,7 @@ def test_attention_forwards_its_group_without_scheduler_config():
     calls = []
 
     def invoke(*args, **kwargs):
-        calls.append((args[2], args[4]))
+        calls.append((args[2], args[3]))
         return args[0]
 
     namespace: dict[str, Any] = {
