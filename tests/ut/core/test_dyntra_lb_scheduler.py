@@ -476,6 +476,45 @@ def test_dyntra_lb_reconciles_connector_hit_with_local_partial_tail(monkeypatch)
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
+@pytest.mark.parametrize(
+    "external_tokens, expected",
+    [(16, True), (0, False)],
+)
+def test_dyntra_lb_reports_sync_kv_loads(monkeypatch, external_tokens, expected):
+    """A request served by an external KV cache must flag the synchronous load.
+
+    Regression guard for #20725: the copied ``schedule()`` dropped upstream's
+    ``has_sync_kv_loads`` bookkeeping. The worker derives
+    ``start_after_forward = not scheduler_output.has_sync_kv_loads`` from the
+    flag, so with it left at its ``False`` default the external KV load was
+    deferred until after the forward pass and the model read KV cache that had
+    never been restored.
+    """
+    block_size = 16
+    vllm_config = make_dyntra_test_config(block_size=block_size)
+    scheduler = create_dyntra_lb_scheduler(
+        vllm_config,
+        scheduler_cls=DyntraLBScheduler,
+    )
+    request = create_request(
+        request_id=1,
+        num_tokens=2 * block_size,
+        block_size=block_size,
+    )
+    scheduler.add_request(request)
+
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        lambda request, num_local_tokens: (external_tokens, False),
+    )
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler_output.total_num_scheduled_tokens > 0
+    assert scheduler_output.has_sync_kv_loads is expected
+
+
 def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
     block_size = 16
     vllm_config = make_dyntra_test_config(block_size=block_size)

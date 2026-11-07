@@ -857,6 +857,32 @@ def test_balance_schedule_records_local_prefix_cache_stats():
     assert recorded == [(request, 0)]
 
 
+@pytest.mark.parametrize(
+    "external_tokens, expected",
+    [(16, True), (0, False)],
+)
+def test_balance_schedule_reports_sync_kv_loads(external_tokens, expected):
+    """A request served by an external KV cache must flag the synchronous load.
+
+    Regression guard for #20725: this fork of ``schedule()`` dropped upstream's
+    ``has_sync_kv_loads`` bookkeeping. The worker derives
+    ``start_after_forward = not scheduler_output.has_sync_kv_loads`` from the
+    flag, so with it left at its ``False`` default the external KV load was
+    deferred until after the forward pass and the model read KV cache that had
+    never been restored.
+    """
+    scheduler = _make_balance_scheduler()
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (external_tokens, False)
+    scheduler.connector = connector
+
+    scheduler.add_request(_create_requests(1, num_tokens=32, max_tokens=8)[0])
+    output = scheduler.schedule()
+
+    assert output.total_num_scheduled_tokens > 0
+    assert output.has_sync_kv_loads is expected
+
+
 @pytest.mark.parametrize("holds_kv_blocks", [False, True])
 def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
     scheduler = _make_balance_scheduler()
