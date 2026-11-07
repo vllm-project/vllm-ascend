@@ -64,8 +64,6 @@ from vllm_ascend.worker.v2.pcp_manager import (
 _DSA_C_ASCEND_OPS = (
     "npu_sparse_attn_sharedkv",
     "npu_sparse_attn_sharedkv_metadata",
-    "npu_kv_quant_sparse_attn_sharedkv",
-    "npu_kv_quant_sparse_attn_sharedkv_metadata",
     "npu_scatter_nd_update_sk",
 )
 
