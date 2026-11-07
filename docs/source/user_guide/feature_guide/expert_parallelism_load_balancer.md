@@ -462,7 +462,7 @@ be booleans, and each field is range checked at startup.
 
 | Parameter | Default | Range | Description |
 | --- | --- | --- | --- |
-| `load_window_bins` | `64` | 2–256 | Maximum chronological bins used to compress the upstream EPLB load window. |
+| `load_window_bins` | `64` | 2–256 | Maximum chronological bins used to search for a candidate placement. |
 | `load_risk_quantile` | `0.75` | (0.5, 1.0) exclusive | One-sided standard-normal quantile converted to a z-score for mean-plus-deviation expert and rank risk. |
 | `relative_balance_threshold` | `0.95` | (0, 1] | Rebalance when current balance divided by the last committed balance is at or below this value. |
 | `absolute_balance_threshold` | `0.90` | (0, 1] | Rebalance when current balance is at or below this value. |
@@ -485,6 +485,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
 Balance is the reciprocal of the mean max-to-average rank-load ratio; STAIR
 rebalances a layer only when the hysteresis gates above fire, so lowering
 `step_interval` alone does not force continuous movement.
+STAIR scores the selected placement on the original recorded steps before
+migration. If either predicted mean or P95 imbalance increases, the layer
+keeps its current placement. The cross-rank statistics reduction preserves
+one row per recorded step at each rearrangement.
 
 ## Critical Considerations
 

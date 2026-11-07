@@ -227,10 +227,12 @@ class StairEplbPolicy(AbstractEplbPolicy):
         if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
             raise ValueError("current expert placement must be [layers, num_replicas]")
         if isinstance(weight, PreparedLoadStats):
-            if weight.values.device.type != "cpu" or weight.sample_counts is None:
-                raise ValueError("prepared STAIR statistics require CPU values and sample counts")
-            logical_load_values = weight.values.to(dtype=torch.float64).numpy()
+            if weight.values.device.type != "cpu":
+                raise ValueError("prepared STAIR statistics require CPU values")
             sample_counts = weight.sample_counts
+            logical_load_values = (
+                weight.values.numpy() if sample_counts is None else weight.values.to(dtype=torch.float64).numpy()
+            )
         else:
             logical_load_values = weight.to(device="cpu", dtype=torch.float64).numpy()
             if logical_load_values.ndim == 2:
@@ -284,15 +286,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return boundaries, np.diff(boundaries).astype(np.int64)
 
     def prepare_local_load_stats(self, load_samples: torch.Tensor) -> PreparedLoadStats:
-        """Compress local temporal samples into weighted STAIR bins."""
-        boundaries, samples_per_bin = self._load_bin_boundaries(load_samples.shape[0], self.config.load_window_bins)
-        load_sums_per_bin = torch.stack(
-            [
-                load_samples[start:end].sum(dim=0, dtype=load_samples.dtype)
-                for start, end in zip(boundaries[:-1], boundaries[1:])
-            ]
-        )
-        return PreparedLoadStats(load_sums_per_bin, samples_per_bin)
+        """Preserve the shared time axis through the cross-rank reduction."""
+        return PreparedLoadStats(load_samples)
 
     @staticmethod
     def compress_load_window(load_samples: np.ndarray, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
@@ -1230,28 +1225,33 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
         ``logical_load_values`` contains raw ``[steps, layers, experts]``
         samples when ``sample_counts`` is absent, otherwise ``[bins, layers,
-        experts]`` pre-binned sums. Current placement is ``[layers, ranks,
-        slots]``.
+        experts]`` pre-binned sums. Runtime STAIR supplies raw steps, so
+        acceptance and hysteresis can use the original time axis. Pre-binned
+        inputs can only be scored at the supplied resolution. Current placement
+        is ``[layers, ranks, slots]``.
         """
+        load_values = np.asarray(logical_load_values, dtype=np.float64)
         if sample_counts is None:
-            load_bins, bin_sample_counts = cls.compress_load_window(logical_load_values, config.load_window_bins)
+            load_bins, bin_sample_counts = cls.compress_load_window(load_values, config.load_window_bins)
         else:
-            load_sums = np.asarray(logical_load_values, dtype=np.float64)
             bin_sample_counts = np.asarray(sample_counts)
             if (
-                load_sums.ndim != 3
-                or load_sums.shape[0] == 0
-                or not np.all(np.isfinite(load_sums))
-                or np.any(load_sums < 0)
+                load_values.ndim != 3
+                or load_values.shape[0] == 0
+                or not np.all(np.isfinite(load_values))
+                or np.any(load_values < 0)
             ):
                 raise ValueError("prepared loads must be finite non-negative [bins, layers, experts]")
             if (
-                bin_sample_counts.shape != (load_sums.shape[0],)
+                bin_sample_counts.shape != (load_values.shape[0],)
                 or not np.issubdtype(bin_sample_counts.dtype, np.integer)
                 or np.any(bin_sample_counts <= 0)
             ):
                 raise ValueError("sample_counts must contain one positive integer per bin")
-            load_bins = load_sums / bin_sample_counts[:, None, None]
+            load_bins = load_values / bin_sample_counts[:, None, None]
+        needs_step_check = len(load_bins) < len(load_values)
+        score_samples = load_values if needs_step_check else load_bins
+        score_counts = np.ones(len(score_samples), dtype=np.int64) if needs_step_check else bin_sample_counts
         current = np.asarray(current_rank_expert_ids)
         if current.ndim != 3 or 0 in current.shape or not np.issubdtype(current.dtype, np.integer):
             raise ValueError("current_rank_expert_ids must be a non-empty integer [layers, ranks, slots] array")
@@ -1278,7 +1278,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         imbalance_ratios = np.empty((current.shape[0], 4), dtype=np.float64)
         layer_priority_keys = []
         for layer_id in range(current.shape[0]):
-            current_imbalance = cls.placement_imbalance(load_bins[:, layer_id], bin_sample_counts, current[layer_id])
+            current_imbalance = cls.placement_imbalance(score_samples[:, layer_id], score_counts, current[layer_id])
             imbalance_ratios[layer_id] = (
                 current_imbalance.mean_ratio,
                 current_imbalance.p95_ratio,
@@ -1286,8 +1286,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 current_imbalance.p95_ratio,
             )
             gated_imbalance = cls.gated_layer_imbalance(
-                load_bins[:, layer_id],
-                bin_sample_counts,
+                score_samples[:, layer_id],
+                score_counts,
                 current[layer_id],
                 anchors[layer_id],
                 config,
@@ -1304,14 +1304,19 @@ class StairEplbPolicy(AbstractEplbPolicy):
             layer_plan = cls.plan_layer(load_bins[:, layer_id], bin_sample_counts, current[layer_id], node_ids, config)
             if layer_plan is None:
                 continue
+            predicted_imbalance = layer_plan.predicted_imbalance
+            if needs_step_check:
+                predicted_imbalance = cls.placement_imbalance(
+                    score_samples[:, layer_id], score_counts, layer_plan.placement.rank_expert_ids
+                )
+                current_mean, current_p95 = imbalance_ratios[layer_id, :2]
+                if predicted_imbalance.mean_ratio > current_mean or predicted_imbalance.p95_ratio > current_p95:
+                    continue
             rank_expert_ids[layer_id] = layer_plan.placement.rank_expert_ids
             source_rank_ids[layer_id] = layer_plan.placement.source_rank_ids
             source_slot_ids[layer_id] = layer_plan.placement.source_slot_ids
-            predicted_mean_ratios[layer_id] = layer_plan.predicted_imbalance.mean_ratio
-            imbalance_ratios[layer_id, 2:] = (
-                layer_plan.predicted_imbalance.mean_ratio,
-                layer_plan.predicted_imbalance.p95_ratio,
-            )
+            predicted_mean_ratios[layer_id] = predicted_imbalance.mean_ratio
+            imbalance_ratios[layer_id, 2:] = (predicted_imbalance.mean_ratio, predicted_imbalance.p95_ratio)
 
         return StairPlan(
             rank_expert_ids=rank_expert_ids,
