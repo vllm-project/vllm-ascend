@@ -71,6 +71,7 @@ class GlobalMemfabricTE:
         self._hostname: str | None = None
         self._unique_id: str | None = None
         self._is_buffer_registered = False
+        self._initialization_attempted = False
         self._engine_lock = threading.Lock()
         self._register_buffer_lock = threading.Lock()
 
@@ -130,6 +131,14 @@ class GlobalMemfabricTE:
             if self._engine is None:
                 if self._role is None or self._device_id is None:
                     raise RuntimeError("MemFabric transfer engine must be configured before initialization")
+                # Mirrors GlobalTE: a failed native initialization leaves the
+                # process with leaked resources, so a retry is rejected rather
+                # than leaking a second native engine.
+                if self._initialization_attempted:
+                    raise RuntimeError(
+                        "MemFabric transfer engine initialization previously failed. "
+                        "Restart the process before retrying to avoid leaking native resources."
+                    )
                 self._hostname = hostname
                 self._engine = self._build_engine(hostname)
             elif hostname != self._hostname:
@@ -170,6 +179,9 @@ class GlobalMemfabricTE:
                 "Please install memfabric_hybrid (memfabric-hybrid) to use SfaRemoteD2HConnector."
             ) from exc
 
+        # Mark the attempt before native construction, including exceptions, so
+        # a failed initialize() cannot be retried into a second leaked engine.
+        self._initialization_attempted = True
         # Match the MemFabric initialization sequence used by its examples.
         set_log_level(2)
         set_conf_store_tls(False, "")

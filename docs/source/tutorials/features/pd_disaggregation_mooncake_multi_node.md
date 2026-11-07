@@ -427,6 +427,60 @@ With `MultiConnector`, set `qos_priority` in the Mooncake P/D child connector's
 it does not configure or validate pooling backends or modify their `store`
 settings. Restart the serving processes after changing P/D QoS.
 
+### Transport Selection
+
+`MooncakeConnectorV1` reads the transfer backend and transport from its
+`kv_connector_extra_config`. All keys are optional; leaving them unset keeps
+the previous Mooncake + `ascend` behavior. Configure the same values on the
+prefiller and the decoder.
+
+| Key | Values | Default |
+| :--- | :--- | :--- |
+| `transfer_backend` | `mooncake`, `memfabric` | `mooncake` |
+| `transfer_protocol` | transport passed to the Mooncake engine; accepted values are defined by the engine (`ascend` is the only one exercised here) | `ascend` |
+| `memfabric_transfer_protocol` | `sdma`, `device_rdma`, `device_urma` | `sdma` |
+
+To keep Mooncake but select another transport (for example on a machine whose
+interconnect exposes a direct path):
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "transfer_backend": "mooncake",
+    "transfer_protocol": "ascend_direct"
+  }
+}
+```
+
+To move KV through MemFabric's SDMA path instead:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {
+    "transfer_backend": "memfabric",
+    "memfabric_transfer_protocol": "sdma"
+  }
+}
+```
+
+!!! warning
+
+    `transfer_backend="memfabric"` is experimental. It requires `kv_role` to be
+    `kv_producer` or `kv_consumer`, is not supported with
+    `--enable-sleep-mode`, and has not been validated on A3 or 950PR&950DT.
+    On A2 only `sdma` initializes. Bulk transfer bandwidth is bound by the
+    shared interconnect, so do not expect it to scale with TP.
+
+    The MemFabric engine is process-wide. If several connectors in one
+    `MultiConnector` use it, they must agree on
+    `memfabric_transfer_protocol`. The Mooncake-only connectors (layerwise,
+    hybrid, D2RH, `MooncakeConnectorV2`) reject a non-default
+    `transfer_backend`/`transfer_protocol`.
+
 ### kv_port Configuration Guide
 
 On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:
