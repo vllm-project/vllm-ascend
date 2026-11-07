@@ -23,7 +23,7 @@ and [fused_dcp_lse_combine](fused_dcp_lse_combine.md).
 The small native BF16/D512 head-scatter route uses the bit-preserving
 [SFA DCP exchange](sfa_dcp_exchange.md) and [local merge](sfa_dcp_merge.md).
 It derives the payload from the input and actual group rather than assuming
-DCP8/H64. Query layout preparation is described in [SFA DCP query](sfa_dcp_query.md).
+DCP8/H64. Query layout preparation is described in [query gather preparation](query_gather_prep.md).
 The public operator has no scheduler-budget parameter; the backend owns
 scheduling and each layout route owns its kernel-specific selection policy.
 
@@ -79,7 +79,7 @@ The scalar combine kernel keeps one FP32 output accumulator and scalar LSE state
 It first finds the maximum valid LSE, then accumulates
 `exp(lse - lse_max) * partial_output`. Invalid LSE rows contribute zero; when
 all ranks are invalid, the output row is zero.
-The eligible A5 BF16 path batches eight rows per program and masks partial
+The eligible BF16 path batches eight rows per program and masks partial
 tiles; other valid shapes use the scalar-row kernels.
 
 ## Custom-op registration and graph tracing

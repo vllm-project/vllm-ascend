@@ -214,6 +214,19 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
+    # Planner ownership only; physical page geometry is unchanged.
+    is_dspark_draft: bool = False
+
+    # AttentionGroup replaces block_size with the kernel size for builders.
+    # Keep the manager page size for DCP table expansion and address mapping.
+    block_table_block_size: int | None = None
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        return replace(
+            self,
+            block_size=block_size,
+            block_table_block_size=self.block_table_block_size or self.block_size,
+        )
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
@@ -312,6 +325,24 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     cache_dtype_str: str | None = None
     sfa_dcp_replicated_indexer_size: int = 1
 
+    block_table_block_size: int | None = None
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        return replace(
+            self,
+            block_size=block_size,
+            block_table_block_size=self.block_table_block_size or self.block_size,
+        )
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        # The V2 layout planner derives strides from stored row bytes. Include
+        # replicated K/scale regions so its descriptors cover the full page;
+        # the indexer reshape still exposes component-major K/scale views.
+        return self.sfa_dcp_replicated_indexer_size * (
+            self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype)
+        )
+
     @property
     def page_size_bytes(self) -> int:
         return self.real_page_size_bytes
@@ -319,11 +350,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     @property
     def real_page_size_bytes(self) -> int:
         num_heads_per_page = self.block_size * self.num_kv_heads
-        return (
-            self.sfa_dcp_replicated_indexer_size
-            * num_heads_per_page
-            * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
-        )
+        return num_heads_per_page * self.state_content_size_bytes
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:

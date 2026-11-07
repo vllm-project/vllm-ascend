@@ -625,6 +625,16 @@ class TestAscendSFAKPathFusion(TestBase):
 
         self.assertIs(_int64_kv_slots(slots, metadata), slots)
 
+    def test_int64_kv_slots_reuses_equivalent_dcp_views(self):
+        slots = torch.tensor([127, -1, 128, -1], dtype=torch.int32)
+        metadata = SimpleNamespace()
+        converted = _int64_kv_slots(slots[:3], metadata)
+        self.assertIs(_int64_kv_slots(slots[:3], metadata), converted)
+        for view in (slots[1:], slots[::2], slots.view(2, 2)):
+            actual = _int64_kv_slots(view, metadata)
+            self.assertIsNot(actual, converted)
+            torch.testing.assert_close(actual, view.to(torch.int64))
+
     def test_int64_kv_slots_converts_and_caches_per_metadata(self):
         slots = torch.arange(4, dtype=torch.int32).view(-1, 1)
         metadata = SimpleNamespace()
@@ -1174,7 +1184,7 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
-                self.impl._record_query_gather_context = lambda *_args: None
+                self.impl._record_query_gather_context = lambda *_args: record_event("query_gather", None)
                 self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)
                 self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
                     "cache", (hidden, hidden, hidden, hidden)
@@ -1194,7 +1204,7 @@ class TestAscendSFAImpl(TestBase):
                     self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)
                     self.assertTrue(torch.all(output == 1))
                     expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
-                    expected.extend([("wait", "layer"), "cache"])
+                    expected.extend([("wait", "layer"), "cache", "query_gather"])
                     # Static shared-index layers own no runtime indexer cache;
                     # only MTP skip_topk layers still write one.
                     if self.impl.runtime_has_indexer:

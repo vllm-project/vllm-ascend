@@ -120,6 +120,23 @@ def _ascend_resolve_kv_cache_block_sizes(
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    if is_paired_sfa_cache(groups):
+        # DCP scales token-history attention only; recurrent checkpoints keep
+        # the TP-local state for the complete logical sequence.
+        specs = [
+            next(iter(g.kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else g.kv_cache_spec
+            for g in groups
+        ]
+        effective = [s.block_size if isinstance(s, MambaSpec) else s.block_size * dcp for s in specs]
+        scheduler = math.lcm(*effective)
+        if not cache_config.enable_prefix_caching:
+            return scheduler, scheduler
+        unit = getattr(cache_config, "prefix_match_unit", None) or math.gcd(*(s.block_size for s in specs))
+        if any(size % unit for size in effective):
+            raise ValueError("Prefix match unit must divide every effective cache block size.")
+        return scheduler, unit
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
     if filtered_private_groups and not is_deepseek_v41_cache(groups):
