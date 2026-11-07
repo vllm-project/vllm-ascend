@@ -15,7 +15,7 @@ import torch_npu
 from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture, is_breakable_cudagraph_enabled
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -231,31 +231,6 @@ def _kimi_kda_with_output_fake(
     return
 
 
-def _kimi_kda(hidden_states: torch.Tensor, positions: torch.Tensor, layer_name: str, output_rows: int) -> torch.Tensor:
-    # The ordinary FULL/eager path can return the external operator's fresh
-    # result directly. Only breakable segments need a caller-owned buffer.
-    layer = get_forward_context().no_compile_layers[layer_name]
-    plan = layer._plan_mega_kda(hidden_states)
-    if plan is None:
-        return layer._forward_default(hidden_states, positions)
-    return layer._execute_mega_kda(hidden_states, positions, plan)
-
-
-def _kimi_kda_fake(
-    hidden_states: torch.Tensor, positions: torch.Tensor, layer_name: str, output_rows: int
-) -> torch.Tensor:
-    return hidden_states.new_empty((output_rows, hidden_states.shape[-1]))
-
-
-direct_register_custom_op(
-    op_name="ascend_kimi_kda",
-    op_func=_kimi_kda,
-    mutates_args=[],
-    fake_impl=_kimi_kda_fake,
-    dispatch_key="PrivateUse1",
-)
-
-
 direct_register_custom_op(
     op_name="ascend_kimi_kda_with_output",
     op_func=_kimi_kda_with_output,
@@ -376,18 +351,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if custom_op is not None and type(custom_op) is not KimiOProjMMReduceScatterOp:
                 return self._forward_default(hidden_states, positions)
             if torch.compiler.is_compiling():
-                if not is_breakable_cudagraph_enabled():
-                    rows = hidden_states.shape[0]
-                    if type(custom_op) is KimiOProjMMReduceScatterOp:
-                        rows = (rows + self.tp_size - 1) // self.tp_size
-                    return torch.ops.vllm.ascend_kimi_kda(hidden_states, positions, self.prefix, rows)
                 output = self._allocate_mega_output(hidden_states)
                 torch.ops.vllm.ascend_kimi_kda_with_output(hidden_states, positions, output, self.prefix)
                 return output
             plan = self._plan_mega_kda(hidden_states)
             if plan is not None:
-                if not is_breakable_cudagraph_enabled():
-                    return self._execute_mega_kda(hidden_states, positions, plan)
                 output = self._allocate_mega_output(hidden_states)
                 self._forward_mega_kda(hidden_states, positions, plan, output)
                 return output
@@ -460,24 +428,24 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 return None
             accepted = torch.ones(state_indices.shape[0], dtype=torch.int32, device=state_indices.device)
 
+        live_batch = metadata.num_spec_decodes if is_spec else metadata.num_decodes
         # FULL graphs use graph-sized stable state tables. Padding is a suffix
         # of NULL_BLOCK_ID rows, exactly as in the source PR's runtime B/S ABI.
         batch = query_start_loc.numel() - 1
-        if batch <= 0 or hidden_states.ndim != 2 or hidden_states.shape[0] % batch:
+        query_lens = getattr(metadata, "mega_query_lens", ())
+        if live_batch <= 0 or batch < live_batch or len(query_lens) != live_batch:
+            return None
+        spec_len = self.num_spec + 1
+        if any(length != spec_len for length in query_lens):
+            return None
+        if (
+            hidden_states.ndim != 2
+            or hidden_states.shape[-1] != self.hidden_size
+            or metadata.num_actual_tokens != live_batch * spec_len
+            or hidden_states.shape[0] != batch * spec_len
+        ):
             return None
         if batch % self.tp_size != 0 or batch > self.tp_size * _MEGA_KDA_MAX_BATCH_MULTIPLIER:
-            return None
-        spec_len = hidden_states.shape[0] // batch
-        if spec_len != self.num_spec + 1:
-            return None
-        # V2 can schedule variable-length requests. An average S matching the
-        # binary width does not make such a batch rectangular (e.g. 7 + 9).
-        live_batch = metadata.num_spec_decodes if is_spec else metadata.num_decodes
-        query_lens = getattr(metadata, "mega_query_lens", ())
-        if live_batch > batch or len(query_lens) != live_batch or any(length != spec_len for length in query_lens):
-            return None
-        # Retain V2 ABI checks for projection width and paged state views.
-        if hidden_states.shape[-1] != self.hidden_size:
             return None
         if state_indices.ndim not in (1, 2) or state_indices.shape[0] != batch:
             return None
@@ -500,21 +468,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         accepted = accepted[:batch].to(torch.int32)
         first_verify = getattr(metadata, "mega_first_verify", None)
         if is_spec:
-            # V2 tracks request identity across physical block migration.
-            # Without this flag the first round could read the wrong Conv tail.
-            if first_verify is None or first_verify.numel() < batch:
+            if first_verify is None or first_verify.numel() != batch:
                 return None
-            conv_accepted = getattr(metadata, "mega_conv_accepted_tokens", None)
-            if conv_accepted is None:
-                conv_accepted = torch.where(
-                    first_verify[:batch] > 0,
-                    torch.full_like(accepted, spec_len),
-                    accepted,
-                )
-            elif conv_accepted.numel() < batch:
-                return None
-            else:
-                conv_accepted = conv_accepted[:batch]
+            conv_accepted = torch.where(
+                first_verify[:batch] > 0,
+                torch.full_like(accepted, spec_len),
+                accepted,
+            )
         else:
             conv_accepted = accepted
         if state_indices.ndim == 1:
