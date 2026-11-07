@@ -176,7 +176,7 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("torch.distributed.get_rank", return_value=0)
     def test_restore_legacy_zero_nbytes_entry(self, _r, _w):
-        """Legacy snapshots with nbytes=0 entries must not crash on restore."""
+        """v3 manifests with nbytes=0 entries must not crash on restore."""
 
         class M(torch.nn.Module):
             def __init__(self):
@@ -198,6 +198,9 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
             "offset": w_entry["offset"] + w_entry["nbytes"] + 1024,
             "nbytes": 0,
             "kind": "attr",
+            "module": "",
+            "attr": "legacy_empty_attr",
+            "path": [],
             "device": "npu",
         }
         with open(manifest_path, "w") as f:
@@ -244,7 +247,13 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("torch.distributed.get_rank", return_value=0)
     def test_corrupt_blob_size_mode_passes_silently(self, _r, _w):
-        """size mode does not catch byte-flips within bounds (trade-off)."""
+        """size mode catches byte-flips within bounds via per-tensor spot hashes.
+
+        (Pre-v3 this test pinned the trade-off that in-bounds tampering
+        passed silently; the reviewer's correctness bar rejected that, and
+        small tensors -- exactly the scale/bias weights whose corruption is
+        hardest to notice at inference -- are now content-checked in every
+        verify mode except none.)"""
 
         class M(torch.nn.Module):
             def __init__(self):
@@ -265,8 +274,8 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
         old_verify = os.environ.get("VLLM_ASCEND_BIGTENSOR_VERIFY")
         os.environ["VLLM_ASCEND_BIGTENSOR_VERIFY"] = "size"
         try:
-            self.loader.restore_snapshot(restored, torch.device("npu"))
-            self.assertFalse(torch.equal(restored.w.data, model.w.data))
+            with self.assertRaisesRegex(RuntimeError, "spot hash mismatch"):
+                self.loader.restore_snapshot(restored, torch.device("npu"))
         finally:
             if old_verify is None:
                 os.environ.pop("VLLM_ASCEND_BIGTENSOR_VERIFY", None)

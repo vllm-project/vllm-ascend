@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+import hashlib
 import json
 import mmap
 import os
@@ -11,13 +13,14 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch_npu
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from vllm_ascend import envs
+from vllm_ascend.model_loader.weight_state import iter_module_weight_states
 
 from .bigtensordefaultloader import BigTensorDefaultLoader
 
@@ -26,6 +29,17 @@ from .bigtensordefaultloader import BigTensorDefaultLoader
 class BigTensorLoader(BigTensorDefaultLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+
+    # Manifest schema this loader writes and restores. v3 adds: container
+    # capture (module/attr/path chains + container defs), alias dedup
+    # (alias_of) so tied weights persist once, and per-tensor spot hashes
+    # for small tensors. Older snapshots are rejected and regenerated.
+    _SCHEMA_VERSION = 3
+
+    # Tensors up to this size get a per-tensor sha256 in the manifest, checked
+    # on restore even in "size" verify mode. Small tensors are exactly the
+    # scale/bias weights whose silent corruption is hardest to notice.
+    _SPOT_HASH_MAX_BYTES = 4 * 1024 * 1024
 
     # dtype string <-> torch.dtype mapping
     _DTYPE_MAP: dict[str, torch.dtype] = {
@@ -161,6 +175,10 @@ class BigTensorLoader(BigTensorDefaultLoader):
         if save_dtype is not None:
             entry["save_dtype"] = save_dtype
             entry["save_shape"] = save_shape
+        if len(raw) <= self._SPOT_HASH_MAX_BYTES:
+            # Content check for small tensors even in "size" verify mode;
+            # cheap here because raw is already a contiguous host copy.
+            entry["sha256"] = hashlib.sha256(raw).hexdigest()
         blob_parts.append(raw)
         return entry, offset + len(raw)
 
@@ -174,88 +192,92 @@ class BigTensorLoader(BigTensorDefaultLoader):
         """Serialize post-process weights to blob_parts + manifest.
 
         D2H runs synchronously (before graph capture); disk write is async.
-        Captures params/buffers, tensor attrs, obj_attr tensors, null attrs,
-        removed params, and scalar side effects. Model-agnostic: integrity
-        is enforced by blob sha256 + descriptor self-consistency + fingerprint.
+        Captures params/buffers, the full non-state_dict weight state (plain
+        tensor attrs, containers, carrier objects -- via the shared
+        weight_state walker also used by netloader/rfork), alias dedup for
+        tied weights, null attrs, removed params, and scalar side effects.
+        Model-agnostic: integrity is enforced by blob sha256 + per-tensor
+        spot hashes + descriptor self-consistency + fingerprint.
         """
-        import hashlib
-
         rank = torch.distributed.get_rank()
         manifest_path, blob_path = self._snapshot_paths()
         entries: dict[str, dict] = {}
         blob_parts: list[bytes] = []
         offset = 0
+        # (data_ptr, dtype, shape, format) -> name of the primary entry.
+        # Tied weights / re-referenced tensors are stored once and installed
+        # as aliases at restore, so tying survives and the blob stays small.
+        alias_primaries: dict[tuple, str] = {}
+        n_aliases = 0
+
+        def dedup_key(t: torch.Tensor) -> tuple:
+            fmt = int(torch_npu.get_npu_format(t)) if t.device.type == "npu" else 0
+            return (t.data_ptr(), t.dtype, tuple(t.shape), fmt)
 
         # (1) params/buffers in state_dict
         for name, t in model.state_dict().items():
+            key = dedup_key(t)
+            primary = alias_primaries.get(key)
+            if primary is not None:
+                entries[name] = {
+                    "kind": "param",
+                    "alias_of": primary,
+                    "dtype": str(t.dtype).replace("torch.", ""),
+                    "shape": list(t.shape),
+                    "format": key[3],
+                    "nbytes": 0,
+                }
+                n_aliases += 1
+                continue
             entry, offset = self._append_tensor(t, blob_parts, offset)
             entry["kind"] = "param"
             entries[name] = entry
+            alias_primaries[key] = name
 
-        # (2) Plain tensor attrs in module __dict__ (invisible to state_dict)
-        for mod_name, mod in model.named_modules(remove_duplicate=False):
-            for attr, v in list(mod.__dict__.items()):
-                if isinstance(v, (list, tuple, dict)):
-                    if attr.startswith("_"):
-                        continue
-                    vals = v.values() if isinstance(v, dict) else v
-                    n_tensors = sum(1 for x in vals if isinstance(x, torch.Tensor) and x.numel() > 0)
-                    if n_tensors:
-                        logger.warning(
-                            "snapshot save: %s.%s is a container holding %d tensor(s); "
-                            "containers are NOT captured -- verify restore coverage",
-                            mod_name or "<root>",
-                            attr,
-                            n_tensors,
-                        )
-                    continue
-                if not isinstance(v, torch.Tensor):
-                    continue
-                if v.numel() == 0:
-                    continue  # runtime placeholder, no data to persist
-                key = f"{mod_name}.{attr}" if mod_name else attr
-                if key in entries:
-                    continue
-                entry, offset = self._append_tensor(v, blob_parts, offset)
-                entry.update({"kind": "attr", "device": v.device.type})
-                entries[key] = entry
+        # (2) full non-state_dict weight state via the shared walker:
+        # plain tensor attrs, list/tuple/dict containers (recorded as
+        # module+attr+path chains plus container defs), and carrier-object
+        # tensors (e.g. MLA impl W_UV / W_UK_T). Same enumeration policy as
+        # netloader's field-tested P2P transfer, incl. cycle protection and
+        # skipping private runtime attrs.
+        containers: dict[str, dict] = {}
+        for rec in iter_module_weight_states(model, deep_scan_all_objects=True, container_defs=containers):
+            t = rec.tensor
+            if t.numel() == 0:
+                continue  # runtime placeholder, no data to persist
+            if rec.name in entries:
+                continue  # same slot reached twice (shared graph); already stored
+            key = dedup_key(t)
+            primary = alias_primaries.get(key)
+            if primary is not None:
+                entries[rec.name] = {
+                    "kind": "attr",
+                    "alias_of": primary,
+                    "module": rec.module,
+                    "attr": rec.attr,
+                    "path": [dict(step) for step in rec.path],
+                    "dtype": str(t.dtype).replace("torch.", ""),
+                    "shape": list(t.shape),
+                    "format": key[3],
+                    "nbytes": 0,
+                    "device": t.device.type,
+                }
+                n_aliases += 1
+                continue
+            entry, offset = self._append_tensor(t, blob_parts, offset)
+            entry.update(
+                {
+                    "kind": "attr",
+                    "module": rec.module,
+                    "attr": rec.attr,
+                    "path": [dict(step) for step in rec.path],
+                    "device": t.device.type,
+                }
+            )
+            entries[rec.name] = entry
+            alias_primaries[key] = rec.name
 
-        # (3) Tensors inside non-Module attribute objects (e.g. MLA's impl)
-        for mod_name, mod in model.named_modules(remove_duplicate=False):
-            for attr, v in list(mod.__dict__.items()):
-                if isinstance(v, (torch.nn.Module, torch.Tensor, type)) or callable(v) or not hasattr(v, "__dict__"):
-                    continue
-                for sub, sv in list(vars(v).items()):
-                    if isinstance(sv, (list, tuple, dict)):
-                        vals = sv.values() if isinstance(sv, dict) else sv
-                        n_tensors = sum(1 for x in vals if isinstance(x, torch.Tensor))
-                        if n_tensors:
-                            logger.warning(
-                                "snapshot save: carrier %s.%s holds container attr '%s' "
-                                "with %d tensor(s); containers are NOT captured",
-                                mod_name or "<root>",
-                                attr,
-                                sub,
-                                n_tensors,
-                            )
-                        continue
-                    if not isinstance(sv, torch.Tensor):
-                        continue
-                    if sv.numel() == 0:
-                        continue
-                    entry, offset = self._append_tensor(sv, blob_parts, offset)
-                    key = f"{mod_name}.{attr}.{sub}" if mod_name else f"{attr}.{sub}"
-                    entry.update(
-                        {
-                            "kind": "obj_attr",
-                            "carrier": f"{mod_name}.{attr}" if mod_name else attr,
-                            "attr": sub,
-                            "device": sv.device.type,
-                        }
-                    )
-                    entries[key] = entry
-
-        # (4) Attrs nulled by process (recorded for restore to replay)
+        # (3) Attrs nulled by process (recorded for restore to replay)
         null_attrs = []
         for mod_name, mod in model.named_modules(remove_duplicate=False):
             for attr, v in mod.__dict__.items():
@@ -266,21 +288,27 @@ class BigTensorLoader(BigTensorDefaultLoader):
         for raw in blob_parts:
             h.update(raw)
         manifest = {
-            "schema_version": 2,
-            "format_note": "Model-agnostic: integrity by sha256 + descriptor + fingerprint",
+            "schema_version": self._SCHEMA_VERSION,
+            "format_note": "Model-agnostic: integrity by sha256 + spot hashes + descriptor + fingerprint",
             "world_rank": rank,
             "world_size": torch.distributed.get_world_size(),
             "fingerprint": fingerprint,
             "sha256": h.hexdigest(),
             "tensors": entries,
+            "containers": containers,
             "null_attrs": null_attrs,
             "removed_params": removed_params or [],
             "scalar_attrs": scalar_attrs or {},
         }
+        n_spot = sum(1 for e in entries.values() if "sha256" in e)
         logger.info(
-            "save_snapshot rank=%d tensors=%d bytes=%d sha256=%s (serialized, awaiting disk write)",
+            "save_snapshot rank=%d tensors=%d (aliases=%d spot_hashed=%d) "
+            "containers=%d bytes=%d sha256=%s (serialized, awaiting disk write)",
             rank,
             len(entries),
+            n_aliases,
+            n_spot,
+            len(containers),
             offset,
             manifest["sha256"][:16],
         )
@@ -417,38 +445,15 @@ class BigTensorLoader(BigTensorDefaultLoader):
         return True, chunk_size, dev_bytes, nz_bytes
 
     def _resolve_target(self, name: str, e: dict, param_dict: dict, name_to_module: dict, target_device) -> tuple:
-        """Resolve manifest entry to (param, module, attr_name)."""
-        kind = e.get("kind")
-        if kind not in ("attr", "obj_attr"):
-            dtype = getattr(torch, e["dtype"], None)
-            dtype_key = self._DTYPE_KEY.get(dtype) if dtype is not None else None
-            if dtype_key is None:
-                raise RuntimeError(f"snapshot restore: dtype {e['dtype']} not in _DTYPE_MAP for {name}")
-            param = self._resolve_param(name, param_dict, name_to_module, target_device, dtype_key)
-            if param is None:
-                return None, None, None  # stale, coverage check will report
-            return param, None, None
-        if kind == "attr":
-            mod_name, _, attr_name = name.rpartition(".")
-            module = name_to_module.get(mod_name)
-            if module is None:
-                raise RuntimeError(f"snapshot restore: module {mod_name} for attr {name} not found")
-            return None, module, attr_name
-        # kind == "obj_attr": resolve carrier by longest module prefix
-        carrier_segs = e["carrier"].split(".")
-        obj = None
-        for i in range(len(carrier_segs), 0, -1):
-            cand = ".".join(carrier_segs[:i])
-            if cand in name_to_module:
-                obj = name_to_module[cand]
-                for s in carrier_segs[i:]:
-                    obj = getattr(obj, s, None)
-                    if obj is None:
-                        break
-                break
-        if obj is None:
-            raise RuntimeError(f"snapshot restore: carrier {e['carrier']} for {name} not found")
-        return None, obj, e["attr"]
+        """Resolve a manifest 'param' entry to its model parameter (or None if stale)."""
+        dtype = getattr(torch, e["dtype"], None)
+        dtype_key = self._DTYPE_KEY.get(dtype) if dtype is not None else None
+        if dtype_key is None:
+            raise RuntimeError(f"snapshot restore: dtype {e['dtype']} not in _DTYPE_MAP for {name}")
+        param = self._resolve_param(name, param_dict, name_to_module, target_device, dtype_key)
+        if param is None:
+            return None  # stale, coverage check will report
+        return param
 
     @staticmethod
     def _check_coverage(
@@ -483,6 +488,317 @@ class BigTensorLoader(BigTensorDefaultLoader):
                 setattr(module, attr_name, None)
 
     @staticmethod
+    def _container_def_key(module_name: str, attr: str, chain: tuple[dict, ...]) -> str:
+        """Key into manifest["containers"] for the container at ``chain``.
+
+        Must mirror weight_state.iter_module_weight_states: root attr as first
+        step, module prefix scoping."""
+        return f"{module_name}|{json.dumps(({'a': attr}, *chain))}"
+
+    def _step_into(
+        self,
+        name: str,
+        module_name: str,
+        attr: str,
+        parent: Any,
+        step: dict,
+        next_step: dict,
+        chain: tuple[dict, ...],
+        container_defs: dict[str, dict],
+        created: list,
+    ) -> Any:
+        """Descend one path step, creating the child container when missing.
+
+        ``chain`` is the steps taken so far *excluding* ``step``; the child's
+        own def key includes ``step``. The declared container type comes from
+        the recorded def (a dict child must not be reborn as a list);
+        ``next_step`` only backfills when no def was recorded.
+        """
+        if "a" in step:
+            child = getattr(parent, step["a"], None)
+            if child is None:
+                raise RuntimeError(
+                    f"snapshot restore: object attribute {step['a']!r} on the way "
+                    f"to {name} is missing on the model; the snapshot is stale "
+                    f"or the carrier is created during process -- re-run convert."
+                )
+            return child
+        child_key = self._container_def_key(module_name, attr, (*chain, step))
+        d = container_defs.get(child_key)
+        child_type = d.get("type") if d else ("dict" if "k" in next_step else "list")
+        is_tuple = child_type == "tuple"
+        length = d.get("len", 0) if d else 0
+
+        def _new_child(container_index: int) -> Any:
+            if child_type == "dict":
+                return {}
+            return [None] * max(length, container_index + 1)
+
+        if "k" in step:
+            key = step["k"]
+            if not isinstance(parent, dict):
+                raise RuntimeError(
+                    f"snapshot restore: slot for {name} is a {type(parent).__name__}, "
+                    f"manifest expects dict; re-run convert."
+                )
+            if key in parent:
+                return parent[key]
+            child: Any = _new_child(0)
+            parent[key] = child
+            created.append((parent, ("k", key), is_tuple, child))
+            return child
+        index = step["i"]
+        if isinstance(parent, dict):
+            if index in parent:
+                return parent[index]
+            child = _new_child(0)
+            parent[index] = child
+            created.append((parent, ("k", index), is_tuple, child))
+            return child
+        if not isinstance(parent, list):
+            raise RuntimeError(
+                f"snapshot restore: slot for {name} is a {type(parent).__name__}, "
+                f"manifest expects list; re-run convert."
+            )
+        while len(parent) <= index:
+            parent.append(None)
+        slot = parent[index]
+        if slot is None:
+            slot = _new_child(index)
+            parent[index] = slot
+            created.append((parent, ("i", index), is_tuple, slot))
+        return slot
+
+    def _install_attr_tensor(
+        self,
+        name: str,
+        e: dict,
+        tensor: torch.Tensor,
+        name_to_module: dict,
+        container_defs: dict[str, dict],
+        created: list,
+    ) -> None:
+        """Install a restored tensor into the model via its access chain.
+
+        Plain attr (empty path) -> setattr. Containers/carriers -> walk the
+        tagged chain from the walker's save, creating missing containers from
+        the recorded defs. Existing slots are drift-checked (shape/dtype)."""
+        module = name_to_module.get(e.get("module", ""))
+        if module is None:
+            raise RuntimeError(
+                f"snapshot restore: module {e.get('module')!r} for {name} not found; "
+                f"the snapshot is stale -- re-run convert."
+            )
+        attr = e["attr"]
+        path = e.get("path") or []
+
+        if not path:
+            current = getattr(module, attr, None)
+            if isinstance(current, torch.Tensor) and (current.shape != tensor.shape or current.dtype != tensor.dtype):
+                raise RuntimeError(
+                    f"snapshot restore: shape/dtype mismatch for {name}: model has "
+                    f"{tuple(current.shape)}/{current.dtype}, snapshot has "
+                    f"{tuple(tensor.shape)}/{tensor.dtype}. Re-run convert."
+                )
+            setattr(module, attr, tensor)
+            return
+
+        parent = getattr(module, attr, None)
+        if parent is None:
+            # Root container attr (e.g. module.caches = [..]) missing on the
+            # freshly initialized model: recreate it from the recorded def.
+            first = path[0]
+            if not ("i" in first or "k" in first):
+                raise RuntimeError(
+                    f"snapshot restore: carrier attr {attr!r} for {name} is missing "
+                    f"on the model; the snapshot is stale -- re-run convert."
+                )
+            d = container_defs.get(self._container_def_key(e.get("module", ""), attr, ()))
+            root_type = d.get("type") if d else ("dict" if "k" in first else "list")
+            is_tuple = root_type == "tuple"
+            length = d.get("len", 0) if d else 0
+            parent: Any = {} if root_type == "dict" else [None] * max(length, 1)
+            setattr(module, attr, parent)
+            created.append((module, ("a", attr), is_tuple, parent))
+        for depth, step in enumerate(path[:-1]):
+            parent = self._step_into(
+                name,
+                e.get("module", ""),
+                attr,
+                parent,
+                step,
+                path[depth + 1],
+                tuple(path[:depth]),
+                container_defs,
+                created,
+            )
+
+        last = path[-1]
+        if "a" in last:
+            sub = last["a"]
+            current = getattr(parent, sub, None)
+            if isinstance(current, torch.Tensor) and (current.shape != tensor.shape or current.dtype != tensor.dtype):
+                raise RuntimeError(
+                    f"snapshot restore: shape/dtype mismatch for {name}: model has "
+                    f"{tuple(current.shape)}/{current.dtype}, snapshot has "
+                    f"{tuple(tensor.shape)}/{tensor.dtype}. Re-run convert."
+                )
+            setattr(parent, sub, tensor)
+        elif "k" in last:
+            key = last["k"]
+            if not isinstance(parent, dict):
+                raise RuntimeError(
+                    f"snapshot restore: slot for {name} is a {type(parent).__name__}, "
+                    f"manifest expects dict; re-run convert."
+                )
+            current = parent.get(key)
+            if isinstance(current, torch.Tensor) and (current.shape != tensor.shape or current.dtype != tensor.dtype):
+                raise RuntimeError(
+                    f"snapshot restore: shape/dtype mismatch for {name}: model has "
+                    f"{tuple(current.shape)}/{current.dtype}, snapshot has "
+                    f"{tuple(tensor.shape)}/{tensor.dtype}. Re-run convert."
+                )
+            parent[key] = tensor
+        else:
+            index = last["i"]
+            if isinstance(parent, tuple):
+                # Tuples are immutable: rebuild the container and rebind it.
+                # Only supported when the tuple is the root attr itself;
+                # nested immutable containers cannot be mutated in place.
+                if len(path) != 1:
+                    raise RuntimeError(
+                        f"snapshot restore: {name} lives inside a nested immutable tuple; re-run convert."
+                    )
+                parent = tuple(tensor if i == index else v for i, v in enumerate(parent))
+                setattr(module, attr, parent)
+                return
+            if isinstance(parent, dict):
+                current = parent.get(index)
+            elif isinstance(parent, list):
+                while len(parent) <= index:
+                    parent.append(None)
+                current = parent[index]
+            else:
+                raise RuntimeError(
+                    f"snapshot restore: slot for {name} is a {type(parent).__name__}, "
+                    f"manifest expects list; re-run convert."
+                )
+            if isinstance(current, torch.Tensor) and (current.shape != tensor.shape or current.dtype != tensor.dtype):
+                raise RuntimeError(
+                    f"snapshot restore: shape/dtype mismatch for {name}: model has "
+                    f"{tuple(current.shape)}/{current.dtype}, snapshot has "
+                    f"{tuple(tensor.shape)}/{tensor.dtype}. Re-run convert."
+                )
+            parent[index] = tensor
+
+    @staticmethod
+    def _seal_created_containers(created: list) -> None:
+        """Convert containers we recreated to tuples where the save recorded tuples.
+
+        Sealed in reverse creation order: nested containers are created before
+        their parents, so sealing children first lets the parent's ``tuple(child)``
+        pick up already-sealed (tuple) children instead of re-wrapping the
+        unsealed list and orphaning the inner seal.
+        """
+        for parent, how, is_tuple, child in reversed(created):
+            if not is_tuple:
+                continue
+            sealed = tuple(child)
+            if how[0] == "a":
+                setattr(parent, how[1], sealed)
+            else:
+                parent[how[1]] = sealed
+
+    def _delete_snapshot(self) -> None:
+        """Remove a stale/corrupt snapshot so the fallback path regenerates it."""
+        try:
+            manifest_path, blob_path = self._snapshot_paths()
+        except RuntimeError:
+            return  # checkpoint path unset/unusable; nothing to delete
+        for path in (manifest_path, blob_path, manifest_path + ".tmp", blob_path + ".tmp"):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    logger.info("snapshot restore: deleted stale snapshot file %s", path)
+                except OSError:
+                    logger.warning("snapshot restore: failed to delete stale snapshot file %s", path)
+
+    @staticmethod
+    def _iter_static_contexts(vllm_config: VllmConfig):
+        """Yield unique (compilation_config, forward_context, moe_layers) triples.
+
+        Covers both the passed config and the thread-current vllm config: layer
+        registration goes through the current config context, which in
+        same-process multi-model setups (e.g. speculative-decoding drafts) is
+        not necessarily the config passed to load_model.
+        """
+        candidates = [vllm_config]
+        current_vllm_config = get_current_vllm_config_or_none()
+        if current_vllm_config is not None:
+            candidates.append(current_vllm_config)
+        seen_compilation: set[int] = set()
+        for config in candidates:
+            compilation_config = getattr(config, "compilation_config", None)
+            if compilation_config is None or id(compilation_config) in seen_compilation:
+                continue
+            seen_compilation.add(id(compilation_config))
+            forward_context = getattr(compilation_config, "static_forward_context", None)
+            moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
+            if not isinstance(forward_context, dict):
+                continue
+            yield compilation_config, forward_context, moe_layers
+
+    @classmethod
+    def _snapshot_forward_context(cls, vllm_config: VllmConfig) -> dict:
+        """Baseline keys/MoE lists before initialize_model, for precise fallback cleanup."""
+        baseline: dict = {"ctx_keys": {}, "moe_layers": {}}
+        for _, forward_context, moe_layers in cls._iter_static_contexts(vllm_config):
+            if id(forward_context) not in baseline["ctx_keys"]:
+                try:
+                    baseline["ctx_keys"][id(forward_context)] = set(forward_context.keys())
+                except TypeError:
+                    baseline["ctx_keys"][id(forward_context)] = set()
+            if isinstance(moe_layers, list) and id(moe_layers) not in baseline["moe_layers"]:
+                baseline["moe_layers"][id(moe_layers)] = (moe_layers, list(moe_layers))
+        return baseline
+
+    @classmethod
+    def _reset_forward_context(
+        cls,
+        vllm_config: VllmConfig,
+        failed_model: nn.Module | None = None,
+        baseline: dict | None = None,
+    ) -> None:
+        """Drop the abandoned model's registrations so a second
+        initialize_model(vllm_config) does not hit 'Duplicate layer name'.
+
+        Attention/MoE/MLA layers register themselves by prefix into
+        ``static_forward_context`` (and MoE appends to ``static_all_moe_layers``).
+        The abandoned model instance is discarded on fallback, so only the
+        entries it added must go; the fresh model re-registers itself as it is
+        built. Removal is precise (new keys + keys owned by the failed model's
+        modules; MoE lists rolled back to the pre-load baseline) so that, in a
+        same-process multi-model setup, a failed restore of one model does not
+        wipe the live registrations of another. Mirrors the netloader cleanup.
+        """
+        if baseline is None:
+            baseline = cls._snapshot_forward_context(vllm_config)
+        stale_module_ids = {id(m) for m in failed_model.modules()} if failed_model is not None else set()
+        for _, forward_context, moe_layers in cls._iter_static_contexts(vllm_config):
+            keep_keys = baseline["ctx_keys"].get(id(forward_context), set())
+            stale_keys = [
+                key
+                for key, module in list(forward_context.items())
+                if key not in keep_keys or id(module) in stale_module_ids
+            ]
+            for key in stale_keys:
+                del forward_context[key]
+            if isinstance(moe_layers, list):
+                rollback = baseline["moe_layers"].get(id(moe_layers))
+                if rollback is not None:
+                    moe_layers[:] = rollback[1]
+
+    @staticmethod
     def _verify_blob(mm: "mmap.mmap", manifest: dict, manifest_path: str) -> float:
         """Pre-restore integrity gate. Returns elapsed time.
 
@@ -515,8 +831,28 @@ class BigTensorLoader(BigTensorDefaultLoader):
                 )
 
         if verify_mode == "size":
+            # Spot content check for small tensors (scales/biases): bounds
+            # checks cannot detect in-place tampering of a same-size tensor,
+            # but a corrupted norm weight silently poisons every output.
+            n_spot = 0
+            for name, e in manifest["tensors"].items():
+                if "sha256" not in e or e["nbytes"] == 0:
+                    continue
+                digest = hashlib.sha256(mm[e["offset"] : e["offset"] + e["nbytes"]]).hexdigest()
+                if digest != e["sha256"]:
+                    raise RuntimeError(
+                        f"snapshot restore: spot hash mismatch for '{name}' -- "
+                        f"manifest records {e['sha256'][:16]}... but the blob holds "
+                        f"{digest[:16]}...; the snapshot at "
+                        f"{os.path.dirname(manifest_path)} is corrupt or was "
+                        f"tampered with. Re-run convert."
+                    )
+                n_spot += 1
             logger.info(
-                "snapshot restore: blob bounds verified (%d tensors, %.3fs)", n_entries, time.perf_counter() - t0
+                "snapshot restore: blob bounds verified (%d tensors, %d spot-hashed, %.3fs)",
+                n_entries,
+                n_spot,
+                time.perf_counter() - t0,
             )
             return time.perf_counter() - t0
 
@@ -535,8 +871,6 @@ class BigTensorLoader(BigTensorDefaultLoader):
                 "skipping sha256"
             )
             return time.perf_counter() - t0
-        import hashlib
-
         h = hashlib.sha256()
         chunk_size = 128 * 1024 * 1024  # 128 MiB
         for pos in range(0, blob_len, chunk_size):
@@ -559,28 +893,43 @@ class BigTensorLoader(BigTensorDefaultLoader):
         """Restore post-process weights from snapshot, skip process entirely.
 
         Each tensor is cloned into standalone offset-0 storage (aclnn rejects
-        nonzero-offset views). Bulk H2D (VLLM_ASCEND_BIGTENSOR_BULK_H2D=1)
-        chunks the blob to keep peak memory at weights + one chunk.
+        nonzero-offset views). Aliased tensors (tied weights, re-referenced
+        derived tensors) are installed once and re-shared, so tying survives.
+        Bulk H2D (VLLM_ASCEND_BIGTENSOR_BULK_H2D=1) chunks the blob to keep
+        peak memory at weights + one chunk.
+
+        Raises on any integrity/staleness problem; the caller (load_model)
+        catches, deletes the snapshot, and falls back to a fresh load.
         """
         manifest_path, blob_path = self._snapshot_paths()
         with open(manifest_path) as f:
             manifest = json.load(f)
         rank = torch.distributed.get_rank()
+        schema = manifest.get("schema_version", 0)
+        if schema != self._SCHEMA_VERSION:
+            raise RuntimeError(
+                f"snapshot restore: unsupported manifest schema_version={schema} "
+                f"(expected {self._SCHEMA_VERSION}). The snapshot at "
+                f"{os.path.dirname(manifest_path)} predates container capture "
+                f"and alias dedup; it will be deleted and regenerated from a "
+                f"fresh load."
+            )
         self._check_fingerprint(manifest.get("fingerprint"), fingerprint, manifest_path)
 
+        container_defs = manifest.get("containers", {})
         with open(blob_path, "rb") as bf, mmap.mmap(bf.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             verify_time = self._verify_blob(mm, manifest, manifest_path)
             h2d_start = time.perf_counter()
             bulk, chunk_size, _, _ = self._plan_bulk(manifest["tensors"], len(mm))
-            # Bulk requires offset-ordered consumption
-            tensor_items = (
-                sorted(manifest["tensors"].items(), key=lambda kv: kv[1]["offset"])
-                if bulk
-                else manifest["tensors"].items()
-            )
+            # Alias entries carry no blob bytes; consume blobs in offset order
+            # for the real entries, then install aliases from the registry.
+            real_items = [(n, e) for n, e in manifest["tensors"].items() if "alias_of" not in e]
+            tensor_items = sorted(real_items, key=lambda kv: kv[1]["offset"]) if bulk else real_items
             param_dict = dict(model.named_parameters(remove_duplicate=False))
             param_dict.update(dict(model.named_buffers(remove_duplicate=False)))
             name_to_module = dict(model.named_modules(remove_duplicate=False))
+            registry: dict[str, torch.Tensor] = {}  # name -> restored standalone tensor
+            created_containers: list = []  # containers recreated by install, sealed to tuples at the end
             dev_chunk = None  # current device-side bulk buffer
             chunk_base = 0  # blob offset where dev_chunk starts
             chunk_end = 0  # blob offset where dev_chunk ends
@@ -589,6 +938,13 @@ class BigTensorLoader(BigTensorDefaultLoader):
             n_nd = n_nz = 0
 
             for name, e in tensor_items:
+                kind = e.get("kind")
+                if kind == "param":
+                    param = self._resolve_target(name, e, param_dict, name_to_module, target_device)
+                    if param is None:
+                        continue  # stale, coverage check will report
+                else:
+                    param = None
                 dtype = getattr(torch, e["dtype"], None)
                 if dtype is None:
                     raise RuntimeError(f"snapshot restore: unsupported dtype {e['dtype']} for {name}")
@@ -618,10 +974,6 @@ class BigTensorLoader(BigTensorDefaultLoader):
                             f"{expected} bytes. Manifest may be corrupt "
                             f"or tampered -- re-run convert."
                         )
-                param, module, attr_name = self._resolve_target(name, e, param_dict, name_to_module, target_device)
-                kind = e.get("kind")
-                if param is None and module is None and attr_name is None:
-                    continue  # stale, coverage check reports
 
                 with torch.no_grad():
                     # Packed NZ: build int8 tensor, view back to int32 after NZ cast
@@ -685,30 +1037,55 @@ class BigTensorLoader(BigTensorDefaultLoader):
                                 f"(nbytes {e['nbytes']}). "
                                 f"Re-run convert."
                             )
-                    if kind in ("attr", "obj_attr"):
-                        # Drift detection: attr shape/dtype set by code, not process
-                        current = getattr(module, attr_name, None)
-                        if isinstance(current, torch.Tensor) and (
-                            current.shape != tensor.shape or current.dtype != tensor.dtype
-                        ):
-                            raise RuntimeError(
-                                f"snapshot restore: shape/dtype mismatch for "
-                                f"{name}: model has "
-                                f"{tuple(current.shape)}/{current.dtype},"
-                                f" snapshot has "
-                                f"{tuple(tensor.shape)}/{tensor.dtype}."
-                                f" Re-run convert."
-                            )
-                        setattr(module, attr_name, tensor)
-                    elif "save_dtype" in e or dtype != param.dtype:
-                        # Packed/dtype-changing: use .data (set_ rejects dtype change)
-                        param.data = tensor
-                    else:
-                        # Standard: set_ preserves NZ metadata; .data for shape-changing
-                        if param.numel() != 0 and tensor.shape != param.shape:
+                    registry[name] = tensor
+                    if param is not None:
+                        if "save_dtype" in e or dtype != param.dtype:
+                            # Packed/dtype-changing: use .data (set_ rejects dtype change)
                             param.data = tensor
                         else:
-                            param.set_(tensor)
+                            # Standard: set_ preserves NZ metadata; .data for shape-changing
+                            if param.numel() != 0 and tensor.shape != param.shape:
+                                param.data = tensor
+                            else:
+                                param.set_(tensor)
+                    else:
+                        self._install_attr_tensor(name, e, tensor, name_to_module, container_defs, created_containers)
+
+            # Alias pass: re-share primaries so tied weights stay tied. The
+            # registry was filled in the complete tensor pass above, so
+            # manifest ordering between primaries and aliases is irrelevant.
+            n_aliases = 0
+            for name, e in manifest["tensors"].items():
+                alias_of = e.get("alias_of")
+                if alias_of is None:
+                    continue
+                primary = registry.get(alias_of)
+                if primary is None:
+                    raise RuntimeError(
+                        f"snapshot restore: alias {name!r} references {alias_of!r} "
+                        f"which was not restored -- the manifest is corrupt; "
+                        f"re-run convert."
+                    )
+                with torch.no_grad():
+                    if e.get("kind") == "param":
+                        param = self._resolve_target(name, e, param_dict, name_to_module, target_device)
+                        if param is None:
+                            continue  # stale alias target, coverage check reports
+                        if tuple(param.shape) != tuple(primary.shape) or param.dtype != primary.dtype:
+                            raise RuntimeError(
+                                f"snapshot restore: alias {name}: model has "
+                                f"{tuple(param.shape)}/{param.dtype} but primary "
+                                f"{alias_of} restored as {tuple(primary.shape)}/"
+                                f"{primary.dtype}. Re-run convert."
+                            )
+                        param.set_(primary)
+                    else:
+                        self._install_attr_tensor(name, e, primary, name_to_module, container_defs, created_containers)
+                    n_aliases += 1
+
+            # Containers we recreated were built as lists (tuples are
+            # immutable); seal them back to tuples where save recorded them.
+            self._seal_created_containers(created_containers)
 
             # Release last chunk, replay scalar side effects
             dev_chunk = None
@@ -726,34 +1103,73 @@ class BigTensorLoader(BigTensorDefaultLoader):
             )
             h2d_time = time.perf_counter() - h2d_start
         logger.info(
-            "restore_snapshot rank=%d mode=%s n_nd=%d n_nz=%d chunks=%d bulk_h2d=%.2fs verify=%.2fs h2d=%.2fs",
+            "restore_snapshot rank=%d mode=%s n_nd=%d n_nz=%d aliases=%d chunks=%d "
+            "bulk_h2d=%.2fs verify=%.2fs h2d=%.2fs",
             rank,
             "bulk" if bulk else "per-tensor",
             n_nd,
             n_nz,
+            n_aliases,
             n_chunks,
             bulk_h2d,
             verify_time,
             h2d_time,
         )
 
-    def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
-        """Load model. FAST_RESTORE=1: snapshot present -> restore-only; absent -> load+process+async save."""
+    def load_model(
+        self,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        prefix: str = "",
+    ) -> nn.Module:
+        """Load model. FAST_RESTORE=1: snapshot present -> restore-only; absent -> load+process+async save.
+
+        Restore failures never kill startup: the stale snapshot is deleted
+        and loading falls back to the fresh path (which re-saves a new,
+        correct snapshot). Mirrors netloader's revert_to_default philosophy --
+        degrade to the known-good path instead of serving broken weights.
+        """
         device_config = vllm_config.device_config
         load_config = vllm_config.load_config
         load_device = device_config.device if load_config.device is None else load_config.device
         target_device = torch.device(load_device)
 
         fast_restore_enabled = envs.VLLM_ASCEND_BIGTENSOR_FAST_RESTORE
-        if fast_restore_enabled:
-            fingerprint = self._fingerprint(vllm_config, model_config)
-            with set_default_torch_dtype(model_config.dtype):
-                with target_device:
+        fingerprint = self._fingerprint(vllm_config, model_config) if fast_restore_enabled else None
+
+        if fast_restore_enabled and self._has_snapshot():
+            model = None
+            context_baseline = self._snapshot_forward_context(vllm_config)
+            try:
+                with set_default_torch_dtype(model_config.dtype), target_device:
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
-                if self._has_snapshot():
-                    self.restore_snapshot(model, target_device, fingerprint)
-                    return model.eval()
-                self.load_weights(model, model_config)
+                self.restore_snapshot(model, target_device, fingerprint)
+                return model.eval()
+            except Exception:
+                logger.exception(
+                    "bigtensorloader: snapshot restore failed; deleting the "
+                    "stale snapshot and falling back to a fresh load + process"
+                )
+                self._delete_snapshot()
+                # The abandoned model already registered its layers by prefix
+                # into the compilation config; drop only those (new/owned)
+                # registrations so the fresh initialize_model below does not
+                # hit 'Duplicate layer name' -- and a co-resident model's live
+                # registrations survive.
+                self._reset_forward_context(vllm_config, model, context_baseline)
+                model = None
+                gc.collect()
+                if target_device.type == "npu":
+                    torch.npu.empty_cache()
+                # fall through to the fresh path below
+
+        with set_default_torch_dtype(model_config.dtype):
+            with target_device:
+                model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
+
+            # Quantization does not happen in `load_weights` but after it
+            self.load_weights(model, model_config)
+            if fast_restore_enabled:
                 pre_params = set(model.state_dict().keys())
                 pre_scalar = self._capture_scalar_state(model)
                 process_weights_after_loading(model, model_config, target_device)
@@ -770,14 +1186,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
                     daemon=True,
                 ).start()
                 logger.info("snapshot snapshot save dispatched to background thread; startup continues without waiting")
-            return model.eval()
-
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
-
-            # Quantization does not happen in `load_weights` but after it
-            self.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
+            else:
+                process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()
