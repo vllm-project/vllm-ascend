@@ -24,6 +24,8 @@
 # limitations under the License.
 #
 import math
+import os
+import sys
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -308,11 +310,23 @@ class DeepseekV4MoE(nn.Module):
         )
         self.gate.precast_fp32_weight = True
 
-        # Load balancing settings.
+        # Load balancing settings. On the V1 runner the Ascend EPLB config is
+        # carried by additional_config, so `parallel_config.eplb_config` keeps
+        # its upstream default (no redundancy) while the expert parameters are
+        # allocated from the Ascend config (see patch_fused_moe). Resolve the
+        # redundancy from the same source, otherwise load_weights builds a
+        # mapping that misses the allocated duplicate experts and their slots
+        # stay uninitialized (all-zero weights) forever.
+        ascend_eplb_config = get_ascend_config().eplb_config
         eplb_config = parallel_config.eplb_config
         self.enable_eplb = parallel_config.enable_eplb
 
-        self.n_redundant_experts = eplb_config.num_redundant_experts
+        if ascend_eplb_config.dynamic_eplb or ascend_eplb_config.expert_map_path is not None:
+            configured_redundancy = ascend_eplb_config.num_redundant_experts
+        else:
+            configured_redundancy = 0
+        # Same precedence as patch_fused_moe: the Ascend value wins when set.
+        self.n_redundant_experts = configured_redundancy or eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -1211,6 +1225,18 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         loaded_params: set[str] = set()
 
         tp_rank = get_tensor_model_parallel_rank()
+        # Experimental load trace, disabled unless EPLB_LOAD_TRACE is set. It
+        # shows whether the duplicate physical experts (>= n_routed_experts)
+        # are present in the mapping and whether their loads succeed.
+        _trace = os.environ.get("EPLB_LOAD_TRACE")
+        if _trace:
+            print(
+                f"[loadtrace] rank={tp_rank} n_logical={self.config.n_routed_experts} "
+                f"n_redundant={self.num_redundant_experts} entries={len(expert_params_mapping)} "
+                f"dup_entries={sum(1 for m in expert_params_mapping if m[2] >= self.config.n_routed_experts)}",
+                file=sys.stderr,
+                flush=True,
+            )
         tp_size = get_tensor_model_parallel_world_size()
 
         # Attention heads per rank
@@ -1392,6 +1418,13 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                             expert_id=expert_id,
                             return_success=True,
                         )
+                        if _trace and ".layers.0." in chunk_name and ".experts." in chunk_name:
+                            print(
+                                f"[loadtrace] rank={tp_rank} ckpt={chunk_name} "
+                                f"phys={expert_id} success={success} slot={getattr(param, 'local_expert_id', '?')}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                         if success:
                             if not is_fusion_moe_shared_experts_layer:
                                 name = name_mapped

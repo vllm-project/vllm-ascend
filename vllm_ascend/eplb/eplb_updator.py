@@ -109,11 +109,17 @@ class EplbUpdator:
             self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
             with record_function_or_nullcontext("EPLB generate p2p task"):
-                (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
-                    self.update_info_all.pop(0)
-                )
+                (
+                    expert_send_info,
+                    expert_recv_info,
+                    updated_expert_map,
+                    log2phy_map,
+                    log2phy_rank_independent_map,
+                    layer_id,
+                ) = self.update_info_all.pop(0)
                 log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
-                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
+                log2phy_rank_independent_this_rank = torch.from_numpy(numpy.array(log2phy_rank_independent_map))
+                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank, log2phy_rank_independent_this_rank)
                 updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
                 self.eplb_loader.generate_expert_d2d_transfer_task(
                     expert_send_info,
@@ -157,6 +163,14 @@ class EplbUpdator:
     def warm_up_eplb(self):
         logger.info("[eplb/updator] Starting EPLB warm-up, rank=%s, world_size=%s", self.rank_id, self.world_size)
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
+        # The worker needs the physical -> logical mapping to build
+        # logical-length log2phy maps from physical-length expert maps.
+        # Store a CPU copy: the worker reads it through the Manager proxy, and
+        # torch_npu refuses to re-share NPU tensors that the manager server
+        # received from another process ("Consider cloning before sending").
+        # All values in the shared_dict must be CPU tensors.
+        phys_to_logical = self.adaptor.phys_to_logical
+        self.shared_dict["phys_to_logical"] = phys_to_logical.cpu() if phys_to_logical is not None else None
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)

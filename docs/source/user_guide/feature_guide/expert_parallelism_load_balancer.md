@@ -63,7 +63,9 @@ traffic before production deployment.
 
 !!!IMPORTANT
 
-    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0` in both runners. Examples in this page that use a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
+    On A2, redundant experts are limited by the CANN grouped-matmul weight
+    list limit (128 per rank): 256-expert models require EP >= 4, while
+    128-expert models (e.g. Qwen3-30B-A3B) work with any EP size.
 
 #### Model Runner V2 Weight Formats
 
@@ -143,7 +145,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | --- | --- | --- | --- | --- |
 | `window_size` | No | positive integer | `1000` | Number of recent steps used for expert-load recording. |
 | `step_interval` | No | positive integer | `3000` | Interval between expert rearrangements. If it exceeds `window_size`, only the last `window_size` steps of metrics are used. |
-| `num_redundant_experts` | No | non-negative integer | `0` | Number of redundant physical experts. Must be `0` on A2. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. |
+| `num_redundant_experts` | No | non-negative integer | `0` | Number of redundant physical experts. On A2, the CANN grouped-matmul weight list limits each rank to 128 experts, so 256-expert models require EP >= 4. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. |
 | `use_async` | No | `true` / `false` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
 | `policy` | No | `stair`, `default` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | No | `true` / `false` | `false` | Log expert balancedness metrics. Incurs extra communication; recommended to leave disabled and only enable it temporarily when debugging. Do not set it in production configuration. |
@@ -273,7 +275,7 @@ We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-
 | expert_heat_collection_interval | Interval for collecting expert heat. | 600 |
 | algorithm_execution_interval | Interval for executing the balancing algorithm. | 50 |
 | eplb_policy_type | EPLB policy type. | 2 |
-| num_redundant_experts | Number of redundant experts. Must be `0` on A2. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. | 0 |
+| num_redundant_experts | Number of redundant experts. On A2 the CANN grouped-matmul weight list limits each rank to 128 experts (256-expert models require EP >= 4). `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. | 0 |
 | eplb_heat_collection_stage | Request stage used to collect expert heat. Available values: `all`, `prefill`, and `decode`. | `all` |
 
 ```mermaid
