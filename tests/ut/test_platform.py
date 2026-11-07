@@ -18,6 +18,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _maybe_disable_cudagraph_for_moe_lora,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
@@ -32,6 +33,45 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     dsv4_skips_indexer_topk,
 )
+
+
+@pytest.mark.parametrize(
+    "cudagraph_mode,lora,ep,tp,dp,is_moe,expect_none",
+    [
+        # LoRA + expert parallel MoE runs the AlltoAll dispatcher (host split
+        # computation) -> ACL graph must be dropped.
+        (CUDAGraphMode.FULL, True, True, 8, 1, True, True),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, True, True, 8, 1, True, True),
+        # Nothing to disable when graph is already off.
+        (CUDAGraphMode.NONE, True, True, 8, 1, True, False),
+        # AllGather MoE (no EP) stays graph-compatible.
+        (CUDAGraphMode.FULL, True, False, 8, 1, True, False),
+        # EP group of size 1 also resolves to AllGather.
+        (CUDAGraphMode.FULL, True, True, 1, 1, True, False),
+        # Plain (non-MoE) LoRA keeps ACL graph.
+        (CUDAGraphMode.FULL, True, True, 8, 1, False, False),
+        # No LoRA -> untouched (MC2/FusedMC2 remain capturable).
+        (CUDAGraphMode.FULL, False, True, 8, 1, True, False),
+    ],
+)
+def test_moe_lora_drops_cudagraph(cudagraph_mode, lora, ep, tp, dp, is_moe, expect_none):
+    vllm_config = SimpleNamespace(
+        lora_config=object() if lora else None,
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=ep,
+            tensor_parallel_size=tp,
+            data_parallel_size=dp,
+        ),
+        model_config=SimpleNamespace(),
+    )
+    with patch("vllm_ascend.platform.is_moe_model", return_value=is_moe):
+        _maybe_disable_cudagraph_for_moe_lora(vllm_config)
+    mode = vllm_config.compilation_config.cudagraph_mode
+    if expect_none:
+        assert mode == CUDAGraphMode.NONE
+    else:
+        assert mode == cudagraph_mode
 
 
 @pytest.mark.parametrize(

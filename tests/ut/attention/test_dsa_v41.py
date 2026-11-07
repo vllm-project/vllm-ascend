@@ -348,3 +348,33 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
     )
     assert result[0] is quantized
     assert result[1].shape == (2, 1, 2, 2)
+
+
+def test_forward_refreshes_cached_projections_for_lora(monkeypatch):
+    """V4.1 bypasses ``dsa_forward``, so it must re-bind LoRA wrappers itself."""
+    calls = []
+
+    class _V1Impl:
+        def sync_projection_layers(self, attn):
+            calls.append(("sync", attn))
+
+    class _V41Impl:
+        def forward(self, attn, positions, hidden_states, output):
+            calls.append(("forward", attn))
+
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=_V1Impl())),
+        v41_impl=_V41Impl(),
+    )
+    monkeypatch.setattr(
+        dsa_v41,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={"layer": attn}),
+    )
+    hidden_states = torch.zeros(2, 4)
+    output = torch.zeros(2, 4)
+
+    dsa_v41.dsa_v41_forward(hidden_states, output, "layer")
+
+    assert [name for name, _ in calls] == ["sync", "forward"]
+    assert all(target is attn for _, target in calls)
