@@ -608,6 +608,7 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         xlite_config.index_rope_interleaved = getattr(hf_config, "indexer_rope_interleave", False)
         index_types: list[str] = getattr(hf_config, "indexer_types", []) or []
         xlite_config.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
+        xlite_config.enable_dsa_cp = get_ascend_config().enable_dsa_cp
 
     def _build_model(self) -> None:
         super()._build_model()
