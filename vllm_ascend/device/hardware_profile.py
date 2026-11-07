@@ -315,7 +315,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=_STANDARD_CAPABILITIES
-            | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.NPU_TOP_K_TOP_P},
+            | {
+                HardwareCapability.RMS_NORM_CAST,
+                HardwareCapability.POOL_KEY_INDEXER_INT8,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
