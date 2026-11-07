@@ -181,24 +181,26 @@ class EplbWorker:
                 (current_expert_maps_this_layer != -1) & (updated_expert_maps_this_layer == -1)
             )
 
-            for idx in range(len(dst_rank_indices)):
-                dst_rank_id = dst_rank_indices[idx].item()
-                expert_id = experts_to_recv[idx].item()
-                if dst_rank_id not in expert_recv_info_this_layer:
-                    expert_recv_info_this_layer[dst_rank_id] = []
+            send_src_by_expert: dict[int, int] = {}
+            for src_rank_id, expert_id in zip(src_rank_indices.tolist(), experts_to_send.tolist()):
+                send_src_by_expert.setdefault(expert_id, src_rank_id)
 
-                if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
+            holder_src_by_expert: dict[int, int] = {}
+            holder_rank_indices, holder_expert_ids = torch.where(current_expert_maps_this_layer != -1)
+            for src_rank_id, expert_id in zip(holder_rank_indices.tolist(), holder_expert_ids.tolist()):
+                holder_src_by_expert.setdefault(expert_id, src_rank_id)
+
+            for dst_rank_id, expert_id in zip(dst_rank_indices.tolist(), experts_to_recv.tolist()):
+                expert_recv_info_this_layer.setdefault(dst_rank_id, [])
+
+                src_rank_id = send_src_by_expert.get(expert_id)
+                if src_rank_id is None:
                     # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
-                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)[0]
-                else:
-                    candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
+                    src_rank_id = holder_src_by_expert[expert_id]
 
                 # TODO: improve selection criterion of NPU sending expert_id,
                 # considering intra-node or inter-node...
-                src_rank_id = candidate_src_rank_indices[0].item()
-                if src_rank_id not in expert_send_info_this_layer:
-                    expert_send_info_this_layer[src_rank_id] = []
-
+                expert_send_info_this_layer.setdefault(src_rank_id, [])
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
                 expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
