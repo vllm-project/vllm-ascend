@@ -37,7 +37,7 @@ def resolve_layerwise_topology(vllm_config: Any) -> LayerwiseTopology:
     The scheduler and every worker must derive identical values so that the
     hit-check key set and the writer key set stay byte-identical.
     """
-    parallel = vllm_config.parallel_config
+    parallel = getattr(vllm_config, "parallel_config", None)
     try:
         use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
     except Exception:
