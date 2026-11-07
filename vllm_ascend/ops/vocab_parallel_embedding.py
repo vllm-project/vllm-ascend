@@ -179,6 +179,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         disable_tp: bool = False,
     ):
         nn.Module.__init__(self)
+        self.prefix = prefix
         self.disable_tp = disable_tp
         self.embedding_tp_capacity: int | None = None
         self._embedding_num_tokens_padded: int | None = None
@@ -224,7 +225,14 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
-            quant_method = UnquantizedEmbeddingMethod()
+            from vllm_ascend.ops.statetree import is_statetree_enabled
+
+            if is_statetree_enabled() and isinstance(self, ParallelLMHead):
+                from vllm_ascend.ops.statetree.methods import StateTreeEmbeddingMethod
+
+                quant_method = StateTreeEmbeddingMethod()
+            else:
+                quant_method = UnquantizedEmbeddingMethod()
 
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
