@@ -72,9 +72,12 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     model = vllm_config.model_config
     partitions = []
     previous_end = 0
+    pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+    pcp_size = pcp_size if isinstance(pcp_size, int) and not isinstance(pcp_size, bool) and pcp_size > 0 else 1
     for stage in range(parallel.pipeline_parallel_size):
         stage_config = copy(parallel)
-        stage_config.rank = stage * parallel.tensor_parallel_size
+        # vLLM rank layout is DP x PP x PCP x TP; the PP stride must include PCP.
+        stage_config.rank = stage * parallel.tensor_parallel_size * pcp_size
         start, end = model.get_layers_start_end_indices(stage_config)
         if start != previous_end or end <= start:
             raise ValueError("Mooncake PP requires contiguous, nonempty model layer partitions")

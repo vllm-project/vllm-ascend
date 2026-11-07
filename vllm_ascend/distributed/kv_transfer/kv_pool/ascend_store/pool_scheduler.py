@@ -150,7 +150,10 @@ class BaseKVPoolScheduler(ABC):
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
+        pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
+        pcp_size = pcp_size if isinstance(pcp_size, int) and not isinstance(pcp_size, bool) and pcp_size > 0 else 1
+        # vLLM rank layout is DP x PP x PCP x TP; the PP stride must include PCP.
+        self.pp_rank = (vllm_config.parallel_config.rank // (self.tp_size * pcp_size)) % self.pp_size
         # Global layer offset for layerwise pool keys under PP (matches the
         # pool worker's pp_layer_offset).
         self.pp_layer_offset = 0
