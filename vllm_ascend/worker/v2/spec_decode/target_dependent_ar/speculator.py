@@ -495,7 +495,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         parallel = self.draft_vllm_config.parallel_config
         model = self.draft_vllm_config.model_config
         if (
-            model.hf_text_config.model_type != "glm5_next"
+            model.architecture != "Glm5NextMTPModel"
             or model.hf_text_config.qk_rope_head_dim != 0
             or self.draft_vllm_config.cache_config.cache_dtype != "int8"
             or not (model.enforce_eager or self.speculative_config.enforce_eager)

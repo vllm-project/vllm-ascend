@@ -406,7 +406,9 @@ def test_glm_draft_prefill_keeps_all_cache_rows(skip_sample):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     parallel = SimpleNamespace(data_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1)
     model = SimpleNamespace(
-        hf_text_config=SimpleNamespace(model_type="glm5_next", qk_rope_head_dim=0), enforce_eager=True
+        architecture="Glm5NextMTPModel",
+        hf_text_config=SimpleNamespace(model_type="glm5_next_mtp", qk_rope_head_dim=0),
+        enforce_eager=True,
     )
     speculator.draft_vllm_config = SimpleNamespace(
         parallel_config=parallel, model_config=model, cache_config=SimpleNamespace(cache_dtype="int8")
