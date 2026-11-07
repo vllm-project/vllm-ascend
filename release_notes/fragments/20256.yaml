@@ -1,0 +1,4 @@
+pr: 20256
+entries:
+  - category: bugfix
+    text: Fixed sparse index-kpool prefills skipping Mamba state boundaries when a chunk starts inside a state block.
