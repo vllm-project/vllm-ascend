@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import json
 import typing
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -26,6 +28,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -1052,6 +1055,26 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
+        requested_sp_direct = getattr(get_ascend_config(), "engram_sp_direct_lookup", False)
+        self._engram_sp_direct = requested_sp_direct and self.use_sequence_parallel
+        self._engram_tp_size = get_tensor_model_parallel_world_size()
+        self._engram_tp_rank = get_tensor_model_parallel_rank()
+        shared_pool_dir = get_ascend_config().engram_shared_host_dir
+        shared_pool_identity = None
+        shared_shards = None
+        if shared_pool_dir:
+            from .engram.shared_pool import checkpoint_identity
+
+            shared_pool_identity = checkpoint_identity(self.engram_weight_root)
+            sharded = json.loads((Path(shared_pool_dir) / "manifest.json").read_text()).get("kind") == "sharded"
+            if requested_sp_direct and not sharded:
+                raise ValueError("engram_sp_direct_lookup requires global sharded pointer tables")
+            if sharded:
+                from .engram.shared_shards import ShardedPool
+
+                shared_shards = ShardedPool(
+                    shared_pool_dir, shared_pool_identity, device=f"npu:{torch.npu.current_device()}"
+                )
         if self.engram_layout is not None:
             # Head buckets use TP x DP x PCP when sharded, or TP alone when host
             # storage is shared across local DP x PCP replicas.
@@ -1081,6 +1104,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     storage_dtype=storage_dtype,
                     cpu_offload=cpu_offload,
                     dp_shared_memory=self.engram_dp_shared_memory,
+                    shared_pool_dir=shared_pool_dir,
+                    shared_pool_identity=shared_pool_identity,
+                    shared_pool_key=f"layers.{layer_id}.engram.embed" if shared_pool_dir else None,
+                    shared_pool=shared_shards,
+                    sp_direct_lookup=self._engram_sp_direct,
                 )
                 embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
                 self.layers[layer_id].engram.embed_tokens = embed
@@ -1243,10 +1271,26 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         if participates:
             assert hashes is not None
             # One DP gather feeds every layer sharing the split table.
-            gathered = gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
+            gathered = (
+                hashes
+                if getattr(self, "_engram_sp_direct", False)
+                else gather_engram_hashes(hashes, dp_shared_memory=self.engram_dp_shared_memory)
+            )
             for slot, (layer_id, table) in enumerate(zip(config.engram_layer_ids, tables)):
                 direct = output_buffers is not None and table.dp_size == 1 and table.tp_size == 1
-                if direct:
+                if getattr(self, "_engram_sp_direct", False):
+                    bucket = hashes.shape[0] if output_tokens is None else output_tokens
+                    local_slot = (bucket + self._engram_tp_size - 1) // self._engram_tp_size
+                    target = (
+                        output_buffers[layer_id]
+                        if output_buffers is not None
+                        else torch.empty(
+                            (local_slot, table.n_hash_cols * table.dim), dtype=torch.bfloat16, device=device
+                        )
+                    )
+                    table.lookup_token_shard(gathered[:, slot], target, bucket, self._engram_tp_rank)
+                    lookups[layer_id] = target
+                elif direct:
                     target = output_buffers[layer_id]
                     count = hashes.shape[0]
                     table.lookup(
@@ -1379,7 +1423,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 {
                     layer: torch.zeros(
                         (
-                            capacity,
+                            (capacity + self._engram_tp_size - 1) // self._engram_tp_size
+                            if getattr(self, "_engram_sp_direct", False)
+                            else capacity,
                             self.layers[layer].engram.embed_tokens.n_hash_cols
                             * self.layers[layer].engram.embed_tokens.dim,
                         ),
@@ -1389,6 +1435,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     for layer in self.config.engram_layer_ids
                 },
                 torch.zeros(capacity, dtype=torch.bool, device=device),
+            )
+            buffers, _ = self._engram_input_buffers
+            logger.info(
+                "Engram lookup workspace: layout=%s token_capacity=%d bytes=%d",
+                "sp_direct" if getattr(self, "_engram_sp_direct", False) else "head_gather",
+                next(iter(buffers.values())).shape[0],
+                sum(t.numel() * t.element_size() for t in buffers.values()),
             )
         return self._engram_input_buffers
 
@@ -1638,7 +1691,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 # model's actual token dimension remains scheduler-dynamic.
                 # SP can copy rows, so shard only after this table is ready.
                 lookup = lookups[layer.layer_idx]
-                if use_sequence_parallel:
+                if use_sequence_parallel and not getattr(self, "_engram_sp_direct", False):
                     lookup = sp_shard(lookup)
                 lookup = lookup[:n]
                 active_mask = token_mask[:n]

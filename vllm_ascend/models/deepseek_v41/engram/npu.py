@@ -221,6 +221,8 @@ def gather_dequantize_host_uva(
     output: torch.Tensor | None = None,
     vocab_start: int = 0,
     vocab_end: int | None = None,
+    head_bounds: torch.Tensor | None = None,
+    heads_per_shard: int = 1,
 ) -> torch.Tensor:
     """Gather registered host rows, preserving BF16 when scales are absent.
 
@@ -229,6 +231,9 @@ def gather_dequantize_host_uva(
     """
 
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+    if codes.ptrs is None or (scales is not None and scales.ptrs is None):
+        raise RuntimeError("Shared Engram must be attached before lookup")
 
     pad_heads = local_heads if pad_heads is None else pad_heads
     width = codes.tensor.shape[-1]
@@ -252,7 +257,7 @@ def gather_dequantize_host_uva(
         vocab_start,
         vocab_end,
         ids.stride(0),
-        CHUNK=CHUNK_ROWS,
+        CHUNK=getattr(codes, "chunk_rows", CHUNK_ROWS),
         WIDTH=width,
         GROUP=SCALE_GROUP,
         HEAD_START=head_start,
@@ -260,6 +265,9 @@ def gather_dequantize_host_uva(
         PAD_HEADS=pad_heads,
         QUANTIZED=scales is not None,
         MXFP8=codes.tensor.dtype == torch.float8_e4m3fn,
+        GLOBAL_ROWS=getattr(codes, "global_rows", False),
+        HEADS_PER_SHARD=heads_per_shard,
+        head_bounds=head_bounds,
         num_warps=4,
     )
     return output

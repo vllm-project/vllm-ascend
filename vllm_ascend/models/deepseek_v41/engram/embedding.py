@@ -61,7 +61,19 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        shared_pool_dir: str | None = None,
+        shared_pool_identity: str | None = None,
+        shared_pool_key: str | None = None,
+        shared_pool=None,
+        sp_direct_lookup: bool = False,
     ) -> None:
+        self._provided_shared_pool = shared_pool
+        self._shared_pool_spec = (shared_pool_dir, shared_pool_identity, shared_pool_key)
+        self._shared_pool_client = None
+        if shared_pool_dir and (
+            not cpu_offload or storage_dtype != torch.int8 or not shared_pool_identity or not shared_pool_key
+        ):
+            raise ValueError("Shared Engram requires INT8 host storage and an explicit pool identity/key")
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
             raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
@@ -85,6 +97,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self.dp_size = 1
         else:
             self.dp_size = max(get_engram_dp_size(), 1)
+        if sp_direct_lookup and (self.dp_size != 1 or shared_pool is None or shared_pool_dir is None):
+            raise ValueError("SP direct lookup requires DP-local sharded backing")
+        self._sp_head_bounds = None
         self._codes_uva: HostUvaBuffer | SharedUvaBuffer | None = None
         self._scales_uva: HostUvaBuffer | SharedUvaBuffer | None = None
         # The upstream constructor queries CUDA properties; keep its parameter
@@ -110,6 +125,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.vocab_end_idx = sum(head_sizes[: self.head_start + self.part_n_hash_cols])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         weight, scales = self._allocate_weights()
+        if sp_direct_lookup:
+            assert self._codes_uva is not None
+            boundaries = [sum(head_sizes[: i * self.part_n_hash_cols]) for i in range(self.tp_size + 1)]
+            self._sp_head_bounds = torch.tensor(
+                list(zip(boundaries[:-1], boundaries[1:])),
+                dtype=torch.int64,
+                device=torch.device("npu", torch.npu.current_device()),
+            )
+            logger.info(
+                "Engram SP direct lookup enabled: TP%d, %d heads per local token", self.tp_size, self.n_hash_cols
+            )
         self.weight = nn.Parameter(weight, requires_grad=False)
         self.weight_scale_inv = nn.Parameter(scales, requires_grad=False) if scales is not None else None
         for param in (self.weight, self.weight_scale_inv):
@@ -142,6 +168,38 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        pool_dir, identity, key = self._shared_pool_spec
+        if pool_dir:
+            from .shared_pool import SharedPoolClient
+
+            assert identity is not None and key is not None
+            client = (
+                self._provided_shared_pool.acquire()
+                if self._provided_shared_pool is not None
+                else SharedPoolClient(pool_dir, identity, device=device)
+            )
+            self._shared_pool_client = client
+            try:
+                self._codes_uva = client.view(
+                    key + ".weight",
+                    self.vocab_start_idx,
+                    self.vocab_end_idx,
+                    rows=self.num_embeddings,
+                    width=self.dim,
+                    dtype=torch.int8,
+                )
+                self._scales_uva = client.view(
+                    key + ".scale",
+                    self.vocab_start_idx,
+                    self.vocab_end_idx,
+                    rows=self.num_embeddings,
+                    width=self.dim // self.block_size,
+                    dtype=torch.float32,
+                )
+                return self._codes_uva.tensor, self._scales_uva.tensor
+            except BaseException:
+                client.close()
+                raise
         if not self.cpu_offload:
             return (
                 # Zeroed, not empty: the engine profiles the model (and runs the
@@ -178,6 +236,15 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         stays retryable and a half-finished release never leaves a live
         parameter pointing at memory the other buffer has already freed.
         """
+        if getattr(self, "_shared_pool_client", None) is not None:
+            self._shared_pool_client.close()
+            self._shared_pool_client = None
+            self._codes_uva = self._scales_uva = None
+            self.weight = nn.Parameter(torch.empty(0, dtype=self.storage_dtype, device="meta"), requires_grad=False)
+            self.weight_scale_inv = nn.Parameter(
+                torch.empty(0, dtype=self.scale_dtype, device="meta"), requires_grad=False
+            )
+            return
         aliases = {
             "_codes_uva": "weight",
             "_scales_uva": "weight_scale_inv",
@@ -218,6 +285,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
+        if getattr(self, "_shared_pool_client", None) is not None:
+            expected = self._shared_pool_spec[2] + ".weight"
+            if key != expected:
+                raise ValueError("Shared Engram checkpoint key mismatch")
+            return  # The external owner has already loaded and published these rows.
         if self._shared_group is None:
             self._load_into_storage(model_path, key, chunk_rows)
             return
@@ -352,7 +424,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         else:
             out = out[:num_tokens]
         if self.tp_size > 1:
-            out = tensor_model_parallel_all_gather(out, dim=1)
+            with torch.profiler.record_function("engram_tp_head_all_gather"):
+                out = tensor_model_parallel_all_gather(out, dim=1)
         return out[:, : self.n_hash_cols]
 
     @staticmethod
@@ -375,6 +448,36 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         num_tokens = indices.shape[0]
         gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
         return self.embed_gathered(gathered, num_tokens)
+
+    def lookup_token_shard(self, indices, out, output_tokens, tp_rank):
+        """Write this SP token window's full heads directly, without a TP gather."""
+        if self.dp_size != 1 or not getattr(self._codes_uva, "global_rows", False) or self._sp_head_bounds is None:
+            raise ValueError("SP direct lookup requires DP-local global chunk pointers")
+        if output_tokens < indices.shape[0] or not 0 <= tp_rank < self.tp_size:
+            raise ValueError("Invalid SP token window")
+        slot = (output_tokens + self.tp_size - 1) // self.tp_size
+        if out.shape[0] < slot or out.shape[1] != self.n_hash_cols * self.dim:
+            raise ValueError("SP Engram output buffer is too small or has the wrong width")
+        start = tp_rank * slot
+        local_ids = indices[start : start + slot].contiguous()
+        count = local_ids.shape[0]
+        with torch.profiler.record_function("engram_sp_direct_lookup"):
+            if count:
+                gather_dequantize_host_uva(
+                    self._codes_uva,
+                    self._scales_uva,
+                    local_ids,
+                    head_start=0,
+                    local_heads=self.n_hash_cols,
+                    pad_heads=self.n_hash_cols,
+                    vocab_start=0,
+                    vocab_end=self.num_embeddings,
+                    head_bounds=self._sp_head_bounds,
+                    heads_per_shard=self.part_n_hash_cols,
+                    output=out[:count].view(-1, self.dim),
+                )
+            out[count:slot].zero_()
+        return out[:slot]
 
     def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False) -> None:
         """Look up this shard's heads into ``[tokens, padded_heads, dim]`` bf16.

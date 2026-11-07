@@ -42,6 +42,7 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
+import vllm_ascend.patch.platform.patch_engine_shutdown  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
@@ -135,3 +136,19 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+
+# ** File: platform/patch_engine_shutdown.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.utils.get_engine_process_shutdown_timeout`
+#    Why:
+#       Immediate request abort also gives the NPU EngineCore no time to release
+#       shared VMM mappings and acknowledge owner leases before force termination.
+#    How:
+#       Give NPU immediate-abort cleanup a 15-second grace for zero/unspecified
+#       process budgets, following the
+#       upstream ROCm separation. Positive request deadlines and remaining budgets
+#       remain unchanged; the original hook handles other platforms.
+#    Related PR (if no, explain why):
+#       No upstream backend-generic cleanup hook currently covers Ascend.
+#    Future Plan:
+#       Remove when upstream extends its platform resource-cleanup grace to NPU.
