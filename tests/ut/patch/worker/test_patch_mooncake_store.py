@@ -29,7 +29,11 @@ def common_worker_methods(monkeypatch):
         (worker.MooncakeStoreWorker, "wait_for_save"),
         (worker.MooncakeStoreWorker, "build_connector_worker_meta"),
     )
-    originals = [(target, name, getattr(target, name)) for target, name in targets]
+    originals = [
+        (target, name, getattr(target, name))
+        for target, name in targets
+        if name != "_setup_store" or hasattr(target, name)
+    ]
     for target, name, original in originals:
         monkeypatch.setattr(target, name, original)
     return originals
@@ -43,6 +47,12 @@ def fabric_patch(monkeypatch, request, common_worker_methods):
     monkeypatch.delenv("MOONCAKE_MASTER", raising=False)
     monkeypatch.delenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", raising=False)
     config = getattr(request, "param", {"enable_ascend_fabric_patch": True})
+    if (
+        config
+        and config.get("enable_ascend_fabric_patch") is True
+        and not hasattr(worker.MooncakeStoreWorker, "_setup_store")
+    ):
+        pytest.skip("Fabric lifecycle tests require the upstream Store setup hook (vllm#66271)")
     kv_transfer_config = (
         KVTransferConfig(kv_connector="MooncakeStoreConnector", kv_role="kv_both", kv_connector_extra_config=config)
         if config is not None
@@ -52,6 +62,7 @@ def fabric_patch(monkeypatch, request, common_worker_methods):
     monkeypatch.setattr(torch, "npu", npu, raising=False)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_mooncake_store.py"
     spec = importlib.util.spec_from_file_location("mooncake_fabric_patch_under_test", source)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     if kv_transfer_config is None:
         spec.loader.exec_module(module)
@@ -118,7 +129,8 @@ def test_multi_connector_patch_options(fabric_patch, common_worker_methods, stor
             fabric_patch.apply_mooncake_store_patch(config)
     else:
         fabric_patch.apply_mooncake_store_patch(config)
-    expected = bool(store_flags) and error is None
+    expected = bool(store_flags) and error is None and fabric_patch.COMMON_SETUP_STORE is not None
+    assert hasattr(worker.MooncakeStoreWorker, "_setup_store") == (fabric_patch.COMMON_SETUP_STORE is not None)
     for target, name, original in common_worker_methods:
         assert (getattr(target, name) is not original) is expected
 
