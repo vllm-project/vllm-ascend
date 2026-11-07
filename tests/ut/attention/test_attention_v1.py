@@ -36,6 +36,32 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    def test_fia_remapped_tables_are_shared_per_step_and_refreshed_for_replay(self):
+        metadata = AscendMetadata.__new__(AscendMetadata)
+        metadata.block_tables = torch.tensor([[2, 0, 3]], dtype=torch.int32)
+        metadata.fia_block_tables = {}
+        metadata.actual_seq_lengths_q = [1]
+        metadata.seq_lens_list = [9]
+        table = metadata.get_fia_block_tables(2)
+        torch.testing.assert_close(table, torch.tensor([[4, 0, 6]], dtype=torch.int32))
+        self.assertIs(table, metadata.get_fia_block_tables(2))
+        self.assertIs(metadata.block_tables, metadata.get_fia_block_tables(1))
+        for provider in (
+            attn_module.FIAParamProvider("layer", None, block_stride=2),
+            attn_module.FIAV2ParamProvider("layer", block_stride=2),
+        ):
+            self.assertIs(provider.resolve({"layer": metadata})["block_table"], table)
+        next_metadata = AscendMetadata.__new__(AscendMetadata)
+        next_metadata.block_tables = torch.tensor([[1, 3, 0]], dtype=torch.int32)
+        next_metadata.fia_block_tables = {}
+        next_metadata.actual_seq_lengths_q = [1]
+        next_metadata.seq_lens_list = [9]
+        updated = attn_module.FIAParamProvider("layer", None, block_stride=2).resolve({"layer": next_metadata})[
+            "block_table"
+        ]
+        torch.testing.assert_close(updated, torch.tensor([[2, 6, 0]], dtype=torch.int32))
+        torch.testing.assert_close(table, torch.tensor([[4, 0, 6]], dtype=torch.int32))
+
     @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
@@ -673,6 +699,32 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertIs(call_kwargs["value_cache"], value_cache)
         self.assertTrue(call_kwargs["use_bnsd"])
 
+    def test_get_fia_params_remaps_only_supported_cache_reads(self):
+        backing = torch.randn(5, 2, 128, 1, 64)
+        self.impl.use_bnsd_kv_cache = False
+        self.impl.enable_c8_quant = False
+        self.impl.key_cache = backing[:, 0]
+        self.impl.value_cache = backing[:, 1]
+        metadata = AscendMetadata.__new__(AscendMetadata)
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.block_tables = torch.tensor([[4, 1]], dtype=torch.int32)
+        metadata.fia_block_tables = {}
+        metadata.seq_lens_list = [129]
+        for draft in (False, True):
+            with patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", SimpleNamespace(is_draft_model=draft)):
+                key, value, block_size, table, lengths = self.impl._get_fia_params(None, None, metadata)
+            self.assertEqual(block_size, 128)
+            self.assertEqual(lengths, [129])
+            self.assertEqual(self.impl._fia_block_stride, 1 if draft else 2)
+            self.assertEqual(key.is_contiguous(), not draft)
+            indices = table[0].long()
+            expected = metadata.block_tables[0].long()
+            torch.testing.assert_close(key[indices], self.impl.key_cache[expected].flatten(2))
+            torch.testing.assert_close(value[indices], self.impl.value_cache[expected].flatten(2))
+        # The write-side cache must retain its original physical page stride.
+        self.assertEqual(self.impl.key_cache.stride(0), 2 * 128 * 64)
+
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", SimpleNamespace(is_draft_model=False))
     def test_get_fia_params_uses_layout_specific_cache_view(self):
         metadata = MagicMock()
         metadata.attn_state = AscendAttentionState.DecodeOnly
