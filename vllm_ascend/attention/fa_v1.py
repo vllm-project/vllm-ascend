@@ -27,6 +27,7 @@ class AscendFlashAttentionMetadata(AscendMetadata):
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     metadata_cls = AscendFlashAttentionMetadata
+    supports_draft_extra_slots = False
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         """Build from exact device lengths; CPU mirrors may be stale after rejection."""

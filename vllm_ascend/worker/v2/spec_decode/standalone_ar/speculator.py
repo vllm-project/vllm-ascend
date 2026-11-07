@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
@@ -17,8 +18,21 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 
+# vLLM #60989 added draft graph capture and moved correction-token accounting
+# to the caller. The release and verified main pins still use the old API.
+_UPSTREAM_STANDALONE_AR_GRAPHS = hasattr(StandaloneARSpeculator, "_prefill_capture_slot_mappings")
+
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # Keep the draft eager until standalone graphs support Ascend's host
+        # FIA metadata refresh. The target can still use its own ACL graphs.
+        super().init_cudagraph_manager(CUDAGraphMode.NONE)
+
+    def capture(self) -> None:
+        # The upstream capture method enters a graph context even in NONE mode.
+        return
+
     if not vllm_version_is("0.32.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
@@ -37,12 +51,8 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         draft_seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound
-        if step == 0:
-            # TODO: Remove this workaround once upstream includes the correction
-            # token in the standalone AR prefill sequence-length bound.
-            # Draft prefill appends the target's correction token to the
-            # expanded query, so the upstream builder must receive target
-            # length + 1. Keep the input batch's bounds unchanged.
+        if step == 0 and not _UPSTREAM_STANDALONE_AR_GRAPHS:
+            # Older upstream callers pass the target's bound unchanged.
             draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(max=self.max_model_len)
 
         num_tokens = int(query_start_loc_np[-1])

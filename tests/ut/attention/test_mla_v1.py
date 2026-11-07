@@ -1053,6 +1053,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.use_v2_model_runner = True
         mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
@@ -1066,6 +1067,9 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         mock_spec_config = MagicMock()
         mock_spec_config.num_speculative_tokens = 3
+        mock_spec_config.method = "draft_model"
+        mock_spec_config.parallel_drafting = False
+        mock_spec_config.max_num_new_slots_for_drafting = 1
         mock_vllm_config.speculative_config = mock_spec_config
 
         ascend_config = MagicMock()
@@ -1074,6 +1078,8 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
+            self.assertEqual(builder.decode_threshold, 5)
+            self.assertEqual(builder.reorder_batch_threshold, 5)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_ascend_mla_metadata_builder_build_full_graph(self, mock_get_cos_and_sin_mla):

@@ -197,6 +197,7 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        use_v2_model_runner=False,
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         compilation_config=SimpleNamespace(
             static_forward_context={
