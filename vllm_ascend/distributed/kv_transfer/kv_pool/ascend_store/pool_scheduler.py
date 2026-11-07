@@ -604,7 +604,9 @@ class KVPoolScheduler:
                     request_tracker,
                     self.cache_transfer_granularity,
                     load_spec=load_spec,
-                    skip_save=None,
+                    # These blocks are still being loaded. A different
+                    # request may run a model step and invoke the save hook.
+                    skip_save=True,
                     block_hashes=request.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
                     original_block_size=self.original_block_size,

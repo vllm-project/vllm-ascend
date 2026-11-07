@@ -133,8 +133,8 @@ class NoRemotePD(KVConnectorBase_V1, SupportsHMA):
         return False, None
 
 
-@pytest.fixture
-def store_runtime(replay_scheduler, monkeypatch):
+@pytest.fixture(params=["kv_consumer", "kv_producer"], ids=["decode", "prefill"])
+def store_runtime(replay_scheduler, monkeypatch, request):
     scheduler = replay_scheduler
     plan = scheduler.kv_cache_manager.kv_cache_config
     config = copy.copy(scheduler.vllm_config)
@@ -153,12 +153,12 @@ def store_runtime(replay_scheduler, monkeypatch):
     config.kv_events_config = None
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="MultiConnector",
-        kv_role="kv_consumer",
+        kv_role=request.param,
         kv_connector_extra_config={
             "connectors": [
                 {
                     "kv_connector": "MooncakeHybridConnector",
-                    "kv_role": "kv_consumer",
+                    "kv_role": request.param,
                     "kv_connector_extra_config": {
                         "prefill": {"dp_size": 4, "tp_size": 4},
                         "decode": {"dp_size": 8, "tp_size": 2},
@@ -166,7 +166,7 @@ def store_runtime(replay_scheduler, monkeypatch):
                 },
                 {
                     "kv_connector": "AscendStoreConnector",
-                    "kv_role": "kv_consumer",
+                    "kv_role": request.param,
                     "kv_connector_extra_config": {
                         "backend": "mooncake",
                         "consumer_is_to_load": True,
@@ -189,6 +189,7 @@ def store_runtime(replay_scheduler, monkeypatch):
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(pool_worker.KVPoolWorker, "_align_kv_ptrs", lambda *_args: None)
     monkeypatch.setattr(KVCacheStoreRecvingThread, "start", lambda self: self.ready_event.set())
+    monkeypatch.setattr(KVCacheStoreSendingThread, "start", lambda self: self.ready_event.set())
     with patch.object(
         pool_worker.importlib, "import_module", return_value=SimpleNamespace(MooncakeBackend=lambda *_a, **_k: backend)
     ):
@@ -221,6 +222,8 @@ def store_runtime(replay_scheduler, monkeypatch):
         worker_multi=worker_multi,
     )
     pool.kv_recv_thread.executor.shutdown(wait=True)
+    if pool.kv_send_thread is not None:
+        pool.kv_send_thread.executor.shutdown(wait=True)
 
 
 def seed_store(runtime, request, hit):
@@ -294,6 +297,7 @@ def test_store_bytes_load_before_window_rebuild(store_runtime, hit):
         return
     assert first.total_num_scheduled_tokens == 0
     assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert first.kv_connector_metadata.metadata[1].requests[0].can_save is False
     assert req.replay_start == 0
     assert r.multi.get_loaded_kv_cache_group_ids(req) == (0,)
     before = r.scheduler.schedule()
