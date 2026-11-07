@@ -89,6 +89,7 @@ class SchedulerCase:
             "_request_trackers": {},
             "_unfinished_requests": {req_id: (None, []) for req_id in unfinished_ids},
             "_preempted_req_ids": set(),
+            "_async_loading_req_ids": set(),
             "_loading_req_ids": set(),
         }.items():
             setattr(self.scheduler, name, value)
