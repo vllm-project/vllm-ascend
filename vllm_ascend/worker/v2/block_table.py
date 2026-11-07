@@ -51,6 +51,7 @@ class AscendBlockTables(BlockTables):
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
+        sliding_window_reach: list[int] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -71,9 +72,11 @@ class AscendBlockTables(BlockTables):
         # vLLM main added a per-group ``dcp_sharded`` flag to BlockTables;
         # older releases have no such parameter, so only forward it
         # when the caller supplies it.
-        super_kwargs: dict[str, list[bool]] = {}
+        super_kwargs: dict[str, list[bool] | list[int]] = {}
         if dcp_sharded is not None:
             super_kwargs["dcp_sharded"] = dcp_sharded
+        if sliding_window_reach is not None:
+            super_kwargs["sliding_window_reach"] = sliding_window_reach
         # vLLM main's `BlockTables.__init__` has no `kernel_block_sizes`
         # parameter, so it is not forwarded; the kernel-block layout is
         # maintained here instead.
@@ -164,3 +167,25 @@ class AscendBlockTables(BlockTables):
             HAS_SLOT_MAPPING_ENABLED=True,
         )
         return slot_mappings[:, :num_tokens_padded]
+
+    def gather_block_tables(
+        self,
+        idx_mapping: torch.Tensor,
+        num_reqs_padded: int,
+        out: tuple[torch.Tensor, ...] | None = None,
+        out_ptrs: torch.Tensor | None = None,
+        num_computed_tokens: torch.Tensor | None = None,
+    ):
+        # Ascend rows are kernel-block expanded (one manager block becomes
+        # blocks_per_kv_block entries), so the upstream null-block count
+        # (first_pos - reach) // block_size must use the kernel block size.
+        # The gather kernel reads block_sizes_tensor only for this count.
+        orig = None
+        if num_computed_tokens is not None and self.has_sliding_window_groups:
+            orig = self.block_sizes_tensor
+            self.block_sizes_tensor = self.kernel_block_sizes_tensor
+        try:
+            return super().gather_block_tables(idx_mapping, num_reqs_padded, out, out_ptrs, num_computed_tokens)
+        finally:
+            if orig is not None:
+                self.block_sizes_tensor = orig
