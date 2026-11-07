@@ -1064,6 +1064,8 @@ class AscendConfig:
         if moe_intermediate_size is None and is_minimax:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
+        if moe_intermediate_size is None:
             return False
         # intermediate_hidden (the post-activation intermediate width) must be in
         # [256, 4096] and aligned to 128.
