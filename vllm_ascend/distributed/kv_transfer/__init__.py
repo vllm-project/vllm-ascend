@@ -174,3 +174,27 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
         "SfaRemoteD2HConnector",
     )
+
+
+def _patch_offloading_spec_factory() -> None:
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu import (
+        NPUOffloadingSpec,
+        NPUTieringOffloadingSpec,
+    )
+
+    original = OffloadingSpecFactory.create_spec.__func__
+
+    def create_spec(cls, config):
+        spec_name = config.extra_config.get("spec_name", "CPUOffloadingSpec")
+        if spec_name == "CPUOffloadingSpec":
+            return NPUOffloadingSpec(config)
+        if spec_name == "TieringOffloadingSpec":
+            return NPUTieringOffloadingSpec(config)
+        return original(cls, config)
+
+    OffloadingSpecFactory.create_spec = classmethod(create_spec)
+
+
+_patch_offloading_spec_factory()
