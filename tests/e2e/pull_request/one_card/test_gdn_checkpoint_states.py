@@ -6,6 +6,13 @@ import pytest
 import torch
 
 from vllm_ascend.ops.triton.fla.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _init_triton_device_properties() -> None:
+    # Standalone kernel tests bypass the worker's device initialization.
+    init_device_properties_triton()
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
