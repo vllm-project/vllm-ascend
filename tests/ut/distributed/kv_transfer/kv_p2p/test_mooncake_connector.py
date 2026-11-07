@@ -2340,42 +2340,141 @@ def test_tracker_publishes_completed_requests_once(request_ids):
     assert tracker.get_and_clear_finished_requests() == set()
 
 
-@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer", "kv_both"])
 def test_worker_role_drains_only_its_completion_and_error_channel(role):
-    """UT-F: route completion/errors by role, without draining the other side.
+    """UT-F: drain a direction only when that direction owns a thread.
 
-    This isolates the worker polling contract, not thread startup or transport.
+    ``kv_both`` owns both threads and must report both directions.  The worker
+    must not infer ownership from an exact ``kv_role`` string.
     """
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.kv_role = role
     worker.tp_rank = 0
     sender = MagicMock(spec=KVCacheSendingThread)
     receiver = MagicMock(spec=KVCacheRecvingThread)
-    worker.kv_send_thread = sender
-    worker.kv_recv_thread = receiver
+    worker.kv_send_thread = sender if role in ("kv_producer", "kv_both") else None
+    worker.kv_recv_thread = receiver if role in ("kv_consumer", "kv_both") else None
     sender.get_and_clear_finished_requests.side_effect = [{"sent"}, set()]
     receiver.get_and_clear_finished_requests.side_effect = [{"received"}, set()]
     receiver.get_and_clear_failed_recv_requests.side_effect = [{"received"}, set()]
     receiver.get_and_clear_invalid_block_ids.side_effect = [{7}, set()]
 
     results = worker.get_transfer_results()
-    assert (results.finished_sending, results.finished_recving) == (
-        ({"sent"}, set()) if role == "kv_producer" else (set(), {"received"})
-    )
-    assert results.failed_recving == (set() if role == "kv_producer" else {"received"})
+    assert results.finished_sending == ({"sent"} if worker.kv_send_thread is not None else set())
+    assert results.finished_recving == ({"received"} if worker.kv_recv_thread is not None else set())
+    assert results.failed_recving == ({"received"} if worker.kv_recv_thread is not None else set())
     assert worker.get_finished() == (set(), set())
-    assert worker.get_block_ids_with_load_errors() == (set() if role == "kv_producer" else {7})
+    assert worker.get_block_ids_with_load_errors() == ({7} if worker.kv_recv_thread is not None else set())
     assert worker.get_block_ids_with_load_errors() == set()
-    if role == "kv_producer":
+    if worker.kv_send_thread is None:
+        sender.get_and_clear_finished_requests.assert_not_called()
+    if worker.kv_recv_thread is None:
         receiver.get_and_clear_finished_requests.assert_not_called()
         receiver.get_and_clear_failed_recv_requests.assert_not_called()
         receiver.get_and_clear_invalid_block_ids.assert_not_called()
     else:
-        sender.get_and_clear_finished_requests.assert_not_called()
         assert [call.args[0] for call in receiver.get_and_clear_failed_recv_requests.call_args_list] == [
             {"received"},
             set(),
         ]
+
+
+class _ReadyTransferThread:
+    """Minimal thread double that marks its readiness event on start."""
+
+    def __init__(self, *args, **kwargs):
+        self._ready_event = next((arg for arg in args if isinstance(arg, threading.Event)), None)
+        self.started = False
+
+    def start(self):
+        self.started = True
+        if self._ready_event is not None:
+            self._ready_event.set()
+
+    def is_alive(self):
+        return True
+
+
+@pytest.mark.parametrize(
+    "role, expect_send, expect_recv",
+    [
+        ("kv_producer", True, False),
+        ("kv_consumer", False, True),
+        ("kv_both", True, True),
+    ],
+)
+def test_start_transfer_threads_follows_kv_role(monkeypatch, role, expect_send, expect_recv):
+    """UT-G: ``kv_both`` must create both the sender and the receiver."""
+    import vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector as connector_module
+
+    created: dict[str, list[_ReadyTransferThread]] = {"send": [], "recv": []}
+
+    class FakeSendThread(_ReadyTransferThread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created["send"].append(self)
+
+    class FakeRecvThread(_ReadyTransferThread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created["recv"].append(self)
+
+    monkeypatch.setattr(connector_module, "KVCacheSendingThread", FakeSendThread)
+    monkeypatch.setattr(connector_module, "KVCacheRecvingThread", FakeRecvThread)
+
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_role = role
+    worker.kv_send_thread = None
+    worker.kv_recv_thread = None
+    worker.vllm_config = MagicMock()
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker._prefill_tp_size = 1
+    worker._prefill_pp_size = 1
+    worker.engine_id = "engine"
+    worker.side_channel_host = "127.0.0.1"
+    worker.side_channel_port = 6000
+    worker.handshake_port = 6000
+    worker.engine = MagicMock()
+    worker.kv_caches = {}
+    worker.kv_caches_base_addr = []
+    worker.block_len_per_addr = []
+    worker.block_stride_per_addr = []
+    worker._is_hma_required = False
+    worker._prefill_pp_layer_partition = None
+    worker.kv_group2layeridx = {}
+    worker.block_size_scale = []
+    worker._use_request_level_recv_errors = False
+    worker.pcp_rank = 0
+
+    worker._start_transfer_threads(MagicMock())
+
+    assert bool(created["send"]) is expect_send
+    assert bool(created["recv"]) is expect_recv
+    assert all(thread.started for thread in created["send"])
+    assert all(thread.started for thread in created["recv"])
+
+
+def test_seed_task_trackers_routes_each_direction():
+    """UT-H: recv, send, and no-transfer requests must not cross trackers."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_send_thread = MagicMock()
+    worker.kv_recv_thread = MagicMock()
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch = {"recv", "send", "zero", "both"}
+    metadata.requests = {"recv": MagicMock(), "both": MagicMock()}
+    metadata.send_req_ids = {"send", "both"}
+
+    worker._seed_task_trackers(metadata)
+
+    send_tracker = worker.kv_send_thread.task_tracker
+    recv_tracker = worker.kv_recv_thread.task_tracker
+    assert {call.args[0] for call in send_tracker.add_req_to_process.call_args_list} == {"send", "both"}
+    assert {call.args[0] for call in recv_tracker.add_req_to_process.call_args_list} == {"recv", "both"}
+    assert "zero" not in {call.args[0] for call in send_tracker.add_req_to_process.call_args_list}
+    assert "zero" not in {call.args[0] for call in recv_tracker.add_req_to_process.call_args_list}
+    send_tracker.add_not_transfer_request.assert_not_called()
+    recv_tracker.add_not_transfer_request.assert_not_called()
 
 
 def test_tracker_completion_is_consumed_by_only_one_reader():
@@ -2935,6 +3034,16 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][0], request)
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][1], ([4, 5, 6],))
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][2], ([1, 2, 4, 5, 6],))
+        self.assertEqual(self.scheduler._reqs_send_intent, set())
+
+    def test_update_state_after_alloc_records_send_intent(self):
+        request = self._make_remote_decode_request(4, "req1")
+        self.scheduler.update_state_after_alloc(request, MockKVCacheBlocks(), 0)
+
+        self.assertEqual(self.scheduler._reqs_send_intent, {"req1"})
+        metadata = self.scheduler.build_connector_meta(MockSchedulerOutput())
+        self.assertEqual(metadata.send_req_ids, {"req1"})
+        self.assertEqual(metadata.reqs_in_batch, {"req1"})
 
     def test_request_finished_no_remote_decode(self):
         request = MockRequest("req1")
@@ -4581,6 +4690,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                         self.assertTrue(source_ports.issubset(senders))
                         send_metadata = MooncakeConnectorMetadata()
                         send_metadata.reqs_in_batch = {request_id}
+                        send_metadata.send_req_ids = {request_id}
                         send_metadata.requests_to_send = {request_id: time.time()}
                         for port, sender in senders.items():
                             sender.start_load_kv(send_metadata)

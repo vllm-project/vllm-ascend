@@ -1593,6 +1593,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.requests: dict[str, ReqMeta] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
+        self.send_req_ids: set[str] = set()
 
     def add_new_req(
         self,
@@ -1795,6 +1796,10 @@ class MooncakeConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
+        # Send direction intent for every request in the current batch.
+        # Recorded at admission so the worker can route sender tracker
+        # bookkeeping without inferring it from ``metadata.requests``.
+        self._reqs_send_intent: set[str] = set()
 
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
@@ -1982,6 +1987,8 @@ class MooncakeConnectorScheduler:
 
         if params is not None and (params.get("do_remote_prefill", False) or params.get("do_remote_decode", False)):
             self._reqs_in_batch.add(request.request_id)
+        if params is not None and params.get("do_remote_decode"):
+            self._reqs_send_intent.add(request.request_id)
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
@@ -2027,6 +2034,8 @@ class MooncakeConnectorScheduler:
         self._reqs_need_send = {}
         meta.reqs_in_batch = self._reqs_in_batch
         self._reqs_in_batch = set()
+        meta.send_req_ids = self._reqs_send_intent
+        self._reqs_send_intent = set()
 
         return meta
 
@@ -2176,10 +2185,10 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        if self.kv_role == "kv_consumer" and self.pcp_size > 1:
+        if self.kv_role in ("kv_consumer", "kv_both") and self.pcp_size > 1:
             raise ValueError(
                 "In P/D disaggregation, Mooncake supports PCP only on the prefill (kv_producer) engine. "
-                "Set prefill_context_parallel_size=1 on the decode (kv_consumer) engine."
+                "Set prefill_context_parallel_size=1 on the receiving (kv_consumer/kv_both) engine."
             )
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
@@ -2737,8 +2746,21 @@ class MooncakeConnectorWorker:
         )
         self.xfer_handshake_metadata = metadata
 
-        ready_event = threading.Event()
-        if self.kv_role == "kv_producer":
+        self._start_transfer_threads(metadata)
+
+    def _start_transfer_threads(self, metadata: MooncakeAgentMetadata) -> None:
+        """Start every transfer direction required by the configured kv_role.
+
+        ``kv_producer`` starts only the sender, ``kv_consumer`` only the
+        receiver, and ``kv_both`` starts both.  The two directions use separate
+        readiness events so that a bidirectional worker does not wait for the
+        wrong thread.
+        """
+        send_ready = threading.Event()
+        recv_ready = threading.Event()
+        started: list[tuple[str, threading.Thread, threading.Event]] = []
+
+        if self.kv_role in ("kv_producer", "kv_both"):
             self.kv_send_thread = KVCacheSendingThread(
                 self.vllm_config,
                 self.tp_rank,
@@ -2747,12 +2769,14 @@ class MooncakeConnectorWorker:
                 self.side_channel_host,
                 self.side_channel_port,
                 metadata,
-                ready_event,
+                send_ready,
                 self.kv_caches,
                 self.pcp_rank,
             )
+            started.append(("sender", self.kv_send_thread, send_ready))
             self.kv_send_thread.start()
-        else:
+
+        if self.kv_role in ("kv_consumer", "kv_both"):
             self.kv_recv_thread = KVCacheRecvingThread(
                 self.tp_rank,
                 self.tp_size,
@@ -2765,7 +2789,7 @@ class MooncakeConnectorWorker:
                 self.block_len_per_addr,
                 self.block_stride_per_addr,
                 self._is_hma_required,
-                ready_event,
+                recv_ready,
                 self.vllm_config,
                 self.kv_caches,
                 self._prefill_pp_layer_partition,
@@ -2773,37 +2797,37 @@ class MooncakeConnectorWorker:
                 self.block_size_scale,
                 use_request_level_recv_errors=self._use_request_level_recv_errors,
             )
+            started.append(("receiver", self.kv_recv_thread, recv_ready))
             self.kv_recv_thread.start()
-        start_wait_time = time.time()
-        thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
-        assert thread is not None
-        while not ready_event.is_set():
-            if not thread.is_alive():
-                raise RuntimeError("KV Cache sending/receiving thread failed to start.")
-            if time.time() - start_wait_time > 5 * 60:
-                raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
-            time.sleep(3)
+
+        self._wait_for_transfer_threads(started)
+
+    def _wait_for_transfer_threads(self, started: list[tuple[str, threading.Thread, threading.Event]]) -> None:
+        deadline = time.time() + 5 * 60
+        for name, thread, ready in started:
+            while not ready.is_set():
+                if not thread.is_alive():
+                    raise RuntimeError(f"KV Cache {name} thread failed to start.")
+                if time.time() > deadline:
+                    raise RuntimeError(f"Timeout waiting for KV Cache {name} thread to be ready.")
+                time.sleep(3)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         results = self.get_transfer_results()
         return results.finished_sending, results.finished_recving
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
+        # Drain by thread presence rather than by an exact role string:
+        # ``kv_both`` owns both threads and must report both directions.
         done_sending = (
-            self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
-            )
-            if self.kv_role == "kv_producer"
-            else set()
+            self.kv_send_thread.get_and_clear_finished_requests() if self.kv_send_thread is not None else set()
         )
         done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
-            )
-            if self.kv_role == "kv_consumer"
-            else set()
+            self.kv_recv_thread.get_and_clear_finished_requests() if self.kv_recv_thread is not None else set()
         )
         failed_recving = (
-            self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)  # type: ignore[union-attr]
-            if self.kv_role == "kv_consumer"
+            self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)
+            if self.kv_recv_thread is not None
             else set()
         )
         if self.tp_rank == 0:
@@ -2820,7 +2844,7 @@ class MooncakeConnectorWorker:
         )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:
+        if self.kv_recv_thread is not None:
             return self.kv_recv_thread.get_and_clear_invalid_block_ids()
         return set()
 
@@ -3927,13 +3951,24 @@ class MooncakeConnectorWorker:
 
         return (local_block_ids,), (remote_block_ids,)
 
+    def _seed_task_trackers(self, metadata: MooncakeConnectorMetadata) -> None:
+        """Seed each direction's tracker with only the requests it owns.
+
+        ``metadata.requests`` is authoritative for receive work, while
+        ``send_req_ids`` is recorded by the scheduler at admission so a
+        prefill-side send is not mistaken for a receive.
+        """
+        send_req_ids: set[str] = getattr(metadata, "send_req_ids", set())
+        for req_id in metadata.reqs_in_batch:
+            if req_id in metadata.requests:
+                if self.kv_recv_thread is not None:
+                    self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
+            if req_id in send_req_ids and self.kv_send_thread is not None:
+                self.kv_send_thread.task_tracker.add_req_to_process(req_id)
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
-        for req_id in metadata.reqs_in_batch:
-            if self.kv_send_thread is not None:
-                self.kv_send_thread.task_tracker.add_req_to_process(req_id)
-            if self.kv_recv_thread is not None:
-                self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
+        self._seed_task_trackers(metadata)
 
         for req_id, meta in metadata.requests.items():
             if meta.do_virtual:

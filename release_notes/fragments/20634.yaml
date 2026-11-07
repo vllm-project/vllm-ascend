@@ -1,0 +1,12 @@
+pr: 20634
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MooncakeConnectorV1 starting only the receive thread when
+      `kv_role="kv_both"`, which silently prevented prefill-to-decode KV cache
+      transfer. `kv_both` now starts both transfer directions and reports both
+      completion channels.
+  - category: config
+    text: >-
+      `kv_role="kv_both"` with MooncakeConnectorV1 requires
+      `prefill_context_parallel_size=1`.
