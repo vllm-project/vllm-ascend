@@ -1,0 +1,4 @@
+pr: 20863
+entries:
+  - category: bugfix
+    text: Fixed stale Worker and ModelRunner config references after runtime model or loader configuration updates.
