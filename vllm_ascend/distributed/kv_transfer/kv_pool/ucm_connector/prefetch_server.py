@@ -13,6 +13,7 @@ import json
 import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import cast
 
 from vllm.logger import logger
 
@@ -22,20 +23,32 @@ from vllm.logger import logger
 _UCM_BLOCK_ID_BYTES = 16
 
 
+class _PrefetchHTTPServer(ThreadingHTTPServer):
+    """HTTP server carrying the state shared with the request handler."""
+
+    prefetch_fn: Callable[[list[bytes]], None]
+    token: str | None
+    lock: threading.Lock
+
+
 class _PrefetchHandler(BaseHTTPRequestHandler):
     server_version = "UcmPrefetchServer/1.0"
 
     @property
+    def _prefetch_server(self) -> _PrefetchHTTPServer:
+        return cast(_PrefetchHTTPServer, self.server)
+
+    @property
     def prefetch_fn(self) -> Callable[[list[bytes]], None]:
-        return self.server.prefetch_fn
+        return self._prefetch_server.prefetch_fn
 
     @property
     def token(self) -> str | None:
-        return getattr(self.server, "token", None)
+        return self._prefetch_server.token
 
     @property
     def lock(self) -> threading.Lock:
-        return self.server.lock
+        return self._prefetch_server.lock
 
     def _authorized(self) -> bool:
         if not self.token:
@@ -110,7 +123,7 @@ class UcmPrefetchServer:
         token: str | None = None,
     ) -> None:
         self.lock = threading.Lock()
-        self._server = ThreadingHTTPServer((host, port), _PrefetchHandler)
+        self._server = _PrefetchHTTPServer((host, port), _PrefetchHandler)
         self._server.prefetch_fn = prefetch_fn
         self._server.token = token
         self._server.lock = self.lock
