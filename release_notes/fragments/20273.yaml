@@ -1,0 +1,5 @@
+pr: 20273
+entries:
+  - category: performance
+    text: Reduced QLI top-k merge workspace and data movement for smaller top-k values on Ascend A3.
+    hardware: [A3]
