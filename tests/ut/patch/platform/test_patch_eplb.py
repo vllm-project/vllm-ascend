@@ -694,7 +694,7 @@ def test_hixl_async_failure_outside_execute_exits_rpc_and_retains_shared_storage
 
 def test_async_noop_result_finishes_without_moving_weights(monkeypatch):
     move_from_buffer = MagicMock()
-    monkeypatch.setattr(patch_eplb._eplb_state, "move_from_buffer", move_from_buffer)
+    monkeypatch.setattr(patch_eplb._expert_copy, "move_from_buffer", move_from_buffer)
     consumed_event = MagicMock()
     model_state = SimpleNamespace(
         pending_result=patch_eplb._AscendAsyncLayerResult(
@@ -801,7 +801,7 @@ def test_hixl_workspace_logs_background_transfer_span(monkeypatch):
         _eplb_foreground_wait_ms=0.25,
     )
     monkeypatch.setattr(
-        patch_eplb._eplb_state,
+        patch_eplb._expert_copy,
         "move_from_buffer",
         MagicMock(side_effect=lambda **_kwargs: call_order.append("move")),
     )
