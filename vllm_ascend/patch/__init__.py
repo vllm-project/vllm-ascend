@@ -1188,6 +1188,43 @@
 #    Future Plan:
 #       Remove this patch once the torch mHC kernels honour norm_weight/norm_eps.
 #
+# ** 11. File: worker/patch_mooncake_store.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker`
+#      `MooncakeStoreConfig`, `MooncakeStoreWorker`, and transfer-thread handlers
+#    Why:
+#       NPU transfer-thread device binding and optional fabric compatibility for
+#       upstream MooncakeStoreConnector on supported HDK before 26.1. It does not target
+#       AscendStoreConnector or the direct P/D MooncakeConnectorV1.
+#       Ascend fabric setup creates transport/device resources that must be kept
+#       out of the tested pre-capture cache-registration path. Cold lookup runs
+#       on an RPC thread, and transfer threads need the owning worker's NPU
+#       context before event synchronization or transport operations.
+#    How:
+#       Set enable_ascend_fabric_patch=true in MooncakeStoreConnector's
+#       kv_connector_extra_config; the default is false. The unified worker
+#       patch entry imports this module. It reads the current kv_transfer_config
+#       and returns without replacements when the option is false, absent, or
+#       no config context exists. Only explicit opt-in installs config changes,
+#       fabric lifecycle wrappers and NPU transfer-thread device binding.
+#       MultiConnector reads the option from each MooncakeStoreConnector child.
+#       Read the existing ASCEND_ENABLE_USE_FABRIC_MEM transport environment
+#       option when constructing Store config; no separate JSON fabric flag.
+#       Buffer defaults and validation use the common vLLM config unchanged.
+#       In fabric mode, defer setup, skip explicit KV-cache registration, return
+#       a cold lookup miss, and initialize from serving callbacks. Capture the
+#       worker's NPU ID and bind it before handling the first send/receive job.
+#       The common vLLM _setup_store hook is required; portable layout and Event
+#       handling remain in vLLM. Non-fabric setup remains immediate.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/66271 supplies the common
+#       Store setup hook, extensible config, layout and Event support.
+#    Future Plan:
+#       HDK 26.1 or later can leave enable_ascend_fabric_patch=false to disable
+#       the entire compatibility patch, including thread device binding.
+#       HDK versions are not detected automatically. Keep the upstream
+#       vLLM layout/Event support and use its matching Store configuration.
+#
 # ** 14. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
