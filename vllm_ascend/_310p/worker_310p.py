@@ -26,7 +26,7 @@ from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend.utils import is_rc_device, vllm_version_is
-from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+from vllm_ascend.worker.worker import NPUWorker
 
 # vLLM #61183 moved `get_kv_cache_groups` to `kv_cache_planning` on main; the
 # v0.32.0 lane still ships it in `kv_cache_utils`.
@@ -52,7 +52,7 @@ class NPUWorker310(NPUWorker):
             return available_memory
         return super()._scale_kv_cache_memory_for_multi_group(available_memory)
 
-    def _create_model_runner(self):
+    def _make_model_runner(self):
         if self.use_v2_model_runner:
             from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
@@ -70,8 +70,7 @@ class NPUWorker310(NPUWorker):
         self.device = self._init_device()
         torch_npu.npu.set_compile_mode(jit_compile=False)
 
-        init_workspace_manager(self.device, num_ubatches=1)
-        self.model_runner = self._create_model_runner()
+        self._init_workspace_and_model_runner()
 
     def save_sharded_state(
         self,

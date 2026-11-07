@@ -23,3 +23,14 @@ def _stub_ascend_config(monkeypatch):
             ascend_warmup_config=SimpleNamespace(enable_early_kernel_warmup=False, enable_early_nz_warmup=False),
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _route_worker_transport_doubles(monkeypatch):
+    # The parent owns PP orchestration after phase 4. Keep the existing tests'
+    # external transport doubles attached to both owners of group lookups.
+    from vllm.v1.worker import gpu_worker
+
+    from vllm_ascend.worker import worker
+
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: worker.get_pp_group())
