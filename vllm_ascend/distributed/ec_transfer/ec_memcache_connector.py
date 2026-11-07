@@ -70,9 +70,25 @@ def _get_recv_buffer_tokens(vllm_config: "VllmConfig") -> int:
     return recv_buffer_tokens
 
 
+def _recv_buffer_width_hint(model_config: Any) -> int:
+    """Per-token width used only to size the persistent receive buffer.
+
+    The layout of each loaded value comes from the request (see
+    ``_build_get_request_params``), so an underestimate here only routes more
+    values through the oversized path; it never reshapes data incorrectly.
+    """
+    vision_config = getattr(getattr(model_config, "hf_config", None), "vision_config", None)
+    out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+    deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+    if out_hidden_size is not None and deepstack_indexes:
+        return out_hidden_size * (1 + len(deepstack_indexes))
+    return model_config.get_inputs_embeds_size()
+
+
 @dataclass
 class ECMemcacheConnectorMetadata(ECConnectorMetadata):
-    mm_hashes_need_loads: list[str] = field(default_factory=list)
+    # mm_hash -> number of encoder embeddings (rows) of the stored value.
+    mm_hashes_need_loads: dict[str, int] = field(default_factory=dict)
     mm_hashes_need_saves: set[str] = field(default_factory=set)
 
 
@@ -82,6 +98,7 @@ class _GetRequestParam:
     key: str
     size: int
     num_tokens: int
+    width: int
 
 
 class ECMemcacheConnector(ECConnectorBase):
@@ -101,21 +118,16 @@ class ECMemcacheConnector(ECConnectorBase):
             self._mm_hash_hit_count = 0
             self._miss_count = 0
             # for worker
-            self._mm_hashes_need_loads: set[str] = set()
+            self._mm_hashes_need_loads: dict[str, int] = {}
             self._mm_hashes_need_saves: set[str] = set()
         elif role == ECConnectorRole.WORKER:
             # Data-plane client for reading and writing embeddings.
             self._backend = MemcacheBackend(vllm_config.parallel_config)
-            # vLLM #57904 measures the encoder output width at startup; size
-            # the receive buffer the same way, DeepStack-aware for Qwen3-VL
-            # (``out_hidden_size * (1 + N)``).
-            vision_config = getattr(getattr(model_config, "hf_config", None), "vision_config", None)
-            out_hidden_size = getattr(vision_config, "out_hidden_size", None)
-            deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
-            if out_hidden_size is not None and deepstack_indexes:
-                self._hidden_dim = out_hidden_size * (1 + len(deepstack_indexes))
-            else:
-                self._hidden_dim = model_config.get_inputs_embeds_size()
+            # Encoder output widths vary by model and modality (vLLM #57904:
+            # Qwen3-Omni image 8192 vs audio 2048), and the worker connector is
+            # built before the producer measures them. Size the buffer from a
+            # hint; each load takes its shape from the request instead.
+            self._hidden_dim = _recv_buffer_width_hint(model_config)
             self._dtype = model_config.dtype
             self._elem_size = torch.empty(0, dtype=self._dtype).element_size()
             self._recv_buffer_tokens = _get_recv_buffer_tokens(vllm_config)
@@ -204,7 +216,7 @@ class ECMemcacheConnector(ECConnectorBase):
         current_image_mm_hash = feature.identifier
 
         if current_image_mm_hash in self._mm_hash_hits:
-            self._mm_hashes_need_loads.add(current_image_mm_hash)
+            self._mm_hashes_need_loads[current_image_mm_hash] = request.get_num_encoder_embeds(index)
             return
 
         self._miss_count += 1
@@ -221,7 +233,7 @@ class ECMemcacheConnector(ECConnectorBase):
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECMemcacheConnectorMetadata:
         meta = ECMemcacheConnectorMetadata(
-            mm_hashes_need_loads=list(self._mm_hashes_need_loads),
+            mm_hashes_need_loads=self._mm_hashes_need_loads,
             mm_hashes_need_saves=self._mm_hashes_need_saves,
         )
         if meta.mm_hashes_need_loads or meta.mm_hashes_need_saves:
@@ -239,7 +251,7 @@ class ECMemcacheConnector(ECConnectorBase):
             )
         # ECMemcacheConnectorMetadata will be passed to worker, so states must be cleared before next batch coming
         # and the statistics fields keep remaining
-        self._mm_hashes_need_loads = set()
+        self._mm_hashes_need_loads = {}
         self._mm_hashes_need_saves = set()
         self._mm_hash_hits.clear()
         return meta
@@ -259,7 +271,10 @@ class ECMemcacheConnector(ECConnectorBase):
         if not loading_hashes_in_current_step:
             return
 
-        embeddings = self._ec_get_batch(loading_hashes_in_current_step)
+        embeddings = self._ec_get_batch(
+            loading_hashes_in_current_step,
+            [metadata.mm_hashes_need_loads[mm_hash] for mm_hash in loading_hashes_in_current_step],
+        )
         if not embeddings:
             return
         for current_image_mm_hash, embedding in zip(loading_hashes_in_current_step, embeddings):
@@ -295,7 +310,12 @@ class ECMemcacheConnector(ECConnectorBase):
         event.synchronize()
         self._recv_buffer_reuse_event = None
 
-    def _ec_get_batch(self, keys: list[str]) -> list[torch.Tensor | None] | None:
+    def _ec_get_batch(self, keys: list[str], num_tokens: list[int]) -> list[torch.Tensor | None] | None:
+        """Load values whose row counts come from the scheduler.
+
+        Capacity, offsets and sizes are in bytes: values of different
+        modalities can have different widths and share one receive buffer.
+        """
         if not keys:
             return None
         embeddings: list[torch.Tensor | None] = [None] * len(keys)
@@ -311,17 +331,18 @@ class ECMemcacheConnector(ECConnectorBase):
             )
             return None
 
-        request_params = self._build_get_request_params(keys, key_infos)
+        request_params = self._build_get_request_params(keys, key_infos, num_tokens)
+        capacity_bytes = self._recv_buffer_tokens * self._hidden_dim * self._elem_size
         regular_requests: list[_GetRequestParam] = []
         oversized_requests: list[_GetRequestParam] = []
         for req in request_params:
-            if req.num_tokens > self._recv_buffer_tokens:
+            if req.size > capacity_bytes:
                 oversized_requests.append(req)
             else:
                 regular_requests.append(req)
 
         # First, use the persistent, user-sized buffer for ordinary requests.
-        for regular_batch in self._build_capacity_batches(regular_requests, self._recv_buffer_tokens):
+        for regular_batch in self._build_capacity_batches(regular_requests, capacity_bytes):
             self._load_regular_requests(regular_batch, embeddings)
 
         # Second, Oversized requests are deferred. so one temporary registration can be
@@ -329,31 +350,29 @@ class ECMemcacheConnector(ECConnectorBase):
         self._load_oversized_requests(oversized_requests, embeddings)
         return embeddings
 
-    def _build_get_request_params(self, keys: list[str], key_infos: list[Any]) -> list[_GetRequestParam]:
-        bytes_per_token = self._elem_size * self._hidden_dim
+    def _build_get_request_params(
+        self, keys: list[str], key_infos: list[Any], num_tokens: list[int]
+    ) -> list[_GetRequestParam]:
+        # The value is a contiguous (rows, width) tensor. Rows come from the
+        # request, so the width is derived per value rather than assumed from
+        # the model config, which differs per modality (vLLM #57904).
         request_params: list[_GetRequestParam] = []
-        for i, (key, key_info) in enumerate(zip(keys, key_infos)):
+        for i, (key, key_info, rows) in enumerate(zip(keys, key_infos, num_tokens)):
             nbytes = int(key_info.size())
             if nbytes == 0:
                 continue
-            if nbytes % bytes_per_token != 0:
+            bytes_per_row = rows * self._elem_size
+            if rows <= 0 or nbytes % bytes_per_row != 0:
                 logger.warning(
-                    "EC memcache value size is not aligned with the encoder "
-                    "hidden dimension: key=%s nbytes=%d bytes_per_token=%d",
+                    "EC memcache value size does not match the request's encoder "
+                    "embedding count: key=%s nbytes=%d rows=%d element_size=%d",
                     key,
                     nbytes,
-                    bytes_per_token,
+                    rows,
+                    self._elem_size,
                 )
                 continue
-            num_tokens = nbytes // bytes_per_token
-            request_params.append(
-                _GetRequestParam(
-                    i,
-                    key,
-                    nbytes,
-                    num_tokens,
-                )
-            )
+            request_params.append(_GetRequestParam(i, key, nbytes, rows, nbytes // bytes_per_row))
         return request_params
 
     def _load_regular_requests(
@@ -383,17 +402,17 @@ class ECMemcacheConnector(ECConnectorBase):
         *,
         should_sync_copy_out_event_immediately: bool,
     ) -> None:
-        bytes_per_token = self._elem_size * self._hidden_dim
         base_addr = recv_buffer.data_ptr()
+        flat_buffer = recv_buffer.view(-1)
         offsets: list[int] = []
-        offset_tokens = 0
+        offset_bytes = 0
         for req in request_params:
-            offsets.append(offset_tokens)
-            offset_tokens += req.num_tokens
+            offsets.append(offset_bytes)
+            offset_bytes += req.size
 
         group_res = self._backend.batch_get_into_buffers(
             [req.key for req in request_params],
-            [base_addr + offset * bytes_per_token for offset in offsets],
+            [base_addr + offset for offset in offsets],
             [req.size for req in request_params],
             MmcDirect.COPY_G2L.value,
         )
@@ -424,10 +443,11 @@ class ECMemcacheConnector(ECConnectorBase):
                 if code != 0:
                     logger.warning("EC memcache get failed: key=%s res=%s", req.key, code)
                     continue
-                staging_view = recv_buffer[offset : offset + req.num_tokens]
+                start = offset // self._elem_size
+                staging_view = flat_buffer[start : start + req.num_tokens * req.width].view(req.num_tokens, req.width)
                 output = torch.empty(
                     req.num_tokens,
-                    self._hidden_dim,
+                    req.width,
                     dtype=self._dtype,
                     device="npu",
                 )
@@ -459,25 +479,25 @@ class ECMemcacheConnector(ECConnectorBase):
 
     @staticmethod
     def _build_capacity_batches(
-        request_params: list[_GetRequestParam], capacity_tokens: int
+        request_params: list[_GetRequestParam], capacity_bytes: int
     ) -> list[list[_GetRequestParam]]:
         """Greedily group requests without changing their relative order."""
         batches: list[list[_GetRequestParam]] = []
         current_batch: list[_GetRequestParam] = []
-        current_batch_tokens = 0
+        current_batch_bytes = 0
         for req in request_params:
-            if req.num_tokens > capacity_tokens:
+            if req.size > capacity_bytes:
                 raise ValueError(
                     "Request exceeds receive buffer capacity: "
-                    f"key={req.key} request_tokens={req.num_tokens} "
-                    f"capacity_tokens={capacity_tokens}"
+                    f"key={req.key} request_bytes={req.size} "
+                    f"capacity_bytes={capacity_bytes}"
                 )
-            if current_batch_tokens + req.num_tokens > capacity_tokens:
+            if current_batch_bytes + req.size > capacity_bytes:
                 batches.append(current_batch)
                 current_batch = []
-                current_batch_tokens = 0
+                current_batch_bytes = 0
             current_batch.append(req)
-            current_batch_tokens += req.num_tokens
+            current_batch_bytes += req.size
         if current_batch:
             batches.append(current_batch)
         return batches
@@ -490,19 +510,18 @@ class ECMemcacheConnector(ECConnectorBase):
         if not request_params:
             return
         self._wait_recv_buffer_reusable()
-        temporary_buffer_tokens = max(req.num_tokens for req in request_params)
+        temporary_buffer_bytes = max(req.size for req in request_params)
         logger.warning(
             "EC memcache values exceed the configured persistent receive "
             "buffer; using one temporary buffer for this batch: "
-            "num_requests=%d temporary_buffer_tokens=%d "
+            "num_requests=%d temporary_buffer_bytes=%d "
             "persistent_capacity_tokens=%d",
             len(request_params),
-            temporary_buffer_tokens,
+            temporary_buffer_bytes,
             self._recv_buffer_tokens,
         )
         temporary_buffer = torch.empty(
-            temporary_buffer_tokens,
-            self._hidden_dim,
+            temporary_buffer_bytes // self._elem_size,
             dtype=self._dtype,
             device="npu",
         )
@@ -514,7 +533,7 @@ class ECMemcacheConnector(ECConnectorBase):
             # once and released after all second-pass batches finish.
             self._backend.register_buffer([temporary_buffer_ptr], [temporary_buffer.nbytes])
             registered = True
-            for batch in self._build_capacity_batches(request_params, temporary_buffer_tokens):
+            for batch in self._build_capacity_batches(request_params, temporary_buffer_bytes):
                 self._load_batch_into_buffer(
                     batch,
                     embeddings,
