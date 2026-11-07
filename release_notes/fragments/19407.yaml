@@ -1,0 +1,4 @@
+pr: 19407
+entries:
+  - category: bugfix
+    text: Fixed head-of-line blocking in the scheduler waiting queue when a multimodal request could not be scheduled due to encoder cache limits; requests queued behind it are now scheduled in the same step.
