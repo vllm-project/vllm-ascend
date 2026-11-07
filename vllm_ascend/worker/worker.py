@@ -458,6 +458,14 @@ class NPUWorker(WorkerBase):
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
+        model_runner = getattr(self, "model_runner", None)
+        if getattr(getattr(model_runner, "ascend_config", None), "engram_shared_host_dir", None):
+            from vllm_ascend.models.deepseek_v41.engram.shared_shards import close_shared_engram
+
+            close_shared_engram(
+                getattr(model_runner, "model", None), getattr(getattr(model_runner, "drafter", None), "model", None)
+            )
+
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
         if ensure_ec_transfer_shutdown is not None:
@@ -982,6 +990,16 @@ class NPUWorker(WorkerBase):
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+            if self.model_runner.ascend_config.engram_shared_host_dir:
+                from vllm.utils.mem_utils import DeviceMemoryProfiler
+
+                from vllm_ascend.models.deepseek_v41.engram.shared_shards import finalize_shared_engram
+
+                with DeviceMemoryProfiler() as shared_memory:
+                    finalize_shared_engram(
+                        self.model_runner.get_model(), getattr(self.model_runner.drafter, "model", None)
+                    )
+                self.model_runner.model_memory_usage += shared_memory.consumed_memory
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
