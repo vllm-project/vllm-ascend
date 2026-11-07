@@ -32,7 +32,7 @@ import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm import envs
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config, update_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
@@ -53,6 +53,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -881,6 +882,8 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    @torch.inference_mode()
+    @with_gpu_sync_check
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -928,10 +931,13 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
+        handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,
         )
+
+        # Metadata work is owned by GroupCoordinator; retain only device work.
+        self._pp_send_work = handles[1:]
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner
@@ -952,6 +958,7 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
+    @with_gpu_sync_check
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
@@ -1489,10 +1496,23 @@ class NPUWorker(WorkerBase):
         return self.model_runner.take_draft_token_ids()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
-        self.model_runner.update_config(overrides)
+        # Replace each config once, sharing the replacement across all owners.
+        # Both NPU runners inherit GPUModelRunner.update_config; calling it after
+        # replacement would construct a second, different object.
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            if config_name not in allowed_config_names:
+                allowed = ", ".join(sorted(allowed_config_names))
+                raise ValueError(f"Config override '{config_name}' is not supported. Supported configs: {allowed}")
+            config = getattr(self.vllm_config, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self.vllm_config, config_name, new_config)
+            setattr(self.model_runner, config_name, new_config)
+            setattr(self, config_name, new_config)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess
