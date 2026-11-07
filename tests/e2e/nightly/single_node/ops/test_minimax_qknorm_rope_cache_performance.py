@@ -37,7 +37,6 @@ def constexpr_reference(tmp_path_factory):
     path = tmp_path_factory.mktemp("minimax_constexpr") / "reference.py"
     path.write_text(
         "from vllm.triton_utils import tl, triton\n"
-        "from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice\n"
         "from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import (\n"
         "    FP8_E4M3_MAX, _norm_rope_with_scale,\n"
         ")\n" + ast.unparse(tree),
@@ -79,7 +78,8 @@ def replay_latency_us(graph):
 def test_num_slots_specialization_performance(tokens, q_heads, constexpr_reference, monkeypatch, record_property):
     # Same tensors, strides and kernel body for both variants; only the bound's
     # specialization differs. Compilation is excluded from steady-state timing.
-    args, kwargs = make_compile_case(tokens=tokens, actual=tokens, blocks=5392, q_heads=q_heads)
+    args = make_compile_case(tokens=tokens, actual=tokens, blocks=5392, q_heads=q_heads)
+    key, value, index = args[11:14]
     runtime_kernel = fused_module._minimax_qknorm_rope_cache_kernel
     assert "NUM_SLOTS" in runtime_kernel.do_not_specialize
     assert next(p for p in runtime_kernel.params if p.name == "NUM_SLOTS").is_constexpr is False
@@ -92,9 +92,9 @@ def test_num_slots_specialization_performance(tokens, q_heads, constexpr_referen
     for name, kernel in (("constexpr", constexpr_reference), ("runtime", runtime_kernel)):
         with monkeypatch.context() as context:
             context.setattr(fused_module, "_minimax_qknorm_rope_cache_kernel", kernel)
-            fn = lambda: fused_module.minimax_qknorm_rope_cache(*args, **kwargs)
+            fn = lambda: fused_module.minimax_qknorm_rope_cache(*args)
             q, iq = fn()
-            outputs[name] = (q.clone(), iq.clone(), args[7].clone(), args[8].clone(), args[9].clone())
+            outputs[name] = (q.clone(), iq.clone(), key.clone(), value.clone(), index.clone())
             graphs[name] = captured_call(fn)
     for actual, expected in zip(outputs["runtime"], outputs["constexpr"]):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
