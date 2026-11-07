@@ -12,7 +12,13 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -334,6 +340,49 @@ def test_v2_glm_shared_slots_reject_missing_layers(v2_glm_cache_plan):
 
     with pytest.raises(ValueError, match="Padded shared-slot KV cache descriptors must cover every cache spec"):
         attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+
+FOREIGN = "draft.0.self_attn"
+
+
+def test_v2_glm_shared_slots_give_foreign_descriptor_private_buffer(v2_glm_cache_plan):
+    """A spec-decode draft's own cache beside the pooled GLM-Next layout.
+
+    A foreign descriptor (non-pooled layers, e.g. a DFlash2 draft's sliding
+    window) must not trip the shared-slot geometry validation; its layers keep
+    the generic packed layout and receive private per-layer buffers, leaving
+    the pooled slot backings untouched.
+    """
+    _, plan = v2_glm_cache_plan
+    foreign_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+    )
+    page = foreign_spec.page_size_bytes
+    plan.kv_cache_groups.append(KVCacheGroupSpec(layer_names=[FOREIGN], kv_cache_spec=foreign_spec))
+    plan.kv_cache_tensors.append(
+        KVCacheTensor(
+            size=plan.num_blocks * page,
+            layers=[FOREIGN],
+            offset=0,
+            layer_stride=plan.num_blocks * page,
+            block_stride=page,
+        )
+    )
+
+    raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+    # Pooled slots keep their shared backings...
+    assert raw_caches[MAIN] is raw_caches[MAMBA]
+    assert raw_caches[INDEXER] is raw_caches[STATE]
+    # ...and the foreign layer gets its own private buffer.
+    foreign = raw_caches[FOREIGN]
+    assert foreign.numel() == plan.num_blocks * page
+    assert foreign is not raw_caches[MAIN]
+    assert foreign is not raw_caches[INDEXER]
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():
