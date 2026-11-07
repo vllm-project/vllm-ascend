@@ -5,7 +5,8 @@
 import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import msgspec
@@ -44,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
-    group_concurrent_contiguous,
     zmq_ctx,
 )
 
@@ -54,7 +54,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
     The queue/result lifecycle is intentionally implemented separately from
     the transfer algorithm. Metadata lookup, block mapping, and Mooncake READ
-    submission belong in _handle_requests.
+    submission belong in _submit_transfer_requests.
     """
 
     def __init__(
@@ -177,34 +177,66 @@ class MooncakePullRecvingThread(threading.Thread):
         self.ready_event.set()
         while True:
             remote_engine_id, requests = self.request_queue.get()
-            failed_request_ids: set[str] = set()
-            request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
-                remote_host, remote_port = self._get_remote_endpoint(request_endpoints)
-                failed_request_ids = self._handle_requests(
-                    remote_engine_id,
-                    remote_host,
-                    remote_port,
-                    requests,
-                )
-                for request_id in failed_request_ids:
-                    self._mark_request_failed(requests[request_id])
-            except Exception as exc:
-                failed_request_ids = set(requests)
-                if self.can_report_invalid_block_ids:
-                    for request_metadata in requests.values():
-                        self._mark_request_failed(request_metadata)
-                logger.exception(
-                    "Mooncake pull failed for remote engine %s at %s, marking batch requests failed: %s; error=%s",
-                    remote_engine_id,
-                    sorted(request_endpoints),
-                    sorted(failed_request_ids),
-                    exc,
-                )
+                self._submit_requests(remote_engine_id, requests)
             finally:
-                for request_id in requests:
-                    self.finished_requests.put((request_id, request_id in failed_request_ids))
                 self.request_queue.task_done()
+
+    def _finish_request(self, request_id: str, request: ReqMeta, failed: bool) -> None:
+        """Publish completion only after all submitted reads have stopped."""
+        if failed:
+            self._mark_request_failed(request)
+        self.finished_requests.put((request_id, failed))
+
+    def _submit_requests(self, remote_engine_id: str, requests: dict[str, ReqMeta]) -> None:
+        """Share engine-batch planning, then submit each prepared request immediately."""
+        pending = dict(requests)
+        try:
+            host, port = self._get_remote_endpoint({(req.remote_host, req.remote_port) for req in requests.values()})
+            for request_id, futures, error in self._submit_transfer_requests(remote_engine_id, host, port, requests):
+                request = pending.pop(request_id)
+                self._track_request(request_id, request, futures, error)
+        except Exception:
+            logger.exception("Mooncake could not prepare requests from %s", remote_engine_id)
+            for request_id, request in pending.items():
+                self._finish_request(request_id, request, True)
+
+    def _track_request(
+        self,
+        request_id: str,
+        request: ReqMeta,
+        future_to_task: dict[Future[None], tuple[int, int, int, set[str]]],
+        submission_error: Exception | None,
+    ) -> None:
+        """Track completion without occupying a pool thread to wait for it."""
+        # Set the full count before adding callbacks: completed futures invoke
+        # callbacks immediately. Even after a partial submission failure, wait
+        # for every submitted READ before allowing the request's blocks to free.
+        remaining = len(future_to_task)
+        failed = submission_error is not None
+        if submission_error is not None:
+            logger.error("Mooncake request %s submission failed: %s", request_id, submission_error)
+        if not remaining:
+            self._finish_request(request_id, request, failed)
+            return
+        completion_lock = threading.Lock()
+
+        def on_done(future: Future[None]) -> None:
+            nonlocal remaining, failed
+            task_failed = False
+            try:
+                future.result()
+            except Exception:
+                task_failed = True
+                logger.exception("Mooncake transfer task failed for request %s", request_id)
+            with completion_lock:
+                failed = failed or task_failed
+                remaining -= 1
+                if remaining == 0:
+                    self._finish_request(request_id, request, failed)
+
+        for future in future_to_task:
+            future.add_done_callback(on_done)
 
     def _mark_request_failed(self, request_metadata: ReqMeta) -> None:
         if not self.can_report_invalid_block_ids:
@@ -528,24 +560,19 @@ class MooncakePullRecvingThread(threading.Thread):
         head_index = tp_rank // replication_size
         return head_index, head_index + 1
 
-    def _handle_requests(
+    def _submit_transfer_requests(
         self,
         remote_engine_id: str,
         remote_host: str,
         remote_port: int,
         requests: dict[str, ReqMeta],
-    ) -> set[str]:
-        """Build and execute transfer buckets for one producer engine."""
+        selection_index_offset: int = 0,
+    ) -> Iterator[tuple[str, dict[Future[None], tuple[int, int, int, set[str]]], Exception | None]]:
+        """Plan an engine batch once and stream prepared requests to the pool."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
-        # Cache block mappings for this producer-engine batch:
-        # request_id -> (local_spec_index, normalized_remote_tp_rank_groups) ->
-        # [(selected_remote_tp_rank, local_kernel_block_ids,
-        #   remote_kernel_block_ids), ...].
-        # Layers with the same spec and candidate topology share their block
-        # mapping across PP ranks. Candidate groups are part of the key because
-        # KVPP layers using the same spec can have different owner TP ranks.
+        # Share spec/block mappings across all layers and PP ranks of the batch.
         transfer_block_ids_by_spec: dict[
             str,
             dict[
@@ -553,62 +580,53 @@ class MooncakePullRecvingThread(threading.Thread):
                 list[tuple[int, list[int], list[int]]],
             ],
         ] = {}
-        # future -> (remote_pp_rank, remote_pcp_rank, remote_tp_rank,
-        # affected_request_ids). A failed replica/TP task marks only the
-        # requests represented in that bucket.
-        future_to_task: dict[Future[None], tuple[int, int, int, set[str]]] = {}
-        submission_error: Exception | None = None
-        try:
-            for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
-                pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
-                transfer_block_buckets, request_ids_by_remote_rank = self._build_transfer_block_buckets(
-                    pp_metadata,
-                    layer_pairs,
-                    tp_rank_groups_by_pp_rank[remote_pp_rank],
-                    remote_metadata.pcp_size,
-                    remote_metadata.dcp_size,
-                    requests,
-                    transfer_block_ids_by_spec,
-                )
-                for (remote_pcp_rank, remote_tp_rank), transfer_entries_by_spec in transfer_block_buckets.items():
-                    future = self.executor.submit(
-                        self._execute_tp_transfer_bucket,
-                        remote_pp_rank,
-                        remote_pcp_rank,
-                        remote_tp_rank,
+        entries_by_request: dict[
+            str, dict[tuple[int, int, int], dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]]
+        ] = {request_id: {} for request_id in requests}
+        for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
+            pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
+            buckets, _ = self._build_transfer_block_buckets(
+                pp_metadata,
+                layer_pairs,
+                tp_rank_groups_by_pp_rank[remote_pp_rank],
+                remote_metadata.pcp_size,
+                remote_metadata.dcp_size,
+                requests,
+                transfer_block_ids_by_spec,
+                selection_index_offset=selection_index_offset,
+            )
+            for (pcp_rank, tp_rank), specs in buckets.items():
+                for spec_index, layers in specs.items():
+                    for layer_pair, entries in layers.items():
+                        for entry in entries:
+                            request_specs = entries_by_request[entry[0]].setdefault(
+                                (remote_pp_rank, pcp_rank, tp_rank), {}
+                            )
+                            request_specs.setdefault(spec_index, {}).setdefault(layer_pair, []).append(entry)
+
+        for request_id in requests:
+            futures: dict[Future[None], tuple[int, int, int, set[str]]] = {}
+            error: Exception | None = None
+            try:
+                for (pp_rank, pcp_rank, tp_rank), entries in entries_by_request.pop(request_id).items():
+                    prepared = self._prepare_tp_transfer_bucket(
+                        pp_rank,
+                        pcp_rank,
+                        tp_rank,
                         remote_metadata.pcp_size,
                         remote_metadata.tp_size,
                         remote_metadata.dcp_size,
-                        pp_metadata,
-                        transfer_entries_by_spec,
+                        remote_metadata.metadata_by_pp_rank[pp_rank],
+                        entries,
                     )
-                    future_to_task[future] = (
-                        remote_pp_rank,
-                        remote_pcp_rank,
-                        remote_tp_rank,
-                        request_ids_by_remote_rank[(remote_pcp_rank, remote_tp_rank)],
-                    )
-        except Exception as exc:
-            submission_error = exc
-
-        failed_request_ids: set[str] = set()
-        for future in as_completed(future_to_task):
-            remote_pp_rank, remote_pcp_rank, remote_tp_rank, request_ids = future_to_task[future]
-            try:
-                future.result()
-            except Exception:
-                logger.exception(
-                    "Mooncake transfer task failed for remote PP rank %s, PCP rank %s, TP rank %s, requests=%s",
-                    remote_pp_rank,
-                    remote_pcp_rank,
-                    remote_tp_rank,
-                    sorted(request_ids),
-                )
-                failed_request_ids.update(request_ids)
-
-        if submission_error is not None:
-            raise submission_error
-        return failed_request_ids
+                    if prepared is not None:
+                        future = self.executor.submit(self._execute_tp_transfer_bucket, *prepared)
+                        futures[future] = (pp_rank, pcp_rank, tp_rank, {request_id})
+            except Exception as exc:
+                error = exc
+            # The caller attaches callbacks before this generator prepares the
+            # next request. Partial submission failures still drain all reads.
+            yield request_id, futures, error
 
     def _build_transfer_block_buckets(
         self,
@@ -625,6 +643,7 @@ class MooncakePullRecvingThread(threading.Thread):
                 list[tuple[int, list[int], list[int]]],
             ],
         ],
+        selection_index_offset: int = 0,
     ) -> tuple[
         dict[tuple[int, int], dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]],
         dict[tuple[int, int], set[str]],
@@ -643,7 +662,9 @@ class MooncakePullRecvingThread(threading.Thread):
         # (remote_pcp_rank, remote_tp_rank) -> requests with at least one
         # transfer entry in the bucket.
         request_ids_by_remote_rank: dict[tuple[int, int], set[str]] = {}
-        for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
+        for selection_index, (request_id, request_metadata) in enumerate(
+            requests.items(), start=selection_index_offset
+        ):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
                 spec_index = self.spec_indices[local_layer_index]
@@ -1114,9 +1135,29 @@ class MooncakePullRecvingThread(threading.Thread):
                             length_list.append(transfer_len)
 
     @staticmethod
+    def _group_concurrent_contiguous_blocks(local_ids: list[int], remote_ids: list[int]) -> list[tuple[int, int, int]]:
+        """Return (local start, remote start, count), preserving paired ID order."""
+        if len(local_ids) != len(remote_ids):
+            raise ValueError("Local and remote block ID counts differ")
+        if not local_ids:
+            return []
+
+        runs: list[tuple[int, int, int]] = []
+        local_start, remote_start = local_ids[0], remote_ids[0]
+        count = 0
+        for local_id, remote_id in zip(local_ids, remote_ids):
+            if local_id != local_start + count or remote_id != remote_start + count:
+                runs.append((local_start, remote_start, count))
+                local_start, remote_start, count = local_id, remote_id, 0
+            count += 1
+        runs.append((local_start, remote_start, count))
+        return runs
+
+    @staticmethod
     def _append_block_transfer_addresses(
-        local_block_groups: list[list[int]],
-        remote_block_groups: list[list[int]],
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        runs: list[tuple[int, int, int]] | None,
         local_base_addr: int,
         remote_base_addr: int,
         local_block_stride: int,
@@ -1128,13 +1169,26 @@ class MooncakePullRecvingThread(threading.Thread):
         local_inner_offset: int = 0,
         remote_inner_offset: int = 0,
     ) -> None:
-        """Append addresses from block groups prepared for one request."""
+        """Append exact byte ranges; callers supply runs only for contiguous bytes.
+
+        ``None`` selects single-block transfers without allocating singleton lists.
+        Source/destination naming follows the Mooncake READ API: local addresses
+        are passed in src_list and remote addresses in dst_list.
+        """
         if transfer_len <= 0:
             return
-        for local_block_group, remote_block_group in zip(local_block_groups, remote_block_groups):
-            src_list.append(local_base_addr + local_block_group[0] * local_block_stride + local_inner_offset)
-            dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
-            length_list.append(transfer_len * len(local_block_group))
+        local_base_addr += local_inner_offset
+        remote_base_addr += remote_inner_offset
+        if runs is None:
+            for local_id, remote_id in zip(local_block_ids, remote_block_ids):
+                src_list.append(local_base_addr + local_id * local_block_stride)
+                dst_list.append(remote_base_addr + remote_id * remote_block_stride)
+                length_list.append(transfer_len)
+        else:
+            for local_start, remote_start, count in runs:
+                src_list.append(local_base_addr + local_start * local_block_stride)
+                dst_list.append(remote_base_addr + remote_start * remote_block_stride)
+                length_list.append(transfer_len * count)
 
     def _append_spec_transfer_addresses(
         self,
@@ -1183,17 +1237,17 @@ class MooncakePullRecvingThread(threading.Thread):
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
             return
 
-        single_block_ids_by_request = {
-            request_id: (
-                [[block_id] for block_id in local_block_ids],
-                [[block_id] for block_id in remote_block_ids],
-            )
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
-        contiguous_block_ids_by_request = {
-            request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
+        # Materialize compact runs only for requests with a byte-contiguous
+        # transfer. Strided and partial-head transfers use the original IDs.
+        runs_by_request: dict[str, list[tuple[int, int, int]]] = {}
+
+        def get_runs(request_id: str) -> list[tuple[int, int, int]]:
+            if request_id not in runs_by_request:
+                runs_by_request[request_id] = self._group_concurrent_contiguous_blocks(
+                    *block_ids_by_request[request_id]
+                )
+            return runs_by_request[request_id]
+
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
             spec,
@@ -1230,16 +1284,13 @@ class MooncakePullRecvingThread(threading.Thread):
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
-                    block_ids_to_transfer = (
-                        contiguous_block_ids_by_request
-                        if local_block_stride == remote_block_stride == local_block_len
-                        else single_block_ids_by_request
-                    )
+                    can_coalesce = local_block_stride == remote_block_stride == local_block_len
                     for request_id, _, _ in transfer_entries:
-                        local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                        local_block_ids, remote_block_ids = block_ids_by_request[request_id]
                         self._append_block_transfer_addresses(
-                            local_block_groups=local_block_groups,
-                            remote_block_groups=remote_block_groups,
+                            local_block_ids=local_block_ids,
+                            remote_block_ids=remote_block_ids,
+                            runs=get_runs(request_id) if can_coalesce else None,
                             local_base_addr=local_base_addr,
                             remote_base_addr=remote_base_addr,
                             local_block_stride=local_block_stride,
@@ -1354,17 +1405,16 @@ class MooncakePullRecvingThread(threading.Thread):
                 transfer_len = num_transfer_heads * local_head_len
                 local_inner_offset = local_head_offset * local_head_len
                 remote_inner_offset = remote_head_offset * remote_head_len
-                block_ids_to_transfer = (
-                    contiguous_block_ids_by_request
-                    if local_block_stride == local_block_len == transfer_len
+                can_coalesce = (
+                    local_block_stride == local_block_len == transfer_len
                     and remote_block_stride == remote_block_len == transfer_len
-                    else single_block_ids_by_request
                 )
                 for request_id, _, _ in transfer_entries:
-                    local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                    local_block_ids, remote_block_ids = block_ids_by_request[request_id]
                     self._append_block_transfer_addresses(
-                        local_block_groups=local_block_groups,
-                        remote_block_groups=remote_block_groups,
+                        local_block_ids=local_block_ids,
+                        remote_block_ids=remote_block_ids,
+                        runs=get_runs(request_id) if can_coalesce else None,
                         local_base_addr=local_base_addr,
                         remote_base_addr=remote_base_addr,
                         local_block_stride=local_block_stride,
@@ -1377,7 +1427,7 @@ class MooncakePullRecvingThread(threading.Thread):
                         length_list=length_list,
                     )
 
-    def _execute_tp_transfer_bucket(
+    def _prepare_tp_transfer_bucket(
         self,
         remote_pp_rank: int,
         remote_pcp_rank: int,
@@ -1390,8 +1440,8 @@ class MooncakePullRecvingThread(threading.Thread):
             int,
             dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
         ],
-    ) -> None:
-        """Calculate addresses and execute one remote PP/PCP/TP transfer bucket.
+    ) -> tuple[int, int, int, str, list[str], list[int], list[int], list[int]] | None:
+        """Calculate addresses for one remote PP/PCP/TP transfer bucket.
 
         ``transfer_entries_by_spec`` maps local spec index to layer-index pairs,
         then to ``(request_id, local_block_ids, remote_block_ids)`` records.
@@ -1426,6 +1476,20 @@ class MooncakePullRecvingThread(threading.Thread):
                 for request_id, _, _ in transfer_entries
             }
         )
+        return remote_pp_rank, remote_pcp_rank, remote_tp_rank, session_id, request_ids, src_list, dst_list, length_list
+
+    def _execute_tp_transfer_bucket(
+        self,
+        remote_pp_rank: int,
+        remote_pcp_rank: int,
+        remote_tp_rank: int,
+        session_id: str,
+        request_ids: list[str],
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+    ) -> None:
+        """Execute an already prepared READ in the transfer pool."""
         transfer_start_time = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
