@@ -167,6 +167,26 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 # Note: Currently, only models that do not have the `packed_modules_mapping` attribute
 # in the vLLM upstream need to be added here.
 UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
+    # Muse Spark Open fuses Q, K, V and the attention output gate into one
+    # QKVOGate projection, and upstream drops ``qkv_proj`` from its own mapping
+    # at instance level because the stock three-way packing cannot describe the
+    # fourth shard. Without an entry here the quantization lookup has nothing
+    # to resolve the fused module from, and the checkpoint keeps the four as
+    # separate tensors. Keyed under every model_type that can reach this: the
+    # multimodal config, the text config a text-only checkpoint carries, and
+    # the 1x text config the released checkpoint's backbone uses.
+    # The ``experts`` entry is what makes the routed experts resolvable at all:
+    # get_quant_type_for_layer only treats a module as fused when its trailing
+    # name is a key here, so without it the MoE layer falls through to the
+    # unquantized method and allocates bf16 experts -- 186GiB per card for this
+    # model, against 50GiB of w4a8 weights.
+    **{
+        model_type: {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj", "gate_proj"],
+            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        }
+        for model_type in ("muse_spark", "muse_spark_text", "musespark1x_text")
+    },
     # GLM-5.3-Flash (glm5_next): KDA layers ship a fused q/k/v/b/f_a/g_a
     # projection; sparse-MLA layers keep the DeepSeek-style q_a/kv_a pair.
     # Native HF FP8 checkpoints leave the KDA projections in bf16 via
@@ -356,6 +376,15 @@ def _resolve_fused_packed_shard_keys(
 
     gate_up_key = _find_quant_description_key(quant_description, f"{prefix}.gate_up_proj")
     down_key = _find_quant_description_key(quant_description, f"{prefix}.down_proj")
+    if gate_up_key is None or down_key is None:
+        # Muse Spark stores the stacked expert tensors under the names of the
+        # fused linears they feed, ``w13_weight`` and ``w2_weight``, and a
+        # ModelSlim description of such a checkpoint carries those names
+        # verbatim. Tried second so a description written with the logical
+        # module names still wins, and both keys have to come from the same
+        # naming or the pair is not describing one layer.
+        gate_up_key = _find_quant_description_key(quant_description, f"{prefix}.w13_weight")
+        down_key = _find_quant_description_key(quant_description, f"{prefix}.w2_weight")
     if gate_up_key is None or down_key is None:
         return None
     return [gate_up_key, down_key]
