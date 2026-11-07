@@ -224,6 +224,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+    try:
+        from vllm.models.mistral.amd.indexer import MistralIndexerCache
+
+        sfa_indexer_cache_types = (DeepseekV32IndexerCache, MistralIndexerCache)
+    except ImportError:
+        # The supported vLLM release pin does not yet ship Mistral Large 4.
+        sfa_indexer_cache_types = (DeepseekV32IndexerCache,)
+
     use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
@@ -245,7 +253,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         elif c8_k_cache_dtype == torch.int8:
             c8_k_scale_cache_dtype = torch.float16
 
-    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    c8_cache_dtype = (
+        torch.float8_e4m3fn
+        if cache_dtype == "fp8_ds_mla"
+        else kv_cache_dtype_str_to_dtype(cache_dtype, vllm_config.model_config)
+    )
 
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
@@ -328,7 +341,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 indexes_kv_by_block_stride=indexes_kv_by_block_stride,
                 **ratio_kwargs,
             )
-        if isinstance(attn_module, DeepseekV32IndexerCache):
+        if isinstance(attn_module, sfa_indexer_cache_types):
             if not getattr(
                 getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
                 "runtime_has_indexer",

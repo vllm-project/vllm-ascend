@@ -397,6 +397,75 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 k_li_scale = gathered_tensors[1]
         return k_li, k_li_scale, slot_mapping
 
+    def project_query(
+        self,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project and rotate the indexer query.
+
+        Model-specific indexers may override this hook when their query does
+        not originate from MLA's q-LoRA latent.  Mistral Large 4, for
+        example, projects a LayerNorm of the raw hidden states and applies
+        scalable-softmax before RoPE.
+        """
+        if isinstance(q_c, tuple):
+            q_c_tensor, q_c_scale = q_c
+            q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
+            quant_matmul_kwargs = dict(
+                bias=None,
+                output_dtype=hidden_states.dtype,
+            )
+            if q_c_tensor.dtype == torch.float8_e4m3fn:
+                if q_c_scale.dim() == 2:
+                    q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
+                quant_matmul_kwargs.update(
+                    scale_dtype=torch_npu.float8_e8m0fnu,
+                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+                    group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
+                )
+            elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
+                q_c_scale = q_c_scale.squeeze(dim=-1)
+            q_li = torch_npu.npu_quant_matmul(
+                q_c_tensor,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=q_c_scale,
+                **quant_matmul_kwargs,
+            )
+        else:
+            q_li, _ = self.wq_b(q_c)
+        q_li = q_li.view(-1, self.n_head, self.head_dim)
+        return self.apply_query_rope(q_li, cos, sin)
+
+    def apply_query_rope(
+        self,
+        q_li: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the indexer's RoPE layout to an already projected query."""
+        if HAS_TRITON:
+            return rope_forward_triton_siso(
+                q_li,
+                cos,
+                sin,
+                rope_dim=self.qk_rope_head_dim,
+                is_neox_style=self.is_rope_neox_style,
+            )
+
+        q_li_pe, q_li_nope = torch.split(
+            q_li,
+            [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+            dim=-1,
+        )
+        q_li_pe = q_li_pe.unsqueeze(2)
+        q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+        q_li_pe = q_li_pe.squeeze(2)
+        return torch.cat([q_li_pe, q_li_nope], dim=-1)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -455,46 +524,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             kw, _ = self.wk_weights_proj(hidden_states)
             weights = kw[:, self.head_dim :]
 
-        if isinstance(q_c, tuple):
-            q_c_tensor, q_c_scale = q_c
-            q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
-            quant_matmul_kwargs = dict(
-                bias=None,
-                output_dtype=hidden_states.dtype,
-            )
-            if q_c_tensor.dtype == torch.float8_e4m3fn:
-                if q_c_scale.dim() == 2:
-                    q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
-                quant_matmul_kwargs.update(
-                    scale_dtype=torch_npu.float8_e8m0fnu,
-                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-                    group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
-                )
-            elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
-                q_c_scale = q_c_scale.squeeze(dim=-1)
-            q_li = torch_npu.npu_quant_matmul(
-                q_c_tensor,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=q_c_scale,
-                **quant_matmul_kwargs,
-            )
-        else:
-            q_li, _ = self.wq_b(q_c)
-        q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
+        q_li = self.project_query(q_c, hidden_states, cos, sin)
 
         q_li_scale = None
         q_li_shape_ori = None

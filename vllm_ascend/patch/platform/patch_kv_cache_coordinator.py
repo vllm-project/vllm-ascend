@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 import sys
 from collections.abc import Mapping
 from copy import copy
@@ -588,9 +589,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
         orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
-        # vLLM main (#61589) added lookahead block hashes; v0.32.0's upstream
-        # coordinator has no such parameter.
-        if not vllm_version_is("0.32.0"):
+        # vLLM main (#61589) added lookahead block hashes. Development builds
+        # can carry a 0.32.x version while still exposing the older callable
+        # contract, so detect the actual upstream signature instead of relying
+        # on the package version string.
+        if "num_hash_lookahead_tokens" in inspect.signature(_orig_get_kv_cache_coordinator).parameters:
             orig_kwargs["num_hash_lookahead_tokens"] = num_hash_lookahead_tokens
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 

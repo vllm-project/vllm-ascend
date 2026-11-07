@@ -18,6 +18,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
+  tests/e2e/pull_request/two_card/test_mistral_large4.py: 360
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 290
   tests/e2e/pull_request/one_card/_310p/test_qwen35_dense_model_310p.py: 810
@@ -170,6 +171,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_glm5_3_flash.py: 420
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 480
   tests/e2e/pull_request/one_card/test_mla_precision.py: 210
+  tests/e2e/pull_request/one_card/test_mistral_large4.py: 360
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 90
   tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 50
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
