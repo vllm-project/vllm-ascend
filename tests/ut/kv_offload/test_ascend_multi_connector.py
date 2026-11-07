@@ -14,6 +14,67 @@ from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa
 )
 
 
+class GroupSource:
+    def __init__(self, groups, hits):
+        self.groups = groups
+        self.hits = hits
+
+    def get_loaded_kv_cache_group_ids(self, request):
+        return self.groups
+
+    def get_num_new_matched_tokens(self, request, local):
+        return self.hits.get(request.request_id, (0, False))
+
+
+def test_loaded_groups_follow_each_selected_source_and_clear_on_miss():
+    pd = GroupSource((0, 1), {"from-p": (95, True)})
+    store = GroupSource((0,), {"from-store": (96, True)})
+    multi = AscendMultiConnector.__new__(AscendMultiConnector)
+    multi._connectors = [pd, store]
+    multi._requests_to_connector = {}
+    p_req = SimpleNamespace(request_id="from-p")
+    store_req = SimpleNamespace(request_id="from-store")
+    assert multi.get_loaded_kv_cache_group_ids(p_req) == ()
+    assert multi.get_num_new_matched_tokens(p_req, 0) == (95, True)
+    assert multi.get_num_new_matched_tokens(store_req, 0) == (96, True)
+    assert multi.get_loaded_kv_cache_group_ids(p_req) == (0, 1)
+    assert multi.get_loaded_kv_cache_group_ids(store_req) == (0,)
+    # Readmission must not retain the source from an earlier admission.
+    store.hits.clear()
+    assert multi.get_num_new_matched_tokens(store_req, 0) == (0, False)
+    assert multi.get_loaded_kv_cache_group_ids(store_req) == ()
+    assert multi.get_loaded_kv_cache_group_ids(p_req) == (0, 1)
+
+
+def test_pending_lookup_does_not_advertise_an_earlier_child():
+    first = GroupSource((0, 1), {"r": (96, True)})
+    pending = GroupSource((0,), {"r": (None, False)})
+    multi = AscendMultiConnector.__new__(AscendMultiConnector)
+    multi._connectors = [first, pending]
+    multi._requests_to_connector = {"r": 1}
+    request = SimpleNamespace(request_id="r")
+    assert multi.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert multi.get_loaded_kv_cache_group_ids(request) == ()
+
+
+def test_preemption_clears_loaded_source():
+    multi = AscendMultiConnector.__new__(AscendMultiConnector)
+    multi._connectors = [GroupSource((0, 1), {})]
+    multi._requests_to_connector = {"r": 0}
+    request = SimpleNamespace(request_id="r")
+    assert not multi.update_state_before_preempt(request, ([], []), 96)
+    assert multi.get_loaded_kv_cache_group_ids(request) == ()
+
+
+def test_replay_rejects_children_without_a_loaded_group_contract():
+    config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
+    with patch.object(MultiConnector, "__init__", return_value=None):
+        multi = AscendMultiConnector.__new__(AscendMultiConnector)
+        multi._connectors = [object()]
+        with pytest.raises(ValueError, match="unsupported child: object"):
+            multi.__init__(config, object(), None)
+
+
 def test_initialization_does_not_publish_kv_write_events():
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(

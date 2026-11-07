@@ -3,28 +3,28 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from vllm.distributed.parallel_state import get_world_group
-
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.distributed.parallel_state import get_world_group
+from vllm.logger import logger
 from vllm.v1.worker import mamba_utils
 
-from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.attention.cache_layout import (
     LAYERWISE_PREFILL_GET_GROUP_SIZE,
     LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT,
     LAYERWISE_PREFILL_WORKSPACE_BANK_COUNT,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.layer_workspace_fence import (
     LayerWorkspaceFence,
     WorkspaceKey,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
-from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -49,6 +49,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             role=role,
             kv_cache_config=kv_cache_config,
         )
+
+        self._swa_bounded_replay = bool(
+            getattr(getattr(vllm_config, "cache_config", None), "swa_bounded_replay", False)
+        )
+        if self._swa_bounded_replay:
+            for connector in self._connectors:
+                if not callable(getattr(type(connector), "get_loaded_kv_cache_group_ids", None)):
+                    raise ValueError(
+                        "SWA replay requires every MultiConnector child to implement "
+                        f"get_loaded_kv_cache_group_ids; unsupported child: {type(connector).__name__}"
+                    )
 
         transfer = vllm_config.kv_transfer_config
         self._requires_full_dspark_prompt = (
@@ -662,11 +673,30 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         if first_error is not None:
             raise first_error
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        """Report the selected source, never the union of sibling cache groups."""
+        index = self._requests_to_connector.get(request.request_id)
+        if index is None:
+            return ()
+        connector = self._connectors[index]
+        if not callable(getattr(type(connector), "get_loaded_kv_cache_group_ids", None)):
+            raise ValueError(f"{type(connector).__name__} does not declare SWA load groups")
+        groups = tuple(connector.get_loaded_kv_cache_group_ids(request))
+        if getattr(self, "_swa_bounded_replay", False):
+            logger.info_once(
+                "SWA KV load source: %s.%s; groups=%s.",
+                type(connector).__module__, type(connector).__name__, groups,
+            )
+        return groups
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
+        # A new lookup (including readmission after preemption) invalidates the
+        # previous source. Keep the selection intact while its load is pending.
+        self._requests_to_connector.pop(request.request_id, None)
         # A target-only child cannot initialize the skipped draft context.
         if getattr(self, "_requires_full_dspark_prompt", False):
             return 0, False
@@ -694,7 +724,10 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 return tokens, load_async
             break
 
-        return super().get_num_new_matched_tokens(request, num_computed_tokens)
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if not result[0]:
+            self._requests_to_connector.pop(request.request_id, None)
+        return result
 
     def update_state_before_preempt(
         self,
@@ -707,6 +740,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             hook = getattr(c, "update_state_before_preempt", None)
             if hook is not None:
                 offloaded = bool(hook(request, block_ids, num_computed_tokens)) or offloaded
+        self._requests_to_connector.pop(request.request_id, None)
         return offloaded
 
     def request_finished_all_groups(
