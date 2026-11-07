@@ -1,0 +1,8 @@
+pr: 21178
+entries:
+  - category: feature
+    text: >-
+      Added optional experimental DeepEP high-throughput dispatch/combine for
+      eager TP1/DP8/EP8 inference on Ascend950 while retaining native expert
+      computation. Prefill and decode use the high-throughput path; EP8
+      low-latency communication and graph capture are not supported.
