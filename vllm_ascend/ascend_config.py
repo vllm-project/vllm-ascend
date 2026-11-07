@@ -411,7 +411,7 @@ class SharedEngramRdmaConfig:
     def _validate(self):
         if bool(self.endpoint) == bool(self.endpoints):
             raise ValueError("set exactly one of shared Engram endpoint or endpoints")
-        endpoints = self.endpoints if self.endpoints else [self.endpoint]
+        endpoints = self.endpoints if self.endpoints else [self.endpoint or ""]
         if len(set(endpoints)) != len(endpoints):
             raise ValueError("shared Engram endpoints must be distinct")
         for endpoint in endpoints:

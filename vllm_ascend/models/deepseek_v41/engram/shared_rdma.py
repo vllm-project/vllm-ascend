@@ -235,6 +235,7 @@ class RemoteReader:
                 self.registration = self.engine.register(self.buffer)
             else:
                 self.engine, self.buffer, self.registration = transport.engine, transport.buffer, transport.registration
+            assert self.engine is not None
             self.engine.check(self.engine.lib.engram_hixl_connect(self.engine.handle, self.peer))
         except BaseException:
             # Keep registered local memory alive if initialization did not complete.
@@ -356,6 +357,7 @@ class RemoteReader:
                 # Only dequantization consumes this registered buffer.
                 if self._last_use is not None:
                     self._last_use.synchronize()
+                assert self.engine is not None
                 self.engine.close()
                 _send(self.wire, dict(op="close", generation=self.generation))
                 if _receive(self.wire) != {"closed": True}:
@@ -374,7 +376,7 @@ class ShardedRemoteReader:
     copy_hashes = staticmethod(RemoteReader.copy_hashes)
 
     def __init__(self, model, endpoints, *, capacity, library_path=None):
-        self.readers = []
+        self.readers: list[RemoteReader] = []
         self.capacity = capacity
         self._last_use = None
         self._operation_lock = threading.Lock()
@@ -437,6 +439,7 @@ class ShardedRemoteReader:
                     for (_, spec, positions, ids), output in zip(selected, outputs, strict=True):
                         size = len(ids) * spec["row_bytes"]
                         if size:
+                            assert reader.buffer is not None
                             values = torch.empty((len(ids), output.shape[-1]), dtype=output.dtype, device=output.device)
                             dequantize_packed_engram(
                                 reader.buffer[offset : offset + size],
@@ -488,6 +491,7 @@ class ShardedRemoteReader:
         try:
             if self._last_use is not None:
                 self._last_use.synchronize()
+            assert self.readers[0].engine is not None
             self.readers[0].engine.close()
         except BaseException:
             for reader in self.readers:
