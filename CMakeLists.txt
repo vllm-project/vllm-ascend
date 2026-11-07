@@ -232,3 +232,9 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
+
+# A5 serial compressor vectors are a direct ASC Torch extension. The Cube
+# projection remains torch.matmul in the prepared Python execution plan.
+if(SOC_VERSION MATCHES "^ascend950$")
+  add_subdirectory(csrc/attention/compressor_serial)
+endif()
