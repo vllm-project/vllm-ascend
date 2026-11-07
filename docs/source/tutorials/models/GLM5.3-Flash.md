@@ -72,7 +72,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     Start the Docker container on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a5-openeuler
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -110,7 +110,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -163,7 +163,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash
     export NAME=vllm-ascend
     export MOONCAKE_SSD_PATH=/path/to/host/ssd
 
