@@ -28,6 +28,14 @@ from vllm.models.qwen4_exp.amd import (
 )
 from vllm.sequence import IntermediateTensors
 
+from vllm.logger import logger as vllm_logger
+
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.linear_op import (
+    Qwen4GdnInProjAGMMOp,
+    Qwen4OProjMMReduceScatterOp,
+)
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -181,7 +189,12 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
         # instead of launching a second all-gather before attention.
         gated_output.add_(hidden_states)
         gated_output_size = gated_output.shape[-1]
-        gathered_ple = sp_all_gather(torch.cat((gated_output, conv_input), dim=-1))[: input_ids.shape[0]]
+        # Keep the padded token count: every other layer slices to
+        # positions.shape[-1] (padded), and slicing to the raw length here
+        # makes this layer emit an unpadded RS/AllGather that breaks the
+        # world_size alignment of the shared compiled graph. Padding rows
+        # are zeroed by the is_padding mask in the decoder layer.
+        gathered_ple = sp_all_gather(torch.cat((gated_output, conv_input), dim=-1))
         gated_output, conv_input = gathered_ple.split((gated_output_size, conv_input.shape[-1]), dim=-1)
         conv_output = torch.zeros_like(conv_input)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
@@ -285,6 +298,49 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
             prefix=maybe_prefix(prefix, "mlp_hyper_connection"),
         )
 
+        self.fuse_o_proj_mm_reduce_scatter = self._enable_o_proj_mm_reduce_scatter(vllm_config)
+        self.gdn_in_proj_ag_mm_op: Qwen4GdnInProjAGMMOp | None = None
+        if self.layer_type == "linear_attention":
+            reason = Qwen4GdnInProjAGMMOp.unsupported_reason(self.linear_attn)
+            if reason is None:
+                self.gdn_in_proj_ag_mm_op = Qwen4GdnInProjAGMMOp(self.linear_attn)
+                vllm_logger.info(
+                    "layer %s: gdn in_proj AG+MM fusion enabled", self.layer_idx
+                )
+            else:
+                vllm_logger.info(
+                    "layer %s: gdn in_proj AG+MM fusion disabled (%s)",
+                    self.layer_idx,
+                    reason,
+                )
+
+    def _enable_o_proj_mm_reduce_scatter(self, vllm_config: VllmConfig) -> bool:
+        if not self.use_sequence_parallel:
+            return False
+        if not get_current_hardware_profile().supports(HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION):
+            return False
+        if get_ascend_config().weight_nz_mode == 2:
+            return False
+        if vllm_config.lora_config is not None:
+            return False
+        if self.layer_type == "linear_attention":
+            proj = self.linear_attn.out_proj
+        elif self.layer_type in upstream_model._QSA_LAYER_TYPES:
+            proj = self.self_attn.o_proj
+        else:
+            return False
+        reason = Qwen4OProjMMReduceScatterOp.unsupported_reason(proj)
+        if reason is not None:
+            vllm_logger.info(
+                "layer %s: o_proj MM+ReduceScatter fusion disabled (%s)",
+                self.layer_idx,
+                reason,
+            )
+            return False
+        proj.custom_op = Qwen4OProjMMReduceScatterOp(proj)
+        vllm_logger.info("layer %s: o_proj MM+ReduceScatter fusion enabled", self.layer_idx)
+        return True
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -326,9 +382,30 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
                 hidden_states = sp_shard(hidden_states)
                 injection = sp_shard(injection)
             else:
-                block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+                if self.gdn_in_proj_ag_mm_op is not None:
+                    agmm_op = self.gdn_in_proj_ag_mm_op
+                    attn_out = torch.ops.vllm.qwen4_gdn_in_proj_ag_mm(
+                        block_input,
+                        agmm_op.qkvz.weight,
+                        agmm_op.n_out,
+                        agmm_op.world_size,
+                    )
+                    block_input = None  # consumed; only attn_out flows on
+                else:
+                    block_input = sp_all_gather(block_input)[: positions.shape[-1]]
 
-        if self.layer_type == "linear_attention":
+        if (
+            self.gdn_in_proj_ag_mm_op is not None
+            and self.layer_type == "linear_attention"
+            and block_input is None
+        ):
+            # Attention already computed inside the opaque AG+MM dispatch op
+            # above; block_input was consumed (None) and attn_out is the
+            # out_proj output for the local token shard. The None guard keeps
+            # the PLE full-token path (block_input is a tensor there) on the
+            # plain linear_attn branch below.
+            pass
+        elif self.layer_type == "linear_attention" and block_input is not None:
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in upstream_model._QSA_LAYER_TYPES:
             attn_out = self.self_attn(
@@ -338,7 +415,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         else:
             raise ValueError("Invalid layer_type")
 
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
             attn_out = sp_reduce_scatter(attn_out)
 
         mlp_hc = self.mlp_hyper_connection

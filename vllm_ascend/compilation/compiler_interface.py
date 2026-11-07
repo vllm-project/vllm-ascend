@@ -216,7 +216,21 @@ def npugraph_ex_compile(
 
         _original_get_compiled_gm = nfx._NpuFxCompiler._get_compiled_gm
 
+        _dump_dir = None  # NGEFXDUMP
+        if os.environ.get("VLLM_DUMP_NGE_FX", "0") == "1":
+            _dump_dir = "/tmp/nge_fx_dump"
+            os.makedirs(_dump_dir, exist_ok=True)
+            logger.info("VLLM_DUMP_NGE_FX=1: dumping pre-compile FX graphs to %s", _dump_dir)
+
         def patched_get_compiled_gm(self, graph, example_inputs):
+            if _dump_dir is not None:
+                try:
+                    _n = int(os.environ.get("NGE_DUMP_SEQ", "0"))
+                    os.environ["NGE_DUMP_SEQ"] = str(_n + 1)
+                    with open(f"{_dump_dir}/g_{_n:03d}.py", "w") as _df:
+                        _df.write(graph.code if hasattr(graph, "code") else str(graph))
+                except Exception as _de:
+                    logger.warning("NGE FX dump failed: %s", _de)
             compiled_gm = _original_get_compiled_gm(self, graph, example_inputs)
             if cache_path:
                 py_code = compiled_gm.get_code()
