@@ -99,20 +99,8 @@ RUN mkdir -m 750 /var/driver -m 750 /var/dmp -m 750 /usr/slog && \
     chown HwHiAiUser:HwHiAiUser /home/drv/hdc_ppc && \
     chown HwHiAiUser:HwHiAiUser /var/log/npu/slog
 
-# Dynamically generate entrypoint.sh for dual mode compatibility
-RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
-    echo 'if lspci 2>/dev/null | grep -qi "accelerators"; then' >> /usr/local/bin/entrypoint.sh && \
-    echo '    :' >> /usr/local/bin/entrypoint.sh && \
-    echo 'else' >> /usr/local/bin/entrypoint.sh && \
-    echo '    su - HwHiAiUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /lib/ld-linux-aarch64.so.1 /var/slogd -d >/dev/null &"' >> /usr/local/bin/entrypoint.sh && \
-    echo '    su - HwDmUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /var/dmp_daemon -I -M -U 8087 &"' >> /usr/local/bin/entrypoint.sh && \
-    echo '    ' >> /usr/local/bin/entrypoint.sh && \
-    echo '    rm -rf /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
-    echo '    ln -sf /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
-    echo 'fi' >> /usr/local/bin/entrypoint.sh && \
-    echo '' >> /usr/local/bin/entrypoint.sh && \
-    echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
-    chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/entrypoint_310p_ubuntu.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # ===== Install pinned torch-npu =====
 # 310P installs only torch-npu (no memfabric/memcache/triton-ascend).
