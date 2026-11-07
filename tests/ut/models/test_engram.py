@@ -296,6 +296,17 @@ def test_loader_rejects_invalid_rotation_layouts(tmp_path):
         load_engram_rotation_block(str(tmp_path), 64, dense_path)
 
 
+def test_loader_requires_declared_rotation_file(tmp_path):
+    declared_path = tmp_path / "optional" / "quarot.safetensors"
+    with pytest.raises(FileNotFoundError, match="QuaRot global rotation"):
+        load_engram_rotation_block(str(tmp_path), 64, declared_path)
+
+
+def test_loader_uses_identity_when_rotation_is_not_declared(tmp_path):
+    blocks = load_engram_rotation_block(str(tmp_path), 64)
+    torch.testing.assert_close(blocks, torch.eye(32))
+
+
 def test_gate_accepts_distinct_rotation_blocks():
     first = torch.eye(32)
     second = torch.flip(torch.eye(32), dims=(0,))
