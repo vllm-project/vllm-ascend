@@ -21,7 +21,13 @@ from tests.e2e.common.single_node.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
 )
-from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.conftest import (
+    DisaggEpdProxy,
+    DisaggPDProxy,
+    RemoteEPDServer,
+    RemoteOpenAIServer,
+    RemotePDServer,
+)
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
 from tools.profiling.capture import (
@@ -61,7 +67,7 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
     prompts = config.prompts if config.prompts else ["Hello!"]
     expected = config.expected_response or {}
 
-    max_model_len_str = _extract_server_cmd_value(config.server_cmd, "--max-model-len")
+    max_model_len_str = _extract_server_cmd_value(_primary_server_cmd(config), "--max-model-len")
     max_model_len = int(max_model_len_str) if max_model_len_str else None
 
     if isinstance(config.api_keyword_args, list):
@@ -93,8 +99,6 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
 
 
 async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
-    import requests
-
     url = f"http://{server.host}:{server.port}"
     prompts = config.prompts if config.prompts else ["Hello!"]
 
@@ -258,7 +262,7 @@ async def run_spec_decode_acceptance_test(
 ) -> None:
     from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
 
-    spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+    spec_config = _parse_json_flag(_primary_server_cmd(config), "--speculative-config")
     num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
 
     acceptance_cfg = config.extra_config.get("acceptance_rate", {})
@@ -307,12 +311,12 @@ async def _run_benchmarks_and_spec_decode(
     if "spec_decode_acceptance" in config.test_content:
         from tools.spec_decode_metrics import capture_baseline
 
-        spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+        spec_config = _parse_json_flag(_primary_server_cmd(config), "--speculative-config")
         num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
 
         chat_url = server.url_for("v1", "chat", "completions")
 
-        def warmup_fn():
+        def warmup_fn() -> None:
             requests.post(
                 chat_url,
                 json={
@@ -340,6 +344,45 @@ def _extract_server_cmd_value(server_cmd: list[str], flag: str) -> str | None:
         return None
 
 
+def _primary_server_cmd(config: SingleNodeConfig) -> list[str]:
+    """Return a representative serve cmd for feature/dtype extraction.
+
+    PD/EPD service modes keep per-instance commands; fall back to the first
+    instance so shared flags (--max-model-len, --quantization, ...) can still
+    be introspected.
+    """
+    if config.server_cmd:
+        return config.server_cmd
+    if config.pd_server_cmds:
+        return config.pd_server_cmds[0]
+    if config.epd_server_cmds:
+        return config.epd_server_cmds[0]
+    return []
+
+
+def _pd_ports_by_role(pd_server_cmds: list[list[str]]) -> tuple[list[int], list[int]]:
+    """Split PD instance ports into (prefiller_ports, decoder_ports) by kv_role."""
+    prefiller_ports: list[int] = []
+    decoder_ports: list[int] = []
+    for cmd in pd_server_cmds:
+        port = _extract_server_cmd_value(cmd, "--port")
+        if port is None:
+            raise ValueError(f"PD server cmd must specify --port: {cmd}")
+        kv_config = _parse_json_flag(cmd, "--kv-transfer-config")
+        role = kv_config.get("kv_role")
+        if role == "kv_producer":
+            prefiller_ports.append(int(port))
+        elif role == "kv_consumer":
+            decoder_ports.append(int(port))
+        else:
+            raise ValueError(f"PD server cmd must set kv_role to 'kv_producer'/'kv_consumer', got {role!r}")
+    if not prefiller_ports:
+        raise ValueError("PD service mode requires at least one kv_producer instance")
+    if not decoder_ports:
+        raise ValueError("PD service mode requires at least one kv_consumer instance")
+    return prefiller_ports, decoder_ports
+
+
 def _extract_hardware(runner: str) -> str:
     """Derive hardware label (e.g. 'A2', 'A3') from runner name."""
     runner_lower = runner.lower()
@@ -349,7 +392,7 @@ def _extract_hardware(runner: str) -> str:
     return runner
 
 
-_PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
+_PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT", "PREFILL_PORT", "DECODE_PORT"}
 
 _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
@@ -371,7 +414,7 @@ _PERF_METRIC_RENAME: dict[str, str] = {
 
 def _extract_dtype(config: SingleNodeConfig) -> str:
     """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
-    server_cmd: list[str] = config.server_cmd
+    server_cmd: list[str] = _primary_server_cmd(config)
     has_w8a8 = "w8a8" in config.model.lower()
     has_quant_ascend = _extract_server_cmd_value(server_cmd, "--quantization") == "ascend"
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
@@ -439,6 +482,8 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
 
 def _build_serve_cmd(config: SingleNodeConfig) -> dict[str, str]:
     """Build serve_cmd dict with mix key for single-node deployments."""
+    if config.service_mode == "pd":
+        return {f"pd_{i}": f"vllm serve {' '.join(cmd)}".strip() for i, cmd in enumerate(config.pd_server_cmds)}
     args = " ".join(config.server_cmd)
     return {"mix": f"vllm serve {config.model} {args}".strip()}
 
@@ -545,7 +590,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "model_name": config.model,
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
-        "feature": _extract_features(config.server_cmd, config.envs),
+        "feature": _extract_features(_primary_server_cmd(config), config.envs),
         "vllm_version": vllm.__version__,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
@@ -617,6 +662,29 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                 env_dict={**config.envs, **kv_pool_manager.server_envs},
             ) as _,
             DisaggEpdProxy(proxy_args=config.epd_proxy_args, env_dict=config.envs) as proxy,
+        ):
+            await _dispatch_tests(config, proxy)
+            await _run_benchmarks_and_spec_decode(config, proxy, proxy.port)
+        return
+
+    if config.service_mode == "pd":
+        if ProfileSpec.from_env().enabled:
+            logger.warning("Profiling is not supported for the single-node PD service mode")
+            (profile_root() / "serve_manifest.json").unlink(missing_ok=True)
+        prefiller_ports, decoder_ports = _pd_ports_by_role(config.pd_server_cmds)
+        with (
+            kv_pool_manager,
+            RemotePDServer(
+                vllm_serve_args=config.pd_server_cmds,
+                env_dict={**config.envs, **kv_pool_manager.server_envs},
+                env_dicts=config.pd_server_envs or None,
+            ),
+            DisaggPDProxy(
+                port=config.proxy_port,
+                prefiller_ports=prefiller_ports,
+                decoder_ports=decoder_ports,
+                env_dict=config.envs,
+            ) as proxy,
         ):
             await _dispatch_tests(config, proxy)
             await _run_benchmarks_and_spec_decode(config, proxy, proxy.port)

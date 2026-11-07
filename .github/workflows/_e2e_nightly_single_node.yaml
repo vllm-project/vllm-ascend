@@ -158,7 +158,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.vllm_ascend_branch }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -297,7 +297,7 @@ jobs:
           cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
           pip install pytest asyncio pytest-asyncio
-          pip install -e . -r requirements/api.txt -r requirements/extra.txt
+          pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
           python3 -m pip cache purge
 
       - name: Show vLLM and vLLM-Ascend version

@@ -12,6 +12,31 @@ From the workflow perspective, we can see how the final test script is executed.
 
 ![alt text](../../assets/workflow.png)
 
+## Scheduling
+
+Single-node, multi-card, and multi-node jobs are not serialized with `needs`
+or throttled with `max-parallel`. All workloads are submitted at the same time,
+and the LWS pods set `schedulerName: npu-scheduler`, which queues pending pods
+in FIFO order. This applies to scheduled runs as well as `/nightly` and
+`/weekly` comment-triggered runs.
+
+The cluster does not use a dedicated-night taint, so the LWS template no longer
+sets `tolerations` and the workflows no longer run taint-cleanup steps.
+
+When two branches run at the same time, the concurrency group includes the
+`vllm_ascend_branch` input even though both runs are triggered from `main`, so
+one branch no longer cancels the other. Log cleanup is also scoped to
+`${ASCEND_LOG_PREFIX}/<branch>` and leaves the other branch's in-flight logs
+untouched.
+
+Scheduled runs are dispatched with `request_id` empty and `test_cases=all`.
+Before they create any workload, the `setup-vars` job force-cancels PR-triggered
+runs of the same workflow whose `run-name` contains `(PR)`, using
+`secrets.PAT_TOKEN`. This prevents an earlier PR run from keeping the shared
+FIFO queue busy past the nightly start time. `force-cancel` bypasses the
+`if: always()` `Post process` step, so LWS resources created by a
+force-cancelled run may need to be cleaned up separately.
+
 ## How to contribute
 
 1. Upload custom weights
@@ -82,10 +107,10 @@ Currently, the multi-node test workflow is defined in `.github/workflows/schedul
 ```yaml
 multi-node-tests:
   name: multi-node
-  if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+  needs: [setup-vars, parse-trigger, build-image]
+  if: always() && needs.parse-trigger.outputs.run == 'true'
   strategy:
     fail-fast: false
-    max-parallel: 1
     matrix:
       test_config:
         - name: multi-node-deepseek-pd
@@ -378,13 +403,13 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20261013-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -461,13 +486,13 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20261013-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,

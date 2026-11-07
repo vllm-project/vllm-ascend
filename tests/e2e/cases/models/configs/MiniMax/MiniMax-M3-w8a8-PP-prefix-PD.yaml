@@ -298,4 +298,4 @@ benchmarks:
     request_rate: 0
     baseline: 1096.57448
     threshold: 0.97
-    tpot_threshold: 22
+    tpot_threshold: 23

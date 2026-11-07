@@ -196,6 +196,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
+    # TP ranks hold the full latent vector, including quantization scales.
+    max_tp_shards: int | None = 1
+
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
@@ -300,6 +303,8 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     model runner still allocates it as an independent physical cache tensor.
     """
 
+    # Indexer keys and their scales are replicated across TP ranks.
+    max_tp_shards: int | None = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     cache_sparse_li_c8: bool = False

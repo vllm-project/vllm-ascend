@@ -92,7 +92,7 @@ defaults:
 
 # only cancel in-progress runs of the same workflow
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a2${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a2-${{ inputs.vllm_ascend_branch }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -149,6 +149,53 @@ jobs:
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_node: ${{ steps.set-matrix.outputs.multi_node }}
     steps:
+      # Scheduled runs have request_id empty and test_cases=all. Force-cancel
+      # PR-triggered runs of this workflow before the tests start, otherwise
+      # their pending LWS pods stay ahead of this run in the npu-scheduler
+      # FIFO queue.
+      - name: Cancel PR nightly runs before scheduled test
+        if: ${{ inputs.request_id == '' }}
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            // Best-effort cleanup: never fail the job.
+            try {
+              // Only drain PR runs of this workflow, never other platforms.
+              const workflowRef = process.env.GITHUB_WORKFLOW_REF || '';
+              const workflow_id = workflowRef.split('@')[0].split('/').pop();
+              if (!workflow_id) {
+                core.warning('Cannot derive workflow file from GITHUB_WORKFLOW_REF; skip');
+                return;
+              }
+
+              const { owner, repo } = context.repo;
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 100,
+              });
+              for (const run of data.workflow_runs) {
+                if (run.id === context.runId) continue;
+                if (run.status === 'completed') continue;
+                if (!(run.display_title || '').includes('(PR)')) continue;
+                core.info(`Force-cancelling ${run.display_title}: ${run.html_url}`);
+                try {
+                  await github.request(
+                    'POST /repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel',
+                    { owner, repo, run_id: run.id },
+                  );
+                } catch (error) {
+                  if (error.status === 409 || error.status === 410) {
+                    core.info(`Run ${run.id} already finished`);
+                  } else {
+                    core.warning(`Failed to force-cancel ${run.id}: ${error.message}`);
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Skipping PR run cleanup: ${error.message}`);
+            }
+
       - id: export
         run: |
           {
@@ -229,7 +276,6 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
@@ -275,148 +321,9 @@ jobs:
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
-  remove-taints:
-    name: Remove node taints
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
-    if: >-
-      always() &&
-      inputs.request_id == '' &&
-      needs.multi-node-tests.result != 'skipped'
-    runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-      env:
-        KUBECONFIG: /tmp/kubeconfig
-    steps:
-      - name: Decode kubeconfig
-        run: echo "${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}" | base64 -d > "$KUBECONFIG"
-
-      - name: Remove dedicated taint from test nodes
-        run: |
-          kubectl taint nodes ${{ vars.A2_TAINT_NODES }} dedicated- || true
-
-  wait-multi-node-pods-ready:
-    name: Wait multi-node pods launched
-    # A2-only gate: does NOT wait for multi-node-tests to finish. It polls the
-    # HK001 cluster until ALL enabled multi-node leader pods are Ready, then
-    # releases single-node / accuracy jobs while multi-node Stream logs keep
-    # running. Leaders are matched by this run's own config-stem pod-name prefix,
-    # so concurrent nightly/PR runs are not counted. No shared reusable workflow
-    # or jinja2 is modified by this job.
-    needs: [setup-vars, parse-trigger, build-image]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-      env:
-        KUBECONFIG: /tmp/kubeconfig
-        NAMESPACE: vllm-project
-    steps:
-      - name: Decode kubeconfig
-        run: echo "${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}" | base64 -d > "$KUBECONFIG"
-
-      - name: Count enabled multi-node cases and wait for leader pods ready
-        id: gate
-        env:
-          MATRIX_JSON: ${{ needs.setup-vars.outputs.multi_node }}
-          FILTER: ${{ needs.parse-trigger.outputs.filter }}
-        run: |
-          set -euo pipefail
-
-          MATRIX_JSON="${MATRIX_JSON:-[]}"
-          FILTER="${FILTER:-}"
-
-          # Pure shell, no JSON parser: pull each multi-node case's `name` and
-          # `config_file_path` in JSON order (the matrix emits them as adjacent
-          # keys per case). A leader pod is named vllm-<config-stem>-<rand>-0, so
-          # we derive the per-case stem from config_file_path and count only OUR
-          # enabled cases' leaders; other concurrent nightly/PR runs are excluded.
-          mapfile -t ALL_NAMES < <(printf '%s' "$MATRIX_JSON" \
-            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-            | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
-          mapfile -t ALL_CFGS < <(printf '%s' "$MATRIX_JSON" \
-            | grep -oE '"config_file_path"[[:space:]]*:[[:space:]]*"[^"]+"' \
-            | sed -E 's/.*"config_file_path"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
-
-          # Build the enabled config stems from the active filter (all, or the
-          # comma-wrapped name list). EXPECTED is the number of leaders to wait for.
-          STEMS=()
-          for i in "${!ALL_NAMES[@]}"; do
-            name="${ALL_NAMES[$i]}"
-            if [ -z "$name" ]; then continue; fi
-            if [ "$FILTER" != "all" ]; then
-              case "$FILTER" in
-                *",${name},"*) ;;
-                *) continue ;;
-              esac
-            fi
-            cfg="${ALL_CFGS[$i]:-}"
-            if [ -z "$cfg" ]; then continue; fi
-            # Mirror _e2e_nightly_multi_node exactly: drop trailing .yaml, lower,
-            # ./_ -> -, cap 43 chars (no basename, so directory-bearing paths match LWS).
-            stem=$(printf '%s' "${cfg%.yaml}" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
-            if [ -z "$stem" ]; then continue; fi
-            STEMS+=("$stem")
-          done
-          EXPECTED=${#STEMS[@]}
-
-          # No enabled multi-node case: release single-node immediately.
-          if [ "$EXPECTED" -eq 0 ]; then
-            echo "No enabled multi-node case; proceeding to single-node without waiting."
-            exit 0
-          fi
-
-          echo "Waiting for ${EXPECTED} leader pod stem(s): ${STEMS[*]}"
-
-          # Poll role=leader pods but count ONLY our enabled config stems, so a
-          # concurrent run's leader never inflates READY. Lenient by design: a
-          # failed/slow launch must not block the independent single-node jobs;
-          # worker readiness follows once the leader joins the LWS.
-          TIMEOUT=3600
-          INTERVAL=10
-          ELAPSED=0
-          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            mapfile -t ROWS < <(kubectl get pods -n "$NAMESPACE" -l role=leader \
-              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null || true)
-
-            READY=0
-            for stem in "${STEMS[@]}"; do
-              for row in "${ROWS[@]}"; do
-                if [ -z "$row" ]; then continue; fi
-                pname=$(printf '%s' "$row" | cut -f1)
-                pphase=$(printf '%s' "$row" | cut -f2)
-                pready=$(printf '%s' "$row" | cut -f3)
-                # Match the exact leader pod name vllm-<stem>-<6-hex-rand>-0, not a
-                # loose prefix, so stems in a parent/child relation cannot double-count.
-                if [[ "$pname" =~ ^vllm-${stem}-[0-9a-f]{6}-0$ ]]; then
-                  if [ "$pphase" = "Running" ] && printf '%s' "$pready" | grep -q 'true'; then
-                    READY=$((READY + 1))
-                    echo "  matched leader [$pname] ready for stem [$stem]"
-                    break
-                  fi
-                fi
-              done
-            done
-
-            echo "[$(date -u +%FT%TZ)] ready leaders=${READY}/${EXPECTED} (${ELAPSED}s)"
-            if [ "$READY" -ge "$EXPECTED" ]; then
-              echo "All ${EXPECTED} enabled multi-node leaders Ready; releasing single-node."
-              exit 0
-            fi
-            sleep "$INTERVAL"
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          # Lenient fallback: do not fail the whole pipeline if not every
-          # multi-node launch becomes Ready in time; single-node runs independently.
-          echo "::warning::Timed out after ${TIMEOUT}s waiting for ${EXPECTED} ready leader pods (${READY:-0} seen); releasing single-node anyway."
-
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, wait-multi-node-pods-ready]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -557,7 +464,7 @@ jobs:
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -589,7 +496,7 @@ jobs:
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -626,9 +533,18 @@ jobs:
     if: needs.multi-node-tests.result != 'skipped'
     steps:
       - name: Clear pre-logs on pvc
+        env:
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
         run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+          # Only clear this branch's directory so a concurrent run of another
+          # branch keeps its in-flight logs on the shared PVC.
+          branch=$(printf '%s' "$VLLM_ASCEND_BRANCH" | tr '/' '-')
+          if [ -z "$branch" ]; then
+            echo "vllm_ascend_branch is empty; skip clearing logs"
+            exit 0
+          fi
+          echo "Clearing ${ASCEND_LOG_PREFIX}/${branch}"
+          rm -rf "${ASCEND_LOG_PREFIX:?}/${branch:?}"/* || true
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a2.zip

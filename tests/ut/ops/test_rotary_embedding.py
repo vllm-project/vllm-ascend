@@ -141,6 +141,59 @@ class TestRopeForwardOOT:
         assert key_out.dtype == torch.float8_e4m3fn
 
 
+class TestAscendMRotaryEmbedding:
+    def _make_emb(self, mrope_section):
+        emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+        emb.head_size = HEAD_SIZE
+        emb.mrope_section = mrope_section
+        emb.mrope_interleaved = False
+        emb.cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.float32)
+        return emb
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_npu_mrope_output_is_copied_back_to_input_buffers(self, mock_npu_mrope):
+        """Caller-facing query/key buffers must hold the rotated values."""
+        emb = self._make_emb([16, 24, 24])
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        key = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        rotated_q = torch.full_like(query, 3.0)
+        rotated_k = torch.full_like(key, 5.0)
+        mock_npu_mrope.return_value = rotated_q, rotated_k
+
+        query_out, key_out = emb.forward_oot(positions, query, key)
+
+        assert query_out is query
+        assert key_out is key
+        torch.testing.assert_close(query, rotated_q)
+        torch.testing.assert_close(key, rotated_k)
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    def test_super_forward_oot_output_is_copied_back_to_input_buffers(self):
+        """Non-[16,24,24] MRoPE (e.g. Qwen3.8) must still copy back into inputs."""
+        emb = self._make_emb([11, 11, 10])
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        key = torch.zeros(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float32)
+        rotated_q = torch.full_like(query, 3.0)
+        rotated_k = torch.full_like(key, 5.0)
+
+        with patch.object(
+            AscendMRotaryEmbedding.__bases__[0],
+            "forward_oot",
+            create=True,
+            return_value=(rotated_q, rotated_k),
+        ) as mock_super_forward_oot:
+            query_out, key_out = emb.forward_oot(positions, query, key)
+
+        mock_super_forward_oot.assert_called_once()
+        assert query_out is query
+        assert key_out is key
+        torch.testing.assert_close(query, rotated_q)
+        torch.testing.assert_close(key, rotated_k)
+
+
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
     """
@@ -396,6 +449,41 @@ class TestAscendMRotaryEmbeddingForwardTriton:
         )
         assert query_out.shape == query.shape
         assert key_out.shape == key.shape
+
+
+class TestAscendMRotaryEmbeddingForwardOOT:
+    @staticmethod
+    def _build_mrope():
+        emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+        emb.mrope_interleaved = False
+        emb.mrope_section = [16, 24, 24]
+        emb.is_neox_style = True
+        emb.head_size = HEAD_SIZE
+        emb.cos_sin_cache = torch.zeros(MAX_POS, HEAD_SIZE, dtype=torch.float32)
+        return emb
+
+    @pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_npu_mrope_receives_contiguous_int64_positions(self, mock_npu_mrope, positions_dtype):
+        """forward_oot must normalize positions to contiguous int64 before
+        calling npu_mrope, so the spec-decode int32 path works and the
+        already-int64 path is a no-op."""
+        emb = self._build_mrope()
+        positions = torch.arange(SEQ_LEN, dtype=positions_dtype).repeat(3, 1)
+        query = torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE)
+        key = torch.randn(SEQ_LEN, HEAD_SIZE)
+        mock_npu_mrope.return_value = query, key
+
+        query_out, key_out = emb.forward_oot(positions, query, key)
+
+        mock_npu_mrope.assert_called_once()
+        positions_arg = mock_npu_mrope.call_args.args[0]
+        assert positions_arg.dtype == torch.int64
+        assert positions_arg.is_contiguous()
+        assert positions_arg.device == positions.device
+        torch.testing.assert_close(positions_arg, positions.to(torch.int64))
+        assert query_out is query
+        assert key_out is key
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:

@@ -146,6 +146,7 @@ configuration rather than the V1/V2 runner input or sampling interface.
 | [mamba/state_ops.py](mamba/state_ops.py) | Model state/attention |
 | [msa/minimax_qknorm_rope_cache.py](msa/minimax_qknorm_rope_cache.py) | Model sparse attention |
 | [msa/msa_m3_index_postprocess.py](msa/msa_m3_index_postprocess.py) | Model sparse attention |
+| [msa/msa_m3_index_topk.py](msa/msa_m3_index_topk.py) | MiniMax-M3 A5 sparse-attention Triton fallback |
 | [mul_add.py](mul_add.py) | Model/attention primitive or shared utility |
 | [muls_add.py](muls_add.py) | Model/attention primitive or shared utility |
 | [mxfp_k_scale.py](mxfp_k_scale.py) | Model/attention primitive or shared utility |

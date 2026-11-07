@@ -20,6 +20,9 @@ import importlib.util
 import json
 import math
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -1749,6 +1752,23 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
+# Only marks synchronous draft construction/loading for platform validation.
+# Nested scopes restore their caller's marker, including on failure.
+_DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
+
+
+def is_draft_config_context() -> bool:
+    return _DRAFT_CONFIG_CONTEXT.get()
+
+
+@contextmanager
+def draft_config_context() -> Iterator[None]:
+    """Identify draft reconstruction without changing configuration values."""
+    token = _DRAFT_CONFIG_CONTEXT.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT_CONFIG_CONTEXT.reset(token)
 
 
 def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:

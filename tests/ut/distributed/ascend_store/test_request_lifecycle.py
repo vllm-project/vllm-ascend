@@ -329,9 +329,7 @@ def test_raw_sequence_lifecycle(
                         if bid and start < (index + 1) * 128 <= end:
                             tensor[bid].fill_(payload_value(input_tokens, (index + 1) * 128, name, plane))
             worker.wait_for_save()
-            # Same fence the connector applies at the start of the next step:
-            # drain the saves of requests whose blocks this output released.
-            pool.handle_released_saves(meta.released_req_ids)
+            pool.wait_for_previous_save()
             sending, recving = worker.get_finished(output.finished_req_ids)
             result = create_model_runner_output([request] if scheduled else [])
             if scheduled and request.num_computed_tokens < len(tokens):
@@ -366,9 +364,6 @@ def test_raw_sequence_lifecycle(
             if req_id not in scheduler.requests:
                 # Consume the finished-ID notification and release Store references.
                 output = scheduler.schedule()
-                # The connector fences this output like any other: drain the
-                # finished request's final saves before its blocks are reused.
-                worker.handle_preemptions(output.kv_connector_metadata)
                 worker.bind_connector_metadata(output.kv_connector_metadata)
                 worker.get_finished(output.finished_req_ids)
                 worker.clear_connector_metadata()

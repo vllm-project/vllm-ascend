@@ -3,7 +3,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
@@ -41,7 +41,10 @@ def _make_runner(need_timing: bool = True):
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
     )
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=None, parallel_config=SimpleNamespace(prefill_context_parallel_size=1)
+    )
+    runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="other_model"),
         # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
@@ -468,57 +471,6 @@ def test_adaptive_verification_pads_fia_query_boundaries(
     np.testing.assert_array_equal(actual[: len(expected)], expected)
 
 
-def test_sample_tokens_restores_replicated_draft_hidden_states():
-    runner = _make_runner(need_timing=False)
-    runner.is_last_pp_rank = True
-    runner.speculator = SimpleNamespace(replicated_pcp=True)
-
-    hidden_states = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    aux_hidden_states = torch.ones(2, 3)
-    state = Mock(aux_hidden_states=[aux_hidden_states])
-    state.hidden_states = hidden_states
-    restored_state = object()
-    state._replace.return_value = restored_state
-    runner.execute_model_state = state
-
-    target_hidden_states = object()
-    restored_hidden_states = torch.ones(4, 3)
-    runner.pcp_manager = SimpleNamespace(
-        restore_hidden_state_buffer=Mock(),
-        restore_hidden_states=Mock(
-            return_value=restored_hidden_states,
-        ),
-    )
-    runner.model = SimpleNamespace(
-        get_mtp_target_hidden_states=lambda: target_hidden_states,
-    )
-    grammar_output = object()
-    expected_output = object()
-
-    with patch.object(
-        GPUModelRunner,
-        "sample_tokens",
-        return_value=expected_output,
-    ) as parent_sample_tokens:
-        actual = runner.sample_tokens(grammar_output)
-
-    assert actual is expected_output
-    parent_sample_tokens.assert_called_once_with(grammar_output)
-    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    # vLLM main (#57980) folded the aux restore into restore_for_sampling,
-    # which the replicated-PCP fast path bypasses; the pre-restore must
-    # cover aux too or the draft reads PCP-local rows.
-    assert runner.pcp_manager.restore_hidden_states.call_args_list == [
-        call(hidden_states),
-        call(aux_hidden_states),
-    ]
-    state._replace.assert_called_once_with(
-        hidden_states=restored_hidden_states,
-        aux_hidden_states=[restored_hidden_states],
-    )
-    assert runner.execute_model_state is restored_state
-
-
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -926,6 +878,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     monkeypatch.setattr(vllm_model_runner, "get_offloader", NoopOffloader)
     monkeypatch.setattr("vllm_ascend.attention.mla_v1.get_offloader", NoopOffloader)
     monkeypatch.setattr("vllm_ascend.attention.mla_v1.maybe_trans_nz", lambda tensor: tensor)
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast", lambda tensor, _format: tensor)
     monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", lambda _config: ())
 
     runner.load_model()
@@ -1254,24 +1207,6 @@ def test_init_spec_pp_full_graph_and_speculator(method):
     assert runner.decode_query_len == 2
 
 
-def test_sample_tokens_non_last_pp_uses_global_batch():
-    runner = _make_runner()
-    runner.is_last_pp_rank = False
-    runner.speculator = None
-    global_batch = object()
-    runner.pcp_manager = MagicMock(spec=AscendPCPManager)
-    runner.pcp_manager.global_batch = global_batch
-    state = Mock(aux_hidden_states=None)
-    replaced = object()
-    state._replace.return_value = replaced
-    runner.execute_model_state = state
-    with patch.object(GPUModelRunner, "sample_tokens", return_value="out") as parent:
-        assert runner.sample_tokens(None) == "out"
-    state._replace.assert_called_once_with(input_batch=global_batch)
-    assert runner.execute_model_state is replaced
-    parent.assert_called_once_with(None)
-
-
 def test_sample_tokens_leaves_draft_broadcast_to_upstream():
     runner = _make_runner()
     runner.is_last_pp_rank = True
@@ -1348,7 +1283,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     create_kvpp.assert_called_once()
     assert runner.kvpp == "kvpp"
     assert runner.model_state.kvpp_runtime == "kvpp"
-    runner.pcp_manager.bind_config.assert_called_once_with(runner.vllm_config)
+    runner.pcp_manager.set_runner_state.assert_called_once_with(runner.vllm_config, seen["cfg"], runner.input_buffers)
+    runner.pcp_manager.set_speculator.assert_not_called()
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
@@ -1410,7 +1346,6 @@ def test_initialize_kv_cache_forwards_allocation_context():
 def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
     runner = _make_runner()
     runner.max_num_tokens = 16
-    runner.vllm_config = SimpleNamespace()
     runner.get_model = MagicMock(return_value="m")
     runner._dummy_run = MagicMock()
     with (
@@ -2173,12 +2108,100 @@ def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsu
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _glm_mla_device_length_runner():
+    runner, output, batch = _m3_device_length_runner()
+    runner.model_config.architecture = "GlmMoeDsaForCausalLM"
+    runner.speculator.use_flashmla = True
+    runner.speculator.attn_backends = {"draft.0": AscendMLABackend}
+    runner.speculative_config.draft_model_config.architectures = ["Glm5DSparkForCausalLM"]
+    return runner, output, batch
+
+
+@pytest.mark.parametrize(
+    "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
+)
+@pytest.mark.parametrize("eager", [False, True])
+def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
+    runner, _, _ = _glm_mla_device_length_runner()
+    runner.model_config.architecture = architecture
+    runner.speculative_config.enforce_eager = eager
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "no_speculator",
+        "method",
+        "target_arch",
+        "draft_arch",
+        "no_draft_config",
+        "no_backends",
+        "draft_fia",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
+    runner, _, _ = _glm_mla_device_length_runner()
+    if unsupported == "no_speculator":
+        runner.speculator = None
+    elif unsupported == "method":
+        runner.speculative_config.method = "eagle3"
+    elif unsupported == "target_arch":
+        runner.model_config.architecture = "KimiK3ForCausalLM"
+    elif unsupported == "draft_arch":
+        runner.speculative_config.draft_model_config.architectures = ["OtherDraftModel"]
+    elif unsupported == "no_draft_config":
+        runner.speculative_config.draft_model_config = None
+    elif unsupported == "no_backends":
+        runner.speculator.attn_backends = {}
+    elif unsupported == "draft_fia":
+        runner.speculator.use_flashmla = False
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+def test_glm_mla_dspark_fallback_copies_and_waits():
+    runner, output, batch = _glm_mla_device_length_runner()
+    runner.speculator.use_flashmla = False
+    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
+    runner.num_computed_tokens_stream = Mock()
+    with (
+        patch.object(GPUModelRunner, "postprocess_sampled"),
+        patch("torch.cuda.current_stream"),
+        patch("torch.npu.stream", return_value=nullcontext()),
+    ):
+        runner.postprocess_sampled(None, None, 2, 1)
+    runner._update_seq_lens_cpu(output, batch.req_ids)
+    runner.num_computed_tokens_event.record.assert_called_once_with()
+    runner.num_computed_tokens_event.synchronize.assert_called_once_with()
+    assert runner.req_states.num_computed_tokens_cpu[0] == 98
+    assert runner.input_buffers.seq_lens_cpu[0] == 100
+
+
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark"])
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
     if draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
+    elif draft == "glm_mla_dspark":
+        runner, output, _ = _glm_mla_device_length_runner()
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])
@@ -2208,3 +2231,51 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize(
+    "scheduled,admitted,host,device,expected_sync",
+    [
+        (8, 8, [0, 5, 10], [0, 5, 10], False),
+        (8, 0, [0, 1, 2], [0, 1, 2], False),
+        (0, 0, [0, 9, 15], [0, 9, 15], False),
+        (8, 4, [0, 3, 6], [0, 1, 6], True),
+    ],
+)
+def test_adaptive_fia_syncs_only_partial_budget(scheduled, admitted, host, device, expected_sync):
+    num_reqs = len(host) - 1
+    host_queries = np.full(num_reqs + 3, -1, dtype=np.int32)
+    host_queries[: num_reqs + 1] = host
+    device_queries = MagicMock()
+    transfer = device_queries.__getitem__.return_value.cpu
+    transfer.return_value.numpy.return_value = np.array(device, dtype=np.int32)
+
+    NPUModelRunner._sync_adaptive_fia_query_start_loc(host_queries, device_queries, num_reqs, scheduled, admitted)
+
+    np.testing.assert_array_equal(host_queries, [*device, device[-1], device[-1]])
+    if expected_sync:
+        transfer.assert_called_once()
+    else:
+        device_queries.__getitem__.assert_not_called()
+
+
+def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
+    manager = SimpleNamespace(
+        _batch_budget=({"a": 2, "b": 1}, {"a": 1, "b": 4}, 1),
+        req_states=SimpleNamespace(req_id_to_index={"a": 1, "b": 0}),
+        _stale_confidences=[SimpleNamespace(np=np.array([[0.5, 0.01], [0.9, 0.8]]))],
+        _stale_idx=0,
+        num_speculative_steps=2,
+        _max_total_logits=5,
+        num_bonus_tokens=1,
+        cost_tables=(np.array([0.0, 0.5, 1.0]), np.arange(20, dtype=float) + 1),
+    )
+    with patch("vllm_ascend.worker.v2.model_runner.logger") as log:
+        log.isEnabledFor.return_value = True
+        NPUModelRunner._log_adaptive_verification_costs(manager)
+
+    args = log.debug.call_args.args
+    assert args[1:5] == (1, 3, 5, 1.0)
+    assert args[5] == [6.0, 7.0, 9.0]
+    np.testing.assert_allclose(args[6], [0.9, 2.12])
+    np.testing.assert_allclose(args[7], [0.7, 0.8])

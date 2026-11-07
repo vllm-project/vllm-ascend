@@ -440,6 +440,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
+        # Ascend initializes this layer without calling ColumnParallelLinear's
+        # constructor, which normally sets the allowance before create_weights.
+        self.allow_fp8_block_shape_mismatch = False
+        allow_fp8_mismatch = getattr(self, "_maybe_allow_fp8_block_shape_mismatch", None)
+        if allow_fp8_mismatch is not None:
+            allow_fp8_mismatch()
+
         self.gather_output = gather_output
 
         if output_sizes is None:

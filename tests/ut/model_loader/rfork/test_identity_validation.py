@@ -17,11 +17,6 @@ def identity_module(monkeypatch):
     _stub(monkeypatch, "vllm.config", ModelConfig=object, VllmConfig=object)
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.types", RFORK_PROTOCOL_VERSION=1)
     _stub(monkeypatch, "vllm_ascend.ascend_config", get_ascend_config=lambda: SimpleNamespace(weight_nz_mode=None))
-    _stub(
-        monkeypatch,
-        "vllm_ascend.device.hardware_profile",
-        get_current_hardware_profile=lambda: SimpleNamespace(weight_layout_policy=None, _device_type="A2"),
-    )
     return _load_module(monkeypatch, "rfork_test_identity", "identity.py")
 
 
@@ -40,9 +35,7 @@ def seed_module(monkeypatch):
     class SeedTransferInfo:
         session_id: str
         weights: dict
-        shared_names: list[str] | None = None
         formats: dict | None = None
-        load_state: dict | None = None
 
     _stub(
         monkeypatch,
@@ -864,6 +857,48 @@ def test_seed_port_base_rejects_non_integer_extra_config(config_module, value):
         config_module.RForkConfigurationError, match="rfork_seed_port_base must be a JSON integer in range"
     ):
         config_module.RForkConfig.from_extra_config({"rfork_seed_port_base": value})
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("rfork_heartbeat_interval_sec", 0, "rfork_heartbeat_interval_sec must be a finite positive JSON number"),
+        (
+            "rfork_heartbeat_interval_sec",
+            True,
+            "rfork_heartbeat_interval_sec must be a finite positive JSON number",
+        ),
+        (
+            "rfork_lease_release_retry_interval_sec",
+            -1,
+            "rfork_lease_release_retry_interval_sec must be a finite positive JSON number",
+        ),
+        (
+            "rfork_lease_release_max_attempts",
+            0,
+            "rfork_lease_release_max_attempts must be a positive JSON integer",
+        ),
+        (
+            "rfork_lease_release_max_attempts",
+            1.5,
+            "rfork_lease_release_max_attempts must be a positive JSON integer",
+        ),
+        ("rfork_seed_removal_supported", "yes", "rfork_seed_removal_supported must be a JSON boolean or null"),
+    ],
+)
+def test_config_rejects_invalid_runtime_values(config_module, key, value, message):
+    with pytest.raises(config_module.RForkConfigurationError, match=message):
+        config_module.RForkConfig.from_extra_config(
+            {"model_url": "model", "model_deploy_strategy_name": "strategy", key: value}
+        )
+
+
+def test_config_accepts_null_seed_removal_supported(config_module):
+    cfg = config_module.RForkConfig.from_extra_config(
+        {"model_url": "model", "model_deploy_strategy_name": "strategy", "rfork_seed_removal_supported": None}
+    )
+
+    assert cfg.seed_removal_supported is None
 
 
 def test_unknown_extra_config_keys_are_reported(config_module):

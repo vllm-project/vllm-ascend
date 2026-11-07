@@ -26,8 +26,7 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
-- [2026/10] 我们发布了新的候选版本 [v0.30.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0rc1)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/)开始在 Ascend 上部署 vLLM Ascend Plugin。
-- [2026/09] 我们发布了新的候选版本 [v0.26.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.26.0rc1)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/)开始在 Ascend 上部署 vLLM Ascend Plugin。
+- [2026/10] 我们发布了新的正式版本 [v0.30.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.30.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/08] 我们发布了新的正式版本 [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.23.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/05] 我们发布了新的正式版本 [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.18.0/)开始在Ascend上部署vLLM Ascend Plugin。
 - [2026/02] 我们发布了新的正式版本 [v0.13.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.13.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.13.0/)开始在Ascend上部署vLLM Ascend Plugin。
@@ -69,12 +68,12 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
 
 ## 准备
 
-- 硬件：Atlas 800I A2 Inference系列、Atlas A2 Training系列、Atlas 800I A3 Inference系列、Atlas A3 Training系列、Atlas 300I Duo（实验性支持）
+- 硬件：Atlas 800I A2 系列、Atlas 800I A3 系列、Atlas 300I Duo、Ascend 950PR&950DT 系列产品
 - 操作系统：Linux
 - 软件：
-    - Python >= 3.10, < 3.13
-    - CANN == 9.1.0 (Ascend HDK 版本详见 [版本说明](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md))
-    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post4
+    - Python == 3.12
+    - CANN == 9.2.1 (Ascend HDK 版本详见 [版本说明](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/softwareinst/releasenote/9.2.1/release-notes.md))
+    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post7
     - vLLM (与vllm-ascend版本一致)
 
 ## 访问昇腾NPU
@@ -87,9 +86,8 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-| v0.30.0rc1 | 候选版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/installation.html)了解更多 |
-| v0.26.0rc1 | 候选版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/installation.html)了解更多 |
-| v0.23.0 | 最新正式/稳定版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html)了解更多 |
+| v0.30.0 | 最新正式/稳定版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.30.0/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.30.0/installation.html)了解更多 |
+| v0.23.0 | 正式/稳定版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html)了解更多 |
 
 ## 分支策略
 

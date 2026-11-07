@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.forward_context import BatchDescriptor
+from vllm.forward_context import is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
@@ -465,27 +465,27 @@ def test_init_cudagraph_manager_preserves_graph_mode(monkeypatch, enforce_eager,
     assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
 
 
-def test_selector_scores_in_request_scoped_context(monkeypatch):
-    config = SimpleNamespace()
-    selector = MagicMock()
+def test_selector_scores_without_forward_context():
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
-    speculator.vllm_config = config
-    speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
     speculator.num_query_per_req = 3
-    speculator.input_buffers = SimpleNamespace(input_ids=torch.arange(6))
+    speculator.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
     candidates = torch.zeros(2, 2, 2, dtype=torch.int64)
     unary = torch.zeros(2, 2, 2)
     hidden = torch.zeros(2, 2, 4)
-    context = object()
-    create = MagicMock(return_value=context)
-    override = MagicMock(return_value=nullcontext())
-    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.create_forward_context", create)
-    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.override_forward_context", override)
+    scores = torch.zeros(2, 2, 2, 2)
 
-    speculator._score_candidates(candidates, unary, hidden)
+    def select(candidate_ids, unary_logits, hidden_states, anchor_token_ids):
+        assert not is_forward_context_available()
+        assert candidate_ids is candidates
+        assert unary_logits is unary
+        assert hidden_states is hidden
+        torch.testing.assert_close(anchor_token_ids, torch.tensor([0, 3]))
+        return scores
 
-    create.assert_called_once_with(None, config, batch_descriptor=BatchDescriptor(num_tokens=2))
-    override.assert_called_once_with(context)
+    selector = MagicMock(side_effect=select)
+    speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
+    with override_forward_context(None):
+        assert speculator._score_candidates(candidates, unary, hidden) is scores
     selector.assert_called_once()
 
 

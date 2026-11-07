@@ -31,6 +31,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
@@ -310,8 +311,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             self.process_weights_after_loading_compressed_tensors(layer)
         else:
             self.process_weights_after_loading_modelslim(layer)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # The W4A8 MoE kernels require NZ, including in batch-invariant mode.
+        # Keep this operator requirement local; other weights retain their policy.
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         tensor_names = (
             "w13_weight",
             "w2_weight",
@@ -522,7 +525,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
-        scale = [w1_scale[0].to(w2_scale[0].dtype)]
+        # W4A8 only supports per-channel weights (is_per_channel_weight is
+        # always True), so the A8W4 gmm scale must always be in [E, 1, N]
+        # layout (unsqueeze -2); otherwise the kernel tiling treats the
+        # flattened per-channel scale as the quant group count and computes
+        # out-of-bounds memory addresses. The scale dtype is already unified
+        # by _process_scale() at load time, so unsqueeze(-2) (a zero-copy
+        # view) is the only runtime work needed here.
+        scale = [item.unsqueeze(-2) for item in w1_scale]
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],

@@ -62,7 +62,7 @@ class DCPChunkedContextMetadata(ChunkedContextMetadata):
     local_context_lens_allranks: list[list[int]] | None = None
     padded_local_cu_seq_lens: torch.Tensor = None
     cu_seq_lens_lst: list[list[int]] | None = None
-    chunk_size: int | None = None
+    local_chunk_starts: list[list[int]] | None = None
     padded_local_cu_seq_lens_lst: list[list[int]] | None = None
     pcp_global_req_indices: list[int] | None = None
     pcp_global_block_table: torch.Tensor | None = None
@@ -118,16 +118,18 @@ class AscendMlaDCPMetadataBuilder(
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         workspace_size = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1:
-            chunk_alignment = lcm(
-                vllm_config.cache_config.block_size,
-                parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
-            )
-            # The shared plan reserves two local fragments per global PCP
-            # request. After halving the budget, each request must still fit
-            # one aligned DCP chunk.
-            min_workspace_size = 2 * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
-            workspace_size = max(workspace_size, min_workspace_size)
+        chunk_alignment = lcm(
+            vllm_config.cache_config.block_size,
+            parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
+        )
+        fragment_factor = (
+            2
+            if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1
+            else 1
+        )
+        # Each collective must fit one aligned request, including local fragments.
+        alignment = fragment_factor * chunk_alignment
+        workspace_size = cdiv(workspace_size, alignment) * alignment
         return workspace_size
 
     def __init__(
@@ -202,16 +204,20 @@ class AscendMlaDCPMetadataBuilder(
         *,
         chunk_plan_lens_cpu: torch.Tensor | None = None,
         chunk_workspace_size: int | None = None,
+        chunk_request_indices: list[int] | None = None,
+        chunk_alignment: int | None = None,
     ):
         context_lens_cpu = (self.seq_lens - self.query_lens)[self.num_decodes : common_attn_metadata.num_reqs]
         gather_lens = context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
         use_default_chunk_workspace = chunk_workspace_size is None
         if chunk_workspace_size is None:
             chunk_workspace_size = self.chunked_prefill_workspace_size
-        local_rows = None
+        local_rows = chunk_request_indices
         block_table = None
         if self.use_pcp and self.use_dcp:
-            pcp_gather_lens, local_rows, block_table = self._get_pcp_prefill_kv_inputs()
+            pcp_gather_lens, pcp_local_rows, block_table = self._get_pcp_prefill_kv_inputs()
+            if chunk_request_indices is None:
+                local_rows = pcp_local_rows
             if pcp_gather_lens is not None:
                 if chunk_plan_lens_cpu is None:
                     gather_lens = pcp_gather_lens
@@ -223,6 +229,10 @@ class AscendMlaDCPMetadataBuilder(
             common_attn_metadata,
             chunk_plan_lens_cpu=gather_lens,
             chunk_workspace_size=chunk_workspace_size,
+            chunk_request_indices=local_rows,
+            chunk_alignment=(
+                lcm(self.block_size, self.cp_virtual_block_size) if chunk_alignment is None else chunk_alignment
+            ),
         )
         if chunked_context_metadata is None:
             return None
@@ -234,19 +244,10 @@ class AscendMlaDCPMetadataBuilder(
             dcp_size=self.dcp_size,
             cp_kv_cache_interleave_size=self.cp_local_block_size,
         )
-        padded_local_context_lens_cpu = cdiv(gather_lens, self.cp_virtual_block_size) * self.cp_local_block_size
-        padded_local_max_context_chunk_across_ranks = (
-            cdiv(self.max_context_chunk, self.cp_virtual_block_size) * self.cp_local_block_size
+        local_chunk_starts = self.context_plan_starts // self.cp_virtual_block_size * self.cp_local_block_size
+        padded_local_chunk_seq_lens = (
+            cdiv(self.context_plan_lens, self.cp_virtual_block_size) * self.cp_local_block_size
         )
-        local_chunk_starts = (
-            torch.arange(self.num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, num_context_rows)
-            * padded_local_max_context_chunk_across_ranks
-        )
-        local_chunk_ends = torch.min(
-            padded_local_context_lens_cpu.unsqueeze(0),
-            local_chunk_starts + padded_local_max_context_chunk_across_ranks,
-        )
-        padded_local_chunk_seq_lens = (local_chunk_ends - local_chunk_starts).clamp(min=0)
         padded_local_cu_chunk_seq_lens_cpu = torch.zeros(
             self.num_chunks,
             num_context_rows + 1,
@@ -277,7 +278,7 @@ class AscendMlaDCPMetadataBuilder(
                 non_blocking=True,
             ),
             cu_seq_lens_lst=self.cu_seq_lens_cpu.tolist(),
-            chunk_size=padded_local_max_context_chunk_across_ranks,
+            local_chunk_starts=local_chunk_starts.tolist(),
             padded_local_cu_seq_lens_lst=padded_local_cu_chunk_seq_lens_cpu.tolist(),
             pcp_global_req_indices=local_rows,
             pcp_global_block_table=block_table,
@@ -1124,8 +1125,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             local_context_lens_allranks: local context lengths on each CP rank.
             sum_seq_len: the sum of cp_chunk_seq_lens_lst.
             max_seq_len: the max value of cp_chunk_seq_lens_lst.
-            chunk_size: the local padded max context chunk from
-                chunked_context_metadata building.
+            local_chunk_starts: per-request offsets in each rank's local cache.
             chunk_idx: chunk idx of chunked_prefill.
             toks: the number of tokens for local gather cache.
         """
@@ -1134,14 +1134,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert chunked_context.local_context_lens_allranks is not None
         assert chunked_context.cu_seq_lens_lst is not None
         assert chunked_context.max_seq_lens is not None
-        assert chunked_context.chunk_size is not None
+        assert chunked_context.local_chunk_starts is not None
         assert chunked_context.kv_rank_offsets is not None
 
         padded_local_chunk_seq_lens_lst = chunked_context.padded_local_chunk_seq_lens[chunk_idx]
         local_context_lens_allranks = chunked_context.local_context_lens_allranks
         sum_seq_len = chunked_context.cu_seq_lens_lst[chunk_idx][-1]
         max_seq_len = chunked_context.max_seq_lens[chunk_idx]
-        chunk_size: int = chunked_context.chunk_size
+        local_chunk_starts = chunked_context.local_chunk_starts[chunk_idx]
         kv_rank_offsets = chunked_context.kv_rank_offsets[chunk_idx]
         cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
         cache_kv_c_k_pe = self._dcp_all_gather(cache_kv_c_k_pe, 0)
@@ -1166,15 +1166,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 src_token_idx = chunked_context.padded_local_cu_seq_lens_lst[chunk_idx][source_row]
             cur_seq_len = 0
             for rank, local_context_len in enumerate(local_context_lens):
-                # Note(qcs): We split the context into multiple chunks,
-                # depending on the size of the workspace.
-                # local_context in dcp0:   |-----------------|
-                # local_context in dcp1:   |--------------|
-                # n*padded_local_chunk:    |-----|-----|-----|
-                # local_chunk_len in dcp1: |-----|-----|--|
-                # so we need update the last chunk length in dcp1.
                 local_chunk_len = min(
-                    max(0, local_context_len - chunk_idx * chunk_size),
+                    max(0, local_context_len - local_chunk_starts[source_row]),
                     padded_local_chunk_seq_len,
                 )
                 if local_chunk_len != 0:
@@ -1194,7 +1187,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             "DCP MLA KV reorg length mismatch: "
             f"actual={reorganized_kv_c_normed.shape[0]}, "
             f"expected={sum_seq_len}, chunk_idx={chunk_idx}, "
-            f"toks={toks}, chunk_size={chunk_size}, "
+            f"toks={toks}, local_chunk_starts={local_chunk_starts}, "
             f"padded_local_chunk_seq_lens="
             f"{padded_local_chunk_seq_lens_lst}, "
             f"local_context_lens_allranks="
