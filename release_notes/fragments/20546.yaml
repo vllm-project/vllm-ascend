@@ -1,0 +1,11 @@
+pr: 20546
+entries:
+  - category: bugfix
+    text: >-
+      Fixed `--prefix-cache-retention-interval` being ignored on the Ascend
+      hybrid KV cache path. The coordinator read a removed environment variable
+      instead of the resolved `CacheConfig` field, skipped validation, and did
+      not forward the value to the per-group managers. An invalid value (not a
+      multiple of `--block-size`) now fails at startup instead of being
+      accepted silently.
+    model: deepseek-v4
