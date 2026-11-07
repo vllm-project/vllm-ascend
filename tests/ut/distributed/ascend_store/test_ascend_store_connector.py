@@ -28,6 +28,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreKVEvents,
     LookupKeyServer,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import (
+    SHUTDOWN_JOIN_TIMEOUT_S,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 
 # isort: on
@@ -134,9 +137,17 @@ class TestLookupKeyServer(unittest.TestCase):
         server.decoder.decode.side_effect = [[0], ["hash"]]
         target = mock_thread_cls.call_args.kwargs["target"]
 
+        server.encoder = MagicMock()
+        server.encoder.encode.return_value = [b"error-envelope"]
+
         target()
 
-        mock_socket.send.assert_called_once_with(b"\x00")
+        # Exactly one reply for the failed handler, and it is the envelope.
+        mock_socket.send_multipart.assert_called_once_with([b"error-envelope"], copy=False)
+        # The receive fault arrived while running was already cleared, so no
+        # reply and no handle churn; loop exit releases the REP once.
+        self.assertEqual(mock_make_socket.call_count, 1)
+        self.assertEqual(mock_socket.send_multipart.call_count, 1)
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
 
@@ -157,7 +168,9 @@ class TestLookupKeyServer(unittest.TestCase):
         server.close()
 
         self.assertFalse(server.running)
-        thread.join.assert_called_once_with()
+        # One join, and it carries a timeout: an in-flight backend call may keep
+        # the daemon thread alive, but close() itself must return.
+        thread.join.assert_called_once_with(SHUTDOWN_JOIN_TIMEOUT_S)
 
 
 class TestAscendStoreConnector(unittest.TestCase):
@@ -244,8 +257,12 @@ class TestAscendStoreConnector(unittest.TestCase):
             kv_cache_config=MagicMock(),
         )
         mock_scheduler_cls.assert_called_once()
-        self.assertIsNone(connector.get_kv_connector_stats())
-        mock_scheduler_cls.return_value.get_stats.assert_not_called()
+        # The scheduler-side client owns the lookup-RPC counters, so the scheduler
+        # object has to report them: vLLM calls this method on the SCHEDULER connector
+        # as well and aggregates the result into the worker stats.
+        stats = mock_scheduler_cls.return_value.get_stats.return_value
+        self.assertIs(connector.get_kv_connector_stats(), stats)
+        mock_scheduler_cls.return_value.get_stats.assert_called_once()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
