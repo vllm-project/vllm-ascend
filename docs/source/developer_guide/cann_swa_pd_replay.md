@@ -43,8 +43,10 @@ D 在本地恢复后继续生成。SWA 不作为可复用前缀快照持久化�
 - `MooncakeConnectorV1`：
   `vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.MooncakeConnector`。
 - 两者传输请求自有缓存组，包括不参与前缀持久化的 SWA 组。
-- 未实现上述接口的 connector 继续在启动时拒绝此组合。
-  此次没有接入 `AscendStoreConnector`、Mooncake Store 或其他 layerwise offload。
+- 后续扩展已接入 `AscendMultiConnector` 和请求级 `AscendStoreConnector`：
+  按请求选择的来源报告恢复组，Store 命中后重建缺失窗口。
+  配置与范围见 [Store replay 指南](cann_swa_store_replay.md)。
+  未实现恢复接口的其他 child、Store layerwise、Store PCP/DCP 多路等仍明确拒绝。
 - MRV1＋旧 DSA-CP 是首轮 A3 路径；MRV2 不能配置 `enable_dsa_cp=true`。
   不需要为此次 P/D 接入切换 runner 或改为 PCP 拓扑。
 - decoder 裁剪仍要求 eager prefill；D 可使用 `FULL_DECODE_ONLY`。
@@ -184,9 +186,10 @@ block size 默认值和 CP 缩放规则。不能只给 worker 随意补一个常
 另外移除了 MultiConnector 构造函数中提前触发 KV 写入回调的错误代码；
 该回调只应在对应层完成 KV 写入时执行。
 
-这两处启动修复没有接入 Store 的 SWA 恢复协议。当前 replay ON 仍只支持
-第 3 节列出的直接 Mooncake connector，不能保留外层 MultiConnector 后
-仅删除其中一个 child，也不能通过切换 MRV2 绕开限制。
+提交 `222d4cb7a` 只修复上述启动问题。之后的 `0b3737e3b`、`c48fba428`
+已接入 MultiConnector 和请求级 Store 的 SWA 恢复协议；
+使用组合配置必须包含这些后续提交，具体见 [Store replay 指南](cann_swa_store_replay.md)。
+切换 runner 本身不能代替接口适配。
 
 先验证 P/D SWA 时，可将 D 的整个 `KV_TRANSFER_CONFIG` 替换为：
 
@@ -211,9 +214,8 @@ replay OFF/ON 对照。这是去掉 Store 缓存池后的直接 P/D 路径；
 
 已提供的 D Store child 配置只有 `load_async=true` 时，并不会自动启用 Store 读取：
 `kv_role=kv_consumer` 的读取还受 `consumer_is_to_load` 控制，默认关闭。
-`load_async` 只控制已经启用的读取采用同步还是异步。
-要保留 Store，需要另外适配 MultiConnector 按每个请求选择的缓存来源报告恢复的组，
-并验证 Store 命中后缺少 SWA 窗口时的重建、失败恢复和缓存块生命周期；
-单独修复字段访问不代表这些功能已经支持。
+`load_async` 只控制已经启用的读取方式；新的 Store replay 路径会强制异步加载，
+确保加载完成后再重建窗口。MultiConnector 的来源转发、Store 组过滤、失败恢复及
+缓存块生命周期已增加 CPU 回归；A3 实机验收仍需按新指南执行。
 
 启动兼容回归的复现信息及检查边界见[验证记录](cann_store_compat_validation.json)。

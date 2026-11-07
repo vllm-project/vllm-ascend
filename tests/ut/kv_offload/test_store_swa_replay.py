@@ -13,12 +13,12 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import CacheConfig, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorRole, SupportsHMA
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -32,10 +32,13 @@ from tests.ut.patch.platform.test_patch_swa_bounded_replay_legacy import (
 from tests.ut.patch.platform.test_patch_swa_bounded_replay_legacy import (
     replay_scheduler as _replay_scheduler_fixture,
 )
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_scheduler, pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    AscendConnectorMetadata,
+    LoadSpec,
     ReqMeta,
     get_block_hashes,
     store_replay_enabled,
@@ -503,3 +506,91 @@ def test_partial_c128_store_mode_is_not_silently_enabled(store_runtime):
     )
     with pytest.raises(ValueError, match="does not support hybrid_cache_c128_chunk"):
         store_replay_enabled(config, store_runtime.pool.kv_cache_config, use_layerwise=False)
+
+
+@pytest.mark.parametrize("ratio", [4, 128])
+@pytest.mark.parametrize("local_caching", [False, True])
+def test_native_compressed_specs_preserve_logical_pages_and_physical_bytes(store_runtime, ratio, local_caching):
+    config = copy.copy(store_runtime.store._vllm_config)
+    config.model_config = copy.copy(config.model_config)
+    config.model_config.max_model_len = 512
+    config.cache_config = CacheConfig(block_size=128, enable_prefix_caching=local_caching, swa_bounded_replay=True)
+    full = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        tokens_per_state=ratio,
+        storage_block_size=128 // ratio,
+        model_version="deepseek_v41",
+    )
+    swa = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        bounded_replay=True,
+    )
+    plan = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["swa"], swa),
+        ],
+    )
+    backend = MemoryBackend()
+    with patch.object(
+        pool_worker.importlib, "import_module", return_value=SimpleNamespace(MooncakeBackend=lambda *_a, **_k: backend)
+    ):
+        worker = AscendStoreConnector(config, KVConnectorRole.WORKER, plan)
+    caches = {
+        "full": (torch.full((64, 128 // ratio, 1, 8), -777, dtype=torch.bfloat16),),
+        "swa": (torch.full((64, 128, 1, 8), -777, dtype=torch.bfloat16),),
+    }
+    worker.register_kv_caches(caches)
+    pool = worker.connector_worker
+    try:
+        with patch.object(pool_scheduler, "LookupKeyClient"):
+            scheduler = pool_scheduler.KVPoolScheduler(config, False, plan)
+        assert scheduler.original_block_size == pool.original_block_size == [128, 128]
+        assert scheduler.hash_block_size == pool.hash_block_size == 128
+        assert scheduler.cache_transfer_granularity == pool.cache_transfer_granularity == 128
+        init_none_hash(sha256)
+        req = Request(
+            "native",
+            list(range(385)),
+            SamplingParams(max_tokens=1),
+            None,
+            block_hasher=get_request_block_hasher(128, sha256),
+        )
+        seed_store(SimpleNamespace(pool=pool, caches=caches, backend=backend), req, 384)
+        assert pool.lookup_scheduler(384, req.block_hashes, [0, 1]) == 384
+        caches["full"][0][8].fill_(123)
+        metadata = AscendConnectorMetadata({"native"}, set())
+        metadata.add_request(
+            ReqMeta(
+                "native",
+                384,
+                block_ids_by_group=[[8, 9, 10], [0, 0, 11]],
+                block_hashes=req.block_hashes,
+                kv_cache_group_ids=[0, 1],
+                can_save=False,
+                load_spec=LoadSpec(vllm_cached_tokens=128, kvpool_cached_tokens=384, can_load=True),
+            )
+        )
+        worker.bind_connector_metadata(metadata)
+        worker.start_load_kv(None)
+        receiver = pool.kv_recv_thread
+        receiver._handle_request(receiver.request_queue.get_nowait())
+        result = worker.get_transfer_results(set())
+        assert result.finished_recving == {"native"} and not result.failed_recving
+        assert torch.all(caches["full"][0][8] == 123)
+        assert torch.all(caches["full"][0][9:11] == 42)
+        assert torch.all(caches["swa"][0] == -777)
+        assert len(backend.gets[0]) == 2
+    finally:
+        pool.kv_recv_thread.executor.shutdown(wait=True)
+        if pool.kv_send_thread is not None:
+            pool.kv_send_thread.executor.shutdown(wait=True)

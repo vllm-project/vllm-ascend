@@ -1,0 +1,191 @@
+{
+  "date": "2026-11-07",
+  "branch": "backport/cann-swa-bounded-replay",
+  "base_revision": "222d4cb7ad61709942d77e5c5f256170f1a1aa06",
+  "runtime_revision": "eaedc04088904edcc334807965c6c679d187ac19",
+  "upstream_vllm_pin": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "implementation_commits": [
+    "0b3737e3b",
+    "c48fba428",
+    "eaedc0408"
+  ],
+  "scope": {
+    "connectors": [
+      "AscendMultiConnector",
+      "AscendStoreConnector",
+      "existing direct Mooncake connectors"
+    ],
+    "runners": [
+      "MRV1",
+      "MRV2",
+      "MRV2 async scheduler"
+    ],
+    "store_roles": [
+      "kv_producer",
+      "kv_consumer"
+    ],
+    "store_transfer": "request-level; PCP=1, DCP=1; asynchronous receive before window rebuild",
+    "unsupported": [
+      "Store layerwise",
+      "Store PCP>1 or DCP>1",
+      "Store hybrid_cache_c128_chunk=true",
+      "MRV2 with legacy enable_dsa_cp=true"
+    ]
+  },
+  "cpu_regression": {
+    "files": 35,
+    "passed": 1658,
+    "skipped": 23,
+    "subtests_passed": 513,
+    "seconds": 23.48,
+    "log": "/tmp/cann-swa-store-primary.log",
+    "junit": "/tmp/cann-swa-store-primary.xml"
+  },
+  "coverage": [
+    "Real MultiConnector constructors, selected-source lookup, metadata dispatch and transfer-result aggregation",
+    "Real Store scheduler, worker, sender and receiver; actual CPU tensor bytes are copied through a simulated backend",
+    "SWA-private groups are absent from Store query, load and save masks; original group IDs survive uniform wrappers",
+    "No forward while asynchronous loads are pending; completed Store loads rebuild missing SWA windows",
+    "Short-hit cold fallback and full-prompt/non-block-aligned load boundaries",
+    "Shared local-global prefix bytes, block IDs and reference counts remain intact",
+    "Backend error codes, missing/short responses and exceptions; cold retry does not reload failed Store objects",
+    "Both recompute and fail policies; cancellation retains target blocks until receive completion",
+    "Preemption/readmission for MRV1/MRV2 and async scheduling, including same-step V2 readmission",
+    "Pending receive metadata cannot publish cache data through another request save hook",
+    "External hashing granularity and C4/C128 grouped-object hashes are not transformed twice",
+    "Local prefix caching disabled; unknown child protocols and unsupported Store layouts reject explicitly",
+    "Real v0.30 C4/C128 MLA specs: logical block sizes, distinct physical tensor rows, local-cache ON/OFF, producer/consumer roles, lookup keys and byte-copy addresses"
+  ],
+  "simulation_limits": {
+    "cpu_tp": 1,
+    "cpu_pcp": 1,
+    "cpu_dcp": 1,
+    "configured_topology_metadata": {
+      "prefill": {
+        "dp_size": 4,
+        "tp_size": 4
+      },
+      "decode": {
+        "dp_size": 8,
+        "tp_size": 2
+      }
+    },
+    "remote_pd_source": "unavailable network source simulated; existing Hybrid regressions run in the primary suite",
+    "model_compute": "not executed",
+    "network": "in-memory backend; no Mooncake master, RDMA or HCCL"
+  },
+  "expanded_store_suite": {
+    "baseline_failed_cases": 36,
+    "current_failed_cases": 36,
+    "new_failing_cases": [],
+    "fixed_cases": []
+  },
+  "expanded_store_suite_details": {
+    "baseline_pytest_summary": "39 failed, 158 passed, 8 subtests passed",
+    "current_pytest_summary": "39 failed, 158 passed, 8 subtests passed",
+    "baseline_revision": "222d4cb7a with only the same obsolete-symbol test fixture compatibility applied",
+    "test_process": "separate process, because the legacy _mock_deps helper mutates package imports",
+    "existing_failure_categories": [
+      "optional C128 transport namespace/range expectations",
+      "layerwise transfer_suffix NameError",
+      "legacy compressed/Mamba coordinator API expectations",
+      "legacy log-capture fixtures"
+    ],
+    "log": "/tmp/cann-store-swa-expanded-final.log",
+    "baseline_log": "/tmp/cann-store-swa-baseline.log"
+  },
+  "offline_probe": {
+    "script": "tests/e2e/models/swa_bounded_replay_probe.py",
+    "check": "Simulated HTTP baseline/ON, P/D markers, selected Store and window-rebuild markers, missing-marker failures and unpaired P/D arguments passed",
+    "log": "/tmp/cann-swa-store-probe.log",
+    "evidence_policy": "Use fresh service logs; markers are process-level, not per-request traces"
+  },
+  "checks": {
+    "ruff_new_tests_and_probe": "passed",
+    "ruff_format_new_tests_probe_and_coordinator": "passed",
+    "runtime_ruff_delta": "No added diagnostics; existing baseline diagnostics remain",
+    "format_sh_ci": "Executed in an isolated snapshot; blocked before hooks by nodeenv parsing the Node 27 prerelease version (0-alpha)",
+    "format_sh_ci_log": "/tmp/cann-swa-store-format-ci.log",
+    "codespell_typos": "passed",
+    "document_links_and_shell_json": "passed",
+    "diff_check": "passed"
+  },
+  "reproduce_primary": {
+    "env": {
+      "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+      "VLLM_VERSION": "0.30.0",
+      "VLLM_PLUGINS": "",
+      "OMP_NUM_THREADS": "1"
+    },
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/ut/_310p/test_model_runner_310p.py",
+      "tests/ut/attention/test_decoder_replay_swa_indices.py",
+      "tests/ut/core/test_kv_cache_interface.py",
+      "tests/ut/core/test_swa_replay_downgrade.py",
+      "tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py",
+      "tests/ut/kv_offload/test_dspark_resident_kv.py",
+      "tests/ut/models/test_deepseek_v41_cache.py",
+      "tests/ut/models/test_deepseek_v41_decoder_replay.py",
+      "tests/ut/models/test_deepseek_v41_decoder_replay_state.py",
+      "tests/ut/models/test_deepseek_v41_dspark.py",
+      "tests/ut/models/test_deepseek_v41_hyper_connection.py",
+      "tests/ut/models/test_deepseek_v41_replay_distributed.py",
+      "tests/ut/models/test_engram_multistream.py",
+      "tests/ut/models/test_engram_v2_model_state.py",
+      "tests/ut/patch/platform/test_packed_kv_cache_compat.py",
+      "tests/ut/patch/platform/test_patch_swa_bounded_replay.py",
+      "tests/ut/patch/platform/test_patch_swa_bounded_replay_legacy.py",
+      "tests/ut/patch/platform/test_prefix_cache_cp_patches.py",
+      "tests/ut/worker/test_attn_utils_v2.py",
+      "tests/ut/worker/test_disable_compilation.py",
+      "tests/ut/worker/test_idle_dummy_config.py",
+      "tests/ut/worker/test_model_runner_v1.py",
+      "tests/ut/worker/test_model_runner_v2.py",
+      "tests/ut/worker/test_pcp_manager_v2.py",
+      "tests/ut/worker/test_replay_slot_padding.py",
+      "tests/ut/worker/test_v2_dummy_padding.py",
+      "tests/ut/worker/test_worker_v1.py",
+      "tests/ut/worker/v2/test_deepseek_v41_engram_state.py",
+      "tests/ut/attention/test_dsa_v41_cp.py",
+      "--disable-warnings",
+      "tests/ut/kv_offload/test_hybrid_prefix_truncation.py",
+      "tests/ut/kv_offload/test_mooncake_hybrid_connector.py",
+      "--tb=short",
+      "tests/ut/kv_offload/test_store_swa_replay.py",
+      "tests/ut/kv_offload/test_ascend_multi_connector.py",
+      "tests/ut/kv_offload/test_ascend_multi_connector_pingpong.py",
+      "tests/ut/kv_offload/test_ascend_store_legacy_config.py",
+      "--junitxml=/tmp/cann-swa-store-primary.xml"
+    ]
+  },
+  "not_validated": [
+    "Actual A3 model startup, NPU kernels and device memory safety",
+    "Real Mooncake/HCCL transfer and cache-pool eviction",
+    "Actual TP4 to TP2 Store object/layout compatibility",
+    "Business accuracy and DSpark acceptance",
+    "TTFT, TPOT/ITL or throughput improvement"
+  ],
+  "source_sha256": {
+    "tests/e2e/models/swa_bounded_replay_probe.py": "296295d14e9ae964c1370c37cb853114af511dbaf44dda912eea4ab5ea107e00",
+    "tests/ut/conftest.py": "e0ba76359093a427ae86b6de394511dac51bfba1453a55022720fea8364a0ffa",
+    "tests/ut/distributed/ascend_store/test_pool_worker.py": "118fee658f4a2ac8cc3a2a0a97f74e990492dbbcdee5a079c7c85448aaf1f827",
+    "tests/ut/kv_offload/test_ascend_multi_connector.py": "002604fdcb17d2411f52c34e524f72b79e150cea0ffba3d8c14b15a695d86110",
+    "tests/ut/kv_offload/test_store_swa_replay.py": "d5d5f720a679db25940ac0923828b9a5bab7d81e76e11e1490a235c714327de2",
+    "vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py": "f0d649434614001a0817a8b046c2a4b40666c038754491ae1f5e9e1cc9a1a0d6",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/ascend_store_connector.py": "7037af2076d6fd1d026bd31b44fff67db6554ff7652c889b5e9b0f1549df2fe7",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/config_data.py": "d3fb02bf6db74051d4011e775316a8e89127347b43ae7a83ac09ba2bf0719c9b",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/coordinator.py": "4fef87ff339f195cc049039aef274ae33de7186a266c4470b42fda6af6f2b859",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py": "8505e1c199ef8ab284c285cd206c0a06dea371d1e30fa75bbbb3795d7ab5dd8f",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py": "92073a208b0e23611e631ca6f165bb24a37e10f33408e6f842bdbeadbaac0b5b",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py": "ad27bcb5fe80a8d40378c40da6ad42a69b7d3d8c9e1140a83df2c2a1917a60f9"
+  },
+  "native_spec_regression": {
+    "cases": 24,
+    "log": "/tmp/cann-swa-store-native-specs.log",
+    "passed": 24
+  }
+}

@@ -144,8 +144,10 @@ vllm bench serve --backend vllm --base-url http://127.0.0.1:8000 \
 - PP、DCP、microbatching、LoRA、不兼容的草稿或 replay 边界后的 Engram 会关闭 decoder replay。
 - vLLM 0.30 兼容层接入 Ascend 的 `MooncakeHybridConnector` 和 `MooncakeConnectorV1`
   请求级 P/D 交接，保留全局 KV、SWA 尾部和必要状态的原有传输路径。
-  未声明 `get_loaded_kv_cache_group_ids` 的 connector 仍明确拒绝；
-  Mooncake Store / AscendStore 的 layerwise offload 不属于此次接入范围。
+  后续还接入 MultiConnector 与请求级 AscendStore：按所选来源恢复 SWA，
+  见 [Store replay 指南](cann_swa_store_replay.md)。
+  未声明 `get_loaded_kv_cache_group_ids` 的 child 仍明确拒绝；
+  AscendStore layerwise、Store PCP/DCP 多路和可选的 C128 分块传输不在扩展范围。
   配置和验收步骤见 [P/D replay 指南](cann_swa_pd_replay.md)。
 - 自定义 scheduler 若替换了上游调度循环，会关闭 SWA replay 并给出原因；需检查最终日志。
 - 本分支默认 OFF；不把 CPU 回归通过表述为 A3 功能、精度或性能已经通过。

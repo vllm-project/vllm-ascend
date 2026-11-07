@@ -72,6 +72,9 @@ def main():
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--prefill-log", type=Path, help="Fresh P service log for a replay-ON P/D run.")
     parser.add_argument("--decode-log", type=Path, help="Fresh D service log for a replay-ON P/D run.")
+    parser.add_argument(
+        "--store-log", type=Path, help="Fresh log from an engine exercising a Store hit with replay ON."
+    )
     args = parser.parse_args()
     if bool(args.prefill_log) != bool(args.decode_log):
         parser.error("--prefill-log and --decode-log must be supplied together")
@@ -98,7 +101,22 @@ def main():
             lines = [line for line in path.read_text(errors="replace").splitlines() if marker in line]
             evidence[role] = {"log": str(path), "activation_lines": lines}
         results["pd_replay_evidence"] = evidence
+    if args.store_log:
+        lines = args.store_log.read_text(errors="replace").splitlines()
+        store_evidence = {
+            "log": str(args.store_log),
+            "selected_store_lines": [
+                line for line in lines if "SWA KV load source:" in line and ".AscendStoreConnector;" in line
+            ],
+            "window_rebuild_lines": [
+                line for line in lines if "SWA bounded replay is active: a prefix hit is rebuilding its window." in line
+            ],
+        }
+        results["store_replay_evidence"] = store_evidence
     args.output.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    if args.store_log:
+        assert store_evidence["selected_store_lines"] and store_evidence["window_rebuild_lines"], store_evidence
+        print("PASS: Store source selection and SWA window rebuilding markers found in supplied log", flush=True)
     if args.prefill_log:
         assert all(item["activation_lines"] for item in evidence.values()), evidence
         print("PASS: P prefill trimming and D window handoff markers found in supplied logs", flush=True)
