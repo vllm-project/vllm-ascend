@@ -117,6 +117,19 @@ def test_empty_stream_still_terminates_with_done(monkeypatch):
     assert out == [_DONE]
 
 
+def test_done_chunk_with_crlf_is_recognized(monkeypatch):
+    crlf_done = "data: [DONE]\r\n\r\n"
+    chunks = [_chunk({"choices": [{"delta": {"content": "a"}}]}), crlf_done]
+    results = [SimpleNamespace(kv_transfer_params={"hash_keys": ["ab"]})]
+
+    out = _stream(chunks, results, monkeypatch=monkeypatch)
+
+    # The normalized terminator is preserved instead of emitting a second one.
+    assert out[-1] == crlf_done
+    assert out.count(crlf_done) == 1
+    assert _DONE not in out
+
+
 def test_positional_and_keyword_args_are_forwarded(monkeypatch):
     seen: dict = {}
     chunks = [_chunk({"choices": []})]

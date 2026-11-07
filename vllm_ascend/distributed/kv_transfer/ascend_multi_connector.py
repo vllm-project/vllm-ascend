@@ -265,7 +265,9 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                         raise RuntimeError(f"Key clash in kv_transfer_params from multiple connectors: {clashes}")
                     kv_txfer_params.update(txfer_params)
                 else:
-                    kv_txfer_params = txfer_params
+                    # Copy so a later update() never mutates the dict owned by
+                    # the connector that produced it.
+                    kv_txfer_params = dict(txfer_params)
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
 

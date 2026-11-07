@@ -92,7 +92,8 @@ async def _patched_chat_completion_stream_generator(
         *args,
         **kwargs,
     ):
-        if chunk == _DONE_CHUNK:
+        # Compare on the payload only: middleware may normalize line endings.
+        if chunk.rstrip() == "data: [DONE]":
             done_chunk = chunk
             continue
         if pending_data is not None:

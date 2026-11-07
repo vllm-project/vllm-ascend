@@ -402,8 +402,9 @@ def _make_hma_connector(async_save: bool, params: dict | None) -> SimpleNamespac
 
 def test_request_finished_all_groups_merges_params_from_every_connector():
     request = SimpleNamespace(request_id="req-1")
+    first_params = {"hash_keys": ["ab"]}
     connector = _make_multi_connector(
-        _make_hma_connector(False, {"hash_keys": ["ab"]}),
+        _make_hma_connector(False, first_params),
         _make_hma_connector(True, {"connector_b": 3}),
     )
 
@@ -411,6 +412,8 @@ def test_request_finished_all_groups_merges_params_from_every_connector():
 
     assert async_save is True
     assert params == {"hash_keys": ["ab"], "connector_b": 3}
+    # Merging must not mutate the dict owned by the first connector.
+    assert first_params == {"hash_keys": ["ab"]}
     assert connector._extra_async_saves == {}
 
 
