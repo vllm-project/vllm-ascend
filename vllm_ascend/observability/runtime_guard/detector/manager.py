@@ -29,6 +29,7 @@ from vllm_ascend.observability.runtime_guard.detector.base import (
     resolve_batch_req_ids,
 )
 from vllm_ascend.observability.runtime_guard.detector.logits_finite import LogitsFiniteDetector
+from vllm_ascend.observability.runtime_guard.detector.rare_chars import RareCharsDetector
 from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.observability.runtime_guard.detector.token_repeat import TokenRepeatDetector
 from vllm_ascend.observability.runtime_guard.io import RequestIoSnapshotManager, has_nonempty_sampled_row
@@ -81,11 +82,16 @@ class DetectorManager:
             runtime_config=runtime_config,
             runner=runner,
         )
+        self._rare_chars_det = RareCharsDetector(
+            runtime_config=runtime_config,
+            runner=runner,
+        )
         self._registry = DetectorRegistry()
         for det in (
             self._spec_det,
             self._token_repeat_det,
             self._logits_finite_det,
+            self._rare_chars_det,
         ):
             self._registry.register(det)
 
@@ -153,11 +159,17 @@ class DetectorManager:
         return bool(self._spec_det.enabled)
 
     def any_after_sample_cpu_enabled(self) -> bool:
-        """``token_repeat`` (not logits_finite)."""
+        """``token_repeat`` (not logits_finite / rare_chars)."""
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
         return bool(self._token_repeat_det.enabled)
+
+    def rare_chars_enabled(self) -> bool:
+        """True when Guard should stash logits and run rc4 rare_chars."""
+        if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
+            return bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
+        return bool(self._rare_chars_det.enabled)
 
     def check_after_spec(
         self,
@@ -268,3 +280,16 @@ class DetectorManager:
             skip_req_ids=skip,
         )
         return []
+
+    def finish_rare_chars(self, req_ids: list[str] | set[str] | tuple[str, ...]) -> list[Incident]:
+        """Flush rc4 look-ahead state when requests finish."""
+        if not self.rare_chars_enabled():
+            return []
+        alerts: list[Incident] = []
+        for rid in req_ids:
+            if not rid:
+                continue
+            alert = self._rare_chars_det.finish_request(str(rid))
+            if alert is not None:
+                alerts.append(alert)
+        return alerts

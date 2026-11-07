@@ -316,6 +316,10 @@ class RequestGuardState:
     # In-flight KV dump arms (queued → drain/drop). Reap waits so finished
     # requests can still complete an already-armed dump_kv (+1 wave).
     dump_jobs: int = 0
+    # In-flight rare_chars pair sync+feed jobs (RarePairWaitQueue). Reap waits
+    # so clear_finished cannot wipe detector rows while delayed feeds run, and
+    # finish_rare_chars is deferred until these pins drain.
+    rare_pair_jobs: int = 0
 
 
 class RequestGuardStore:
@@ -475,6 +479,33 @@ class RequestGuardStore:
                 if state is not None and state.dump_jobs > 0:
                     state.dump_jobs -= 1
 
+    def add_rare_pair_jobs(self, req_ids: Iterable[str] | None) -> None:
+        """Pin reqs until async rare_chars pair sync+feed completes."""
+        if not req_ids:
+            return
+        with self._lock:
+            for raw in req_ids:
+                if not raw:
+                    continue
+                rid = str(raw)
+                state = self._by_req.get(rid)
+                if state is None:
+                    self._discard_reaped_locked(rid)
+                    state = RequestGuardState(req_id=rid)
+                    self._by_req[rid] = state
+                state.rare_pair_jobs += 1
+
+    def finish_rare_pair_jobs(self, req_ids: Iterable[str] | None) -> None:
+        if not req_ids:
+            return
+        with self._lock:
+            for raw in req_ids:
+                if not raw:
+                    continue
+                state = self._by_req.get(str(raw))
+                if state is not None and state.rare_pair_jobs > 0:
+                    state.rare_pair_jobs -= 1
+
     def is_request_finished(self, req_id: str) -> bool:
         """True when Store has marked this req finished (not merely unknown)."""
         if not req_id:
@@ -512,6 +543,18 @@ class RequestGuardStore:
                 return True
             mark = int(current_wave)
             state.finish_mark_wave = mark
+        # Rare-pair feeds must complete before clear. Do not force-reap while
+        # pins remain (pins release in the pair-wait job ``finally``).
+        if state.rare_pair_jobs > 0:
+            age = int(current_wave) - mark
+            if age >= int(self.max_deferred_waves) and age % int(self.max_deferred_waves) == 0:
+                logger.warning(
+                    "[runtime_guard reap] defer clear for req=%s rare_pair_jobs=%s age_waves=%s",
+                    state.req_id,
+                    state.rare_pair_jobs,
+                    age,
+                )
+            return False
         if state.cpu_jobs > 0 or state.dump_jobs > 0:
             if int(current_wave) - mark < int(self.max_deferred_waves):
                 return False

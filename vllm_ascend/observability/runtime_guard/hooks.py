@@ -207,9 +207,34 @@ def get_postprocess_sampled(runner: Any) -> tuple[Any, Any]:
     )
 
 
+# Stashed pre-sample logits for Guard-side rare_chars (top1, chosen) collect.
+# Detection-only: never attached to the OpenAI / SamplingParams.logprobs path.
+_PRE_SAMPLE_LOGITS_ATTR = "_rg_pre_sample_logits"
+
+
+def stash_pre_sample_logits(runner: Any, logits: Any) -> None:
+    """Keep a reference to this step's logits for ``rare_chars`` (cleared after use)."""
+    setattr(runner, _PRE_SAMPLE_LOGITS_ATTR, logits)
+
+
+def take_pre_sample_logits(runner: Any) -> Any:
+    """Pop stashed pre-sample logits (or ``None``)."""
+    logits = getattr(runner, _PRE_SAMPLE_LOGITS_ATTR, None)
+    if hasattr(runner, _PRE_SAMPLE_LOGITS_ATTR):
+        try:
+            delattr(runner, _PRE_SAMPLE_LOGITS_ATTR)
+        except Exception:
+            setattr(runner, _PRE_SAMPLE_LOGITS_ATTR, None)
+    return logits
+
+
 def need_pre_sample_hook(guard: Any) -> bool:
     """True when wrapping ``compute_logits`` is useful (detector on + gate open)."""
-    if not bool(guard.runtime_config.detector_get("logits_finite", "enabled", False)):
+    cfg = guard.runtime_config
+    need_logits = bool(cfg.detector_get("logits_finite", "enabled", False)) or bool(
+        cfg.detector_get("rare_chars", "enabled", False)
+    )
+    if not need_logits:
         return False
     return bool(guard.action_executor.can_run_detection())
 
@@ -219,15 +244,24 @@ def check_before_sample_from_batch(
     logits: Any,
     input_batch: Any,
 ) -> None:
-    """Pack batch fields and call :meth:`RuntimeGuardProcessor.check_before_sample`."""
+    """Pack batch fields and call :meth:`RuntimeGuardProcessor.check_before_sample`.
+
+    Also stashes logits for ``rare_chars`` so Guard-side (top1, chosen) logprobs
+    can be computed after sample without ``SamplingParams.logprobs``.
+    """
+    cfg = guard.runtime_config
+    if bool(cfg.detector_get("rare_chars", "enabled", False)):
+        stash_pre_sample_logits(guard.runner, logits)
     logits_indices = getattr(input_batch, "logits_indices", None)
     if logits_indices is None:
         logits_indices = getattr(guard.runner, "logits_indices", None)
-    guard.check_before_sample(
-        logits=logits,
-        logits_indices=logits_indices,
-        input_batch=input_batch,
-    )
+    # logits_finite path is a no-op when that detector is off.
+    if bool(cfg.detector_get("logits_finite", "enabled", False)):
+        guard.check_before_sample(
+            logits=logits,
+            logits_indices=logits_indices,
+            input_batch=input_batch,
+        )
 
 
 def _restore_bound_override(obj: Any, name: str, orig: Any, *, had_instance_attr: bool) -> None:
@@ -342,6 +376,9 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         output = self._inner.get_output()
+        guard = getattr(self._runner, "runtime_guard", None)
+        if guard is not None:
+            guard.consume_rare_pairs(output)
         _safe_check_after_sample(self._runner, output)
         return output
 

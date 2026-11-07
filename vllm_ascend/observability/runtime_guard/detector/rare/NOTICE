@@ -1,0 +1,10 @@
+rare_chars (rc4) algorithm and tables
+======================================
+
+Adapted from https://github.com/RinshannKaihou/self_evolving_inference_detector
+(package v35_detector 0.4.0; research commit 5118334 for rc4).
+
+Files under this directory (rare.py, rare_vocab.py, rare_gb.py, rare_ref.py,
+rc4.json, tables/*.npz) preserve the evaluated detector logic and frozen
+artifacts. Guard wiring, Ascend (top1, chosen) logprob collection, and the
+ConfigBackedDetector wrapper live outside this package.
