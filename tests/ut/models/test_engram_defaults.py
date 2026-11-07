@@ -30,3 +30,15 @@ def test_remote_engram_is_opt_in():
     config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
     assert config.shared_engram_rdma is None
     assert SharedEngramRdmaConfig(endpoint="127.0.0.1:29500").capacity == 65536
+
+
+def test_shared_reader_rejects_immediate_shutdown(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.ascend_config.get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
+    config = AscendConfig(
+        shared_engram_rdma=SharedEngramRdmaConfig(endpoint="127.0.0.1:29500"),
+        sparse_kv_offload_config=SimpleNamespace(enabled=False),
+    )
+    with pytest.raises(ValueError, match="shutdown-timeout"):
+        config.derive_and_validate(SimpleNamespace(shutdown_timeout=0))

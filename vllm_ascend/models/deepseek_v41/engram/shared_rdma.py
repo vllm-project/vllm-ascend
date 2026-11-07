@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Immutable Engram owner and bounded HIXL row reader for A2 RoCE.
+"""Immutable Engram owner and bounded HIXL row reader.
 
 Control messages carry IDs; registered staging buffers carry packed rows.
 This protocol is for a trusted serving network, not an exposed storage API.
 """
 
 import ctypes
+import functools
 import hashlib
 import json
+import os
 import socket
 import socketserver
 import struct
@@ -23,6 +25,31 @@ from safetensors import safe_open
 
 MAX_ROWS = 65536
 MAX_CONTROL_BYTES = 65536
+
+# A failed transfer may still access its registered receive buffer.
+_held_readers = set()
+_held_readers_lock = threading.Lock()
+
+
+def _hold_reader(reader):
+    reader.failed = True
+    with _held_readers_lock:
+        _held_readers.add(reader)
+
+
+def _reader_operation(function):
+    @functools.wraps(function)
+    def run(self, *args, **kwargs):
+        with self._operation_lock:
+            if self.failed or self.closed:
+                raise RuntimeError("remote Engram reader is failed or closed")
+            try:
+                return function(self, *args, **kwargs)
+            except BaseException:
+                _hold_reader(self)
+                raise
+
+    return run
 
 
 def _receive_exact(wire, size):
@@ -62,18 +89,28 @@ def checkpoint_metadata(model):
     """Identify the immutable checkpoint and sample raw rows before allocation."""
     root = Path(model)
     digest = hashlib.sha256()
-    for filename in ("config.json", "quant_model_weights.safetensors.index.json"):
+    index_path = next(
+        (
+            root / name
+            for name in ("quant_model_weights.safetensors.index.json", "model.safetensors.index.json")
+            if (root / name).is_file()
+        ),
+        None,
+    )
+    if index_path is None:
+        raise ValueError("remote Engram requires a checkpoint index")
+    for filename in ("config.json", index_path.name):
         digest.update(filename.encode())
         digest.update((root / filename).read_bytes())
     config = json.loads((root / "config.json").read_text())
     config = config.get("text_config", config)
-    index = json.loads((root / "quant_model_weights.safetensors.index.json").read_text())["weight_map"]
+    index = json.loads(index_path.read_text())["weight_map"]
     if config["engram_head_dim"] != 256:
         raise ValueError("remote Engram requires width256 INT8 checkpoint rows")
     tables = {}
     for layer, rows in zip(config["engram_layer_ids"], config["engram_num_embeddings"], strict=True):
         sample = hashlib.sha256()
-        scale_dtype = None
+        scale_dtype = code_dtype = None
         for suffix, width in (("weight", 256), ("scale", 8)):
             key = f"layers.{layer}.engram.embed.{suffix}"
             with safe_open(root / index[key], framework="pt", device="cpu") as file:
@@ -81,8 +118,10 @@ def checkpoint_metadata(model):
                 dtype = tensor.get_dtype()
                 if tensor.get_shape() != [rows, width]:
                     raise ValueError(f"unsupported checkpoint shape: {key}")
-                if suffix == "weight" and dtype not in ("I8", "INT8"):
-                    raise ValueError("remote Engram currently requires INT8 codes")
+                if suffix == "weight":
+                    if dtype not in ("I8", "INT8", "F8_E4M3"):
+                        raise ValueError("remote Engram requires INT8 or FP8 E4M3 codes")
+                    code_dtype = dtype
                 if suffix == "scale":
                     if dtype not in ("F8_E8M0", "F32"):
                         raise ValueError("remote Engram requires E8M0 or FP32 scales")
@@ -96,9 +135,10 @@ def checkpoint_metadata(model):
             rows=rows,
             row_bytes=264 if scale_dtype == "F8_E8M0" else 288,
             scale_dtype=scale_dtype,
+            code_dtype=code_dtype,
             samples=sample.hexdigest(),
         )
-    return dict(identity=digest.hexdigest(), tables=tables)
+    return dict(identity=digest.hexdigest(), tables=tables, index_file=index_path.name)
 
 
 class HixlEngine:
@@ -158,6 +198,8 @@ class RemoteReader:
         if not 0 < capacity <= MAX_ROWS:
             raise ValueError("invalid remote Engram row capacity")
         self.closed = False
+        self.failed = False
+        self._operation_lock = threading.Lock()
         self._last_use = None
         self.engine = None
         self.buffer = None
@@ -191,10 +233,11 @@ class RemoteReader:
             self.registration = self.engine.register(self.buffer)
             self.engine.check(self.engine.lib.engram_hixl_connect(self.engine.handle, self.peer))
         except BaseException:
-            # Without a completed attach/drain, owner staging is retained conservatively.
+            # Keep registered local memory alive if initialization did not complete.
             if self.engine is not None:
-                self.engine.close()
-            self.wire.close()
+                _hold_reader(self)
+            else:
+                self.wire.close()
             raise
 
     @staticmethod
@@ -245,16 +288,20 @@ class RemoteReader:
                 )
             )
 
+    @_reader_operation
     def lookup(self, table, indices, out, *, cpu_ids=None):
         layer, spec, ids = self._lookup_ids(table, indices, cpu_ids)
         self._transfer_rows(dict(op="lookup", layer=layer, count=len(ids)), ids, len(ids) * spec["row_bytes"])
         if len(ids):
             from vllm_ascend.ops.triton.engram_lookup import dequantize_packed_engram
 
-            dequantize_packed_engram(self.buffer, out, len(ids), spec["row_bytes"], spec["scale_dtype"])
+            dequantize_packed_engram(
+                self.buffer, out, len(ids), spec["row_bytes"], spec["scale_dtype"], spec.get("code_dtype", "I8")
+            )
         self._last_use = torch.npu.Event()
         self._last_use.record(torch.npu.current_stream())
 
+    @_reader_operation
     def lookup_layers(self, tables, gathered, cpu_hashes):
         """Use one RPC/read when all layers fit the existing receive buffer."""
         if not self.supports_batch or len(tables) < 2:
@@ -280,7 +327,12 @@ class RemoteReader:
             size = len(rows) * spec["row_bytes"]
             if len(rows):
                 dequantize_packed_engram(
-                    self.buffer[offset : offset + size], output, len(rows), spec["row_bytes"], spec["scale_dtype"]
+                    self.buffer[offset : offset + size],
+                    output,
+                    len(rows),
+                    spec["row_bytes"],
+                    spec["scale_dtype"],
+                    spec.get("code_dtype", "I8"),
                 )
             offset += size
             outputs.append(output)
@@ -289,20 +341,25 @@ class RemoteReader:
         return outputs
 
     def close(self):
-        if self.closed:
-            return
-        # Only dequantization consumes this registered buffer. Later graph and
-        # collective work uses separate BF16 results and need not be drained.
-        if self._last_use is not None:
-            self._last_use.synchronize()
-        assert self.engine is not None
-        self.engine.close()
-        _send(self.wire, dict(op="close", generation=self.generation))
-        if _receive(self.wire) != {"closed": True}:
-            raise RuntimeError("owner did not retire remote Engram lease")
-        self.wire.close()
-        self.buffer = None
-        self.closed = True
+        with self._operation_lock:
+            if self.closed:
+                return
+            if self.failed:
+                raise RuntimeError("failed remote Engram reader requires external recovery")
+            try:
+                # Only dequantization consumes this registered buffer.
+                if self._last_use is not None:
+                    self._last_use.synchronize()
+                self.engine.close()
+                _send(self.wire, dict(op="close", generation=self.generation))
+                if _receive(self.wire) != {"closed": True}:
+                    raise RuntimeError("owner did not retire remote Engram lease")
+                self.wire.close()
+                self.buffer = None
+                self.closed = True
+            except BaseException:
+                _hold_reader(self)
+                raise
 
 
 def _lookup_plan(request, tables, capacity):
@@ -381,7 +438,7 @@ class SharedOwner(socketserver.ThreadingTCPServer):
         self.retained = []
         self.lock = threading.Lock()
         root = Path(model)
-        index = json.loads((root / "quant_model_weights.safetensors.index.json").read_text())["weight_map"]
+        index = json.loads((root / self.metadata["index_file"]).read_text())["weight_map"]
         for layer, spec in self.metadata["tables"].items():
             packed = torch.empty((spec["rows"], spec["row_bytes"]), dtype=torch.uint8)
             for suffix, start, end in (("weight", 0, 256), ("scale", 256, spec["row_bytes"])):
@@ -399,6 +456,8 @@ class SharedOwner(socketserver.ThreadingTCPServer):
     def engine_for_reader(self, address, device):
         # A2 Device RoCE cannot connect a NIC to itself. Reuse the same DRAM
         # through another owner device only for the colocated same-device rank.
+        if os.getenv("ENGRAM_HIXL_FABRIC") == "ub":
+            return self.engine, self.engine_endpoint
         if address != self.server_address[0] or device != self.device:
             return self.engine, self.engine_endpoint
         with self.lock:

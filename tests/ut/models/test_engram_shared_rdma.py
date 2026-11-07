@@ -55,6 +55,7 @@ def test_oversized_control_is_rejected_before_payload(rdma):
 
 
 def test_same_nic_reader_uses_another_owner_device(rdma, monkeypatch):
+    monkeypatch.delenv("ENGRAM_HIXL_FABRIC", raising=False)
     owner = object.__new__(rdma.SharedOwner)
     owner.server_address = ("10.0.0.1", 29500)
     owner.device = 0
@@ -122,6 +123,17 @@ def test_owner_retains_unacknowledged_stage(rdma, monkeypatch, abrupt):
         assert deregistered == [handle]
 
 
+def test_ub_reader_reuses_owner_engine_without_second_npu(rdma, monkeypatch):
+    owner = object.__new__(rdma.SharedOwner)
+    owner.server_address = ("10.0.0.1", 29500)
+    owner.device = 0
+    owner.engine = object()
+    owner.engine_endpoint = "10.0.0.1:29501"
+    monkeypatch.setenv("ENGRAM_HIXL_FABRIC", "ub")
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(device_count=lambda: 1), raising=False)
+    assert owner.engine_for_reader("10.0.0.1", 0) == (owner.engine, owner.engine_endpoint)
+
+
 def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
     hashes = torch.tensor(
         [[[0, 10, -1, 13], [20, 21, 22, 23]], [[30, 31, 32, 33], [40, -1, 42, 43]]], dtype=torch.int32
@@ -134,6 +146,8 @@ def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
 
 def test_batch_reader_falls_back_without_touching_transport(rdma):
     reader = object.__new__(rdma.RemoteReader)
+    reader.closed = reader.failed = False
+    reader._operation_lock = threading.Lock()
     reader.supports_batch = False
     tables = [SimpleNamespace(part_n_hash_cols=6)] * 2
     hashes = torch.empty((4, 2, 24), dtype=torch.int64)
@@ -147,6 +161,8 @@ def test_close_fences_only_owned_buffer_before_retiring_lease(rdma, monkeypatch)
     order = []
     reader = object.__new__(rdma.RemoteReader)
     reader.closed = False
+    reader.failed = False
+    reader._operation_lock = threading.Lock()
     reader._last_use = SimpleNamespace(synchronize=lambda: order.append("last_use"))
     reader.engine = SimpleNamespace(close=lambda: order.append("engine"))
     reader.wire = SimpleNamespace(close=lambda: order.append("wire"))
@@ -163,6 +179,28 @@ def test_close_fences_only_owned_buffer_before_retiring_lease(rdma, monkeypatch)
     reader.close()
     assert order == ["last_use", "engine", "owner_close", "wire"]
     assert reader.closed and reader.buffer is None
+
+
+def test_failed_read_retains_buffer_and_rejects_reuse(rdma, monkeypatch):
+    import weakref
+
+    reader = object.__new__(rdma.RemoteReader)
+    reader.closed = reader.failed = False
+    reader._operation_lock = threading.Lock()
+    reader.buffer = object()
+    reader._lookup_ids = lambda *args: ("1", {"row_bytes": 264}, np.array([1], dtype=np.int64))
+    reader._transfer_rows = lambda *args: (_ for _ in ()).throw(TimeoutError("READ may be in flight"))
+    with pytest.raises(TimeoutError):
+        reader.lookup(None, None, None)
+    assert reader.failed and reader in rdma._held_readers and reader.buffer is not None
+    with pytest.raises(RuntimeError, match="failed or closed"):
+        reader.lookup(None, None, None)
+    with pytest.raises(RuntimeError, match="external recovery"):
+        reader.close()
+    reference = weakref.ref(reader)
+    del reader
+    assert reference() is not None
+    rdma._held_readers.clear()
 
 
 @pytest.mark.parametrize(
@@ -233,7 +271,8 @@ def test_worker_retires_reader_before_network_shutdown(monkeypatch):
 
 @pytest.mark.skipif(not Path("/dev/davinci_manager").exists(), reason="requires NPU kernels")
 @pytest.mark.parametrize("scale_dtype,row_bytes", [("F32", 288), ("F8_E8M0", 264)])
-def test_packed_dequant_preserves_signed_codes_and_scales(scale_dtype, row_bytes):
+@pytest.mark.parametrize("code_dtype", ["I8", "F8_E4M3"])
+def test_packed_dequant_preserves_signed_codes_and_scales(scale_dtype, row_bytes, code_dtype):
     import torch_npu  # noqa: F401
 
     import vllm_ascend.ops  # noqa: F401
@@ -241,6 +280,8 @@ def test_packed_dequant_preserves_signed_codes_and_scales(scale_dtype, row_bytes
 
     torch.npu.set_device(1 if torch.npu.device_count() > 1 else 0)
     codes = torch.arange(-128, 128, dtype=torch.int16).to(torch.int8).repeat(3, 1)
+    if code_dtype == "F8_E4M3":
+        codes = codes.float().div(8).to(torch.float8_e4m3fn)
     scales = torch.tensor([[0.125, 0.25, 0.5, 1, 2, 4, 8, 16]], dtype=torch.float32).repeat(3, 1)
     raw = (
         scales.view(torch.uint8)
@@ -251,7 +292,7 @@ def test_packed_dequant_preserves_signed_codes_and_scales(scale_dtype, row_bytes
     packed[:, :256].copy_(codes.view(torch.uint8))
     packed[:, 256:].copy_(raw)
     actual = torch.empty((3, 256), dtype=torch.bfloat16, device="npu")
-    dequantize_packed_engram(packed.to("npu"), actual, 3, row_bytes, scale_dtype)
+    dequantize_packed_engram(packed.to("npu"), actual, 3, row_bytes, scale_dtype, code_dtype)
     torch.npu.synchronize()
     expected = (codes.float().unflatten(-1, (8, 32)) * scales.unsqueeze(-1)).flatten(-2).bfloat16()
     torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
@@ -295,3 +336,20 @@ def test_native_packer_mask_order_and_no_partial_write(width):
     ids[-1] = 4
     assert lib.engram_pack_rows(*args) != 0
     np.testing.assert_array_equal(output, before)
+
+
+@pytest.mark.parametrize("index_name", ["quant_model_weights.safetensors.index.json", "model.safetensors.index.json"])
+def test_fp8_checkpoint_preserves_code_dtype_and_index(rdma, tmp_path, index_name):
+    config = {"text_config": {"engram_head_dim": 256, "engram_layer_ids": [1], "engram_num_embeddings": [4]}}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    weight_key, scale_key = "layers.1.engram.embed.weight", "layers.1.engram.embed.scale"
+    index = {"weight_map": {weight_key: "weights.safetensors", scale_key: "weights.safetensors"}}
+    (tmp_path / index_name).write_text(json.dumps(index))
+    codes = torch.arange(-128, 128).float().div(8).repeat(4, 1).to(torch.float8_e4m3fn)
+    save_file({weight_key: codes, scale_key: torch.ones(4, 8)}, tmp_path / "weights.safetensors")
+    metadata = rdma.checkpoint_metadata(tmp_path)
+    assert metadata["index_file"] == index_name
+    assert metadata["tables"]["1"]["code_dtype"] == "F8_E4M3"
+    # Equal raw bytes reinterpreted as INT8 must not attach as the same table.
+    save_file({weight_key: codes.view(torch.int8), scale_key: torch.ones(4, 8)}, tmp_path / "weights.safetensors")
+    assert metadata != rdma.checkpoint_metadata(tmp_path)

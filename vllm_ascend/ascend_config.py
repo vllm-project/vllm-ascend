@@ -706,6 +706,10 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.shared_engram_rdma is not None:
+            if getattr(vc, "shutdown_timeout", 0) <= 0:
+                raise ValueError("shared_engram_rdma requires --shutdown-timeout > 0 to retire reader leases")
+            os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

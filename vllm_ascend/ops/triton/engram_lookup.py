@@ -18,10 +18,15 @@ def _decode_e8m0(scale):
 
 
 @triton.jit
-def _dequantize_packed_engram_kernel(packed, scale_ptr, output, ROW_BYTES: tl.constexpr, E8M0: tl.constexpr):
+def _dequantize_packed_engram_kernel(
+    packed, scale_ptr, output, ROW_BYTES: tl.constexpr, E8M0: tl.constexpr, MXFP8: tl.constexpr
+):
     row = tl.program_id(0)
     columns = tl.arange(0, 256)
-    codes = tl.load(packed + row * ROW_BYTES + columns).to(tl.int8).to(tl.float32)
+    if MXFP8:
+        codes = tl.load((packed + row * ROW_BYTES + columns).to(tl.pointer_type(tl.float8e4nv))).to(tl.float32)
+    else:
+        codes = tl.load(packed + row * ROW_BYTES + columns).to(tl.int8).to(tl.float32)
     if E8M0:
         scales = _decode_e8m0(tl.load(scale_ptr + row * ROW_BYTES + 256 + columns // 32))
     else:
@@ -29,9 +34,11 @@ def _dequantize_packed_engram_kernel(packed, scale_ptr, output, ROW_BYTES: tl.co
     tl.store(output + row * 256 + columns, (codes * scales).to(tl.bfloat16))
 
 
-def dequantize_packed_engram(packed, output, rows, row_bytes, scale_dtype):
+def dequantize_packed_engram(packed, output, rows, row_bytes, scale_dtype, code_dtype="I8"):
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
+    if code_dtype not in ("I8", "INT8", "F8_E4M3"):
+        raise ValueError("unsupported packed Engram code dtype")
     if scale_dtype not in ("F8_E8M0", "F32") or row_bytes != (264 if scale_dtype == "F8_E8M0" else 288):
         raise ValueError("unsupported packed Engram row format")
     if not output.is_contiguous() or output.numel() != rows * 256:
@@ -41,7 +48,13 @@ def dequantize_packed_engram(packed, output, rows, row_bytes, scale_dtype):
 
     scales = packed if scale_dtype == "F8_E8M0" else packed.view(torch.float32)
     _dequantize_packed_engram_kernel[(rows,)](
-        packed, scales, output, ROW_BYTES=row_bytes, E8M0=scale_dtype == "F8_E8M0", num_warps=4
+        packed,
+        scales,
+        output,
+        ROW_BYTES=row_bytes,
+        E8M0=scale_dtype == "F8_E8M0",
+        MXFP8=code_dtype == "F8_E4M3",
+        num_warps=4,
     )
 
 
