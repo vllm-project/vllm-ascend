@@ -174,6 +174,10 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        # Run the SFA indexer q-projection (quantize + quant matmul) on the
+        # attention calculation stream so that it overlaps with the indexer k
+        # pre-processing on the main stream.
+        self.multistream_sfa_indexer_overlap = additional_config.get("multistream_sfa_indexer_overlap", False)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
         self.enable_fused_mc2 = self._get_config_value(
