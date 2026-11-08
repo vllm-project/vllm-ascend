@@ -13,7 +13,7 @@
 # Scope: one A5 node, 8 NPUs, pre-pruned Kimi-K3 W4A8 with 256 routed experts.
 # Source checkpoint: Kimi-K3-w4a8-mxfp-QuaRot. Pruning is a separate prerequisite.
 # References: vllm-project/vllm-ascend#20101 and Qwen3_6_27b_A5.yaml.
-# Model path: /data/weights/Kimi-K3-w4a8-mxfp-QuaRot-pruned-uniform-experts256
+# Model path: /data/weights/Kimi-K3-w4a8-mxfp-QuaRot-experts256
 # Dataset path: /data/c30087248/datasets/first500/gsm8k; test.jsonl contains the first 500 questions.
 # Mount the model path and dataset path inside the test runtime.
 # Dataset includes train.jsonl for 4-shot examples and first-500 test.jsonl.
@@ -32,7 +32,7 @@
 # Private checkpoints are not downloaded by this case.
 test_cases:
 - name: Kimi-K3-W4A8-EP256-A5-GSM8K-First500
-  model: /data/weights/Kimi-K3-w4a8-mxfp-QuaRot-pruned-uniform-experts256
+  model: /data/weights/Kimi-K3-w4a8-mxfp-QuaRot-experts256
   envs:
     VLLM_USE_V2_MODEL_RUNNER: '1'
     HCCL_BUFFSIZE: '800'
