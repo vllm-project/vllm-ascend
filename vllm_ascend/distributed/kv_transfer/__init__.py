@@ -141,26 +141,6 @@ def register_connector():
         override=True,
     )
 
-    # Override the upstream SimpleCPUOffloadConnector with the NPU
-    # adaptation that uses aclrtMemcpyBatchAsync + torch.npu streams.
-    # Only override if the upstream module exists in this vLLM version.
-    # Class-name alias is required from upstream v0.31.0 on: there the
-    # upstream SimpleCPUOffloadConnector overrides
-    # ``get_kv_connector_stats`` and so emits stats whose key (the class
-    # name) must resolve at the factory. On v0.30.0 the alias is a
-    # harmless no-op because that connector emits no stats.
-    try:
-        import vllm.v1.simple_kv_offload  # noqa: F401
-    except ImportError:
-        pass
-    else:
-        _register_with_class_name_alias(
-            "SimpleCPUOffloadConnector",
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
-            "AscendSimpleCPUOffloadConnector",
-            override=True,
-        )
-
     # No class-name alias here: this connector does not override
     # get_kv_connector_stats, so it never emits stats to reconstruct.
     KVConnectorFactory.register_connector(
