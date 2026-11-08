@@ -24,7 +24,6 @@ from typing import Any, cast
 import torch
 import torch.fx as fx
 import torch_npu
-from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
@@ -36,7 +35,11 @@ from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
+from vllm_ascend.utils import COMPILATION_PASS_KEY, preserve_shutdown_signal_handlers, vllm_version_is
+
+# Importing npugraph_ex replaces the shutdown signal handlers; keep vLLM's.
+with preserve_shutdown_signal_handlers():
+    from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:

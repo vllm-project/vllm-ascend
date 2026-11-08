@@ -14,7 +14,6 @@ from vllm_ascend.utils import vllm_version_is
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
-    "sleep_mode_backend",
     "_get_sleep_parameters",
     "discard",
     "checkpoint_prepare",

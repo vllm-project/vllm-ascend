@@ -50,6 +50,10 @@ TITLES = {
     "developer_guide/Design_Documents/npugraph_ex.md": {"en": "NPUGraph Ex", "zh": "NPUGraph 扩展"},
     "developer_guide/Design_Documents/patch.md": {"en": "Patch", "zh": "补丁"},
     "developer_guide/Design_Documents/quantization.md": {"en": "Quantization", "zh": "量化"},
+    "developer_guide/Design_Documents/sleep_mode_backend.md": {
+        "en": "Sleep Mode Backend",
+        "zh": "休眠模式后端",
+    },
     "developer_guide/contribution/doc_writing.md": {"en": "Doc Writing", "zh": "文档编写"},
     "developer_guide/contribution/e2e_ci_test.md": {"en": "E2E CI Test", "zh": "端到端 CI 测试"},
     "developer_guide/contribution/multi_node_test.md": {"en": "Multi-Node Test", "zh": "多节点测试"},

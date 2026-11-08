@@ -7,12 +7,15 @@ import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
 
-try:
-    import npugraph_ex as nge
-except ImportError:
-    import torchair as nge
-
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
+from vllm_ascend.utils import preserve_shutdown_signal_handlers
+
+# Importing npugraph_ex replaces the shutdown signal handlers; keep vLLM's.
+with preserve_shutdown_signal_handlers():
+    try:
+        import npugraph_ex as nge
+    except ImportError:
+        import torchair as nge
 
 # Patterns already handed to the process-global npugraph_ex backend registry.
 _registered_patterns: set[str] = set()

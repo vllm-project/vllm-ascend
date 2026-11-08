@@ -25,6 +25,14 @@ The engine (v0/v1) supports two sleep levels to manage memory during idle period
 
 Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) and build from source. If you are using < v0.12.0rc1, remember to set `export COMPILE_CUSTOM_KERNELS=1`.
 
+## Sleep-mode backend
+
+vLLM selects the mechanism behind `sleep()` and `wake_up()` with `--sleep-mode-backend`. vLLM Ascend adds no backend name: on NPU the default, `cumem`, runs the sleep as a list of phases. If one phase fails, the phases that already ran are undone and the error is reported.
+
+If that sequence misbehaves, set `"rl_config": {"enabled": true, "sleep_mode_legacy": true}` in `--additional-config` to fall back to the sequence used before, which has no undo step. Both release the same resources in the same order. The key is temporary and will be removed once the phased sequence has been validated on the supported models and hardware.
+
+A third-party backend registered under another name is selected with `--sleep-mode-backend` as on GPU. See the [Sleep Mode Backend](../../developer_guide/Design_Documents/sleep_mode_backend.md) design document for details.
+
 ## Optional extra cleanup
 
 By default, sleep mode only releases memory managed by the sleep-mode allocator. For RL workloads that need to return more NPU memory to the trainer, vLLM Ascend also provides an optional extra cleanup path:

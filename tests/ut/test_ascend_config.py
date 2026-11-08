@@ -125,14 +125,17 @@ class TestRlConfig(TestBase):
         enabled = RlConfig(
             enabled=True,
             sleep_mode_extra_cleanup=True,
+            sleep_mode_legacy=True,
             enable_training_consistency=True,
             enable_batch_invariant=True,
         )
 
         self.assertFalse(defaults.enabled)
         self.assertFalse(defaults.sleep_mode_extra_cleanup)
+        self.assertFalse(defaults.sleep_mode_legacy)
         self.assertTrue(enabled.enabled)
         self.assertTrue(enabled.sleep_mode_extra_cleanup)
+        self.assertTrue(enabled.sleep_mode_legacy)
         self.assertTrue(enabled.enable_training_consistency)
         self.assertTrue(enabled.enable_batch_invariant)
 

@@ -386,6 +386,10 @@ class RlConfig:
 
     enabled: bool = False
     sleep_mode_extra_cleanup: bool = False
+    # Temporary fallback: run sleep mode with the pre-migration in-worker
+    # sequence instead of the phased backend. Removed once the
+    # SleepModeBackend migration is complete.
+    sleep_mode_legacy: bool = False
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
 
@@ -610,6 +614,7 @@ class AscendConfig:
             "rl_config": {
                 "enabled": false,
                 "sleep_mode_extra_cleanup": false,
+                "sleep_mode_legacy": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
             },

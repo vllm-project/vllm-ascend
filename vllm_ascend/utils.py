@@ -23,6 +23,9 @@ import functools
 import json
 import math
 import os
+import signal
+import threading
+from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
@@ -1230,6 +1233,30 @@ def has_rope(vllm_config: VllmConfig):
         hf_config = vllm_config.model_config.hf_text_config.to_dict()
         _HAS_ROPE = "rope_parameters" in hf_config
     return _HAS_ROPE
+
+
+@contextmanager
+def preserve_shutdown_signal_handlers() -> Iterator[None]:
+    """Put back the SIGTERM and SIGINT handlers the body replaced.
+
+    Importing ``npugraph_ex`` installs process-wide handlers for both signals.
+    After its own cleanup such a handler ignores the signal and sends it again,
+    so vLLM's shutdown handler never runs and the process waits to be killed.
+    The same cleanup is registered with ``atexit``, so it still runs when vLLM
+    exits normally.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        # Only the main thread can set handlers, including the body's.
+        yield
+        return
+    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for signum, handler in saved.items():
+            # None is a handler installed outside Python, which cannot be set again.
+            if handler is not None:
+                signal.signal(signum, handler)
 
 
 @contextmanager

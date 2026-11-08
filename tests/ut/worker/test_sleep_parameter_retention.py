@@ -10,14 +10,21 @@ import torch
 
 @pytest.fixture
 def worker(monkeypatch):
+    from vllm_ascend.device_allocator import sleep_mode_backend as backend_module
     from vllm_ascend.worker import worker as worker_module
 
+    monkeypatch.setattr(backend_module, "current_platform", SimpleNamespace(device_type="npu"))
+
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
-    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["weight"])
+    worker.model_config = SimpleNamespace(
+        sleep_preserve_parameter_names=["weight"],
+        sleep_mode_backend=backend_module.UPSTREAM_DEFAULT_SLEEP_MODE_BACKEND,
+    )
     worker.model_runner = SimpleNamespace(model=torch.nn.Linear(2, 2))
     worker.model_runner.model.register_buffer("scale", torch.tensor([2.0]))
     worker._sleep_saved_parameters = {}
     worker._sleep_saved_buffers = {}
+    worker._sleep_mode_backend = None
     worker.sleep_wakeup_manager = MagicMock()
     worker.allocator = MagicMock()
     monkeypatch.setattr(worker, "synchronize_device", MagicMock())
@@ -32,7 +39,7 @@ def worker(monkeypatch):
         "get_ascend_config",
         lambda: SimpleNamespace(
             weight_nz_mode=0,
-            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
+            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False, sleep_mode_legacy=False),
         ),
     )
     return worker
@@ -120,7 +127,9 @@ def test_level_two_retains_parameters_before_allocator_discards_them(worker, mon
     assert torch.equal(model.scale, torch.tensor([2.0]))
     assert worker._sleep_saved_parameters == {}
     assert worker._sleep_saved_buffers == {}
-    assert worker.synchronize_device.call_count == 3
+    # One barrier before the sleep and one after the wake-up. The barrier ahead
+    # of the unmap belongs to the backend's device-memory phase.
+    assert worker.synchronize_device.call_count == 2
 
 
 def test_level_one_keeps_allocator_offload_and_clears_old_backups(worker, monkeypatch):

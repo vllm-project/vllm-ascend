@@ -17,6 +17,8 @@ import builtins
 import json
 import math
 import os
+import signal
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -995,3 +997,52 @@ def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2
     )
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
     assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
+
+
+def _owner_handler(signum, frame):
+    pass
+
+
+def _sdk_handler(signum, frame):
+    pass
+
+
+@pytest.fixture
+def owner_handlers():
+    """vLLM's handlers stand-in, with the test runner's restored afterwards."""
+    previous = {signum: signal.signal(signum, _owner_handler) for signum in (signal.SIGTERM, signal.SIGINT)}
+    yield
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def test_preserve_shutdown_signal_handlers_undoes_a_replacement(owner_handlers):
+    with utils.preserve_shutdown_signal_handlers():
+        signal.signal(signal.SIGTERM, _sdk_handler)
+        signal.signal(signal.SIGINT, _sdk_handler)
+
+    assert signal.getsignal(signal.SIGTERM) is _owner_handler
+    assert signal.getsignal(signal.SIGINT) is _owner_handler
+
+
+def test_preserve_shutdown_signal_handlers_restores_after_an_error(owner_handlers):
+    with pytest.raises(ImportError), utils.preserve_shutdown_signal_handlers():
+        signal.signal(signal.SIGTERM, _sdk_handler)
+        raise ImportError("no graph SDK")
+
+    assert signal.getsignal(signal.SIGTERM) is _owner_handler
+
+
+def test_preserve_shutdown_signal_handlers_is_a_no_op_off_the_main_thread(owner_handlers):
+    entered = []
+
+    def body():
+        with utils.preserve_shutdown_signal_handlers():
+            entered.append(True)
+
+    thread = threading.Thread(target=body)
+    thread.start()
+    thread.join()
+
+    assert entered == [True]
+    assert signal.getsignal(signal.SIGTERM) is _owner_handler

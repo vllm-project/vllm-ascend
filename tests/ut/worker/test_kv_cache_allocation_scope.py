@@ -6,9 +6,24 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
+from vllm_ascend.device_allocator import sleep_mode_backend as backend_module
 from vllm_ascend.worker.worker import NPUWorker
+
+
+@pytest.fixture(autouse=True)
+def _ascend_sleep_backend(monkeypatch):
+    """Sleep and wake-up resolve the Ascend backend through vLLM's factory."""
+    monkeypatch.setattr(backend_module, "current_platform", SimpleNamespace(device_type="npu"))
+
+
+def _use_ascend_sleep_backend(worker: NPUWorker, **model_config: Any) -> None:
+    worker.model_config = SimpleNamespace(
+        sleep_mode_backend=backend_module.UPSTREAM_DEFAULT_SLEEP_MODE_BACKEND, **model_config
+    )
+    worker._sleep_mode_backend = None
 
 
 class _AllocationScope(AbstractContextManager):
@@ -46,17 +61,18 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     worker.model_runner = runner
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()
+    _use_ascend_sleep_backend(worker)
 
     with (
         # wake_up ends with a device barrier; this UT runs on a CPU runner, so the
         # barrier must be mocked or torch.npu.synchronize() would try to init NPU.
         patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device") as mock_synchronize,
-        patch("vllm_ascend.worker.worker.CaMemAllocator") as mock_allocator_class,
+        patch("vllm_ascend.device_allocator.camem.CaMemAllocator") as mock_allocator_class,
         patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_config,
     ):
         mock_get_config.return_value = SimpleNamespace(
             weight_nz_mode=0,
-            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
+            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False, sleep_mode_legacy=False),
         )
         mock_allocator_class.get_instance.return_value = MagicMock()
         NPUWorker.wake_up(worker, tags=["kv_cache"])
@@ -70,7 +86,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
 def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
-    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
+    _use_ascend_sleep_backend(worker, sleep_preserve_parameter_names=[])
     worker.model_runner = SimpleNamespace(model=model)
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()
@@ -79,13 +95,13 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
 
 @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-@patch("vllm_ascend.worker.worker.CaMemAllocator")
+@patch("vllm_ascend.device_allocator.camem.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
 def test_level1_sleep_does_not_cpu_backup_hadamard(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
     mock_get_config.return_value = SimpleNamespace(
-        rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False)
+        rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False, sleep_mode_legacy=False)
     )
     mock_allocator_class.get_instance.return_value = MagicMock()
 
@@ -98,19 +114,21 @@ def test_level1_sleep_does_not_cpu_backup_hadamard(
 
     assert worker._sleep_saved_buffers == {}
     assert torch.equal(model.get_buffer("_dsa_hadamard"), hadamard)
-    # Both sleep barriers fire on the cleanup-disabled path too.
-    assert mock_synchronize_device.call_count == 2
+    # The worker's own barrier fires on the cleanup-disabled path too; the one
+    # ahead of the unmap belongs to the backend's device-memory phase.
+    assert mock_synchronize_device.call_count == 1
+    mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
 
 
 @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
 @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-@patch("vllm_ascend.worker.worker.CaMemAllocator")
+@patch("vllm_ascend.device_allocator.camem.CaMemAllocator")
 @patch("vllm_ascend.worker.worker.get_ascend_config")
 def test_level2_sleep_still_cpu_backups_named_buffers(
     mock_get_config, mock_allocator_class, _mock_mem_get_info, mock_synchronize_device
 ) -> None:
     mock_get_config.return_value = SimpleNamespace(
-        rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False)
+        rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False, sleep_mode_legacy=False)
     )
     mock_allocator_class.get_instance.return_value = MagicMock()
 
@@ -124,4 +142,5 @@ def test_level2_sleep_still_cpu_backups_named_buffers(
     assert "_dsa_hadamard" in worker._sleep_saved_buffers
     assert worker._sleep_saved_buffers["_dsa_hadamard"].device.type == "cpu"
     assert torch.equal(worker._sleep_saved_buffers["_dsa_hadamard"], hadamard)
-    assert mock_synchronize_device.call_count == 2
+    assert mock_synchronize_device.call_count == 1
+    mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=())
