@@ -41,7 +41,6 @@ class AscendBlockTables(BlockTables):
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
         device: torch.device,
-        kernel_block_sizes: list[int] | None = None,
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
@@ -50,7 +49,6 @@ class AscendBlockTables(BlockTables):
     ):
         # vLLM #57169 keeps public block tables at KV-cache-manager
         # granularity. Kernel-specific expansion is handled by AttentionGroup.
-        del kernel_block_sizes
         super_kwargs: dict[str, list[bool]] = {}
         if dcp_sharded is not None:
             super_kwargs["dcp_sharded"] = dcp_sharded
