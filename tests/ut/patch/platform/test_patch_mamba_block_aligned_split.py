@@ -371,6 +371,10 @@ def test_main_passes_resolved_policy_to_native_split(monkeypatch, lookahead, eff
     assert scheduler.num_hash_lookahead_tokens == lookahead
 
 
+@pytest.mark.skipif(
+    "num_hash_lookahead_tokens" not in inspect.signature(mod.get_mamba_prefill_checkpoint_position).parameters,
+    reason="requires the native lookahead checkpoint API",
+)
 @pytest.mark.parametrize("sparse", [False, True], ids=["native", "sparse"])
 @pytest.mark.parametrize(
     "lookahead, effective_drop, prompt, expected",
