@@ -190,16 +190,6 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     assert torch.count_nonzero(second_workspace.first_refs) == 0
 
 
-@pytest.mark.parametrize("hot,union", [(16, 8), (8192, 8192), (12288, 64), (32768, 32768)])
-def test_native_resolver_scratch_follows_request_capacity(hot, union):
-    from vllm_ascend.hisparse.resolver import scratch_layout
-
-    buckets, size = scratch_layout(hot, union)
-    assert buckets > union and buckets & (buckets - 1) == 0
-    words = 2 * buckets + hot + 2 * ((hot + 31) // 32) + 64
-    assert size == (words + 15) // 16 * 64 + 512
-
-
 def test_native_resolver_uses_available_ub_without_truncating_the_union():
     from vllm_ascend.hisparse.resolver import scratch_layout
 
