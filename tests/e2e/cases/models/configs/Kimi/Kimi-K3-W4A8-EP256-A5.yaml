@@ -42,7 +42,7 @@ test_cases:
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
   server_cmd:
   - --host
-  - 127.0.0.1
+  - 0.0.0.0
   - --trust-remote-code
   - --tokenizer-mode
   - kimi_k3
