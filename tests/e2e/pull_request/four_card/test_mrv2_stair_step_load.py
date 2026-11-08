@@ -21,7 +21,7 @@ from vllm_ascend.distributed.eplb import eplb_state
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.policy import stair
 from vllm_ascend.patch.platform.patch_eplb import _wrap_async_rebalance
-from vllm_ascend.utils import is_950
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _RANKS = 4
 _EXPERTS_PER_RANK = 2
@@ -115,8 +115,11 @@ def _check_stepwise_plan(rank, device, groups):
         policy._stop_planner_process()
 
 
-@pytest.mark.skipif(not is_950(), reason="A5 STAIR stepwise planner regression")
-def test_a5_stair_rejects_stepwise_regression():
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A3 or A5",
+)
+def test_stair_rejects_stepwise_regression():
     workers = mp.spawn(_run_step_validation, args=(get_open_port(),), nprocs=_RANKS, join=False)
     deadline = time.monotonic() + _TIMEOUT
     try:
