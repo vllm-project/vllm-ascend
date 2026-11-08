@@ -20,8 +20,8 @@ from vllm.v1.worker.gpu import model_runner as core_runner
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
-@pytest.fixture
-def lifecycle(monkeypatch):
+@pytest.fixture(params=[False, True], ids=["async-load", "sync-load"])
+def lifecycle(monkeypatch, request):
     """Use real core orchestration with state/transport/device work at the edges."""
     events = []
     backend = Mock()
@@ -85,7 +85,7 @@ def lifecycle(monkeypatch):
     batch = SimpleNamespace(
         req_ids=["request"], idx_mapping=torch.tensor([0], device="cpu"), query_start_loc=None, num_tokens=1
     )
-    schedule = SimpleNamespace(kv_connector_metadata=object(), has_sync_kv_loads=False, finished_req_ids=set())
+    schedule = SimpleNamespace(kv_connector_metadata=object(), has_sync_kv_loads=request.param, finished_req_ids=set())
 
     def draft(*args, **kwargs):
         # K=0 must still reach propose before save; this checks orchestration,
@@ -118,14 +118,28 @@ def lifecycle(monkeypatch):
         # implementation, so a changed core order cannot silently pass.
         return inspect.unwrap(GPUModelRunner.sample_tokens)(runner, None)
 
-    return SimpleNamespace(runner=runner, backend=backend, events=events, proposer=proposer, run=run)
+    return SimpleNamespace(
+        runner=runner, backend=backend, events=events, proposer=proposer, run=run, has_sync_kv_loads=request.param
+    )
 
 
 @pytest.mark.parametrize("num_drafts", [0, 3])
 def test_mtp_native_finalize_runs_once_after_propose(lifecycle, num_drafts):
     result = lifecycle.run(num_drafts)
 
-    assert lifecycle.events == ["bind", "load", "postprocess", "propose", "save", "clear"]
+    # Async loads may start in native post_forward before or after proposal.
+    # Sync loads must precede compute; accepted-state saves must follow MTP.
+    assert [event for event in lifecycle.events if event != "load"] == [
+        "bind",
+        "postprocess",
+        "propose",
+        "save",
+        "clear",
+    ]
+    lifecycle.backend.start_load_kv.assert_called_once()
+    assert lifecycle.events.index("bind") < lifecycle.events.index("load") < lifecycle.events.index("save")
+    if lifecycle.has_sync_kv_loads:
+        assert lifecycle.events.index("load") < lifecycle.events.index("postprocess")
     lifecycle.backend.wait_for_save.assert_called_once_with()
     lifecycle.backend.clear_connector_metadata.assert_called_once_with()
     lifecycle.proposer.propose.assert_called_once()

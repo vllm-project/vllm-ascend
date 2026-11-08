@@ -152,7 +152,6 @@ def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_int
 @pytest.mark.parametrize("legacy", [False, True], ids=["main", "v032"])
 def test_unmarked_eagle_fallback_matches_paired_version(monkeypatch, legacy):
     monkeypatch.setattr(mod, "vllm_version_is", lambda version: legacy and version == "0.32.0")
-    monkeypatch.setattr(mod.envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None, raising=False)
     coordinator = _make_coordinator(monkeypatch, use_eagle=True)
     expected = {0} if legacy else {0, 1}
     assert coordinator.eagle_group_ids == expected
@@ -241,7 +240,6 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(
     monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle
 ):
     monkeypatch.setattr(mod, "vllm_version_is", lambda version: version == "0.32.0")
-    monkeypatch.setattr(mod.envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None, raising=False)
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=use_eagle,
@@ -456,10 +454,12 @@ def test_main_resolved_drop_preserves_identity_and_lookup(monkeypatch, lookahead
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
+@pytest.mark.parametrize("legacy", [False, True], ids=["main", "v032"])
 @pytest.mark.parametrize("retention", [0, MAMBA_SPEC.block_size])
-def test_main_retention_uses_resolved_cache_config(monkeypatch, retention):
+def test_retention_uses_resolved_cache_config(monkeypatch, retention, legacy):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda version: legacy and version == "0.32.0")
     # A conflicting environment value must not override the resolved config.
-    monkeypatch.setattr(mod.envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", 3072, raising=False)
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "3072")
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=False,
@@ -471,7 +471,7 @@ def test_main_retention_uses_resolved_cache_config(monkeypatch, retention):
 
 
 @pytest.mark.parametrize("initial_retention", [0, 3072])
-def test_main_inherits_native_store_checkpoint_retention(monkeypatch, initial_retention):
+def test_inherits_native_store_checkpoint_retention(monkeypatch, initial_retention):
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import scheduler as store_mod
 
     # Exercise the real Store retention policy, stubbing only lookup transport
@@ -487,7 +487,6 @@ def test_main_inherits_native_store_checkpoint_retention(monkeypatch, initial_re
         "MooncakeStoreCoordinator",
         SimpleNamespace(from_kv_cache_config=lambda *args: SimpleNamespace(enable_partial_hash_hits=True)),
     )
-    monkeypatch.setattr(mod.envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None, raising=False)
     kv_config = _hybrid_config(fa_eagle=True)
     kv_config.prefix_cache_retention_interval = initial_retention
     transfer = SimpleNamespace(
@@ -502,9 +501,9 @@ def test_main_inherits_native_store_checkpoint_retention(monkeypatch, initial_re
         parallel_config=SimpleNamespace(world_size=1),
     )
     store = store_mod.MooncakeStoreScheduler(config, kv_config)
-    expected = MAMBA_SPEC.block_size if initial_retention == 0 else initial_retention
+    # Store resolves its version's checkpoint policy; Ascend must preserve it.
+    expected = store.kv_cache_config.prefix_cache_retention_interval
     assert store.kv_cache_config is kv_config
-    assert kv_config.prefix_cache_retention_interval == expected
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=False,
@@ -515,13 +514,6 @@ def test_main_inherits_native_store_checkpoint_retention(monkeypatch, initial_re
     assert coordinator.kv_cache_config is kv_config
     assert coordinator.retention_interval == expected
     assert coordinator.retention_interval is not None  # Never silently fall back to dense.
-
-
-def test_v032_retention_keeps_legacy_environment_source(monkeypatch):
-    monkeypatch.setattr(mod, "vllm_version_is", lambda version: version == "0.32.0")
-    monkeypatch.setattr(mod.envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", 3072, raising=False)
-    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=0)
-    assert coordinator.retention_interval == 3072
 
 
 def test_main_forwards_cache_group_role_to_manager(monkeypatch):
