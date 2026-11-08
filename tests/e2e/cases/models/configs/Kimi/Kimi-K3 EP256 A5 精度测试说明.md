@@ -10,7 +10,7 @@
 | --- | --- |
 | `.github/workflows/configs/nightly_config.yaml` | 注册 A5 单节点测试任务，指定 ARM64 A5 8 卡 runner 和测试 YAML |
 | `tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml` | 新增模型启动参数、数据集配置、请求参数和精度验收值 |
-| `tests/e2e/cases/models/configs/Kimi/A5_ENVIRONMENT.zh-CN.md` | 说明改动范围、测试环境、测试参数和验证结果 |
+| `tests/e2e/cases/models/configs/Kimi/Kimi-K3 EP256 A5 精度测试说明.md` | 说明改动范围、测试环境、测试参数和验证结果 |
 
 用例名称：`Kimi-K3-W4A8-EP256-A5-GSM8K-First500`。
 测试通过项目共享入口 `tests/e2e/common/single_node/test_single_node.py` 执行，

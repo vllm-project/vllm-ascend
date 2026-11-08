@@ -1,5 +1,5 @@
 # Kimi-K3 EP256 A5 accuracy case.
-# Test environment and results: A5_ENVIRONMENT.zh-CN.md in this directory.
+# Test environment and results: Kimi-K3 EP256 A5 精度测试说明.md in this directory.
 # DRAFT: native AISBench accuracy case; no custom runner or dataset Python file.
 # Scope: one A5 node, 8 NPUs, pre-pruned Kimi-K3 W4A8 with 256 routed experts.
 # Source checkpoint: Kimi-K3-w4a8-mxfp-QuaRot. Pruning is a separate prerequisite.
