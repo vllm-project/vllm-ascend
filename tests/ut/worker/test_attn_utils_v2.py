@@ -2140,7 +2140,8 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_ca
 
 
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
-def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
+@pytest.mark.parametrize("logical_width", [False, True])
+def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed, logical_width):
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 
     from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
@@ -2149,6 +2150,13 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     from vllm_ascend.worker import kvpp_cache
 
     config, specs, layers = make_attention_cache_case(packed)
+    if packed and logical_width:
+        specs = {
+            name: replace(spec, head_size=512, state_content_bytes=spec.state_content_size_bytes)
+            if isinstance(spec, AscendMLAAttentionSpec)
+            else spec
+            for name, spec in specs.items()
+        }
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
     monkeypatch.setattr(kv_cache_placement, "get_layers_from_vllm_config", lambda *_args: layers)
@@ -2266,7 +2274,8 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
     assert caches["alias"] is caches[layer_name]
 
 
-def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
+@pytest.mark.parametrize("logical_width", [False, True])
+def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch, logical_width):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     index_head_dim = 128
     spec = AscendSFAIndexerCacheSpec(
@@ -2280,6 +2289,8 @@ def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
         cache_sparse_li_c8=False,
         sfa_dcp_replicated_indexer_size=1,
     )
+    if logical_width:
+        spec = replace(spec, head_size=index_head_dim, state_content_bytes=68)
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -2593,7 +2604,6 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
         get_kv_cache_spec=lambda _cfg: spec,
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
-    monkeypatch.setattr(attn_utils, "kv_cache_dtype_str_to_dtype", lambda _s, _m: torch.bfloat16)
     return attn_utils.get_kv_cache_spec(vllm_config)
 
 

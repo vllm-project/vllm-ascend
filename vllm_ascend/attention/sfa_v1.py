@@ -12,7 +12,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -895,7 +895,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.enable_sparse_sfa_turboquant:
             spec = replace(
                 spec,
-                head_size=self.sfa_qsfa_packed_kv_head_dim,
+                state_content_bytes=self.sfa_qsfa_packed_kv_head_dim,
                 dtype=torch.int8,
                 cache_dtype_str=self.kv_cache_dtype,
                 cache_sparse_sfa_turboquant=True,
@@ -903,7 +903,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         elif self.enable_sparse_sfa_c8:
             spec = replace(
                 spec,
-                head_size=self.sfa_qsfa_packed_kv_head_dim,
+                state_content_bytes=self.sfa_qsfa_packed_kv_head_dim * get_dtype_size(self.c8_cache_dtype),
                 dtype=self.c8_cache_dtype,
                 cache_dtype_str=self.kv_cache_dtype,
                 cache_sparse_sfa_c8=True,

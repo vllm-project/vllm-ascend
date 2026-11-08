@@ -19,7 +19,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader, get_offloader
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -1097,7 +1097,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer:
             return replace(
                 spec,
-                head_size=self.head_size + self.qk_rope_head_dim,
+                state_content_bytes=(self.head_size + self.qk_rope_head_dim) * get_dtype_size(self.dtype),
                 dtype=self.dtype,
                 cache_dtype_str=None,
             )

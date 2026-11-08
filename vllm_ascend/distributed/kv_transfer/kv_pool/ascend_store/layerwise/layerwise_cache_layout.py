@@ -17,7 +17,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, get_kv_cache_storage_head_size
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
@@ -45,7 +45,7 @@ def allocate_shared_indexer_cache(
     capacity = 0
     for name, spec in specs.items():
         rows = num_blocks * spec.sfa_dcp_replicated_indexer_size * spec.block_size * spec.num_kv_heads
-        data_bytes = rows * spec.head_size * get_dtype_size(spec.dtype)
+        data_bytes = rows * get_kv_cache_storage_head_size(spec) * get_dtype_size(spec.dtype)
         scale_bytes = rows * spec.scale_dim * get_dtype_size(spec.scale_dtype)
         scale_alignment = get_dtype_size(spec.scale_dtype)
         scale_offset = ((data_bytes + scale_alignment - 1) // scale_alignment) * scale_alignment
@@ -379,7 +379,7 @@ def apply_layerwise_kv_cache_plan(
             descriptor_page_size = spec.page_size_bytes
             if isinstance(spec, AscendSFAIndexerCacheSpec):
                 # Generic descriptors describe the inherited MLA content width,
-                # without Ascend's separate scales or replicated indexer data.
+                # including scales but without page-level DCP replication.
                 # Validate that logical region before replacing it; the new
                 # reuse slots below use the full physical page_size_bytes.
                 logical_page_size = spec.num_heads * spec.num_states * spec.state_content_size_bytes

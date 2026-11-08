@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Cache owners publish the formats used by their execution implementations."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,11 @@ from vllm_ascend.attention import indexer as indexer_module
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, AscendSFAIndexerCache
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    get_kv_cache_storage_head_size,
+)
 
 
 @pytest.mark.parametrize("model_type,heads", [("glm_moe_dsa", 12), ("kimi_linear", 1)])
@@ -76,7 +81,8 @@ def test_sfa_spec_uses_execution_format_and_offload_decision(format_name, width,
     impl.store_kv_cache_on_host = offload
     source = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
     spec = impl.customize_kv_cache_spec(source)
-    assert spec.head_size == width
+    assert spec.head_size == 576
+    assert get_kv_cache_storage_head_size(spec) == width
     assert spec.dtype == (torch.bfloat16 if format_name == "bf16" else torch.int8)
     assert spec.store_on_host is offload
     assert spec.cache_sparse_sfa_c8 is (format_name == "c8")
@@ -93,7 +99,8 @@ def test_fa_quant_spec_uses_execution_dtype():
     spec = impl.customize_kv_cache_spec(
         AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
     )
-    assert spec.head_size == 640
+    assert spec.head_size == 576
+    assert spec.state_content_bytes == 640
     assert spec.dtype == torch.int8
     assert spec.cache_dtype_str is None
     assert spec.page_size_bytes == 128 * 640
@@ -130,7 +137,8 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     assert spec.cache_role is source.cache_role and spec.is_draft
     assert spec.sfa_dcp_replicated_indexer_size == replicas
     assert spec.scale_dim == (4 if c4 else 1 if c8 else 0)
-    assert spec.head_size == (64 if c4 else 128)
+    assert spec.head_size == 128
+    assert get_kv_cache_storage_head_size(spec) == (64 if c4 else 128)
     assert spec.page_size_bytes == replicas * 128 * (68 if c4 else 130 if c8 else 256)
 
     prefix = "model.layers.0.self_attn.indexer.k_cache"
@@ -162,3 +170,25 @@ def test_worker_collects_complete_specs_without_inspecting_impl(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {"main": Owner()})
     config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
     assert attn_utils.get_kv_cache_spec(config)["main"] is spec
+
+
+@pytest.mark.parametrize("indexer", [False, True])
+def test_merge_preserves_physical_bytes_and_upstream_metadata(indexer):
+    cls = AscendSFAIndexerCacheSpec if indexer else AscendMLAAttentionSpec
+    spec = cls(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128 if indexer else 576,
+        state_content_bytes=68 if indexer else 656,
+        dtype=torch.uint8,
+        is_draft=True,
+        dcp_sharded=True,
+        block_stride_alignment=256,
+        cache_role=SparseCacheRole.INDEXER if indexer else SparseCacheRole.SPARSE,
+        is_index_group_leader=True,
+    )
+    merged = cls.merge([spec, replace(spec)])
+    assert merged == spec
+    assert merged.is_draft
+    assert merged.state_content_bytes == spec.state_content_bytes
+    assert merged.page_size_bytes == spec.page_size_bytes

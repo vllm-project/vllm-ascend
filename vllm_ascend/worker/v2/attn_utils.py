@@ -41,7 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -81,6 +81,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
+    get_kv_cache_storage_head_size,
     get_storage_block_size,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
@@ -107,7 +108,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
-from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -1367,7 +1367,7 @@ def _allocate_kv_cache(
                 * example_spec.sfa_dcp_replicated_indexer_size
                 * example_spec.block_size
                 * example_spec.num_kv_heads
-                * example_spec.head_size
+                * get_kv_cache_storage_head_size(example_spec)
                 * get_dtype_size(example_spec.dtype)
             )
             if example_spec.scale_dim:
@@ -1709,7 +1709,7 @@ def _reshape_kv_cache_v2(
                         item_shape=(
                             kv_cache_spec.num_kv_heads,
                             storage_block_size,
-                            kv_cache_spec.head_size,
+                            get_kv_cache_storage_head_size(kv_cache_spec),
                         ),
                         storage_offset=slot_offset + region.offset,
                     ).transpose(1, 2)
@@ -1762,7 +1762,7 @@ def _reshape_kv_cache_v2(
                     kv_cache_config.num_blocks,
                     get_storage_block_size(kv_cache_spec),
                     kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
+                    get_kv_cache_storage_head_size(kv_cache_spec),
                 )
                 kv_cache_shape_list = [kv_cache_shape]
                 kv_cache_dtype_list = [kv_cache_spec.dtype]
@@ -1824,7 +1824,7 @@ def _reshape_kv_cache_v2(
                     num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
                     kernel_block_size,
                     group_spec.num_kv_heads,
-                    group_spec.head_size,
+                    get_kv_cache_storage_head_size(group_spec),
                 )
 
                 indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
@@ -2006,7 +2006,7 @@ def _reshape_kv_cache_v2(
                 kernel_num_blocks,
                 kernel_block_size,
                 kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
+                get_kv_cache_storage_head_size(kv_cache_spec),
                 cache_dtype,
             )
             packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
@@ -2034,7 +2034,7 @@ def _reshape_kv_cache_v2(
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
                 if packed_sfa_main_cache:
-                    k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
+                    k_shape = (num_blocks_, block_size_, num_kv_heads, get_kv_cache_storage_head_size(kv_cache_spec))
                     v_dim = 0
                 v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
             else:
@@ -2058,11 +2058,7 @@ def _reshape_kv_cache_v2(
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
-                k_dtype = (
-                    torch.int8
-                    if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-                )
+                k_dtype = kv_cache_spec.dtype
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):

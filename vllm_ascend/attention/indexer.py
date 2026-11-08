@@ -10,7 +10,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -277,7 +277,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         c4, c8 = self.enable_sparse_li_c4, self.enable_sparse_li_c8
         values = {field.name: getattr(source, field.name) for field in fields(source) if field.init}
         values.update(
-            head_size=self.head_dim // 2 if c4 else self.head_dim,
+            head_size=self.head_dim,
             dtype=self.c4_k_cache_dtype if c4 else self.c8_k_cache_dtype if c8 else vllm_config.model_config.dtype,
             cache_dtype_str=vllm_config.cache_config.cache_dtype
             if c4 or c8
@@ -292,6 +292,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             if enable_sfa_dcp_replicated_indexer(vllm_config)
             else 1,
         )
+        data_width = self.head_dim // 2 if c4 else self.head_dim
+        values["state_content_bytes"] = data_width * get_dtype_size(values["dtype"]) + values[
+            "scale_dim"
+        ] * get_dtype_size(values["scale_dtype"])
         return AscendSFAIndexerCacheSpec(**values)
 
     def process_weights_after_loading(self) -> None:
