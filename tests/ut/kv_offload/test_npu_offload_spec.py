@@ -336,7 +336,7 @@ def test_overlapping_groups_round_trip_with_real_transfer_descriptors(
     monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", memcpy, raising=False)
     block_ids = ([0, 2] if group_sizes[0] else []) + ([1, 3] if group_sizes[1] else [])
     npu_spec = GPULoadStoreSpec(block_ids, group_sizes, [0, 1])
-    cpu_ids = []
+    cpu_ids: list[int] = []
     for count, block_index in zip(group_sizes, (0, 1)):
         if count:
             chunks = (count + block_index % blocks_per_chunk + blocks_per_chunk - 1) // blocks_per_chunk
