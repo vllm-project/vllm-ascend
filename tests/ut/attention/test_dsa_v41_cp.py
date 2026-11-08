@@ -36,6 +36,46 @@ from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+def test_short_context_indexer_selects_visible_positions(monkeypatch):
+    indexer = SimpleNamespace(index_topk=4, compress_ratio=2)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    metadata = SimpleNamespace(max_cache_seq_len=4)
+    assert DeepseekV41Indexer.can_select_all(
+        indexer, metadata, is_candidate_source=False, uses_candidate_filter=False
+    )
+    for candidate_source, candidate_filter in ((True, False), (False, True)):
+        assert not DeepseekV41Indexer.can_select_all(
+            indexer,
+            metadata,
+            is_candidate_source=candidate_source,
+            uses_candidate_filter=candidate_filter,
+        )
+    metadata.max_cache_seq_len = 5
+    assert not DeepseekV41Indexer.can_select_all(
+        indexer, metadata, is_candidate_source=False, uses_candidate_filter=False
+    )
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    assert not DeepseekV41Indexer.can_select_all(
+        indexer, metadata, is_candidate_source=False, uses_candidate_filter=False
+    )
+    metadata.max_cache_seq_len = 4
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
+    assert not DeepseekV41Indexer.can_select_all(
+        indexer, metadata, is_candidate_source=False, uses_candidate_filter=False
+    )
+
+    positions = torch.tensor([0, 1, 3, 7], dtype=torch.int64)
+    indices = torch.empty(4, 4, dtype=torch.int32)
+    lengths = torch.empty(4, 1, dtype=torch.int32)
+    result = DeepseekV41Indexer.select_all(indexer, positions, indices, lengths)
+    assert result is indices
+    assert indices.tolist() == [[-1] * 4, [0, -1, -1, -1], [0, 1, -1, -1], [0, 1, 2, 3]]
+    assert lengths.flatten().tolist() == [0, 1, 2, 4]
+
+
 @pytest.mark.parametrize("pcp", [False, True])
 def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, pcp):
     config = {"pcp": pcp}

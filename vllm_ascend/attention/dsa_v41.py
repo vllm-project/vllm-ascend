@@ -268,7 +268,7 @@ class DeepseekV41PreparedIndexer:
     """Query-local projections and the event guarding auxiliary quantization."""
 
     query: torch.Tensor | None
-    weights: torch.Tensor
+    weights: torch.Tensor | None
     quantized_query: torch.Tensor | None = None
     query_scale: torch.Tensor | None = None
     quantize_done: Any = None
@@ -477,6 +477,12 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
+        if indexer.can_select_all(
+            metadata.indexer.cache,
+            is_candidate_source=self.role.is_candidate_source,
+            uses_candidate_filter=self.role.uses_candidate_filter,
+        ):
+            return DeepseekV41PreparedIndexer(query=None, weights=None)
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
@@ -662,6 +668,12 @@ class AscendDSAV41Impl:
             folded_cache = context[folded_name].kv_cache[0]
             source_cache = (*source_cache, folded_cache)
         assert prepared_indexer is not None
+        if prepared_indexer.query is None:
+            return attn.indexer.select_all(
+                positions,
+                shared.topk_indices[: hidden_states.shape[0]],
+                None if shared.topk_lengths is None else shared.topk_lengths[: hidden_states.shape[0]],
+            )
         if prepared_indexer.quantize_done is not None:
             torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
         selected, candidates = attn.indexer.select_projected(

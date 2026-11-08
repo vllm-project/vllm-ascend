@@ -177,6 +177,26 @@ class DeepseekV41Indexer(nn.Module):
     def project_query(self, qr):
         return self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
 
+    def can_select_all(self, source_metadata, *, is_candidate_source, uses_candidate_filter):
+        # Candidate sources must also produce block IDs. Compiled or captured
+        # graphs may replay with longer sequences than their dummy metadata.
+        return (
+            not is_candidate_source
+            and not uses_candidate_filter
+            and source_metadata.max_cache_seq_len <= self.index_topk
+            and not torch.compiler.is_compiling()
+            and not torch.npu.is_current_stream_capturing()
+        )
+
+    def select_all(self, positions, indices_output, lengths_output=None):
+        """Select every visible compressed K position in chronological order."""
+        lengths = torch.div(positions + 1, self.compress_ratio, rounding_mode="floor").to(torch.int32)
+        columns = torch.arange(self.index_topk, device=positions.device, dtype=torch.int32)
+        indices_output.copy_(torch.where(columns[None, :] < lengths[:, None], columns[None, :], -1))
+        if lengths_output is not None:
+            lengths_output.copy_(lengths[:, None])
+        return indices_output
+
     def apply_query_rope(self, query, cos, sin):
         DeviceOperator.apply_partial_rotary_inplace(query, cos, sin, start=self.width - self.rope_width, end=self.width)
 
