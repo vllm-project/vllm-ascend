@@ -57,6 +57,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | DeepSeekOCR2        |   🔴   |      |  ✅ |       A2/A3        |     | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
     | MiniMax-M2.5/2.7    |   🔴     |      |  ✅ |   A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
     | Qwen2.5-Math-RM-72B |   🔴    | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+    | MiniCPM3-4B         |   🔵    | BF16 only; TP1 validated, TP2 E2E pending; 310P unsupported | ✅ |       A2        | ❌ | 🟡 | 🟡 | ❌ | ❌ |  | 🟡 |  | ❌ |  |  | 🟡 | 🟡 | 32768 |  | [MiniCPM3-4B](../../tutorials/models/MiniCPM3-4B.md) |
     | Hy3-preview | 🔴 |   |  |A3|  |  |  |  |  |  | |  |  |  |  |  |  |  | [Hy3-preview](../../tutorials/models/Hy3-preview.md)  |
     | Hy4-preview (Experimental)  | 🔵  |   |  |A3|   |   |   |   |   |   |   |   |   |   |   |   |  |   |  [Hy4-preview (Experimental) ](../../tutorials/models/Hy4-preview.md) |
 

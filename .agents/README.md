@@ -19,6 +19,9 @@ Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if y
     - [File layout](#file-layout-1)
     - [Getting started](#getting-started)
     - [Key guidelines](#key-guidelines)
+  - [MiniCPM3-4B Ascend Adaptation Skill](#minicpm3-4b-ascend-adaptation-skill)
+    - [What it records](#what-it-records)
+    - [When to use it](#when-to-use-it)
 
 ## vLLM Ascend Model Adapter Skill
 
@@ -110,3 +113,23 @@ This skill guides an AI agent through the end-to-end release workflow:
   decision.
 - Scripts are idempotent and safe to re-run; checklist updates replace a section instead of
   appending duplicates.
+
+## MiniCPM3-4B Ascend Adaptation Skill
+
+Record of adapting one concrete community model, kept as a worked example rather than a
+general playbook.
+
+### What it records
+
+This skill captures the MiniCPM3-4B adaptation end to end:
+
+1. Why no `vllm_ascend/models/minicpm3.py` is added (upstream `MiniCPM3ForCausalLM` is reused).
+2. The mandatory `trust_remote_code=True` requirement and the MLA / LongRoPE specifics.
+3. Test harness pitfalls: prompt-prefixed runner outputs, sampling parameters that are not
+   forwarded to HTTP requests, and the string `tp_size` fixture.
+4. Reusable prompts, best practices, and the local static verification record.
+
+### When to use it
+
+Read it when adapting a model that upstream vLLM already registers but vLLM Ascend has not
+listed, or when writing offline-vs-online equality assertions in `tests/e2e/models`.
