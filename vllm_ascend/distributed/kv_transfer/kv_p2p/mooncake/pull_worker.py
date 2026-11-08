@@ -1332,6 +1332,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     ) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
+        self._finished_sending: set[str] = set()
 
     def register_kv_caches(
         self,
@@ -1371,7 +1372,8 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 raise RuntimeError("Mooncake pull receiving thread failed to start")
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
-        """Start the pull operations described by scheduler metadata."""
+        """Start pulls and stage producer completions from scheduler metadata."""
+        self._finished_sending.update(metadata.finished_sending)
         if not metadata.requests:
             return
         if self.kv_transfer_config.is_kv_consumer:
@@ -1385,12 +1387,15 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 self._recving_thread.add_requests(remote_engine_id, requests)
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        """Return completed receives, including their failure status."""
-        return (
+        """Return transfer completions and receive failures."""
+        results = (
             self._recving_thread.get_and_clear_finished_requests()
             if self._recving_thread is not None
             else KVConnectorTransferResults()
         )
+        results.finished_sending.update(self._finished_sending)
+        self._finished_sending.clear()
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return local block IDs whose pull operations failed."""

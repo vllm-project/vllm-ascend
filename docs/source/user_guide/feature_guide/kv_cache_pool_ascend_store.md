@@ -1747,8 +1747,9 @@ zero-copy byte views; separately allocated GDN states use their real strides.
 Full native recurrent states are saved, including speculative records.
 
 This route requires vLLM with connector lookahead hashing (upstream #64096)
-and the device/layout extensions in [vLLM #66294](https://github.com/vllm-project/vllm/pull/66294),
-plus scheduler completion polling from [vLLM #66295](https://github.com/vllm-project/vllm/pull/66295).
+and the device/layout extensions in [vLLM #66294](https://github.com/vllm-project/vllm/pull/66294).
+For PD composition, Ascend forwards completion notifications through native
+worker results before request blocks are released.
 Install the compatible source pairing before enabling the connector. The separate Mamba partial-checkpoint
 scheduling fix is platform-wide: it restores native partial-hit splitting for
 legacy Store and P2P connectors as well as this route.

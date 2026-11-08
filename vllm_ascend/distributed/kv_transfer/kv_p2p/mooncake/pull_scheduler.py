@@ -499,6 +499,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             )
 
         self._reqs_need_recv.clear()
+        if self._sending_thread is not None:
+            meta.finished_sending = self._sending_thread.get_and_clear_finished_requests()
         meta.reqs_in_batch = self._reqs_in_batch
         self._reqs_in_batch = set()
         return meta
@@ -603,19 +605,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                         self.kv_transfer_config.kv_load_failure_policy,
                     )
 
-        # P side: feed scheduler-received ACKs into vLLM's standard delayed
-        # free path. Scheduler._update_from_kv_xfer_finished reads this same
-        # KVConnectorOutput immediately after this hook returns.
-        finished_sending = (
-            self._sending_thread.get_and_clear_finished_requests() if self._sending_thread is not None else set()
-        )
-        if finished_sending:
-            for req_id in finished_sending:
-                self._reqs_need_send.pop(req_id, None)
-            if connector_output.finished_sending is None:
-                connector_output.finished_sending = finished_sending
-            else:
-                connector_output.finished_sending.update(finished_sending)
+        for req_id in connector_output.finished_sending or ():
+            self._reqs_need_send.pop(req_id, None)
 
 
 __all__ = [

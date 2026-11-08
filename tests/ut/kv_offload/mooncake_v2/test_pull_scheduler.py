@@ -11,7 +11,9 @@ import pytest
 import torch
 import zmq
 from cachetools import TTLCache
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
@@ -611,9 +613,9 @@ def test_rejected_consumer_completes_producer_delayed_free_without_timeout() -> 
     assert consumer.request_finished(request_d, ([],)) == (False, None)
 
     # The actual producer completion path returns the held request to vLLM.
-    output = SimpleNamespace(finished_recving=set(), finished_sending=None)
-    producer.update_connector_output(output)
-    assert output.finished_sending == {"request-p"}
+    metadata = producer.build_connector_meta(MagicMock())
+    assert metadata.finished_sending == {"request-p"}
+    producer.update_connector_output(KVConnectorOutput(finished_sending={"request-p"}))
     assert not producer._reqs_need_send
     assert not producer._sending_thread.delayed_free_requests
 
@@ -686,21 +688,19 @@ def test_rejected_consumer_without_remote_address_does_not_send_done(missing: st
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_update_connector_output_routes_worker_completion_and_scheduler_ack(failed: bool) -> None:
+def test_update_connector_output_routes_aggregated_worker_completion(failed: bool) -> None:
     scheduler = make_pull_scheduler()
     scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
     scheduler._recving_thread = MagicMock()
-    scheduler._sending_thread = MagicMock()
-    scheduler._sending_thread.get_and_clear_finished_requests.return_value = {"request-p"}
     scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p")
     scheduler._reqs_need_send["request-p"] = time.time()
-    output = SimpleNamespace(
+    output = KVConnectorOutput(
         finished_recving={"request-d"},
-        finished_sending=None,
+        finished_sending={"request-p"},
         failed_recving={"request-d"} if failed else set(),
     )
 
-    scheduler.update_connector_output(output)  # type: ignore[arg-type]
+    scheduler.update_connector_output(output)
 
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
     assert output.finished_sending == {"request-p"}
@@ -836,7 +836,7 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
         "MooncakeSchedulerSendingThread",
         thread_cls,
     )
-    metadata = {0: make_transfer_metadata()}
+    metadata: dict[int | tuple[int, ...], KVConnectorHandshakeMetadata] = {0: make_transfer_metadata()}
 
     scheduler.set_xfer_handshake_metadata_from_workers(metadata)
     scheduler.set_xfer_handshake_metadata_from_workers(metadata)
@@ -935,16 +935,17 @@ def test_matched_token_query_does_not_change_prompt_length(prefix_connector):
     assert len(request.all_token_ids) == 513
 
 
-def test_recving_thread_does_not_requeue_failed_notification() -> None:
+def test_recving_thread_does_not_requeue_failed_notification(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = MooncakeSchedulerRecvingThread(threading.Event())
     thread.add_request("10.0.0.1", 6000, "failed")
     thread.add_request("10.0.0.2", 6000, "healthy")
     thread.request_queue.put(None)
-    thread._send_done_recving = MagicMock(side_effect=[RuntimeError("unreachable"), None])
+    send_done = MagicMock(side_effect=[RuntimeError("unreachable"), None])
+    monkeypatch.setattr(thread, "_send_done_recving", send_done)
 
     thread.run()
 
-    assert thread._send_done_recving.call_args_list == [
+    assert send_done.call_args_list == [
         call("10.0.0.1", 6000, "failed"),
         call("10.0.0.2", 6000, "healthy"),
     ]
@@ -965,7 +966,7 @@ def test_recving_thread_shutdown_wakes_idle_thread() -> None:
     assert thread.request_queue.unfinished_tasks == 0
 
 
-def test_recving_thread_shutdown_closes_resources_in_owner_thread() -> None:
+def test_recving_thread_shutdown_closes_resources_in_owner_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = MooncakeSchedulerRecvingThread(threading.Event())
     socket = MagicMock()
     context = MagicMock()
@@ -978,7 +979,8 @@ def test_recving_thread_shutdown_closes_resources_in_owner_thread() -> None:
         thread.zmq_context = context
         thread.stop_event.set()
 
-    thread._send_done_recving = MagicMock(side_effect=send_done)
+    notification = MagicMock(side_effect=send_done)
+    monkeypatch.setattr(thread, "_send_done_recving", notification)
     thread.add_request("10.0.0.1", 6000, "first")
     thread.add_request("10.0.0.1", 6000, "pending")
     thread.start()
@@ -993,7 +995,7 @@ def test_recving_thread_shutdown_closes_resources_in_owner_thread() -> None:
     assert thread.zmq_context is None
     assert thread.request_queue.empty()
     assert thread.request_queue.unfinished_tasks == 0
-    assert thread._send_done_recving.call_count == 1
+    assert notification.call_count == 1
 
 
 def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1341,7 +1343,7 @@ def test_heartbeat_tracks_waiting_request_until_aggregated_receive() -> None:
     scheduler.update_state_after_alloc(request, make_blocks(), 16)
     scheduler.build_connector_meta(MagicMock())
     assert "request-d" in heartbeat.requests
-    scheduler.update_connector_output(SimpleNamespace(finished_recving={"request-d"}, failed_recving=set()))
+    scheduler.update_connector_output(KVConnectorOutput(finished_recving={"request-d"}, failed_recving=set()))
     assert not heartbeat.requests
     scheduler._recving_thread.add_request.assert_called_once_with("127.0.0.1", 6000, "request-p")
 
