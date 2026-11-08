@@ -92,7 +92,7 @@ ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
 RUN case "$TARGETPLATFORM" in \
   linux/arm64) \
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
-    python3 -m pip install "cannbotdsl===0.6.0.post1" "cannbot-arena-net-ops===0.1.0.post1" && \
+    python3 -m pip install "cannbotdsl===0.6.0+g91e7c8f" "cannbot-arena-net-ops===0.1.0" && \
     python3 -m pip cache purge ;; \
   linux/amd64) \
     echo "TARGET is x86_64, skip cannbot wheels install" ;; \
