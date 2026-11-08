@@ -284,7 +284,9 @@ def run_pool_hit_sequence(
     ``runner.model.reset_prefix_cache(reset_connector=False)`` before every
     round (hybrid cases must keep the local prefix cache enabled, and without
     the reset R2/R3 would be served locally with 0 external hits).
-    ``check_output=False`` skips H3 only for structural dummy-weight witnesses.
+    ``check_output=False`` skips H3 for cases where cold/hit token identity is
+    not meaningful (#11 dummy weights) or not comparable (#3 DSpark); H1/H2/R4
+    stay active.
 
     Calls go through ``runner.generate_greedy`` rather than ``runner.model`` so
     that both ``VllmRunner`` and ``DPVllmRunner`` are supported.
@@ -369,7 +371,8 @@ def run_pool_hit_sequence(
     summary = {
         "r2": ratio_r2,
         "r3": ratio_r3,
-        "expected_hits": float(expected_total),
+        "expected_hits": float(expected_hits),
+        "expected_hits_total": float(expected_total),
         "load_keys": snap4.load_keys,
     }
     if lcm_block_size:
@@ -377,7 +380,8 @@ def run_pool_hit_sequence(
     else:
         detail = f"delta_ratio R2={ratio_r2:.4f} R3={ratio_r3:.4f}"
     print(
-        f"[kv_pool] {tag} {detail} expected_hits={expected_total} load_keys_total={snap4.load_keys:.0f}",
+        f"[kv_pool] {tag} {detail} expected_hits={expected_hits} replicas={replicas} "
+        f"expected_hits_total={expected_total} load_keys_total={snap4.load_keys:.0f}",
         flush=True,
     )
     return summary

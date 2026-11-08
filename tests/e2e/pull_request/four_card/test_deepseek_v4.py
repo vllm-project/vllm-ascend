@@ -34,6 +34,9 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 # setdefault keeps it overridable on other platforms.
 os.environ.setdefault("ASCEND_ENABLE_USE_FABRIC_MEM", "1")
 
+# Local verification uses a mounted checkpoint; CI uses the HF id.
+POOL_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+
 # 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
 # prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
@@ -92,7 +95,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         SingleNodeMooncakeManager(pool_config, "dsv4_tp4_pool_watch") as pool,
         patch.dict(os.environ, pool.server_envs),
         VllmRunner(
-            "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+            POOL_MODEL,
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_seqs=16,
             max_num_batched_tokens=POOL_PROMPT_TOKENS,

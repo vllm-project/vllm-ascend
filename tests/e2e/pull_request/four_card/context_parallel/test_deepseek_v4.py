@@ -34,8 +34,9 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
-MTP_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
-DSPARK_MODEL = "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"
+# Local verification uses mounted checkpoints; CI uses the HF ids.
+MTP_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+DSPARK_MODEL = os.environ.get("DEEPSEEK_V4_DSPARK_MODEL_PATH", "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test")
 
 MAX_NUM_SEQS = 4
 MAX_TOKENS = 1024
