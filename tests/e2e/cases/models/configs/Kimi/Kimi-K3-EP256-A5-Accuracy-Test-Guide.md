@@ -10,8 +10,8 @@ with eight NPUs, using the first 500 GSM8K test questions to measure answer accu
 | --- | --- |
 | `.github/workflows/configs/nightly_config.yaml` | Register a single-node A5 test job with an ARM64 eight-NPU runner and the test YAML |
 | `tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml` | Add model launch arguments, dataset settings, request parameters, and accuracy acceptance values |
-| `tests/e2e/cases/models/configs/Kimi/Kimi-K3 EP256 A5 精度测试说明.md` | Document the change scope, test environment, parameters, and validation results in Chinese |
-| `tests/e2e/cases/models/configs/Kimi/Kimi-K3 EP256 A5 Accuracy Test Guide.md` | Provide the English version of the test guide |
+| `tests/e2e/cases/models/configs/Kimi/Kimi-K3-EP256-A5-精度测试说明.md` | Document the change scope, test environment, parameters, and validation results in Chinese |
+| `tests/e2e/cases/models/configs/Kimi/Kimi-K3-EP256-A5-Accuracy-Test-Guide.md` | Provide the English version of the test guide |
 
 Test case: `Kimi-K3-W4A8-EP256-A5-GSM8K-First500`.
 The case uses the shared entry point `tests/e2e/common/single_node/test_single_node.py`
@@ -118,8 +118,10 @@ Each run was checked for complete question IDs, correspondence to the original q
 | YAML parsing, launch argument types, and embedded JSON | Passed |
 | Nightly job registration and configuration paths | Passed |
 | Git whitespace checks | Passed |
+| Markdownlint, Codespell, Typos, Gitleaks, and filename checks | Passed |
+| Nightly name dispatch, parameters, and document value consistency | Passed |
 | Dataset preparation | First 500 test questions verified; 7,473 training records |
-| Full formatting check, `bash format.sh ci` | Pending; `pre-commit` is missing from the environment |
+| Full formatting check, `bash format.sh ci` | Pending; GitHub hook downloads timed out and no usable Bash is available locally |
 | A5 service startup, inference, and 500-question evaluation using the current YAML | Pending |
 | Nightly CI execution | Pending |
 | Native-scoring acceptance calibration | Pending; currently uses the user-selected baseline of 60.0% ±3.0 percentage points |

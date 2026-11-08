@@ -10,7 +10,8 @@
 | --- | --- |
 | `.github/workflows/configs/nightly_config.yaml` | 注册 A5 单节点测试任务，指定 ARM64 A5 8 卡 runner 和测试 YAML |
 | `tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml` | 新增模型启动参数、数据集配置、请求参数和精度验收值 |
-| `tests/e2e/cases/models/configs/Kimi/Kimi-K3 EP256 A5 精度测试说明.md` | 说明改动范围、测试环境、测试参数和验证结果 |
+| `tests/e2e/cases/models/configs/Kimi/Kimi-K3-EP256-A5-精度测试说明.md` | 说明改动范围、测试环境、测试参数和验证结果 |
+| `tests/e2e/cases/models/configs/Kimi/Kimi-K3-EP256-A5-Accuracy-Test-Guide.md` | 提供英文版测试说明 |
 
 用例名称：`Kimi-K3-W4A8-EP256-A5-GSM8K-First500`。
 测试通过项目共享入口 `tests/e2e/common/single_node/test_single_node.py` 执行，
@@ -114,8 +115,10 @@ python -m pytest -sv tests/e2e/common/single_node/test_single_node.py
 | YAML 解析、启动参数类型和内嵌 JSON 检查 | 通过 |
 | nightly 任务注册及配置路径检查 | 通过 |
 | Git 空白检查 | 通过 |
+| Markdownlint、Codespell、Typos、Gitleaks、文件名检查 | 通过 |
+| nightly 名称调度解析、参数与文档数值一致性 | 通过 |
 | 数据准备 | 测试集前 500 题比对通过，训练集 7473 条 |
-| 完整格式检查 `bash format.sh ci` | 待完成，环境缺少 `pre-commit` |
+| 完整格式检查 `bash format.sh ci` | 待完成；钩子环境下载遇到 GitHub 连接超时，本机缺少可用 Bash |
 | 当前 YAML 的 A5 服务启动、推理及 500 题评测 | 待执行 |
 | nightly CI 运行 | 待执行 |
 | 原生评分验收值校准 | 待执行；当前采用用户选定的 60.0% ±3.0 个百分点 |
