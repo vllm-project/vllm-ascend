@@ -80,6 +80,8 @@ def make_backend(backend_name, store):
     backend.store = store
     backend._lazy_init = False
     backend._store_initialized = True
+    if backend_name == "mooncake":
+        backend._closed = False
     backend.config = SimpleNamespace(preferred_segment=False, prefer_alloc_in_same_node=True)
     return backend
 

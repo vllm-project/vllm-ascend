@@ -409,7 +409,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                         and group_block_size > self.hash_block_size
                         else group_block_size
                     )
-                    _max_length = min(curr_hit_length + eagle_margin, max_cache_hit_length)
+                    # The proof block may follow the reusable prefix, as in core.
+                    _max_length = min(curr_hit_length + eagle_margin, len(block_hashes) * self.hash_block_size)
                 hit_result = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
