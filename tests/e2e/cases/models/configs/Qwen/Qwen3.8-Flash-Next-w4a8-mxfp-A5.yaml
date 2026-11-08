@@ -6,7 +6,7 @@
 # Performance baselines are provisional conservative values calibrated from
 # one successful release Nightly CI run on 2026-11-02 (overall output token/s).
 test_cases:
-  - name: "Qwen3.8-Flash-Next-w4a8-mxfp-mtp-A5"
+  - name: "Qwen3.8-Flash-Next-w4a8-mxfp-A5"
     model: "Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp"
     envs:
       VLLM_USE_MODELSCOPE: "true"
