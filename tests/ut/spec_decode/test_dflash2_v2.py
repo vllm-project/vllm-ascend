@@ -605,7 +605,7 @@ def test_dflash_input_preparation_uses_manager_block_size(monkeypatch, block_siz
 
     dflash_module.prepare_dflash_inputs(*inputs)
 
-    kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=block_size)
+    kernel.assert_called_once_with(*inputs, num_reqs_override=None)
 
 
 @pytest.mark.skipif(False, reason="main-only num_reqs_override")
@@ -619,7 +619,7 @@ def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
 
     dflash_module.prepare_dflash_inputs(*inputs, 5)
 
-    kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=640)
+    kernel.assert_called_once_with(*inputs, num_reqs_override=5)
 
 
 def test_dflash_input_preparation_keeps_manager_table_on_main(monkeypatch):
@@ -636,5 +636,5 @@ def test_dflash_input_preparation_keeps_manager_table_on_main(monkeypatch):
 
     assert kernel.call_args.args[16] is block_table
     assert kernel.call_args.args[17] == 640
-    assert kernel.call_args.kwargs["kv_cache_block_size"] == 640
+    assert "kv_cache_block_size" not in kernel.call_args.kwargs
     torch.testing.assert_close(block_table, torch.tensor([[7, 11]], dtype=torch.int32))

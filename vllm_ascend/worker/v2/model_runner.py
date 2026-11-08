@@ -449,9 +449,11 @@ class NPUModelRunner(GPUModelRunner):
             )
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
-            # Target PCP metadata can contain two chunks per request; both
-            # target and draft FIA metadata may append one padding request.
-            max_metadata_reqs = self.max_num_reqs * (2 if self.pcp_manager is not None else 1) + 1
+            # PCP owns the local-row capacity; FIA may append one padding
+            # request for either target or draft metadata.
+            max_metadata_reqs = (
+                self.pcp_manager.max_num_local_reqs if self.pcp_manager is not None else self.max_num_reqs
+            ) + 1
             metadata_groups = [*self.attn_groups, *getattr(self.speculator, "attn_groups", [])]
             initialize_kernel_block_table_buffers(
                 (group for groups in metadata_groups for group in groups), max_metadata_reqs

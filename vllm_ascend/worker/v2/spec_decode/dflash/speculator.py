@@ -246,6 +246,4 @@ def prepare_dflash_inputs(
         max_model_len,
         sample_from_anchor,
         num_reqs_override=num_reqs_override,
-        # The public table and DCP ownership both use manager blocks.
-        kv_cache_block_size=block_size,
     )

@@ -113,7 +113,6 @@ def initialize_kv_cache(
         max_num_batched_tokens=self.max_num_tokens,
         max_num_blocks_per_group=max_num_blocks_per_group,
         device=self.device,
-        kernel_block_sizes=self.kernel_block_sizes,
         slot_mapping_enabled=slot_mapping_enabled,
         cp_size=self.dcp_size,
         cp_rank=self.dcp_rank,

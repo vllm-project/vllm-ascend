@@ -230,6 +230,12 @@ class AscendPCPManager(PCPManager):
         self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
 
     @property
+    def max_num_local_reqs(self) -> int:
+        """Request-row capacity already reserved by PCP partitioning."""
+        assert self._input_buffers is not None
+        return self._input_buffers.max_num_reqs
+
+    @property
     def is_decode_sharded(self) -> bool:
         """Use the shared policy after the runner injects vllm_config."""
         return is_pcp_decode_sharding_enabled(self.vllm_config)
