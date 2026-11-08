@@ -226,7 +226,7 @@ def test_pad_pass_forwards_its_own_arrays():
 
 
 def test_host_function_returns_before_launching_when_nothing_replays():
-    from vllm_ascend.ops.triton.compute_slot_mapping import pad_replayed_slot_mapping
+    from vllm_ascend.ops.triton.v1.compute_slot_mapping import pad_replayed_slot_mapping
 
     empty = torch.tensor([], dtype=torch.int32)
     # No cacheable group, and no request: both have to be non-launches rather

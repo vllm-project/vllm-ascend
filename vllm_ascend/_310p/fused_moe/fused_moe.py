@@ -30,6 +30,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
 from .moe_comm_method import AllGatherCommImpl310
+from .shared_experts import configure_shared_experts_310
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
@@ -139,8 +140,8 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
 
 class AscendRoutedExperts310(AscendRoutedExperts):
-    def __init__(self, *args, tid2eid=None, n_shared_experts: int = 0, **kwargs):
-        super().__init__(*args, tid2eid=tid2eid, n_shared_experts=n_shared_experts, **kwargs)
+    def __init__(self, *args, n_shared_experts: int = 0, **kwargs):
+        super().__init__(*args, n_shared_experts=n_shared_experts, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
@@ -165,7 +166,6 @@ class AscendMoERunner310(AscendMoERunner):
         routed_input_transform=None,
         routed_output_transform=None,
         routed_scaling_factor=1,
-        tid2eid=None,
         n_shared_experts: int = 0,
     ):
         super().__init__(
@@ -186,13 +186,8 @@ class AscendMoERunner310(AscendMoERunner):
             # Keep the 310P gate weight in FP16 NZ format at load time.
             gate.precast_fp32_weight = False
 
-        ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
-        if ascend_shared_experts is not None:
-            ascend_shared_experts.multistream_overlap = False
-            # The parent may have selected the SP-multistream custom op before
-            # 310P disables the unsupported feature. Restore the upstream entry
-            # so its fake output contract matches the single-stream execution.
-            self._forward_entry = self._select_forward()
+        if self.ascend_shared_experts is not None:
+            configure_shared_experts_310(self.ascend_shared_experts)
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, self.moe_config)] = AllGatherCommImpl310(self.moe_config)
 
     def _compute_router_logits(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:

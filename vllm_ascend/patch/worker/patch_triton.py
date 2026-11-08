@@ -105,17 +105,17 @@ from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator  # noqa: E402
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator  # noqa: E402
 
-from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel  # noqa: E402
-from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_kernel  # noqa: E402
-from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.thinking_budget import (  # noqa: E402
+from vllm_ascend.ops.triton.apply_grammar_bitmask import _apply_grammar_bitmask_kernel  # noqa: E402
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel  # noqa: E402
+from vllm_ascend.ops.triton.metrics.num_nans import get_num_nans  # noqa: E402
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample  # noqa: E402
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel  # noqa: E402
+from vllm_ascend.ops.triton.sample.sampling_mask import sampling_mask_from_logits_npu  # noqa: E402
+from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa: E402
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
 )
-from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu  # noqa: E402
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words  # noqa: E402
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature  # noqa: E402
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs  # noqa: E402
@@ -146,7 +146,7 @@ speculator.gumbel_sample = categorical_sample
 base_speculator.gumbel_sample = categorical_sample
 dspark_speculator.gumbel_sample = categorical_sample
 sampler.gumbel_sample = categorical_sample
-topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
+topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit

@@ -51,9 +51,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStorePromMetrics,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
+    BaseKVPoolScheduler,
     KVPoolScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker, KVPoolWorker
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
@@ -61,7 +62,7 @@ if TYPE_CHECKING:
 
 def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
-) -> KVPoolScheduler:
+) -> BaseKVPoolScheduler:
     scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
     return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
 
@@ -70,7 +71,7 @@ def create_kv_pool_worker(
     vllm_config: VllmConfig,
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
-) -> KVPoolWorker:
+) -> BaseKVPoolWorker:
     worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
     return worker_class(
         vllm_config,
@@ -169,8 +170,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # Opt in only for synchronous bulk loads, not background retrieval.
         self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
-        self.connector_scheduler: KVPoolScheduler | None = None
-        self.connector_worker: KVPoolWorker | None = None
+        self.connector_scheduler: BaseKVPoolScheduler | None = None
+        self.connector_worker: BaseKVPoolWorker | None = None
         self.dspark_prefix_cache_enabled = False
 
         if role == KVConnectorRole.SCHEDULER:
@@ -209,7 +210,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def restore_dspark_prefix(self, metadata: Any, request_id: str, offset: int, block_ids: Any) -> int:
         assert self.connector_worker is not None
-        cache = self.connector_worker.dspark_prefix_cache
+        cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is None or request is None:
             raise RuntimeError("DSpark prefix hit has no registered draft cache or load metadata")
@@ -217,7 +218,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def save_dspark_prefix(self, metadata: Any, request_id: str, through_tokens: int, block_ids: Any) -> None:
         assert self.connector_worker is not None
-        cache = self.connector_worker.dspark_prefix_cache
+        cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is not None and request is not None:
             cache.save(request, through_tokens, block_ids)
@@ -339,16 +340,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Fence only the saves of requests whose blocks this step may reuse.
+        """Fence the previous save before this step can reuse KV blocks.
 
-        Blocks are freed immediately when a request finishes or is preempted.
-        Before this step's forward can reallocate them, the in-flight puts of
-        exactly those requests are awaited (released_req_ids carried in the
-        connector metadata), instead of the whole previous save batch.
+        This hook is temporarily reused for deferred KV cache save
+        synchronization and will be replaced by a dedicated mechanism.
         """
         assert self.connector_worker is not None
-        released_req_ids = getattr(kv_connector_metadata, "released_req_ids", None)
-        self.connector_worker.handle_released_saves(released_req_ids)
+        self.connector_worker.wait_for_previous_save()
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
@@ -461,7 +459,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         assert self.connector_worker is not None
-        self.connector_worker.wait_for_save(self._get_connector_metadata())
+        cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
@@ -533,11 +531,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
-        if self.connector_worker is not None:
-            return self.connector_worker.get_stats()
-        return None
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_stats()
 
     @classmethod
     def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:

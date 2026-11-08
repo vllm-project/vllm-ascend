@@ -60,6 +60,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -119,16 +120,21 @@ from vllm_ascend.utils import (
 
 # vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
 # in kv_cache_utils, so importing the main-only module breaks worker startup.
+# Main resolves grouping through the platform's `KVCacheConfigBuilder`.
 if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import (
         get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
     )
 else:
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+    from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
+
+    def get_kv_cache_groups(
+        vllm_config: VllmConfig,
+        kv_cache_spec: dict[str, KVCacheSpec],
+    ) -> list[KVCacheGroupSpec]:
+        return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -351,9 +357,6 @@ class NPUWorker(WorkerBase):
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
         )
-
-    def disconnect_kv_transfer_peers(self) -> None:
-        global_te.disconnect_all_peers()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
@@ -692,6 +695,10 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            # Explicit and startup-plan budgets are physical bytes too. Apply
+            # the same private multi-group allocation correction as profiling
+            # before the offload and KVPP budget conversions.
+            kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(kv_cache_memory_bytes)
             return self._apply_kvpp_memory_budget(
                 self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
             )
@@ -1360,7 +1367,15 @@ class NPUWorker(WorkerBase):
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
             self.model_runner._init_kv_zero_meta()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
+    ):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1379,11 +1394,13 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 self.profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
-                self.profiler.start()  # type: ignore[attr-defined]
-            else:
-                # Profiler already initialized. Restart profiling but keep
-                # the original trace name from the first initialization.
-                self.profiler.start()
+            # Else: profiler already initialized. Restart profiling but keep the
+            # original trace name from the first initialization.
+            if not vllm_version_is("0.32.0"):
+                # vLLM main supports per-session profiler kwargs; the release
+                # wrapper has no slot for them.
+                self.profiler.set_profiler_kwargs(profiler_kwargs)
+            self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
