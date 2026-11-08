@@ -4,8 +4,8 @@
 # Scope: one A5 node, 8 NPUs, pre-pruned Kimi-K3 W4A8 with 256 routed experts.
 # Source checkpoint: Kimi-K3-w4a8-mxfp-QuaRot. Pruning is a separate prerequisite.
 # References: vllm-project/vllm-ascend#20101 and Qwen3_6_27b_A5.yaml.
-# Model path: /mnt/weight/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
-# Dataset path: /mnt/weight/modelscope/hub/datasets/CuiZ2007/gsm8k; test.jsonl contains the first 500 questions.
+# Model path: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
+# Dataset path: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k; test.jsonl contains the first 500 questions.
 # Mount the model path and dataset path inside the test runtime.
 # Dataset includes train.jsonl for 4-shot examples and first-500 test.jsonl.
 # Mount the dataset at the same absolute path; keep basename gsm8k, no trailing slash.
@@ -23,7 +23,7 @@
 # Private checkpoints are not downloaded by this case.
 test_cases:
 - name: Kimi-K3-W4A8-EP256-A5-GSM8K-First500
-  model: /mnt/weight/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
+  model: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
   envs:
     SERVER_PORT: "8080"
     VLLM_USE_V2_MODEL_RUNNER: '1'
@@ -76,8 +76,8 @@ test_cases:
   benchmarks:
     accuracy:
       case_type: accuracy
-      dataset_path: /mnt/weight/modelscope/hub/datasets/CuiZ2007/gsm8k
-      dataset_path_local: /mnt/weight/modelscope/hub/datasets/CuiZ2007/gsm8k
+      dataset_path: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k
       request_conf: vllm_api_general_chat
       dataset_conf: gsm8k/gsm8k_gen_4_shot_cot_str
       num_prompts: 500
