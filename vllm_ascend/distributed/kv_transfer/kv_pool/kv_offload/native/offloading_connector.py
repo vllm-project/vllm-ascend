@@ -488,6 +488,13 @@ class AscendOffloadingConnector(OffloadingConnector):
         super().__init__(vllm_config, role, kv_cache_config)
         connector_worker = self.connector_worker
         if connector_worker is not None:
+            # An opt-in synchronous load completes in pre_forward. Defer the
+            # MRV2 state pre-copy so it reads the checkpoint after that load.
+            self.requires_mamba_state_copy_after_load = (
+                vllm_config.use_v2_model_runner
+                and int(connector_worker.spec.extra_config.get("sync_load_budget_bytes", 0)) > 0
+                and kv_cache_config.has_mamba_layers
+            )
             self.connector_worker = AscendOffloadingConnectorWorker(
                 connector_worker.spec,
                 vllm_config,

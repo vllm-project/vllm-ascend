@@ -122,14 +122,23 @@ def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> N
     assert create_calls == 1
 
 
+@pytest.mark.parametrize("sync_load_budget_bytes", [0, 1 << 20])
+@pytest.mark.parametrize("has_mamba", [False, True])
 def test_ascend_connector_replaces_worker_with_current_vllm_config(
     monkeypatch: pytest.MonkeyPatch,
+    sync_load_budget_bytes: int,
+    has_mamba: bool,
 ) -> None:
-    vllm_config = object()
-    kv_cache_config = object()
+    vllm_config = SimpleNamespace(use_v2_model_runner=True)
+    groups = []
+    if has_mamba:
+        mamba_spec = MambaSpec(block_size=2, shapes=((2,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+        groups.append(KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec))
+    kv_cache_config = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=groups)
     spec = SimpleNamespace(
         replicated_layout=False,
         config=SimpleNamespace(parallel=SimpleNamespace(rank=0)),
+        extra_config={"sync_load_budget_bytes": sync_load_budget_bytes},
     )
 
     def fake_upstream_init(
@@ -155,6 +164,7 @@ def test_ascend_connector_replaces_worker_with_current_vllm_config(
     assert connector.connector_worker.spec is spec
     assert connector.connector_worker.vllm_config is vllm_config
     assert connector.connector_worker.kv_cache_config is kv_cache_config
+    assert connector.requires_mamba_state_copy_after_load is (has_mamba and sync_load_budget_bytes > 0)
 
 
 def test_split_kv_cache_is_canonicalized_without_copy() -> None:
