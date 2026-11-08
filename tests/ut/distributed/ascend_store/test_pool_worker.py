@@ -100,9 +100,10 @@ class TestSharedPoolConnector(unittest.TestCase):
         ]
         worker = SimpleNamespace(
             vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(enforce_eager=True),
                 kv_transfer_config=SimpleNamespace(
                     kv_connector_extra_config={"store_tp_size": 4, "cache_prefix": "epoch", "use_layerwise": True}
-                )
+                ),
             ),
             kv_cache_config=SimpleNamespace(kv_cache_groups=groups, num_blocks=3),
             m_store=MemoryBackend(),

@@ -30,6 +30,12 @@ Use `kv_consumer` for D. Ordinary prefix pooling uses `AscendStoreConnector`
 with the same extra configuration and the appropriate role. `use_layerwise`
 may differ between endpoints without changing object identity.
 
+With graph execution enabled, the shared format performs bulk I/O at the
+runner's step boundaries. D restores the PD cache and copies the loaded Mamba
+state before graph replay. Decode writeback fences the completed step before
+copying and publishing committed cache. An eager P can continue to write
+layer by layer into the same pool.
+
 The validated serving configuration used `--tensor-parallel-size 8`,
 `--enable-expert-parallel`, `--enforce-eager`, `--enable-prefix-caching`,
 `--mamba-cache-mode align`, `--max-model-len 1024` and

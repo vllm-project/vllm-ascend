@@ -76,6 +76,13 @@ def shared_draft_names(cache_config):
     return draft
 
 
+def shared_pool_uses_layerwise(config):
+    # Full graph replay does not execute the Python layer callbacks. Keep
+    # pool I/O at the runner's step boundaries whenever graphs may run.
+    extra = config.kv_transfer_config.kv_connector_extra_config
+    return bool(extra.get("use_layerwise", False)) and config.model_config.enforce_eager
+
+
 def validate_shared_pool(config, cache_config, *, worker=True):
     """Reject unsupported contracts before constructing native clients."""
     extra = config.kv_transfer_config.kv_connector_extra_config
@@ -93,8 +100,8 @@ def validate_shared_pool(config, cache_config, *, worker=True):
         for size in (p.pipeline_parallel_size, p.prefill_context_parallel_size, p.decode_context_parallel_size)
     ):
         raise ValueError("Shared pool currently requires PP=PCP=DCP=1")
-    if not config.use_v2_model_runner or not config.model_config.enforce_eager:
-        raise ValueError("Shared pool currently requires MRV2 eager")
+    if not config.use_v2_model_runner:
+        raise ValueError("Shared pool currently requires MRV2")
     if extra.get("backend", "mooncake").lower() != "memcache" or extra.get("load_async", False):
         raise ValueError("Shared pool currently requires MemCache with synchronous reads")
     if extra.get("discard_partial_chunks", True) is not True:
@@ -160,7 +167,7 @@ class SharedPoolTransfer:
     def __init__(self, worker):
         self.worker = worker
         extra = worker.vllm_config.kv_transfer_config.kv_connector_extra_config
-        self.layerwise = bool(extra.get("use_layerwise", False))
+        self.layerwise = shared_pool_uses_layerwise(worker.vllm_config)
         self.io = MemcacheStoreLayoutIO(worker.m_store, int(extra.get("store_lease_ttl_ms", 600000)))
         self.layouts = {}
         self.request_states = {}

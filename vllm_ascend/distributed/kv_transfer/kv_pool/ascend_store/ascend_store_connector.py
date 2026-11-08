@@ -128,7 +128,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         AscendStore requires PIECEWISE CUDA graph mode when layerwise
         operations are enabled.
         """
-        return extra_config.get("use_layerwise", False)
+        return extra_config.get("use_layerwise", False) and "store_tp_size" not in extra_config
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
@@ -139,10 +139,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.shared_pool_enabled:
             # Import only for the opt-in format; legacy paths do not acquire a
             # dependency on the new upstream StoreLayout API.
-            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import validate_shared_pool
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import (
+                shared_pool_uses_layerwise,
+                validate_shared_pool,
+            )
 
             validate_shared_pool(vllm_config, kv_cache_config, worker=role != KVConnectorRole.SCHEDULER)
-        self.use_layerwise = extra_config.get("use_layerwise", False)
+            self.use_layerwise = shared_pool_uses_layerwise(vllm_config)
+        else:
+            self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None

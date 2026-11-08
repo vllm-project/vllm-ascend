@@ -160,17 +160,18 @@ def test_layerwise_failure_drains_pending_tasks_without_publication(monkeypatch)
     assert writer._sender.request_queue.unfinished_tasks == 0
 
 
-def transfer(backend, tp, rank, layerwise, source):
+def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True):
     layout, caches = attention(tp, rank, source=source, chunk=4)
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(enforce_eager=enforce_eager),
             kv_transfer_config=SimpleNamespace(
                 kv_connector_extra_config={
                     "store_tp_size": 4,
                     "use_layerwise": layerwise,
                     "cache_prefix": "weights-v1",
                 }
-            )
+            ),
         ),
         m_store=backend,
         can_put=True,
@@ -352,6 +353,40 @@ def test_step_metadata_prefix_lookup_and_partial_hit_restore(
     assert not backend.registered
 
 
+def test_graph_step_copies_and_publishes_without_layer_callbacks(monkeypatch):
+    event = MagicMock()
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=lambda: event), raising=False)
+    backend = MemoryBackend()
+    for rank in range(2):
+        writer, _ = transfer(backend, 2, rank, True, True, enforce_eager=False)
+        writer.prepare_step(step(saved_request()))
+        writer.finish_step()
+        writer.close()
+    assert len(backend.readable) == 4
+    assert event.synchronize.call_count == 2
+
+    reader, caches = transfer(backend, 2, 0, True, False, enforce_eager=False)
+    meta = step(
+        ReqMeta(
+            req_id="graph-reader",
+            block_ids_by_group=[[2]],
+            block_hashes=[b"hash2", b"hash4"],
+            can_save=False,
+            load_spec=LoadSpec(0, 3, True),
+        )
+    )
+    reader.prepare_step(meta)
+    reader.start_load(meta)
+    # A replay consumes the restored bytes before finish_step runs.
+    _, expected = attention(2, 0, source=True, chunk=4)
+    for owner, tensors in caches.items():
+        for actual, wanted in zip(tensors, expected[owner]):
+            torch.testing.assert_close(actual[4:6], wanted[2:4], rtol=0, atol=0)
+    reader.finish_step()
+    reader.close()
+    assert not backend.leases
+
+
 def test_save_range_skips_previous_chunks_and_uncommitted_hashes():
     worker, _ = transfer(MemoryBackend(), 2, 0, False, True)
     request = ReqMeta(
@@ -403,6 +438,8 @@ def test_supported_contract_and_fail_fast_on_unsupported_features():
         kv_events_config=None,
     )
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["layer.0"])])
+    validate_shared_pool(config, cache_config)
+    config.model_config.enforce_eager = False
     validate_shared_pool(config, cache_config)
     for changed in (replace(spec, non_causal=True), replace(spec, tokens_per_state=2), replace(spec, max_tp_shards=1)):
         cache_config.kv_cache_groups[0].kv_cache_spec = changed

@@ -15,6 +15,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import (
+    shared_pool_uses_layerwise,
     validate_shared_pool,
 )
 
@@ -32,7 +33,7 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
         handoff_ttl_s = vllm_config.kv_transfer_config.kv_connector_extra_config.get("handoff_ttl_s", 60)
         if type(handoff_ttl_s) not in (int, float) or not 5 <= handoff_ttl_s <= 300:
             raise ValueError("Pool PD handoff_ttl_s must be between 5 and 300 seconds")
-        layerwise = bool(vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False))
+        layerwise = shared_pool_uses_layerwise(vllm_config)
         # Use the same MRV2 extension points as ordinary AscendStore. The
         # runner owns checkpoint src/dst selection and the actual state copy.
         self.requires_mamba_state_copy_after_layer_load = layerwise
