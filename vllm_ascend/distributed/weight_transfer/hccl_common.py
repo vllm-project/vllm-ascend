@@ -9,7 +9,7 @@ inline in the engine, mirroring `nccl_common.worker_init_process_group`).
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from vllm.distributed.weight_transfer.nccl_common import NCCLWeightTransferInitInfo
@@ -28,6 +28,13 @@ def _validate_packed_params(info: Any) -> None:
             raise ValueError(f"`{name}` must be a positive integer or None, got {value!r}")
 
 
+def _validate_transfer_mode(mode: str | None, packed: bool | None) -> None:
+    if mode not in (None, "legacy", "bounded"):
+        raise ValueError("`packed_transfer_mode` must be 'legacy' or 'bounded'")
+    if mode == "bounded" and packed is not True:
+        raise ValueError("bounded transfers require `packed=True` fixed at initialization")
+
+
 @dataclass(kw_only=True)
 class HCCLWeightTransferInitInfo(NCCLWeightTransferInitInfo):
     """Upstream worker init contract with TCP rendezvous and optional packed settings.
@@ -42,12 +49,15 @@ class HCCLWeightTransferInitInfo(NCCLWeightTransferInitInfo):
     packed: bool | None = None  # type: ignore[assignment]
     packed_buffer_size_bytes: int | None = None  # type: ignore[assignment]
     packed_num_buffers: int | None = None  # type: ignore[assignment]
+    # An omitted field uses the legacy protocol and stays absent on the wire.
+    packed_transfer_mode: Literal["legacy", "bounded"] | None = None
 
     def __post_init__(self) -> None:
         if self.nccl_unique_id_b64 is not None:
             raise ValueError("HCCL weight transfer requires TCP rendezvous; `nccl_unique_id_b64` is not supported")
         super().__post_init__()
         _validate_packed_params(self)
+        _validate_transfer_mode(self.packed_transfer_mode, self.packed)
 
 
 def stateless_init_process_group(

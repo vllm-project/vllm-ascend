@@ -30,7 +30,10 @@ from vllm_ascend.utils import vllm_version_is
 def _npu_context():
     with (
         patch.object(
-            torch, "npu", SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock()), create=True
+            torch,
+            "npu",
+            SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock(), Stream=MagicMock()),
+            create=True,
         ),
         patch("torch.accelerator.current_device_index", return_value=0),
     ):
@@ -43,6 +46,7 @@ def _make_engine():
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
     engine._last_hccl_update_info = {}
+    engine._bounded_streams = None
     return engine
 
 
@@ -410,3 +414,153 @@ def test_worker_metadata_is_per_model_and_cleared_on_reinit():
         engine.model_update_group.broadcast.reset_mock()
         engine.receive_weights(full)
         engine.model_update_group.broadcast.assert_called_once()
+
+
+@pytest.mark.parametrize("mode,packed", [("unknown", True), ("bounded", False), ("bounded", None)])
+def test_rejects_invalid_bounded_configuration(mode, packed):
+    args = dict(master_address="host", master_port=1234, world_size=2, packed=packed, packed_transfer_mode=mode)
+    with pytest.raises(ValueError, match="packed"):
+        HCCLWeightTransferInitInfo(rank_offset=1, **args)
+    with pytest.raises(ValueError, match="packed"):
+        HCCLTrainerInitInfo(rank=0, **args)
+
+
+def test_bounded_handshake_is_explicit_and_rejected_by_legacy_peer():
+    info = HCCLTrainerInitInfo(
+        rank=0, master_address="host", master_port=1234, world_size=2, packed_transfer_mode="bounded"
+    )
+    client = MagicMock()
+    group = MagicMock()
+
+    def legacy_peer(payload):
+        assert payload["packed_transfer_mode"] == "bounded"
+        NCCLWeightTransferInitInfo(**payload)
+
+    client.init_weight_transfer_engine.side_effect = legacy_peer
+    with (
+        patch("vllm_ascend.distributed.weight_transfer.hccl_common.trainer_init", return_value=group),
+        pytest.raises(TypeError, match="packed_transfer_mode"),
+    ):
+        HCCLTrainerWeightTransferEngine.trainer_init(info, client=client, source=MagicMock())
+    group.close.assert_called_once_with()
+
+
+def test_bounded_worker_uses_native_loader_and_metadata_cache():
+    engine = _make_engine()
+    engine.model_config.quantization = None
+    engine._init_info = HCCLWeightTransferInitInfo(
+        master_address="host",
+        master_port=1234,
+        rank_offset=1,
+        world_size=2,
+        packed=True,
+        packed_transfer_mode="bounded",
+        packed_buffer_size_bytes=13,
+        packed_num_buffers=2,
+    )
+    engine.model_update_group = MagicMock()
+    full = HCCLWeightTransferUpdateInfo(names=["w"], dtype_names=["float32"], shapes=[[32]])
+    received = []
+
+    def receive(**kwargs):
+        received.append(list(kwargs["metadata"]))
+        assert kwargs["post_unpack_func"] == engine.model.load_weights
+        assert kwargs["buffer_size_bytes"] == 13
+        assert kwargs["num_buffers"] == 2
+
+    with patch("vllm_ascend.distributed.weight_transfer.hccl_engine.bounded_broadcast_consumer", side_effect=receive):
+        engine.receive_weights(full)
+        engine.receive_weights(HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[]))
+    assert received == [[("w", ([32], torch.float32))]] * 2
+    assert torch.npu.Stream.call_count == 3
+    with pytest.raises(TypeError, match="packed_transfer_mode"):
+        HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[], packed_transfer_mode="legacy")
+
+
+@pytest.mark.parametrize("name,value", [("packed_buffer_size_bytes", 64), ("packed_num_buffers", 3)])
+def test_bounded_defaults_are_fixed_for_the_session(name, value):
+    engine = _make_engine()
+    engine._init_info = HCCLWeightTransferInitInfo(
+        master_address="host",
+        master_port=1234,
+        rank_offset=1,
+        world_size=2,
+        packed=True,
+        packed_transfer_mode="bounded",
+    )
+    with pytest.raises(ValueError, match=name):
+        engine._wire_params(HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[], **{name: value}))
+
+
+def test_bounded_failure_closes_worker_session():
+    engine = _make_engine()
+    engine._init_info = HCCLWeightTransferInitInfo(
+        master_address="host",
+        master_port=1234,
+        rank_offset=1,
+        world_size=2,
+        packed=True,
+        packed_transfer_mode="bounded",
+    )
+    group = engine.model_update_group = MagicMock()
+    with (
+        patch.object(NCCLWeightTransferEngine, "update_weights", side_effect=RuntimeError("copy failed")),
+        pytest.raises(RuntimeError, match="copy failed"),
+    ):
+        engine.update_weights({})
+    assert engine.model_update_group is None
+    group.close.assert_called_once_with()
+
+
+def test_bounded_init_rejects_quantized_model_before_rendezvous():
+    engine = _make_engine()
+    engine.model_config.quantization = "awq"
+    info = HCCLWeightTransferInitInfo(
+        master_address="host",
+        master_port=1234,
+        rank_offset=1,
+        world_size=2,
+        packed=True,
+        packed_transfer_mode="bounded",
+    )
+    with (
+        patch.object(engine, "_stateless_init_process_group") as rendezvous,
+        pytest.raises(ValueError, match="non-quantized"),
+    ):
+        engine.init_transfer_engine(info)
+    rendezvous.assert_not_called()
+
+
+def test_bounded_trainer_passes_metadata_and_reuses_session_streams():
+    engine = _trainer(True)
+    engine.model_update_group = MagicMock()
+    engine.packed_transfer_mode = "bounded"
+    engine.packed_num_buffers = 2
+    metadata = [ParamMeta(name="w", dtype=torch.float32, shape=(32,))]
+    pair = ("w", torch.arange(32, dtype=torch.float32))
+    calls = []
+
+    def broadcast(**kwargs):
+        assert list(kwargs["metadata"]) == [("w", ((32,), torch.float32))]
+        received = list(kwargs["iterator"])
+        assert len(received) == 1 and received[0][0] == "w"
+        assert received[0][1] is pair[1]
+        assert kwargs["group"] is engine.model_update_group
+        assert kwargs["src"] == 0
+        calls.append(kwargs["streams"])
+
+    namespace = "vllm_ascend.distributed.weight_transfer.hccl_engine"
+    with (
+        patch.object(engine, "_checked_iter", side_effect=lambda *_: iter([pair])),
+        patch(f"{namespace}.bounded_broadcast_producer", side_effect=broadcast),
+        patch(f"{namespace}.packed_broadcast_producer") as legacy,
+    ):
+        for _ in range(2):
+            if vllm_version_is("0.32.0"):
+                engine._broadcast(engine.source, metadata)
+            else:
+                engine._broadcast(metadata, 0)
+    legacy.assert_not_called()
+    assert calls[0] is calls[1]
+    assert len(calls[0]) == 2
+    assert torch.npu.Stream.call_count == 2
