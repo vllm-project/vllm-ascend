@@ -313,6 +313,9 @@
 #       grouping through `vllm_ascend.core.kv_cache_config_builder`, selected
 #       by `NPUPlatform.get_kv_cache_config_builder_cls`; its default
 #       materialization delegates back to these patched functions.
+#       For Model Runner V2, shared attention/state page alignment runs before
+#       grouping in the planner, rather than during worker spec collection.
+#       GLM-Next and QSA retain their model-specific page classes here.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:

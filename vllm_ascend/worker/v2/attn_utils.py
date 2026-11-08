@@ -184,43 +184,9 @@ def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfi
     return replace(kv_cache_config, kv_cache_groups=groups)
 
 
-def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -> None:
-    """Align dense K/V segments before padding a shared Attention/Mamba pool."""
-    # MLA and compressed-cache subclasses manage their own storage layouts.
-    attention_specs = {
-        name: spec for name, spec in kv_cache_specs.items() if type(spec) in (FullAttentionSpec, SlidingWindowSpec)
-    }
-    if not attention_specs:
-        return
-    reference = max(attention_specs.values(), key=lambda spec: spec.real_page_size_bytes)
-    page_size = reference.real_page_size_bytes
-    for layer_name, spec in attention_specs.items():
-        # Ascend packs each layer as [all K blocks][all V blocks]. Equal
-        # padded pages alone do not isolate block IDs: a smaller SWA K segment
-        # can overlap another request's full-attention V block. Grow scheduler
-        # blocks before padding; the backend still splits them into kernel blocks.
-        if (
-            page_size % spec.real_page_size_bytes
-            or spec.head_size * reference.head_size_v != reference.head_size * spec.head_size_v
-        ):
-            raise ValueError(
-                f"Cannot align hybrid attention K/V pages for {layer_name}: "
-                "the shared contiguous cache requires matching K/V size ratios "
-                "and divisible unpadded page sizes."
-            )
-        ratio = page_size // spec.real_page_size_bytes
-        if ratio > 1:
-            kv_cache_specs[layer_name] = replace(
-                spec,
-                block_size=spec.block_size * ratio,
-                page_size_padded=max(spec.page_size_padded, page_size) if spec.page_size_padded is not None else None,
-            )
-
-
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Collect owner specs and retain the attention-before-state ordering."""
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
@@ -264,43 +230,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if not vllm_version_is("0.32.0") and getattr(attn_module, "is_draft_layer", False):
             spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
-        if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
-            attention_layer_names.append(layer_name)
-            continue
 
-    if mamba_specs:
-        # QSA/CSA hybrid models (descriptor-native cache owners) need
-        # the descriptor-native cache alignment: every align_kv_cache_with_mamba
-        # attention layer (including the QSA main owners) pads its page up
-        # to the Mamba page, while Mamba keeps its own page size. The
-        # Qwen4 hybrid planner and the upstream page-size unification then
-        # receive the same geometry the Qwen4 cache planner requires.
-        descriptor_native_attn = {
-            name
-            for name, layer in attn_layers.items()
-            if isinstance(kv_cache_spec.get(name), AttentionSpec)
-            and getattr(layer.get_attn_backend(), "uses_descriptor_cache_view", False)
-        }
-        if descriptor_native_attn:
-            mamba_page_size = max(spec.page_size_bytes for spec in mamba_specs.values())
-            for layer_name in attention_layer_names:
-                spec = kv_cache_spec[layer_name]
-                if spec.page_size_bytes < mamba_page_size:
-                    kv_cache_spec[layer_name] = replace(spec, page_size_padded=mamba_page_size)
-            kv_cache_spec.update(mamba_specs)
-        else:
-            _align_hybrid_attention_page_sizes(kv_cache_spec)
-            common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
-            for layer_name in attention_layer_names:
-                spec = kv_cache_spec[layer_name]
-                page_size_padded = (
-                    common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
-                )
-                kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
-            for layer_name, spec in mamba_specs.items():
-                if spec.page_size_bytes < common_page_size:
-                    mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
-            kv_cache_spec.update(mamba_specs)
+    kv_cache_spec.update(mamba_specs)
 
     return kv_cache_spec
 

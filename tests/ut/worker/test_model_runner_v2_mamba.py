@@ -22,11 +22,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_planning import (
+    _align_hybrid_attention_page_sizes,
+    align_hybrid_kv_cache_specs,
+)
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
-    _align_hybrid_attention_page_sizes,
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
@@ -944,7 +947,7 @@ def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
 
 
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
-def test_mamba_spec_follows_aligned_attention_spec(
+def test_spec_collection_keeps_owner_pages_until_planning(
     mock_get_layers,
 ):
     attention_spec = FullAttentionSpec(
@@ -980,13 +983,19 @@ def test_mamba_spec_follows_aligned_attention_spec(
     specs = get_kv_cache_spec(_mock_vllm_config())
 
     assert list(specs) == ["full_attn", "linear_attn"]
-    assert specs["full_attn"].page_size_bytes == 20
-    assert specs["full_attn"].page_size_padded == 20
+    assert specs["full_attn"] is attention_spec
+    assert specs["linear_attn"] is mamba_spec
+    assert attention_spec.page_size_padded is None
+
+    planned = align_hybrid_kv_cache_specs(specs)
+    assert planned["full_attn"].page_size_bytes == 20
+    assert planned["full_attn"].page_size_padded == 20
+    assert specs["full_attn"].page_size_padded is None
 
 
 @pytest.mark.parametrize("include_mamba", [False, True])
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
-def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
+def test_planning_rejects_nondivisible_hybrid_attention_pages(
     mock_get_layers,
     include_mamba,
 ):
@@ -1034,8 +1043,11 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
     }
 
     if include_mamba:
+        specs = get_kv_cache_spec(_mock_vllm_config())
+        assert specs["small_attn"] is small_attention_spec
+        assert specs["large_attn"] is large_attention_spec
         with pytest.raises(ValueError, match="Cannot align hybrid attention K/V pages for small_attn"):
-            get_kv_cache_spec(_mock_vllm_config())
+            align_hybrid_kv_cache_specs(specs)
     else:
         del mock_get_layers.return_value["linear_attn"]
         # Non-hybrid allocation does not use the shared Attention/Mamba layout.
@@ -1090,7 +1102,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
-    specs = get_kv_cache_spec(config)
+    specs = align_hybrid_kv_cache_specs(get_kv_cache_spec(config))
     num_blocks = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,

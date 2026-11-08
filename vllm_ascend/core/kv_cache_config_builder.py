@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
@@ -44,6 +45,7 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.qwen4_exp.cache_config import (
+    get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
@@ -63,8 +65,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
-        the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
+        Precedence: GLM-Next and QSA, then DSV4.1 / mixed-page-size shared
+        slots, then Kimi-K3 DSpark, then vLLM's generic grouping.
         """
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
@@ -73,6 +75,13 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
             return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
+
+        qwen_groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
+        if qwen_groups is not None:
+            return qwen_groups
+
+        if vllm_config.use_v2_model_runner:
+            kv_cache_spec = align_hybrid_kv_cache_specs(kv_cache_spec)
 
         if is_deepseek_v41_cache(kv_cache_spec):
             return make_cache_groups(group_cache_specs(kv_cache_spec))

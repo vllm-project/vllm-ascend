@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
+from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 
 QSA_MAIN: Final = "qsa_main"
 QSA_RAW: Final = "qsa_raw"
@@ -628,6 +629,8 @@ def get_qwen4_exp_kv_cache_groups(
     owners = _prepare_qsa_composite_groups(kv_cache_spec)
     if owners is None:
         return None
+    if vllm_config.use_v2_model_runner:
+        kv_cache_spec = align_hybrid_kv_cache_specs(kv_cache_spec, descriptor_native=True)
     groups = get_default_groups(vllm_config, kv_cache_spec)
     groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
     groups = _merge_mamba_state_groups(groups, len(owners[0]))
