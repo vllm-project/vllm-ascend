@@ -11,6 +11,14 @@ from vllm.logger import logger
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import PoolObject
 
 
+class MemCacheReadLeaseError(RuntimeError):
+    """The SDK returned failures for individual read leases."""
+
+    def __init__(self, statuses: set[int]):
+        self.statuses = frozenset(statuses)
+        super().__init__(f"MemCache read lease failed with statuses {sorted(statuses)}")
+
+
 @dataclass
 class StoreIOSession:
     plans: tuple[PoolObject, ...]
@@ -88,8 +96,10 @@ class MemcacheStoreLayoutIO:
                         for key in failed:
                             del self._references[key]
                             del self._deadlines[key]
-                if len(results) != len(fresh) or any(result != 0 for result in results):
-                    raise RuntimeError("MemCache read lease failed")
+                if len(results) != len(fresh):
+                    raise RuntimeError("MemCache returned an incomplete read lease response")
+                if statuses := {result for result in results if result != 0}:
+                    raise MemCacheReadLeaseError(statuses)
             if not writing and keys:
                 infos = self.backend.batch_get_key_info(keys, for_load=True)
                 if len(infos) != len(plans) or any(

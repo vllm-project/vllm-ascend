@@ -10,7 +10,10 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import HANDOFF_DEADLINE_MARGIN_S
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import block_hash_to_str
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import MemcacheStoreLayoutIO
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import (
+    MemCacheReadLeaseError,
+    MemcacheStoreLayoutIO,
+)
 
 _HANDOFF_RELEASE_GRACE_S = 2.0
 _HANDOFF_LEASE_GRACE_S = 30.0
@@ -25,6 +28,7 @@ class PoolPDWorker:
         self.tails = []
         self.handoff_requests = []
         self.handoff_holds = []
+        self.failed_handoffs: set[str] = set()
         self.results = KVConnectorTransferResults()
 
     def _plans(self, request, *, tail_only, writing):
@@ -101,7 +105,9 @@ class PoolPDWorker:
         for request in self.handoff_requests:
             remaining = request.handoff_deadline - time.time()
             if remaining <= HANDOFF_DEADLINE_MARGIN_S:
-                raise RuntimeError("Pool PD handoff protection expired before acquisition")
+                self.failed_handoffs.add(request.request_id)
+                logger.warning("Pool PD handoff expired before acquisition req=%s", request.request_id)
+                continue
             # Use an independent local owner for each handoff. The SDK tracks
             # operation leases per client/key; no stale GVA is reused. Native
             # TTL exceeds the bounded hold, including clock-skew allowance.
@@ -109,10 +115,17 @@ class PoolPDWorker:
                 self.transfer.io.backend, lease_ttl_ms=int((remaining + _HANDOFF_LEASE_GRACE_S) * 1000)
             )
             plans = self._plans(request, tail_only=False, writing=True)
-            session = io.begin(plans, writing=False)
+            try:
+                session = io.begin(plans, writing=False)
+            except MemCacheReadLeaseError as error:
+                self.failed_handoffs.add(request.request_id)
+                logger.warning("Pool PD handoff failed req=%s: %s", request.request_id, error)
+                continue
             self.handoff_holds.append((time.monotonic() + remaining + _HANDOFF_RELEASE_GRACE_S, io, session))
             if time.time() + HANDOFF_DEADLINE_MARGIN_S >= request.handoff_deadline:
-                raise RuntimeError("Pool PD handoff protection expired during acquisition")
+                self.failed_handoffs.add(request.request_id)
+                logger.warning("Pool PD handoff expired during acquisition req=%s", request.request_id)
+                continue
             logger.info(
                 "Pool PD HOLD req=%s objects=%d deadline=%.3f", request.request_id, len(plans), request.handoff_deadline
             )

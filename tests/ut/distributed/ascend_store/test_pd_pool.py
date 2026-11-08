@@ -6,14 +6,17 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.connector import LayerwisePoolConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.failure import install_handoff_failure_handler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
     POOL_PD_PROTOCOL,
     PoolPDMetadata,
     PoolPDRequest,
+    PoolPDWorkerMetadata,
     prompt_digest,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.scheduler import PoolPDScheduler
@@ -62,7 +65,7 @@ def test_pd_forwards_pool_checkpoint_completion_and_releases_pins():
     for rank in range(8):
         worker = object.__new__(KVPoolWorker)
         worker.shared_pool = SimpleNamespace(completed_events={meta.event_id: 1})
-        connector.worker = SimpleNamespace(pool=worker)
+        connector.worker = SimpleNamespace(pool=worker, failed_handoffs=set())
         ack = connector.build_connector_worker_meta()
         assert connector.build_connector_worker_meta() is None
         connector.update_connector_output(SimpleNamespace(finished_recving=None, kv_connector_worker_meta=ack))
@@ -549,11 +552,61 @@ def test_scheduler_protected_handoff_requires_fresh_deadline():
     assert scheduler.get_num_new_matched_tokens(req, 0) == (2, True)
 
 
-def test_handoff_acquisition_failure_cannot_emit_protection(monkeypatch):
+def test_handoff_acquisition_failure_does_not_stop_other_handoffs(monkeypatch):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
     backend = MemoryBackend()
     common, _ = transfer(backend, 2, 0, False, True)
     worker = PoolPDWorker(SimpleNamespace(shared_pool=common))
-    worker.handoff_requests = [PoolPDRequest("missing", 3, "prompt", [[1]], [], handoff_deadline=time.time() + 60)]
-    with pytest.raises(RuntimeError, match="read lease failed"):
-        worker._protect_handoffs()
-    assert not worker.handoff_holds
+    missing = PoolPDRequest("missing", 3, "missing", [[1]], [], handoff_deadline=time.time() + 60)
+    healthy = PoolPDRequest("healthy", 3, "healthy", [[2]], [], handoff_deadline=time.time() + 60)
+    metadata = PoolPDMetadata(step(), tails=[missing, healthy])
+    worker.prepare(metadata)
+    missing_keys = {plan.key for plan in worker._plans(missing, tail_only=False, writing=True)}
+    add_lease = backend.batch_add_lease
+
+    def evict_before_protection(keys, ttl):
+        # Both requests publish. One object is evicted before the hold.
+        backend.readable.difference_update(missing_keys)
+        return [-3102 if result else 0 for result in add_lease(keys, ttl)]
+
+    monkeypatch.setattr(backend, "batch_add_lease", evict_before_protection)
+    worker.finish()
+    assert worker.failed_handoffs == {"missing"}
+    assert len(worker.handoff_holds) == 1
+    assert backend.leases == {p.key for p in worker._plans(healthy, tail_only=False, writing=True)}
+    worker._reap_handoffs(all_holds=True)
+    assert not backend.leases
+
+
+def test_aggregated_rank_failure_is_finished_before_handoff(monkeypatch):
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    healthy = request([1, 2, 3], request_id="healthy")
+    missing = request([1, 2, 3], request_id="missing")
+    missing.client_index = 0
+    missing.get_finished_reason = lambda: FinishReason.ERROR
+    missing.take_events = lambda: None
+    missing.trace_headers = None
+    active = {r.request_id: r for r in (healthy, missing)}
+
+    def finish_requests(request_ids, status):
+        assert status == RequestStatus.FINISHED_ERROR
+        assert request_ids == {"missing"}
+        return [active.pop(rid) for rid in request_ids]
+
+    def update_from_output(scheduler, scheduler_output, runner_output):
+        assert active == {"healthy": healthy}
+        return {0: EngineCoreOutputs(outputs=[EngineCoreOutput(request_id="healthy", new_token_ids=[1])])}
+
+    monkeypatch.setattr(Scheduler, "update_from_output", update_from_output)
+    install_handoff_failure_handler()
+    install_handoff_failure_handler()  # Multiple pool schedulers share the class.
+    meta = PoolPDWorkerMetadata({1: 1}).aggregate(PoolPDWorkerMetadata({1: 1}, {"missing"}))
+    assert meta.completed_events == {1: 2}
+    model_output = SimpleNamespace(kv_connector_output=SimpleNamespace(kv_connector_worker_meta=meta))
+    outputs = Scheduler.update_from_output(SimpleNamespace(finish_requests=finish_requests), None, model_output)
+    healthy_output, failed_output = outputs[0].outputs
+    assert healthy_output.request_id == "healthy"
+    assert failed_output.request_id == "missing"
+    assert failed_output.finish_reason == FinishReason.ERROR
+    assert failed_output.kv_transfer_params is None

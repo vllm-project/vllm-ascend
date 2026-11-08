@@ -8,7 +8,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import PoolPDMetadata
+from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.failure import install_handoff_failure_handler
+from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import PoolPDMetadata, PoolPDWorkerMetadata
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.scheduler import PoolPDScheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.worker import PoolPDWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
@@ -39,6 +40,7 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
         self.requires_mamba_state_copy_after_layer_load = layerwise
         self.requires_mamba_state_copy_after_load = not layerwise
         if role == KVConnectorRole.SCHEDULER:
+            install_handoff_failure_handler()
             pool_scheduler = KVPoolScheduler(vllm_config, False, kv_cache_config)
             groups = pool_scheduler.shared_groups
             self.target_groups = tuple(groups["target_groups"])
@@ -105,7 +107,12 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
         # Pool saves pin committed Mamba checkpoints until every worker has
         # acknowledged publication. Forward the existing event protocol so
         # those references are released even after a request is cancelled.
-        return self.worker.pool.build_connector_worker_meta()
+        pool_meta = self.worker.pool.build_connector_worker_meta()
+        failures = self.worker.failed_handoffs
+        self.worker.failed_handoffs = set()
+        if pool_meta is None and not failures:
+            return None
+        return PoolPDWorkerMetadata(pool_meta.completed_events if pool_meta is not None else {}, failures)
 
     def has_pending_push_work(self):
         return bool(self.scheduler and self.scheduler.pool.has_pending_push_work())
