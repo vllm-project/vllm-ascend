@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 """Independent CPU oracle for native Qwen K/V and full GDN state transfer.
 
 Geometry matches the Qwen3.8-27B text config, without weights or NPU calls.
@@ -11,6 +12,14 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+
+import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+
+native_connector_module = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector")
+if not hasattr(native_connector_module.MooncakeStoreConnector, "_create_worker"):
+    pytest.skip("requires vLLM native Store device hooks (#66294)", allow_module_level=True)
+
+# isort: split
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
     HeadMajorStoreLayout,
     KeyMetadata,

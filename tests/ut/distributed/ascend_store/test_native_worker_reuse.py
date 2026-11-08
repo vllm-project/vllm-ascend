@@ -136,6 +136,10 @@ class NativeWorkerReuseTests(unittest.TestCase):
         worker.store = self.store
         return worker
 
+    @unittest.skipUnless(
+        (VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store/layout.py").is_file(),
+        "requires vLLM split Mooncake Store worker",
+    )
     def test_native_receiver_publishes_only_after_known_completion(self):
         steps = []
         worker = self.native_worker()
@@ -233,6 +237,8 @@ class NativeWorkerReuseTests(unittest.TestCase):
             {"MooncakeStoreWorker"},
             self.namespace,
         )
+        if not hasattr(self.namespace["MooncakeStoreWorker"], "_close_store"):
+            self.skipTest("requires vLLM native Store close hook (#66294)")
         load_classes(STORE / "native_worker.py", {"AscendNativeStoreWorker"}, self.namespace)
         cls = self.namespace["AscendNativeStoreWorker"]
         worker = cls.__new__(cls)

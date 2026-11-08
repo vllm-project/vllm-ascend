@@ -46,6 +46,7 @@ def stub_imports(path: Path) -> None:
         sys.modules[node.module] = module
 
 
+@unittest.skipUnless((STORE / "layout.py").is_file(), "requires vLLM split Mooncake Store implementation")
 class NativeSchedulerReuseTest(unittest.TestCase):
     modules = patch.dict(sys.modules)
     data: ClassVar[Any]
@@ -54,6 +55,7 @@ class NativeSchedulerReuseTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.modules.start()
+        cls.addClassCleanup(cls.modules.stop)
         stub_imports(STORE / "data.py")
         torch_stub = types.ModuleType("torch")
         torch_stub.__dict__.update(cuda=types.SimpleNamespace(Event=object))
@@ -64,10 +66,6 @@ class NativeSchedulerReuseTest(unittest.TestCase):
         stub_imports(STORE / "scheduler.py")
         sys.modules["vllm.v1.attention.backends.utils"].__dict__.update(NULL_BLOCK_ID=0)
         cls.native = load(NATIVE + ".scheduler", STORE / "scheduler.py")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.modules.stop()
 
     def setUp(self):
         self.scheduler = self.native.MooncakeStoreScheduler.__new__(self.native.MooncakeStoreScheduler)
