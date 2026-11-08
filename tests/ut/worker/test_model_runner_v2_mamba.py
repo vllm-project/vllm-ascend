@@ -1088,7 +1088,6 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     }
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
     specs = get_kv_cache_spec(config)

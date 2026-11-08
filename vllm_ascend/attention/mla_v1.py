@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -163,6 +163,22 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AttentionSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if not vllm_config.use_v2_model_runner:
+            return spec
+        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        values.update(
+            num_heads=spec.num_heads
+            if vllm_config.model_config.hf_text_config.model_type == "kimi_linear"
+            else self.num_heads,
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
+        )
+        return self.impl.customize_kv_cache_spec(AscendMLAAttentionSpec(**values))
 
 
 @dataclass
@@ -1075,6 +1091,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+    def customize_kv_cache_spec(self, spec: AscendMLAAttentionSpec) -> AscendMLAAttentionSpec:
+        """Describe the format already selected by this execution instance."""
+        if self.fa_quant_layer:
+            return replace(
+                spec,
+                head_size=self.head_size + self.qk_rope_head_dim,
+                dtype=self.dtype,
+                cache_dtype_str=None,
+            )
+        return spec
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config

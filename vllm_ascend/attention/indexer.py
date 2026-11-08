@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
@@ -7,6 +7,7 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -35,10 +36,12 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.utils import (
     _round_up,
     enable_sfa_dcp_replicated_indexer,
@@ -86,6 +89,31 @@ class AscendSFAIndexerMetadata:
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
     # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
+
+
+class AscendSFAIndexerCache(DeepseekV32IndexerCache):
+    """Cache owner whose storage spec is supplied by its indexer backend."""
+
+    align_kv_cache_with_mamba = False
+
+    def __init__(self, source: nn.Module, spec: AscendSFAIndexerCacheSpec) -> None:
+        nn.Module.__init__(self)
+        self.prefix = source.prefix
+        self.kv_cache = source.kv_cache
+        self.cache_config = source.cache_config
+        self.head_dim = spec.head_size
+        self.dtype = spec.dtype
+        self.cache_spec = spec
+        self.cache_enabled = True
+        get_current_vllm_config().compilation_config.static_forward_context[self.prefix] = self
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
+        if not self.cache_enabled:
+            return None
+        return replace(self.cache_spec, block_size=vllm_config.cache_config.block_size)
+
+    def get_attn_backend(self):
+        return AscendSFAIndexerBackend
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -208,6 +236,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.c4_k_cache_dtype, self.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
             self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
 
+        vllm_config = get_current_vllm_config()
+        if vllm_config.use_v2_model_runner:
+            spec = self.get_kv_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
+            self.k_cache = AscendSFAIndexerCache(self.k_cache, spec)
+            vllm_indexer.k_cache = self.k_cache
+
         model_type = get_current_vllm_config().model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
@@ -237,6 +271,28 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @property
     def enable_sparse_li_quant(self) -> bool:
         return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+
+    def get_kv_cache_spec(self, source: AttentionSpec, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec:
+        """Describe the data/scale format selected once in backend initialization."""
+        c4, c8 = self.enable_sparse_li_c4, self.enable_sparse_li_c8
+        values = {field.name: getattr(source, field.name) for field in fields(source) if field.init}
+        values.update(
+            head_size=self.head_dim // 2 if c4 else self.head_dim,
+            dtype=self.c4_k_cache_dtype if c4 else self.c8_k_cache_dtype if c8 else vllm_config.model_config.dtype,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype
+            if c4 or c8
+            else None
+            if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
+            else "auto",
+            scale_dim=self.head_dim // 32 if c4 else 1 if c8 else 0,
+            scale_dtype=self.c4_k_scale_cache_dtype if c4 else self.c8_k_scale_cache_dtype if c8 else torch.int8,
+            cache_sparse_li_c4=c4,
+            cache_sparse_li_c8=c8,
+            sfa_dcp_replicated_indexer_size=vllm_config.parallel_config.decode_context_parallel_size
+            if enable_sfa_dcp_replicated_indexer(vllm_config)
+            else 1,
+        )
+        return AscendSFAIndexerCacheSpec(**values)
 
     def process_weights_after_loading(self) -> None:
         if not self.enable_sparse_li_quant:
