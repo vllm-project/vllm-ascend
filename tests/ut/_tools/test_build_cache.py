@@ -2095,3 +2095,55 @@ file(WRITE "{result}" "${{VLLM_ASCEND_BUILD_CACHE_DIR}}")
     build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
     assert "VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache" in build_script
     assert "VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/../build_cache" not in build_script
+
+
+class TestReapStaleOpcLocks:
+    """_reap_stale_opc_locks removes kernel_meta.lock files owned by dead
+    processes (issue: one crashed build must not poison later retries) and
+    keeps locks owned by live ones."""
+
+    @pytest.fixture()
+    def engine(self):
+        return _load_engine("build_cache_reap_engine")
+
+    @staticmethod
+    def _make_lock(root: Path, kernel: str, content: str) -> Path:
+        meta_dir = root / f"kernel_meta_{kernel}"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        lock = meta_dir / "kernel_meta.lock"
+        lock.write_text(content, encoding="utf-8")
+        return lock
+
+    @pytest.fixture()
+    def dead_pid(self) -> int:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        proc.wait()
+        assert proc.returncode == 0
+        return proc.pid
+
+    def test_removes_lock_of_dead_process(self, engine, tmp_path, dead_pid):
+        lock = self._make_lock(tmp_path, "dead_owner", str(dead_pid))
+        assert engine._reap_stale_opc_locks(tmp_path) == 1
+        assert not lock.exists()
+
+    def test_keeps_lock_of_live_process(self, engine, tmp_path):
+        lock = self._make_lock(tmp_path, "live_owner", str(os.getpid()))
+        assert engine._reap_stale_opc_locks(tmp_path) == 0
+        assert lock.exists()
+
+    def test_removes_lock_with_garbage_content(self, engine, tmp_path):
+        lock = self._make_lock(tmp_path, "garbage_owner", "not-a-pid")
+        assert engine._reap_stale_opc_locks(tmp_path) == 1
+        assert not lock.exists()
+
+    def test_empty_tree_is_noop(self, engine, tmp_path):
+        assert engine._reap_stale_opc_locks(tmp_path) == 0
+
+    def test_mixed_locks_only_dead_removed(self, engine, tmp_path, dead_pid):
+        dead_lock = self._make_lock(tmp_path, "dead", str(dead_pid))
+        live_lock = self._make_lock(tmp_path, "live", str(os.getpid()))
+        assert engine._reap_stale_opc_locks(tmp_path) == 1
+        assert not dead_lock.exists()
+        assert live_lock.exists()
