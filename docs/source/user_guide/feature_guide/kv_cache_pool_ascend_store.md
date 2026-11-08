@@ -1670,9 +1670,11 @@ unchanged.
 The scheduler, group recoverability checks, pinned checkpoint lifecycle,
 rank acknowledgements, lookup protocol, and metrics are inherited from Core's
 Mooncake Store connector. The NPU worker adapts registration, strided attention
-descriptors, and completion events. Attention objects contain only their hash
-interval; recurrent objects contain the **complete checkpoint at that boundary**,
-not a proportional slice of the state. A hash match alone is insufficient:
+descriptors, and completion events. Like Core, Store objects contain complete
+logical blocks, with no inter-layer padding. Partial-tail keys identify the
+hash boundary up to which each block can be reused. Recurrent objects contain
+the **complete checkpoint at that boundary**, not a proportional slice of the
+state. Fine-grained logical hits do not imply PMU-sized I/O objects. A hash match alone is insufficient:
 Core only advertises a boundary recoverable across all required cache groups.
 Physical page sizes and local APC arbitration are not changed.
 
@@ -1698,6 +1700,24 @@ show a non-page-aligned, hash-aligned hit while the latter remains zero.
 Compare restored output with a cold reference under the same topology and
 sampling settings. A short-output comparison is a functional check, not a full
 model-accuracy or throughput benchmark.
+
+For a pure P/D prefill producer, Ascend's existing scheduler/coordinator omit
+the EAGLE checkpoint backoff. The hash Store scheduler and worker reuse that
+same role policy, so Attention payload keys and Mamba state keys describe the
+same boundary. This does not disable MTP or change engine configuration.
+Consumers and `kv_both` deployments keep upstream Store's EAGLE policy.
+
+For FabricMem runtimes that fail concurrent Store virtual-address reservations,
+`kv_connector_extra_config.npu_store_setup_lock` optionally specifies an absolute,
+host-local lock-file path shared by the workers. The parent directory must exist
+and be writable. The lock is disabled by default, waits at most 60 seconds, and
+serializes only worker initialization, not requests or data transfers. Use a
+task-specific path; do not share it with unrelated deployments. Separately,
+Fabric shared-handle self-import is unsupported by CANN: use a separate Store
+provider with capacity and configure inference clients with
+`"mode": "standalone-store"` and `"global_segment_size": "0GB"`
+if the installed SDK routes same-process pool reads through Fabric self-import.
+This deployment choice does not change Core's hash-boundary lookup or local APC.
 
 ## FAQ
 

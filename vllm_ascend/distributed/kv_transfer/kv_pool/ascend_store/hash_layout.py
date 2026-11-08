@@ -2,16 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU descriptors for the upstream Store hash-boundary protocol.
 
-Attention chunks contain exactly their tokens, never the intervening slab
-padding. Recurrent chunks contain a complete checkpoint, not a fraction of a
-state tensor. The upstream scheduler owns the checkpoint's token boundary.
+Store objects contain complete logical blocks, never intervening slab padding.
+Core's hash-boundary keys allow partial logical hits without fractional
+recurrent state. The upstream scheduler owns each checkpoint's token boundary.
 """
 
 import itertools
 from collections.abc import Sequence
 
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import RankLocalStoreLayout
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import RankLocalStoreLayout
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout":
+        raise
+    # Before Core split the layout module, the same public Store layout
+    # protocol lived in data.py. Reuse it without changing Core.
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import RankLocalStoreLayout
 
 
 class AscendHashStoreLayout(RankLocalStoreLayout):
@@ -20,11 +28,18 @@ class AscendHashStoreLayout(RankLocalStoreLayout):
         self.is_state = is_state
         self.head_major = head_major
         self._views: list[torch.Tensor] = []
+        self._group_views: Sequence[torch.Tensor] | None = None
+
+    def bind_group_views(self, views: Sequence[torch.Tensor]) -> None:
+        # Older Core workers pass one flattened representative-tensor list to
+        # every group, dropping recurrent components. Bind the actual group
+        # views before upstream registration starts its transfer threads.
+        self._group_views = views
 
     def register_kv_caches(self, kv_caches: Sequence[torch.Tensor], num_blocks: int) -> None:
         # The upstream worker already groups kernel blocks under manager dim 0.
         # Retain logical views: raw-storage spans can include other layers.
-        views = [view for view in kv_caches if view.numel()]
+        views = [view for view in (self._group_views if self._group_views is not None else kv_caches) if view.numel()]
         if not views:
             raise ValueError("Hash recovery requires every cache group to expose transferable views")
         for view in views:
@@ -90,6 +105,17 @@ class AscendHashStoreLayout(RankLocalStoreLayout):
                 for token in range(lo, hi):
                     yield base + offset + token * token_stride, suffix_bytes
 
+    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
+        # Core publishes scheduler-pinned boundary checkpoints through this
+        # entrypoint, not prepare_values. A boundary object contains the whole
+        # logical block (all recurrent components), excluding slab padding.
+        if block_id <= 0 or block_id >= self._num_blocks:
+            raise ValueError("Cannot restore or publish a null checkpoint block")
+        segments = [segment for view in self._views for segment in self._segments(view, block_id, 0, self.block_size)]
+        if not segments:
+            raise ValueError("Hash Store object has no payload")
+        return [address for address, _ in segments], [size for _, size in segments]
+
     def prepare_values(self, chunks, block_ids, shard_ids):
         if len(chunks) != len(shard_ids) or any(shard != 0 for shard in shard_ids):
             raise ValueError("Ascend hash Store uses rank-local objects")
@@ -97,20 +123,19 @@ class AscendHashStoreLayout(RankLocalStoreLayout):
         for start, end in chunks:
             if start < 0 or end <= start or start % self.hash_block_size or end % self.hash_block_size:
                 raise ValueError("Store transfer must cover positive, hash-aligned token ranges")
-            block_index, offset = divmod(start, self.block_size)
+            block_index = start // self.block_size
             if (end - 1) // self.block_size != block_index:
                 raise ValueError("A hash Store object cannot cross a manager page")
             block_id = block_ids[block_index]
             if block_id <= 0 or block_id >= self._num_blocks:
                 raise ValueError("Cannot restore or publish a null checkpoint block")
-            segments = [
-                segment
-                for view in self._views
-                for segment in self._segments(view, block_id, offset, end - start + offset)
-            ]
-            if not segments:
-                raise ValueError("Hash Store object has no payload")
-            addresses.append([address for address, _ in segments])
-            sizes.append([size for _, size in segments])
+            # Core keys both normal objects and pinned partial-tail objects by
+            # hash boundaries. Their payload schema must be identical: whole
+            # logical block, even when only its prefix will be reused. Splitting
+            # attention into PMU-sized objects conflicts with Core's group masks
+            # and boundary puts, and is not required for hash-grained hits.
+            address, size = self.prepare_value_for_block(block_id)
+            addresses.append(address)
+            sizes.append(size)
             used_blocks.append(block_id)
         return addresses, sizes, used_blocks
