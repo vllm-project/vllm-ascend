@@ -57,8 +57,8 @@ Weights and datasets were mounted read-only.
 | Item | Current YAML configuration |
 | --- | --- |
 | Model | Kimi-K3 W4A8 MXFP/QuaRot with 256 routed experts |
-| Model path | `/mnt/weight/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256` |
-| Dataset path | `/mnt/weight/modelscope/hub/datasets/CuiZ2007/gsm8k` |
+| Model path | `/root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256` |
+| Dataset path | `/root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k` |
 | Dataset files | `test.jsonl`: first 500 test questions; `train.jsonl`: four-shot examples |
 | Service port / runner | `SERVER_PORT=8080` / `VLLM_USE_V2_MODEL_RUNNER=1` |
 | Communication buffer / CPU threads | `HCCL_BUFFSIZE=800` / `OMP_NUM_THREADS=1` |
@@ -122,6 +122,10 @@ Each run was checked for complete question IDs, correspondence to the original q
 | Nightly name dispatch, parameters, and document value consistency | Passed |
 | Dataset preparation | First 500 test questions verified; 7,473 training records |
 | Full formatting check, `bash format.sh ci` | Pending; GitHub hook downloads timed out and no usable Bash is available locally |
-| A5 service startup, inference, and 500-question evaluation using the current YAML | Pending |
-| Nightly CI execution | Pending |
+| A5 service startup, inference, and 500-question evaluation using the current YAML | First run failed during model path resolution; inference and evaluation did not start. Cache paths updated; rerun pending |
+| Nightly CI execution | First run completed on 2026-11-08: vllm-ascend build/install passed; YAML test failed during model path resolution. Rerun pending |
 | Native-scoring acceptance calibration | Pending; currently uses the user-selected baseline of 60.0% ±3.0 percentage points |
+
+First nightly run: [42462410488](https://github.com/vllm-project/vllm-ascend/actions/runs/42462410488).
+ModelScope reported missing cached files with network downloads disabled.
+The YAML now uses `/root/.cache` paths; validation of the updated paths awaits a rerun.
