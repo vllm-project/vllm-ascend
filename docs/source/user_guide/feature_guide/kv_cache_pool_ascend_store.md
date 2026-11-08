@@ -1642,6 +1642,63 @@ QoS can be configured through `kv_connector_extra_config`, which is injected int
 
 Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring `qos_priority` also creates it.
 
+## Opt-in external hash-boundary recovery
+
+Whole-page pool I/O (`pool_prefix_mode="block_only"`) and local APC matches
+have different granularities. To restore an external prefix at a hash boundary
+inside a physical page, explicitly select the hash connector entrypoint:
+
+```json
+{
+  "kv_connector": "AscendStoreConnector",
+  "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hash_connector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "pool_prefix_mode": "hash",
+    "backend": "mooncake",
+    "load_async": true
+  }
+}
+```
+
+This entrypoint requires a vLLM Core version with Mooncake Store
+`prefix_cacheable_groups` and partial-tail boundary-state handoff APIs. It fails
+explicitly on older versions; it does not patch Core or silently fall back to
+whole-page recovery. The existing connector entrypoint and its defaults are
+unchanged.
+
+The scheduler, group recoverability checks, pinned checkpoint lifecycle,
+rank acknowledgements, lookup protocol, and metrics are inherited from Core's
+Mooncake Store connector. The NPU worker adapts registration, strided attention
+descriptors, and completion events. Attention objects contain only their hash
+interval; recurrent objects contain the **complete checkpoint at that boundary**,
+not a proportional slice of the state. A hash match alone is insufficient:
+Core only advertises a boundary recoverable across all required cache groups.
+Physical page sizes and local APC arbitration are not changed.
+
+The initial implementation supports rank-local Mooncake bulk transfers,
+asynchronous loads, NHD/HND attention views, and contiguous recurrent checkpoint
+components, including inter-layer slab padding. It rejects layerwise transfers,
+context parallelism, store TP sharing, custom memory pools, sleep mode, and
+HiSparse host caches. Other AscendStore backends are not supported by this
+entrypoint. Hash objects use a separate schema namespace and cannot be mixed
+with legacy whole-page objects. Use consistent model weights and configuration
+across workers sharing a pool, as with the upstream connector.
+
+For P/D deployments, place this connector on P (for example, in a
+`MultiConnector` with the P/D transport). External Store recovery on P and KV
+transfer to D are separate operations. Verify both, and do not interpret D's
+transport hits as proof of a fine-grained Store hit on P.
+
+To validate external recovery, seed a prefix whose end is not a physical-page
+boundary, wait for Store writes, reset **local APC only**, and submit a request
+sharing that prefix. Compare counter deltas for
+`vllm:external_prefix_cache_hits` and `vllm:prefix_cache_hits`: the former must
+show a non-page-aligned, hash-aligned hit while the latter remains zero.
+Compare restored output with a cold reference under the same topology and
+sampling settings. A short-output comparison is a functional check, not a full
+model-accuracy or throughput benchmark.
+
 ## FAQ
 
 For common environment, installation, and general parameter issues, see the [Public FAQ](../../faqs.md). This chapter only covers issues specific to this feature.
