@@ -354,6 +354,35 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+### 9.3 Model Runner V2 Decode Submission
+
+Audited Qwen3.8 Flash Next Model Runner V2 consumers automatically use optimistic
+CPU length bounds while exact execution lengths remain on device. This capability
+is enabled by default for supported consumers and requires no configuration switch.
+The resolved target architecture must be `Qwen4ExpForCausalLM` or
+`Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
+
+The model checks the initialized target and MTP draft attention consumers once
+after KV initialization. A supported model skips both the corrected-count D2H
+copy and its CPU synchronization, using the runner's existing paired exemption.
+Exact positions, accepted counts, KV slots and recurrent state still use device
+state. Existing connector loads, waits, acknowledgements and errors are unchanged.
+
+The same capability covers text and ordinary non-realtime multimodal requests.
+Completed prompts use the existing encoder gather fast path; there are no extra
+media certificates or PD observers.
+
+Unknown target/draft consumers, context parallelism, sparse KV offload and
+realtime media retain exact CPU synchronization. The runner's existing PP
+exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off,
+prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement.
+Underlying model/runtime restrictions still apply.
+
+The decision is fixed for the model state's initialized lifetime so production
+and consumption cannot switch independently between batches. Changes to runtime
+configuration or attention consumers require model-state reinitialization.
+Initialization drains the old copy stream once before enabling the exemption.
+
 ## 10 FAQ
 
 For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md).

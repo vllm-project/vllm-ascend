@@ -21,7 +21,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.triton.reject_sample import (
+from vllm_ascend.ops.triton.v1.reject_sample import (
     _REJECTION_RANDOM_SAMPLE_BLOCK_VERIFY_KERNEL,
     _REJECTION_RANDOM_SAMPLE_KERNEL,
     _SAMPLE_RECOVERED_TOKENS_KERNEL,
@@ -773,6 +773,7 @@ def sample_recovered_tokens(
             vocab_size=vocab_size,
             no_draft_probs=draft_probs is None,
             sub_block=4 * 1024,
+            max_spec_len=max_spec_len,
         )
     elif use_block_verify:
         sample_recovered_tokens_blockwise_pytorch(

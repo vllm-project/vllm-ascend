@@ -7,6 +7,7 @@ import torch
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.platforms.interface import Platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -344,8 +345,9 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
 
     _setup_compile_backend(config, compile_backend="test_backend")
 
+    assert "vllm::glm5next_kda_forward" not in compilation_config.splitting_ops
     expected_count = int(mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE))
-    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward") == expected_count
+    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward_with_output") == expected_count
     if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
         assert compilation_config.splitting_ops == []
 
@@ -429,6 +431,11 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    def test_get_kv_cache_config_builder_cls(self):
+        assert NPUPlatform.get_kv_cache_config_builder_cls(self.mock_vllm_config()) == (
+            "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+        )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
@@ -2164,6 +2171,128 @@ class TestNPUPlatform(TestBase):
         self.platform.update_block_size_for_backend(vllm_config)
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
+
+    def _run_hook_with_derived_size(self, model_type: str, block_size: int, derived: int):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.hf_config.model_type = model_type
+        vllm_config.cache_config.block_size = block_size
+        vllm_config.cache_config.enable_prefix_caching = True
+
+        def write_derived_size(cls, config):
+            config.cache_config.block_size = derived
+
+        with patch.object(Platform, "update_block_size_for_backend", classmethod(write_derived_size)):
+            self.platform.update_block_size_for_backend(vllm_config)
+
+        return vllm_config.cache_config.block_size
+
+    def test_update_block_size_for_backend_leaves_dsv4_alone(self):
+        for block_size in (32, 64, 128):
+            with self.subTest(block_size=block_size):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.model_config.hf_config.model_type = "deepseek_v4"
+                vllm_config.cache_config.block_size = block_size
+
+                with patch.object(Platform, "update_block_size_for_backend") as parent_hook:
+                    self.platform.update_block_size_for_backend(vllm_config)
+
+                parent_hook.assert_not_called()
+                self.assertEqual(vllm_config.cache_config.block_size, block_size)
+
+    def test_update_block_size_for_backend_leaves_dsv41_alone(self):
+        """DeepSeek V4.1 must keep the block size its cache was built with.
+
+        The V4.1 cache backend does not override
+        get_supported_kernel_block_sizes(), so the parent's Phase 1 would replace
+        the size settled before the model was constructed with the default 16,
+        while the allocated cache keeps the settled size.
+        AscendDSAV41MetadataBuilder then rebuilds the V4.1 MLA spec from the
+        worker's current cache_config.block_size, so the metadata would describe
+        a different page geometry than the cache it is applied to.
+        """
+        for model_type in ("deepseek_v41", "deepseek_v41_text", "deepseek_v4.1", "deepseek_v4.1_text"):
+            for block_size in (32, 64, 128):
+                with self.subTest(model_type=model_type, block_size=block_size):
+                    vllm_config = TestNPUPlatform.mock_vllm_config()
+                    vllm_config.model_config.hf_config.model_type = model_type
+                    vllm_config.cache_config.block_size = block_size
+
+                    with patch.object(Platform, "update_block_size_for_backend") as parent_hook:
+                        self.platform.update_block_size_for_backend(vllm_config)
+
+                    parent_hook.assert_not_called()
+                    self.assertEqual(vllm_config.cache_config.block_size, block_size)
+
+    def test_update_block_size_for_backend_keeps_the_settled_size_for_dsv41(self):
+        """A parent that would derive another size must not reach DeepSeek V4.1."""
+        self.assertEqual(self._run_hook_with_derived_size("deepseek_v41", 128, 16), 128)
+
+    def test_update_block_size_for_backend_keeps_the_parent_value_for_other_models(self):
+        self.assertEqual(self._run_hook_with_derived_size("qwen3_moe", 32, 4096), 4096)
+
+    def test_update_block_size_for_backend_does_not_reach_the_real_derivation(self):
+        """The parent would settle on a logical size; the hook must not reach it.
+
+        The full Ascend backend set derives 4096 (the logical page); a stage carrying only
+        SWA and C4 layers derives 128, which collides with a physical table key.
+        """
+        from vllm_ascend.attention.dsa_v1 import (
+            AscendDSAC4Backend,
+            AscendDSAC128Backend,
+            AscendDSASWABackend,
+        )
+
+        cases = (
+            ([AscendDSASWABackend, AscendDSAC4Backend, AscendDSAC128Backend], 4096),
+            ([AscendDSASWABackend, AscendDSAC4Backend], 128),
+        )
+        for backends, expected_derived in cases:
+            for block_size in (32, 64, 128):
+                with self.subTest(backends=[b.get_name() for b in backends], block_size=block_size):
+                    vllm_config = TestNPUPlatform.mock_vllm_config()
+                    vllm_config.model_config.hf_config.model_type = "deepseek_v4"
+                    vllm_config.cache_config.block_size = block_size
+                    vllm_config.cache_config.user_specified_block_size = False
+                    vllm_config.cache_config.kv_cache_dtype_skip_layers = []
+                    vllm_config.cache_config.enable_prefix_caching = True
+
+                    # What the parent would settle on, before the restore runs.
+                    self.assertEqual(
+                        Platform._preferred_block_size_for_backends(backends, 16, vllm_config),
+                        expected_derived,
+                    )
+
+                    with patch.object(Platform, "_find_non_ssm_backends", return_value=backends):
+                        self.platform.update_block_size_for_backend(vllm_config)
+
+                    self.assertEqual(vllm_config.cache_config.block_size, block_size)
+
+    def test_refresh_block_size_then_the_hook_keeps_the_physical_size(self):
+        """The whole chain: default 16 settles to 32, the parent derives 4096, 32 survives."""
+        from vllm_ascend import utils as vllm_ascend_utils
+        from vllm_ascend.attention.dsa_v1 import (
+            AscendDSAC4Backend,
+            AscendDSAC128Backend,
+            AscendDSASWABackend,
+        )
+
+        backends = [AscendDSASWABackend, AscendDSAC4Backend, AscendDSAC128Backend]
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.hf_config.model_type = "deepseek_v4"
+        vllm_config.cache_config.block_size = 16
+        vllm_config.cache_config.user_specified_block_size = False
+        vllm_config.cache_config.kv_cache_dtype_skip_layers = []
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = None
+        vllm_config.speculative_config = None
+
+        with patch.object(vllm_ascend_utils, "is_c8_mxfp_kv_quant", return_value=False):
+            vllm_ascend_utils.refresh_block_size(vllm_config)
+        self.assertEqual(vllm_config.cache_config.block_size, 32)
+
+        with patch.object(Platform, "_find_non_ssm_backends", return_value=backends):
+            self.platform.update_block_size_for_backend(vllm_config)
+        self.assertEqual(vllm_config.cache_config.block_size, 32)
 
     def test_validate_parallel_config_rejects_pcp_for_model_runner_v1(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

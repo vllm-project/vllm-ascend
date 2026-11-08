@@ -553,9 +553,6 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
-    # FIXME(linfeng): Currently custom op compilation and execution are partially available
-    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
-    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
     if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
@@ -1450,9 +1447,9 @@ def refresh_block_size(vllm_config):
         return
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        if cache_config.block_size is None:
-            cache_config.block_size = 32
-        elif cache_config.block_size not in [32, 64, 128]:
+        # CacheConfig resolves an omitted --block-size on its own default above, so
+        # block_size cannot be None here.
+        if cache_config.block_size not in [32, 64, 128]:
             logger.warning(
                 "For deepseek_v4 model, block size should be 32, 64 or 128. "
                 "Setting block size to 32 for better performance."

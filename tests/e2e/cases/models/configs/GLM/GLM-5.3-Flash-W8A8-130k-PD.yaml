@@ -124,7 +124,7 @@ templates:
       - --safetensors-load-strategy
       - "prefetch"
       - --max-num-seqs
-      - "32"
+      - "16"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
@@ -173,7 +173,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 128
     request_rate: 0
-    baseline: 4248.503
+    baseline: 4562.6419
     threshold: 0.95
   acc_aime2025:
     case_type: accuracy
@@ -182,7 +182,7 @@ benchmarks:
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
     max_out_len: 131072
     batch_size: 32
-    baseline: 95
-    threshold: 10
+    baseline: 93
+    threshold: 7
     temperature: 1.0
     top_p: 0.95

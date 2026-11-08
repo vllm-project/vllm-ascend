@@ -81,6 +81,17 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
     or do nothing.
     """
 
+    def validate_weight_shapes(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_size: int,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+    ) -> None:
+        """Validate the partition shapes before allocating linear weights."""
+        return None
+
     @abstractmethod
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Return weight tensor specifications.
@@ -167,6 +178,10 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
         """
         ...
 
+    def apply_weight_shard(self, layer: torch.nn.Module, x: torch.Tensor, *, bias_rank: int) -> torch.Tensor:
+        """Include complete quantized bias on just one parallel contributor."""
+        return self.apply(layer, x, bias=None, tp_rank=bias_rank)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing (transpose, format conversion, etc.).
 
@@ -249,6 +264,10 @@ class AscendMoEScheme(ABC):
     # Activations that this method implements through a fused gmm1+act+quant
     # path (``apply_gmm1_act_quant``). Stored as activation string values.
     fused_activations: frozenset[str] = frozenset()
+
+    def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
+        """Validate the partition shapes before allocating expert weights."""
+        return None
 
     @abstractmethod
     def get_weight(

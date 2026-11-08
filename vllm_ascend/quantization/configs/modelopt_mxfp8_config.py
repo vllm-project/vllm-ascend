@@ -42,7 +42,6 @@ class AscendModelOptMxFp8Config(ModelOptMxFp8Config):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
         from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -62,7 +61,7 @@ class AscendModelOptMxFp8Config(ModelOptMxFp8Config):
             if isinstance(layer, LinearBase):
                 return AscendUnquantizedLinearMethod()
             if is_fused_moe_layer(layer):
-                return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid)
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return None
 
         # Match the compatibility behavior retained by ModelOpt for older
@@ -81,7 +80,6 @@ class AscendModelOptMxFp8Config(ModelOptMxFp8Config):
             return AscendFusedMoEMethod(
                 AscendW8A8MXFP8DynamicFusedMoEMethod(),
                 layer.moe_config,
-                tid2eid,
             )
 
         # Embeddings and the BF16 KV cache keep their native methods.

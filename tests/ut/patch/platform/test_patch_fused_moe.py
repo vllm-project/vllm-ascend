@@ -124,7 +124,7 @@ def test_adapted_router_uses_ascend_mapping_operation():
     )
 
 
-def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
+def test_factory_passes_hash_table_only_through_upstream_path():
     hash_indices_table = torch.tensor([[1, 3]], dtype=torch.int32)
     router = _Router()
     runner = SimpleNamespace(router=router)
@@ -150,7 +150,7 @@ def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
 
     kwargs = original_factory.call_args.kwargs
     assert kwargs["hash_indices_table"] is hash_indices_table
-    assert kwargs["routed_experts_args"]["tid2eid"] is hash_indices_table
+    assert "tid2eid" not in kwargs["routed_experts_args"]
 
 
 def test_factory_keeps_vision_bias_in_ascend_router_only():

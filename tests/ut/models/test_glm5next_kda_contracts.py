@@ -45,7 +45,8 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     monkeypatch.setattr(kda_ops, "recurrent_kda", recurrent)
     destination = torch.full((1, 8, 1, 128), float("nan"), dtype=q.dtype) if direct_output else None
 
-    def writeback(source, target, ends):
+    def writeback(source: torch.Tensor, target: torch.Tensor, ends: torch.Tensor) -> None:
+        assert destination is not None
         assert target is destination and ends is starts
         assert torch.isnan(source[:, 3:]).all()
         target.zero_()

@@ -136,6 +136,9 @@ class TestACLGraphWrapper(TestBase):
         self.mock_updatable_graph = self.exit_stack.enter_context(
             patch("vllm_ascend.compilation.acl_graph.UpdatableGraph")
         )
+        self.mock_is_forward_context_available = self.exit_stack.enter_context(
+            patch("vllm_ascend.compilation.acl_graph.is_forward_context_available", return_value=True)
+        )
 
         # Mock VllmConfig
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
@@ -216,6 +219,48 @@ class TestACLGraphWrapper(TestBase):
             ACLGraphWrapper(
                 runnable=self.mock_runnable, vllm_config=self.mock_vllm_config, runtime_mode=CUDAGraphMode.NONE
             )
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_call_without_forward_context(
+        self, mock_envs, mock_current_platform, mock_get_forward_context, mock_get_forward_context_2
+    ):
+        """Compiled helpers outside model forward bypass graph dispatch."""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        self.mock_is_forward_context_available.return_value = False
+        args = (object(), object())
+        kwargs = {"keyword": object()}
+        output = object()
+
+        for runtime_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+            with self.subTest(runtime_mode=runtime_mode):
+                self.mock_runnable.reset_mock(side_effect=True)
+                self.mock_runnable.return_value = output
+                wrapper = ACLGraphWrapper(
+                    runnable=self.mock_runnable,
+                    vllm_config=self.mock_vllm_config,
+                    runtime_mode=runtime_mode,
+                    cudagraph_options=self.mock_cudagraph_options,
+                )
+
+                self.assertIs(wrapper(*args, **kwargs), output)
+                self.mock_runnable.assert_called_once_with(*args, **kwargs)
+
+                self.mock_runnable.reset_mock()
+                error = RuntimeError("runnable failed")
+                self.mock_runnable.side_effect = error
+                with self.assertRaises(RuntimeError) as context:
+                    wrapper(*args, **kwargs)
+                self.assertIs(context.exception, error)
+                self.mock_runnable.assert_called_once_with(*args, **kwargs)
+
+                mock_get_forward_context.assert_not_called()
+                mock_get_forward_context_2.assert_not_called()
+                self.mock_updatable_graph.assert_not_called()
+                self.assertEqual(wrapper.concrete_aclgraph_entries, {})
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
