@@ -118,17 +118,23 @@ def allocate_mapped_host(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Te
 class ResolverWorkspace:
     """Fixed scratch shared by one index group on its ordered copy stream."""
 
-    def __init__(self, max_rows: int, hot_size: int, max_union_rows: int, device: torch.device) -> None:
+    def __init__(
+        self, max_rows: int, hot_size: int, max_union_rows: int, device: torch.device, *, max_topk: int | None = None
+    ) -> None:
         if not 0 < max_union_rows <= hot_size <= 32768 or max_rows <= 0:
             raise ValueError("HiSparse requires 0 < union <= hot_size <= 32768 and positive max_rows")
         self.max_rows = max_rows
         self.hot_size = hot_size
         self.max_union_rows = max_union_rows
+        self.max_topk = hot_size if max_topk is None else max_topk
+        if not 0 < self.max_topk <= hot_size:
+            raise ValueError("HiSparse resolver TopK capacity must be positive and fit the Hot cache")
         from vllm_ascend.hisparse.resolver import _load_resolver, scratch_layout
 
         self.native = _load_resolver()
         scratch_layout(hot_size, max_union_rows, self.native.hisparse_resolver_scratch_capacity())
-        self.first_refs = torch.empty(max_rows * hot_size, dtype=torch.int32, device=device)
+        # One resolved Host row per selected token, not per Hot-cache slot.
+        self.first_refs = torch.empty(max_rows * self.max_topk, dtype=torch.int32, device=device)
         self.errors = torch.zeros((max_rows, 8), dtype=torch.int32, device=device)
 
 
@@ -254,7 +260,12 @@ class HiSparseNPUOps:
         hot_size = lru_slots.size(1)
         if rows == 0:
             return
-        if rows > workspace.max_rows or hot_size != workspace.hot_size or max_union_rows != workspace.max_union_rows:
+        if (
+            rows > workspace.max_rows
+            or topk > workspace.max_topk
+            or hot_size != workspace.hot_size
+            or max_union_rows != workspace.max_union_rows
+        ):
             raise ValueError("HiSparse resolver input exceeds its prepared workspace")
         if region_stride != device_global_indices.size(1) or region_stride != hot_size or hot_size < topk:
             raise ValueError("HiSparse region and LRU widths must match and cover top-k")

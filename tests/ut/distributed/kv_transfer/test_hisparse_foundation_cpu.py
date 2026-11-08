@@ -160,7 +160,10 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     backend = AscendHiSparseBackend()
 
     def group():
-        owner = NS(copy_stream=NS(device=torch.device("cpu")))
+        owner = NS(
+            copy_stream=NS(device=torch.device("cpu")),
+            shared_topk=NS(device_topk_rows=torch.empty((max_rows, union_rows), dtype=torch.int32)),
+        )
         leader = NS(
             index_group=owner,
             max_swap_rows=max_rows,
@@ -181,13 +184,19 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     assert follower.host_mapping is first.registered_host_pool._hisparse_registration
     assert second.cache_ops.workspace is not first.cache_ops.workspace
     first_workspace, second_workspace = first.cache_ops.workspace, second.cache_ops.workspace
-    assert first_workspace.first_refs.shape == (max_rows * hot_rows,)
+    assert first_workspace.first_refs.shape == (max_rows * union_rows,)
     assert first_workspace.errors.shape == (max_rows, 8)
     assert first_workspace.max_union_rows == union_rows
     first_workspace.first_refs.fill_(13)
     second_workspace.first_refs.zero_()
     assert torch.all(follower.workspace.first_refs == 13)
     assert torch.count_nonzero(second_workspace.first_refs) == 0
+
+
+@pytest.mark.parametrize("topk", [0, 17])
+def test_resolver_scratch_rejects_topk_outside_hot_capacity(topk):
+    with pytest.raises(ValueError, match="TopK capacity"):
+        hisparse_ops.ResolverWorkspace(4, 16, 8, torch.device("cpu"), max_topk=topk)
 
 
 def test_native_resolver_uses_available_ub_without_truncating_the_union():

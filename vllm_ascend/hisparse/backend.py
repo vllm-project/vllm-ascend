@@ -114,6 +114,7 @@ class AscendHiSparseBackend(HiSparseBackend):
                 hot_size=runtime.region_stride,
                 max_union_rows=runtime.max_union_rows,
                 device=runtime.device,
+                max_topk=group.shared_topk.device_topk_rows.shape[1],
             )
         else:
             leader_ops = group.leader.cache_ops
