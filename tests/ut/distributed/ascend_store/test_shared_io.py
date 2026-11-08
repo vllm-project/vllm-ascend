@@ -60,6 +60,7 @@ class MemoryBackend:
 
     def batch_write_finish(self, keys, results):
         self.readable.update(keys)
+        self.leases.difference_update(keys)  # WRITE_OK consumes the write lease.
         return [0] * len(keys)
 
     def batch_copy(self, gvas, addresses, sizes, direction):
@@ -113,13 +114,13 @@ def test_incomplete_or_failed_copy_never_published():
     io.copy(session, {"layer.0"})
     with pytest.raises(RuntimeError, match="partially copied"):
         io.finish(session)
-    assert not backend.readable and not backend.leases
+    assert not backend.readable and backend.leases == {"shared-key"}
     session = io.begin([plan(source)], writing=True)
     backend.fail_copy = True
     with pytest.raises(RuntimeError, match="copy failed"):
         io.copy(session)
     io.abort(session)
-    assert not backend.readable and not backend.leases
+    assert not backend.readable and backend.leases == {"shared-key"}
 
 
 def test_missing_read_fails_closed():
@@ -184,25 +185,58 @@ def test_two_readers_retain_one_lease_until_last_consumer_finishes():
     assert not backend.leases
 
 
-def test_cleanup_failure_retains_ownership_and_can_retry(monkeypatch):
+@pytest.mark.parametrize("writing", [False, True])
+def test_cleanup_status_failure_does_not_fail_completed_transfer(monkeypatch, writing):
+    backend = MemoryBackend()
+    io = MemcacheStoreLayoutIO(backend)
+    source = ctypes.create_string_buffer(b"abcdefgh", 8)
+    writer = io.begin([plan(source)], writing=True)
+    io.copy(writer)
+    if writing:
+        session = writer
+    else:
+        io.finish(writer)
+        target = ctypes.create_string_buffer(8)
+        session = io.begin([plan(target)], writing=False)
+        io.copy(session)
+    calls = []
+
+    def failed_release(keys):
+        calls.append(tuple(keys))
+        return -3106
+
+    monkeypatch.setattr(backend, "batch_remove_lease", failed_release)
+    io.finish(session)
+    assert session.closed and session.released
+    assert backend.readable == {"shared-key"}
+    assert not io._references and not io._pending_release and not io._deadlines
+    if not writing:
+        assert target.raw == source.raw
+    # The failed old cleanup must never release a newly acquired lease.
+    reader = io.begin([plan(source)], writing=False)
+    io.abort(session)
+    io.retry_cleanup()
+    assert len(calls) == (0 if writing else 1)
+    io.copy(reader)
+    io.finish(reader)
+    assert len(calls) == (1 if writing else 2)
+
+
+def test_cleanup_status_failure_preserves_publication_error(monkeypatch):
     backend = MemoryBackend()
     io = MemcacheStoreLayoutIO(backend)
     source = ctypes.create_string_buffer(b"abcdefgh", 8)
     session = io.begin([plan(source)], writing=True)
-    release = backend.batch_remove_lease
-    monkeypatch.setattr(backend, "batch_remove_lease", lambda keys: -1)
-    with pytest.raises(RuntimeError, match="lease release failed"):
-        io.abort(session)
-    assert session.released and not session.closed
-    assert backend.leases == {"shared-key"}
-    with pytest.raises(RuntimeError, match="cleanup must succeed"):
-        io.begin([plan(source)], writing=True)
-    monkeypatch.setattr(backend, "batch_remove_lease", release)
-    io.abort(session)
-    assert session.closed and not backend.leases
+    io.copy(session)
+    monkeypatch.setattr(backend, "batch_write_finish", lambda *args: [-1])
+    monkeypatch.setattr(backend, "batch_remove_lease", lambda keys: -3106)
+    with pytest.raises(RuntimeError, match="publication failed"):
+        io.finish(session)
+    assert session.closed and not backend.readable
+    assert not io._pending_release
 
 
-def test_partial_allocation_exception_releases_attempted_keys(monkeypatch):
+def test_partial_allocation_exception_leaves_write_lease_to_ttl(monkeypatch):
     backend = MemoryBackend()
     io = MemcacheStoreLayoutIO(backend)
     alloc = backend.batch_alloc
@@ -215,7 +249,7 @@ def test_partial_allocation_exception_releases_attempted_keys(monkeypatch):
     source = ctypes.create_string_buffer(b"abcdefgh", 8)
     with pytest.raises(RuntimeError, match="partial allocation"):
         io.begin([plan(source)], writing=True)
-    assert not backend.leases and not backend.readable
+    assert backend.leases == {"shared-key"} and not backend.readable
 
 
 def test_incomplete_readability_response_is_not_a_hit(monkeypatch):

@@ -29,6 +29,9 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker = None
         self.lookup_server = None
         self._mamba_state = None
+        handoff_ttl_s = vllm_config.kv_transfer_config.kv_connector_extra_config.get("handoff_ttl_s", 60)
+        if type(handoff_ttl_s) not in (int, float) or not 5 <= handoff_ttl_s <= 300:
+            raise ValueError("Pool PD handoff_ttl_s must be between 5 and 300 seconds")
         layerwise = bool(vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False))
         # Use the same MRV2 extension points as ordinary AscendStore. The
         # runner owns checkpoint src/dst selection and the actual state copy.
@@ -42,6 +45,7 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler = PoolPDScheduler(
                 pool_scheduler,
                 need_truncate=groups["stateful"],
+                handoff_ttl_s=handoff_ttl_s,
                 mtp_tokens=getattr(vllm_config.speculative_config, "num_speculative_tokens", 0),
             )
         else:

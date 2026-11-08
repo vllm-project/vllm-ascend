@@ -78,7 +78,7 @@ def test_pd_live_state_waits_for_copy_before_finish_or_cancel(monkeypatch, cance
             thread.join(5)
         common.close()
     assert returned.is_set() and not errors
-    assert not backend.leases
+    assert bool(backend.leases) is cancel
     for name, tensor in zip(owners, tensors, strict=True):
         saved = bytes(backend.objects[name])
         assert saved == tensor.numpy().tobytes()
@@ -133,7 +133,7 @@ def test_layerwise_copy_overlaps_compute_but_drains_before_release(monkeypatch, 
             thread.join(5)
         writer.close()
     assert drained.is_set() and not failures
-    assert not backend.leases
+    assert bool(backend.leases) is abort
     assert bool(backend.readable) is not abort
     assert writer.completed_events == ({} if abort else {7: 1})
 
@@ -154,7 +154,7 @@ def test_layerwise_failure_drains_pending_tasks_without_publication(monkeypatch)
         pytest.fail("Failed asynchronous copy was not reported")
     with pytest.raises(RuntimeError):
         writer.close()
-    assert not backend.readable and not backend.leases
+    assert not backend.readable and backend.leases  # Failed writes expire by native TTL.
     assert not writer.completed_events
     assert not writer._sender.is_alive()
     assert writer._sender.request_queue.unfinished_tasks == 0
@@ -187,7 +187,7 @@ def transfer(backend, tp, rank, layerwise, source):
         hash_block_size=2,
         block_size=4,
         dcp_size=1,
-        token_database=SimpleNamespace(group_block_len=[[1]]),
+        token_database=SimpleNamespace(group_block_len={}),
         _as_cache_tuple=tuple,
     )
     result = SharedPoolTransfer(worker)
@@ -377,7 +377,7 @@ def test_layerwise_missing_owner_cannot_publish(monkeypatch):
     writer.save_layer(next(iter(caches)))
     with pytest.raises(RuntimeError, match="partially copied"):
         writer.finish_step()
-    assert not backend.readable and not backend.leases
+    assert not backend.readable and backend.leases  # Failed writes expire by native TTL.
 
 
 def test_supported_contract_and_fail_fast_on_unsupported_features():

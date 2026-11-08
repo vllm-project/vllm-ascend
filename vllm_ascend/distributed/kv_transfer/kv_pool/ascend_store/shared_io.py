@@ -6,6 +6,8 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from vllm.logger import logger
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import PoolObject
 
 
@@ -159,7 +161,13 @@ class MemcacheStoreLayoutIO:
                 self._references[plan.key] -= 1
                 if self._references[plan.key] == 0:
                     del self._references[plan.key]
-                    self._pending_release.add(plan.key)
+                    # WRITE_OK already consumes the native write lease. Failed
+                    # writes retain their allocation lease until backend TTL;
+                    # remove_lease is a read-lease API, not a write rollback.
+                    if not session.writing:
+                        self._pending_release.add(plan.key)
+                    else:
+                        del self._deadlines[plan.key]
             session.released = True
         self.retry_cleanup()
         session.closed = True
@@ -167,12 +175,18 @@ class MemcacheStoreLayoutIO:
     def retry_cleanup(self) -> None:
         if self._pending_release:
             # Do not WRITE_FAIL/delete: allocation may race with another writer.
-            # Retain failed releases so shutdown can retry rather than forgetting
-            # ownership. An unresolved failure prevents reuse of these keys.
+            # Transfers have drained before release. Match the ordinary pool:
+            # a returned cleanup failure is diagnostic, not a transfer failure.
+            # Let backend TTL reclaim leftover leases. Do not retry old keys
+            # after a new session may have acquired a lease for the same key.
             keys = sorted(self._pending_release)
             result = self.backend.batch_remove_lease(keys)
             if result != 0:
-                raise RuntimeError(f"MemCache lease release failed: {result}")
+                logger.error(
+                    "Shared pool lease cleanup returned %s for %d keys; backend TTL will reclaim leases",
+                    result,
+                    len(keys),
+                )
             self._pending_release.difference_update(keys)
             for key in keys:
                 del self._deadlines[key]

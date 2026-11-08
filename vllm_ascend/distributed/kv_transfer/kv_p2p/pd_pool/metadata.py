@@ -10,7 +10,8 @@ from vllm.v1.core.kv_cache_utils import generate_block_hash_extra_keys
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 
-POOL_PD_PROTOCOL = "ascend_shared_v1"
+POOL_PD_PROTOCOL = "ascend_shared_v2"
+HANDOFF_DEADLINE_MARGIN_S = 1.0
 
 
 def prompt_digest(request) -> str:
@@ -35,6 +36,7 @@ class PoolPDRequest:
     block_hashes: list[bytes]
     local_tokens: int = 0
     cache_tokens: int | None = None
+    handoff_deadline: float | None = None
 
 
 @dataclass

@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PD completion and compact tails over the common pool executor."""
 
+import time
+
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import HANDOFF_DEADLINE_MARGIN_S
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import block_hash_to_str
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import MemcacheStoreLayoutIO
+
+_HANDOFF_RELEASE_GRACE_S = 2.0
+_HANDOFF_LEASE_GRACE_S = 30.0
 
 
 class PoolPDWorker:
@@ -16,6 +23,8 @@ class PoolPDWorker:
         if self.transfer is None:
             raise ValueError("Pool PD requires the shared Store format")
         self.tails = []
+        self.handoff_requests = []
+        self.handoff_holds = []
         self.results = KVConnectorTransferResults()
 
     def _plans(self, request, *, tail_only, writing):
@@ -67,7 +76,38 @@ class PoolPDWorker:
                 )
         return tuple(plans)
 
+    def _reap_handoffs(self, *, all_holds=False):
+        remaining = []
+        for expiry, io, session in self.handoff_holds:
+            if all_holds or time.monotonic() >= expiry:
+                io.abort(session)
+            else:
+                remaining.append((expiry, io, session))
+        self.handoff_holds = remaining
+
+    def _protect_handoffs(self):
+        for request in self.handoff_requests:
+            remaining = request.handoff_deadline - time.time()
+            if remaining <= HANDOFF_DEADLINE_MARGIN_S:
+                raise RuntimeError("Pool PD handoff protection expired before acquisition")
+            # Use an independent local owner for each handoff. The SDK tracks
+            # operation leases per client/key; no stale GVA is reused. Native
+            # TTL exceeds the bounded hold, including clock-skew allowance.
+            io = MemcacheStoreLayoutIO(
+                self.transfer.io.backend, lease_ttl_ms=int((remaining + _HANDOFF_LEASE_GRACE_S) * 1000)
+            )
+            plans = self._plans(request, tail_only=False, writing=True)
+            session = io.begin(plans, writing=False)
+            self.handoff_holds.append((time.monotonic() + remaining + _HANDOFF_RELEASE_GRACE_S, io, session))
+            if time.time() + HANDOFF_DEADLINE_MARGIN_S >= request.handoff_deadline:
+                raise RuntimeError("Pool PD handoff protection expired during acquisition")
+            logger.info(
+                "Pool PD HOLD req=%s objects=%d deadline=%.3f", request.request_id, len(plans), request.handoff_deadline
+            )
+
     def prepare(self, metadata):
+        self._reap_handoffs()
+        self.handoff_requests = [r for r in metadata.tails if r.handoff_deadline is not None]
         if self.tails:
             raise RuntimeError("Previous PD tail saves have not drained")
         self.transfer.prepare_step(metadata.pool)
@@ -91,7 +131,17 @@ class PoolPDWorker:
         for request in metadata.receives:
             session = None
             try:
+                if (
+                    request.handoff_deadline is not None
+                    and time.time() + HANDOFF_DEADLINE_MARGIN_S >= request.handoff_deadline
+                ):
+                    raise RuntimeError("Pool PD handoff protection expired before receive")
                 session = self.transfer.io.begin(self._plans(request, tail_only=False, writing=False), writing=False)
+                if (
+                    request.handoff_deadline is not None
+                    and time.time() + HANDOFF_DEADLINE_MARGIN_S >= request.handoff_deadline
+                ):
+                    raise RuntimeError("Pool PD handoff protection expired during receive acquisition")
                 self.transfer.io.copy(session)
                 self.transfer.io.finish(session)
                 logger.info(
@@ -125,6 +175,7 @@ class PoolPDWorker:
                 if not self.transfer.layerwise:
                     self.transfer.io.copy(session)
                 self.transfer.io.finish(session)
+            self._protect_handoffs()
         finally:
             self.abort()
 
@@ -140,6 +191,7 @@ class PoolPDWorker:
             except Exception as error:
                 errors.append(error)
         self.tails.clear()
+        self.handoff_requests.clear()
         if errors:
             raise RuntimeError("PD tail lease cleanup failed") from errors[0]
 
@@ -150,5 +202,6 @@ class PoolPDWorker:
     def shutdown(self):
         try:
             self.abort()
+            self._reap_handoffs(all_holds=True)
         finally:
             self.pool.shutdown()

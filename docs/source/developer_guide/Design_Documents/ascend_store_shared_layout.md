@@ -92,7 +92,10 @@ and the native `store.batch_copy` operation for data movement.
 
 Client-local reference counts retain a shared lease while multiple requests use
 the same object. Failed lease acquisition is distinguished from a successfully
-acquired lease needing cleanup. Failed releases remain tracked for retry.
+acquired lease needing cleanup. After transfers drain, returned lease-release failures are logged without failing
+the completed transfer; backend TTL reclaims any remaining leases. Local cleanup
+records are cleared so a stale retry cannot release a later session's lease.
+Allocation, copy and publication failures still fail the operation.
 These local counters do not prove the native backend's internal lease state.
 
 ## PD handoff
@@ -145,3 +148,37 @@ in-flight lease guarantees and performance need further production validation.
 
 See [Flash integration and validation](glm53flash_pool_stage1.md) for the
 validated model configuration and explicit limitations.
+
+### MemCache 1.3.0 lease pairing and bounded PD handoff
+
+`batch_alloc` owns a write lease; successful `batch_write_finish(WRITE_OK)`
+consumes that lease and publishes the object. Do not subsequently call
+`batch_remove_lease` for that write: the native API releases read operations.
+An incomplete write remains unpublished and expires by native TTL.
+`batch_add_lease` acquires a read operation only for a readable object;
+`batch_remove_lease` releases that client's read operation. P and D can hold
+independent read operations for the same key. Returned read cleanup errors
+are logged after copies have drained; TTL handles residual ownership.
+
+Protocol `ascend_shared_v2` adds `pool_pd_handoff_deadline`. After publishing,
+each P shard acquires read leases for all its handoff objects, including full
+blocks, attention tails and recurrent state. P emits the handoff only after
+all workers complete acquisition. A publication-to-acquisition miss fails the
+handoff instead of forwarding an unprotected key. D must acquire its own read
+leases before the deadline and then keeps them through the synchronous copy.
+
+`handoff_ttl_s` defaults to 60 seconds (allowed 5–300), measured from scheduling
+the final P step. P releases holds on a later step after that deadline plus
+two seconds; idle or failed workers rely on native TTL (deadline plus 30
+seconds). D rejects an expired handoff with a one-second safety margin.
+Cross-host deployments require synchronized clocks with less than one second
+of skew; colocated P/D share a host clock. This is a bounded handoff window,
+not a D-ACK protocol or an indefinite pin. It protects against normal eviction,
+not explicit object deletion, pool process failure or lease expiry. Requests
+queued beyond the deadline fail rather than consume potentially stale data.
+
+The contract was checked against Ascend/memcache GitCode release/1.3.0
+`cfe30446f43d533ff18d746f2e14b633e518ca6f` and the installed 1.3.0 SDK:
+WRITE_OK followed by read-lease removal reproduces -3106; overlapping P/D read
+leases allow D to retain exact bytes after P releases and under allocation
+pressure exceeding the test pool's capacity.

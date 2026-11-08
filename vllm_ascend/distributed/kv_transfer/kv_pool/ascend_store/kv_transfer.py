@@ -49,7 +49,6 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
-        self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
         # Serialize request submission with the transition to a fatal state.
         # Otherwise a producer can enqueue immediately after the failed
@@ -233,7 +232,9 @@ class KVTransferThread(threading.Thread):
 
         max_transfer_addrs = 0
         if max_transfer_blocks > 0:
-            max_transfer_addrs = max_transfer_blocks * self.num_addrs_per_block
+            # Shared StoreLayerTask uses planned ranges and has no legacy group 0.
+            # Resolve legacy address counts only when this copy path needs them.
+            max_transfer_addrs = max_transfer_blocks * len(self.token_database.group_block_len[0])
         if max_transfer_addrs <= 0:
             max_transfer_addrs = len(gvas)
 

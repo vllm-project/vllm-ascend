@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -446,3 +447,58 @@ def test_pd_checks_mtp_cache_contract_before_allocating(producer_tokens, decoder
         with pytest.raises(ValueError, match="matching P/D"):
             decoder.get_num_new_matched_tokens(req, 0)
         assert not decoder.matches and not decoder.receives
+
+
+@pytest.mark.parametrize("length", [3, 4, 5])
+def test_protected_handoff_holds_full_blocks_and_tail_until_deadline(monkeypatch, length):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    common, _ = transfer(backend, 2, 0, False, True)
+    worker = PoolPDWorker(SimpleNamespace(shared_pool=common))
+    req = PoolPDRequest("p", length, "prompt", [[1, 2]], [b"h2", b"h4"], handoff_deadline=time.time() + 60)
+    full = ReqMeta(
+        "p", block_ids_by_group=[[1, 2]], block_hashes=req.block_hashes, can_save=True, save_end_token=(length // 4) * 4
+    )
+    meta = PoolPDMetadata(step(full), tails=[req])
+    worker.prepare(meta)
+    worker.start_load(meta)
+    worker.finish()
+    assert worker.handoff_holds
+    keys = {p.key for p in worker._plans(req, tail_only=False, writing=True)}
+    assert keys and keys <= backend.leases
+    worker._reap_handoffs()
+    assert keys <= backend.leases
+    worker._reap_handoffs(all_holds=True)
+    assert not backend.leases and not worker.handoff_holds
+
+
+def test_expired_handoff_never_copies(monkeypatch):
+    backend = MemoryBackend()
+    common, _ = transfer(backend, 2, 0, False, False)
+    worker = PoolPDWorker(SimpleNamespace(shared_pool=common))
+    req = PoolPDRequest("d", 3, "prompt", [[2]], [], handoff_deadline=time.time() - 1)
+    monkeypatch.setattr(backend, "batch_copy", lambda *a: pytest.fail("expired handoff copied"))
+    worker.start_load(PoolPDMetadata(step(), receives=[req]))
+    assert worker.take_results().failed_recving == {"d"}
+
+
+def test_scheduler_protected_handoff_requires_fresh_deadline():
+    scheduler = PoolPDScheduler(MagicMock(), handoff_ttl_s=60)
+    req = request([1, 2, 3])
+    req.kv_transfer_params = dict(do_remote_prefill=True, pool_pd_protocol=POOL_PD_PROTOCOL, remote_num_prompt_tokens=3)
+    for deadline in [None, float("nan"), time.time() - 1]:
+        req.kv_transfer_params["pool_pd_handoff_deadline"] = deadline
+        with pytest.raises(ValueError, match="protection expired"):
+            scheduler.get_num_new_matched_tokens(req, 0)
+    req.kv_transfer_params["pool_pd_handoff_deadline"] = time.time() + 60
+    assert scheduler.get_num_new_matched_tokens(req, 0) == (2, True)
+
+
+def test_handoff_acquisition_failure_cannot_emit_protection(monkeypatch):
+    backend = MemoryBackend()
+    common, _ = transfer(backend, 2, 0, False, True)
+    worker = PoolPDWorker(SimpleNamespace(shared_pool=common))
+    worker.handoff_requests = [PoolPDRequest("missing", 3, "prompt", [[1]], [], handoff_deadline=time.time() + 60)]
+    with pytest.raises(RuntimeError, match="read lease failed"):
+        worker._protect_handoffs()
+    assert not worker.handoff_holds

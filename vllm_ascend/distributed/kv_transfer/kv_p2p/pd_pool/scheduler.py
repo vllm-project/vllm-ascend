@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPD handoff composed with ordinary full-block pool scheduling."""
 
+import math
+import time
+
 from vllm.logger import logger
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import truncate_stateful_prefill_request
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
+    HANDOFF_DEADLINE_MARGIN_S,
     POOL_PD_PROTOCOL,
     PoolPDMetadata,
     PoolPDRequest,
@@ -15,9 +19,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
 
 
 class PoolPDScheduler:
-    def __init__(self, pool, *, need_truncate=False, mtp_tokens=0):
+    def __init__(self, pool, *, need_truncate=False, mtp_tokens=0, handoff_ttl_s=0):
         if type(mtp_tokens) is not int or mtp_tokens < 0:
             raise ValueError("Pool PD requires a nonnegative speculative token count")
+        self.handoff_ttl_s = handoff_ttl_s
+        self.handoff_deadlines = {}
         self.pool = pool
         self.mtp_tokens = mtp_tokens
         self.need_truncate = need_truncate
@@ -49,6 +55,14 @@ class PoolPDScheduler:
         length = len(request.prompt_token_ids or ())
         if params.get("remote_num_prompt_tokens") != length:
             raise ValueError("Pool PD handoff prompt length differs from the decode request")
+        if self.handoff_ttl_s:
+            deadline = params.get("pool_pd_handoff_deadline")
+            if (
+                not isinstance(deadline, (int, float))
+                or not math.isfinite(deadline)
+                or time.time() + HANDOFF_DEADLINE_MARGIN_S >= deadline
+            ):
+                raise ValueError("Pool PD handoff protection expired or missing")
         # Keep the existing CPD last-token recomputation. Draft cache is local.
         count = max(0, length - 1 - num_computed_tokens)
         if count:
@@ -82,11 +96,16 @@ class PoolPDScheduler:
             list(request.block_hashes),
             local,
             cache_tokens,
+            self.handoff_deadlines.get(request.request_id)
+            if (request.kv_transfer_params or {}).get("do_remote_decode")
+            else (request.kv_transfer_params or {}).get("pool_pd_handoff_deadline"),
         )
 
     def build_connector_meta(self, output):
         released = set(output.finished_req_ids or ()) | set(output.preempted_req_ids or ())
         self.tail_scheduled.difference_update(released)
+        for rid in released:
+            self.handoff_deadlines.pop(rid, None)
         for rid in output.finished_req_ids:
             self.pd_load_requests.discard(rid)
             self.original_prompts.pop(rid, None)
@@ -110,6 +129,8 @@ class PoolPDScheduler:
             tracker = self.pool._request_trackers.get(rid)
             if tracker is None:
                 raise RuntimeError("Pool PD producer has no allocated block table")
+            if self.handoff_ttl_s:
+                self.handoff_deadlines[rid] = time.time() + self.handoff_ttl_s
             metadata.tails.append(self._request(request, tracker.allocated_block_ids_by_group))
             self.tail_scheduled.add(rid)
         return metadata
@@ -120,7 +141,8 @@ class PoolPDScheduler:
             if request.request_id not in self.tail_scheduled:
                 raise RuntimeError("Cannot hand off a prompt without its pool publication step")
             # wait_for_save completed before this model result was delivered.
-            # Objects remain in the pool; no HBM hold or remote delete ACK.
+            # Workers acquired bounded read leases for every handoff object.
+            # No HBM hold or remote delete ACK is needed within this window.
             handoff = {
                 "do_remote_prefill": True,
                 "do_remote_decode": False,
@@ -129,6 +151,11 @@ class PoolPDScheduler:
                     request.request_id, (len(request.prompt_token_ids), None)
                 )[0],
             }
+            if self.handoff_ttl_s:
+                deadline = self.handoff_deadlines[request.request_id]
+                if time.time() + HANDOFF_DEADLINE_MARGIN_S >= deadline:
+                    raise RuntimeError("Pool PD handoff protection expired before response")
+                handoff["pool_pd_handoff_deadline"] = deadline
             if self.need_truncate or self.mtp_tokens:
                 # This verifies the cache contract, not draft work requested
                 # from D. Each endpoint initializes its own draft state.

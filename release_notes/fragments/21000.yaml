@@ -5,3 +5,10 @@ entries:
       Added experimental LayerwisePoolConnector and opt-in Ascend Store shared
       objects for prefix pooling and pool-backed PD. Initial validation covers
       GLM-5.3-Flash BF16 with matching TP8 and MTP settings in MRV2 eager mode.
+
+  - category: bugfix
+    text: >-
+      Pair MemCache write/read lease APIs correctly and protect pool-backed
+      P-to-D handoffs with bounded read leases. Decode rejects expired handoffs;
+      read-lease cleanup failures after completed copies no longer terminate
+      the shared pool worker.
