@@ -60,6 +60,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     microscaling, and weights are stored in FP8 format with per-group scales.
     """
 
+    quant_type: QuantType = QuantType.W8A8MXFP
     model_dtype = None
     weight_switch_gather_specs = (
         WeightSwitchGatherSpec("weight"),
@@ -374,6 +375,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
         if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            # MegaMoe consumes the non-transposed per-expert weight/scale lists
+            # built in process_weights_after_loading (the non-mega path uses the
+            # transposed single tensors below).
+            shared = getattr(layer, "ascend_megamoe_shared_weights", None)
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -381,6 +386,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=layer.w13_weight_list if self.use_expert_weight_list else layer.w13_weight,

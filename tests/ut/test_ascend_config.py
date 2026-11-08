@@ -371,7 +371,8 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
-        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
+        # 0 = let the MegaMoe operator auto-compute the receive capacity.
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -517,9 +518,10 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
-        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
-        # out-of-range values are invalid on main.
-        invalid_values = [0, -1]
+        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, and 0 is
+        # now a valid value (let the MegaMoe operator auto-compute), so only
+        # negative values are invalid.
+        invalid_values = [-1]
 
         for invalid_value in invalid_values:
             clear_ascend_config()
