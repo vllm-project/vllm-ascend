@@ -77,7 +77,9 @@ class PoolPDScheduler:
             return
         local = self.matches.pop(request.request_id)
         if num_external_tokens:
-            self.receives[request.request_id] = self._request(request, blocks.get_block_ids(), local)
+            receive = self._request(request, blocks.get_block_ids(), local)
+            receive.unhashed_block_ids = blocks.get_unhashed_block_ids_all_groups()
+            self.receives[request.request_id] = receive
         # Ordinary pool scheduling tracks subsequent decode and writeback,
         # while this module exclusively owns the CPD external load.
         self.pool.update_state_after_alloc(request, blocks, 0)

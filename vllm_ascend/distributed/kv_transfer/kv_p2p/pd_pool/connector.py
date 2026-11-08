@@ -21,7 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer im
 
 
 class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
-    """Layerwise or bulk P writes, whole-request D reads, one shared pool."""
+    """Layerwise or bulk P writes and prefix-aware D reads in one shared pool."""
 
     def __init__(self, vllm_config, role, kv_cache_config):
         super().__init__(vllm_config, role, kv_cache_config)
@@ -54,6 +54,16 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
             self.worker = PoolPDWorker(pool)
             if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(pool, vllm_config)
+
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        # A PD handoff supplies the exact recurrent and circular state even
+        # when attention has a longer local hit. Ordinary pool prefix loads
+        # still require the cache groups to agree on a common boundary.
+        config = self._kv_transfer_config
+        return config.kv_role == "kv_consumer" and not config.kv_connector_extra_config.get(
+            "consumer_is_to_load", False
+        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config):

@@ -57,18 +57,30 @@ class PoolPDWorker:
                 plans.extend(layout.objects(0, blocks[index], f"pd_state_{cache_end}_{request.prompt_digest}"))
                 continue
             first = request.local_tokens // layout.chunk_size
+            unhashed = None
+            if not writing and request.unhashed_block_ids is not None:
+                # The scheduler reports the deepest attention hit. A different
+                # group may have missed part of that prefix, so decide which
+                # blocks to restore from each group's actual allocation.
+                unhashed = set(request.unhashed_block_ids[gid])
+                first = 0
             if not tail_only:
                 for index in range(first, complete):
+                    block_id = blocks[index]
+                    if block_id <= 0:
+                        raise ValueError("PD cannot restore a null full-attention block")
+                    if unhashed is not None and block_id not in unhashed:
+                        continue
                     digest = block_hash_to_str(
                         request.block_hashes[(index + 1) * layout.chunk_size // layout.hash_block_size - 1]
                     )
-                    if blocks[index] <= 0:
-                        raise ValueError("PD cannot restore a null full-attention block")
-                    plans.extend(layout.objects(index * layout.chunk_size, blocks[index], digest))
+                    plans.extend(layout.objects(index * layout.chunk_size, block_id, digest))
             needs_tail = writing or receive_end > complete * layout.chunk_size
             if remainder and needs_tail and request.local_tokens < request.prompt_tokens:
                 if complete >= len(blocks) or blocks[complete] <= 0:
                     raise ValueError("PD tail has no allocated block")
+                if unhashed is not None and blocks[complete] not in unhashed:
+                    raise ValueError("PD tail requires a private destination block")
                 plans.extend(
                     layout.partial_objects(
                         complete * layout.chunk_size, blocks[complete], request.prompt_digest, remainder

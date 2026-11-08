@@ -37,6 +37,7 @@ class PoolPDRequest:
     local_tokens: int = 0
     cache_tokens: int | None = None
     handoff_deadline: float | None = None
+    unhashed_block_ids: list[list[int]] | None = None
 
 
 @dataclass

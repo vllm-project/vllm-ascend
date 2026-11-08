@@ -152,6 +152,57 @@ def test_pd_tail_and_full_block_copy_and_retention(monkeypatch, layerwise, lengt
     assert not backend.leases
 
 
+def test_pd_adopts_per_group_attention_hits_and_restores_state():
+    connector = LayerwisePoolConnector.__new__(LayerwisePoolConnector)
+    config = SimpleNamespace(kv_role="kv_consumer", kv_connector_extra_config={})
+    connector._kv_transfer_config = config
+    assert connector.supports_divergent_local_hybrid_hits
+    config.kv_connector_extra_config["consumer_is_to_load"] = True
+    assert not connector.supports_divergent_local_hybrid_hits
+    config.kv_role = "kv_producer"
+    config.kv_connector_extra_config.clear()
+    assert not connector.supports_divergent_local_hybrid_hits
+
+    scheduler = PoolPDScheduler(MagicMock(), need_truncate=True)
+    req = request(
+        list(range(11)),
+        block_hashes=[b"h2", b"h4", b"h6", b"h8"],
+        kv_transfer_params=dict(do_remote_prefill=True, pool_pd_protocol=POOL_PD_PROTOCOL, remote_num_prompt_tokens=11),
+    )
+    assert scheduler.get_num_new_matched_tokens(req, 8) == (2, True)
+    blocks = SimpleNamespace(
+        get_block_ids=lambda: ([1, 2, 3], [4, 5, 6], [0, 0, 7], [8]),
+        get_unhashed_block_ids_all_groups=lambda: [[3], [5, 6], [7], [8]],
+    )
+    scheduler.update_state_after_alloc(req, blocks, 2)
+
+    def layout(group, *, state=False):
+        return SimpleNamespace(
+            chunk_size=4,
+            block_size=4,
+            hash_block_size=2,
+            state=state,
+            objects=lambda start, block, key: [(group, start, block)],
+            partial_objects=lambda start, block, key, remainder: [(group, start, block, remainder)],
+        )
+
+    transfer = SimpleNamespace(
+        layouts={0: layout(0), 1: layout(1), 2: layout(2, state=True)},
+        request_states={3: SimpleNamespace(snapshot=lambda block, digest, end: [(3, end, block)])},
+    )
+    worker = PoolPDWorker(SimpleNamespace(shared_pool=transfer))
+    receive = scheduler.receives["r"]
+    # The second attention group missed a block inside the first group's
+    # local hit. Restore it, both tails and the exact recurrent/ring state.
+    assert worker._plans(receive, tail_only=False, writing=False) == (
+        (3, 10, 8),
+        (0, 8, 3, 2),
+        (1, 4, 5),
+        (1, 8, 6, 2),
+        (2, 0, 7),
+    )
+
+
 def test_pd_receive_does_not_require_recomputed_token_block(monkeypatch):
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
     backend = MemoryBackend()
@@ -262,7 +313,9 @@ def test_scheduler_cpd_contract_and_last_token_recompute():
     decoder = PoolPDScheduler(MagicMock())
     req.kv_transfer_params = params
     assert decoder.get_num_new_matched_tokens(req, 0) == (2, True)
-    decoder.update_state_after_alloc(req, SimpleNamespace(get_block_ids=lambda: ([2],)), 2)
+    decoder.update_state_after_alloc(
+        req, SimpleNamespace(get_block_ids=lambda: ([2],), get_unhashed_block_ids_all_groups=lambda: [[2]]), 2
+    )
     assert decoder.receives["r"].prompt_digest == prompt_digest(req)
     assert not req.kv_transfer_params["do_remote_prefill"]
     decoder.pool.update_state_after_alloc.assert_called_once()
@@ -322,7 +375,9 @@ def test_finished_decode_clears_pending_receive_and_request_identity():
         kv_transfer_params=dict(do_remote_prefill=True, pool_pd_protocol=POOL_PD_PROTOCOL, remote_num_prompt_tokens=3),
     )
     assert scheduler.get_num_new_matched_tokens(req, 0) == (2, True)
-    scheduler.update_state_after_alloc(req, SimpleNamespace(get_block_ids=lambda: ([4],)), 2)
+    scheduler.update_state_after_alloc(
+        req, SimpleNamespace(get_block_ids=lambda: ([4],), get_unhashed_block_ids_all_groups=lambda: [[4]]), 2
+    )
     assert "r" in scheduler.receives
     output = SimpleNamespace(finished_req_ids={"r"}, preempted_req_ids=set(), num_scheduled_tokens={})
     metadata = scheduler.build_connector_meta(output)
