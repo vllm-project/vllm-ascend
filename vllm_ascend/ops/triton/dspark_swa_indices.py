@@ -345,6 +345,29 @@ def build_dspark_swa_slot_indices_triton(
     buffer rules and the parameter semantics.
     """
 
+    # The kernel dereferences every tensor with device-side loads/stores;
+    # a host (CPU) tensor turns into a wild GM pointer and faults the device
+    # with AI Core Error 95 instead of raising (see #21270). Validate the
+    # device residency of every tensor argument up front.
+    _device = block_table.device
+    for _name, _tensor in (
+        ("block_table", block_table),
+        ("query_start_loc", query_start_loc),
+        ("seq_lens", seq_lens),
+        ("indices_output", indices_output),
+        ("lens_output", lens_output),
+    ):
+        if _tensor is not None and _tensor.device != _device:
+            raise ValueError(
+                f"dspark_swa_indices tensors must live on the same device, got "
+                f"{_name} on {_tensor.device} while block_table is on {_device}"
+            )
+    if _device.type not in ("npu", "cuda"):
+        raise ValueError(
+            f"dspark_swa_indices requires an accelerator device, got block_table on {_device}; "
+            "the triton kernel would dereference host memory (see #21270)"
+        )
+
     num_reqs = query_start_loc.shape[0] - 1
     if index_width is None:
         # Same alignment rule as dsa_v1._aligned_dspark_index_width.
