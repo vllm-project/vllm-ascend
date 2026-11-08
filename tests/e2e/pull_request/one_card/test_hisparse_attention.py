@@ -13,6 +13,11 @@ import torch_npu  # noqa: F401
 
 @pytest.fixture(autouse=True)
 def _require_npu_sfa():
+    from vllm_ascend.utils import bootstrap_custom_op_env
+
+    # Match platform initialization: publish the OPP path before device queries
+    # or set_device can initialize the runtime and its tiling registry.
+    bootstrap_custom_op_env()
     if not torch.npu.is_available():
         pytest.skip("HiSparse SFA tests require an NPU")
     from vllm_ascend.device.device_config import is_310p
@@ -20,10 +25,7 @@ def _require_npu_sfa():
     if is_310p():
         pytest.skip("The native SFA operation is not registered for Ascend 310P")
     torch.npu.set_device(0)
-    from vllm_ascend.utils import bootstrap_custom_op_env
-
     # Load the required SFA extension without changing custom-op selection.
-    bootstrap_custom_op_env()
     import vllm_ascend.vllm_ascend_C  # noqa: F401
 
 
