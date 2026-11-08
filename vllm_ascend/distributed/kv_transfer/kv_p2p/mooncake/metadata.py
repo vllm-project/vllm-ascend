@@ -201,6 +201,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         # D request ID -> whether the failed metaserver call never dispatched P.
         self.push_failed_requests: dict[str, bool] = {}
         self.requests_to_send: dict[str, float] = {}
+        self.finished_sending: set[str] = set()
         self.reqs_in_batch: set[str] = set()
 
     def add_new_req(
