@@ -38,6 +38,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
@@ -135,6 +136,11 @@ def _is_absorbed_by_attention(layer: torch.nn.Module) -> bool:
     return getattr(layer, "prefix", "").endswith("kv_b_proj")
 
 
+def _get_layer_tp_size(layer: torch.nn.Module) -> int:
+    tp_size = getattr(layer, "tp_size", None)
+    return get_tensor_model_parallel_world_size() if tp_size is None else tp_size
+
+
 @register_scheme(FP8_METHOD, "linear")
 class AscendFp8BlockLinearMethod(AscendLinearScheme):
     """Linear method for native block-wise FP8 checkpoints.
@@ -179,6 +185,42 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         self.block_n, self.block_k = weight_block_size
         self.model_dtype = get_current_vllm_config().model_config.dtype
         self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod() if is_950() else None
+
+    def validate_weight_shapes(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_size: int,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+    ) -> None:
+        # Upstream explicitly permits some packed projections with padded
+        # block scales. Preserve the loader's policy for those layers.
+        if getattr(layer, "allow_fp8_block_shape_mismatch", False):
+            return
+
+        tp_size = _get_layer_tp_size(layer)
+        if tp_size > 1 and input_size == input_size_per_partition * tp_size and input_size_per_partition % self.block_k:
+            raise ValueError(
+                f"Weight input_size_per_partition = {input_size_per_partition} is not divisible by "
+                f"weight quantization block_k = {self.block_k}."
+            )
+
+        # Internal packed boundaries must align even for replicated weights.
+        # A replicated final projection may own a partial tile at its tail.
+        # QKV layers can replicate K/V independently of Q, so the packed
+        # output size alone cannot establish whether the last slice is sharded.
+        logical_sizes = getattr(layer, "output_sizes", [output_size])
+        last_size = output_partition_sizes[-1]
+        kv_replicas = getattr(layer, "num_kv_head_replicas", 1)
+        last_is_sharded = tp_size > kv_replicas and logical_sizes[-1] == last_size * tp_size
+        sizes_to_check = output_partition_sizes if last_is_sharded else output_partition_sizes[:-1]
+        for size in sizes_to_check:
+            if size % self.block_n:
+                raise ValueError(
+                    f"Weight output_partition_size = {size} is not divisible by "
+                    f"weight quantization block_n = {self.block_n}."
+                )
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         return {"weight": torch.empty(output_size, input_size, dtype=BLOCK_FP8_WEIGHT_DTYPE)}
@@ -284,6 +326,18 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             get_dynamic_mx_quant_scale_alg(get_current_vllm_config()) if self.mxfp8_method is not None else 0
         )
         self._bf16_method: Any = None
+
+    def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
+        if intermediate_size_per_partition % self.block_n:
+            raise ValueError(
+                f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
+                f"divisible by weight quantization block_n = {self.block_n}."
+            )
+        if _get_layer_tp_size(layer) > 1 and intermediate_size_per_partition % self.block_k:
+            raise ValueError(
+                f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
+                f"divisible by weight quantization block_k = {self.block_k}."
+            )
 
     @property
     def bf16_method(self):

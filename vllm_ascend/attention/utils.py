@@ -13,7 +13,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
@@ -258,31 +258,7 @@ def needs_layer_aware_fia_graph_replay() -> bool:
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-    scheduler_config = vllm_config.scheduler_config
-    cache_config = vllm_config.cache_config
-    model_config = vllm_config.model_config
-
-    chunked_prefill_workspace_size = min(
-        # Make sure there is enough for 8 full length request or at least
-        # 4 pages of cache per request
-        max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
-        # For long-context models try not to over-allocate limiting
-        # kv-cache space, limiting it to 128k tokens,
-        # which would result in the workspace being:
-        #   2*(576)*(128*1024) = 288mb
-        # (assuming 576 MLA head dim, and fp16)
-        # which would result in up-projected context being
-        #   2*(192*128)*(128*1024) = 6gb
-        # (assuming 192 QK head dim, 128 heads, and fp16)
-        128 * 1024,
-    )
-
-    chunked_prefill_workspace_size = max(
-        chunked_prefill_workspace_size,
-        scheduler_config.max_num_seqs * cache_config.block_size,
-    )
-
-    return chunked_prefill_workspace_size
+    return MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
 
 
 def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:

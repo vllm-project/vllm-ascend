@@ -301,20 +301,22 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
-#   2. `vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder._get_pool_bytes_per_block`
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_groups`,
+#      `...get_kv_cache_config_from_groups`,
+#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
 #    Why:
-#       The builder-based vLLM planner probes one block and requires every
-#       device tensor to share one backing size. Ascend's DSV4.1, DSV4, GLM5,
-#       and TurboQuant layouts can use several differently sized allocations.
+#       The v0.32.0 release lane has no pluggable `KVCacheConfigBuilder`, so
+#       the Ascend DSV4/DSV4.1, GLM-Next, Kimi-K3 DSpark, and TurboQuant
+#       planning rules must stay module-level monkey patches there.
 #    How:
-#       Return the aggregate per-block pool size from existing Ascend layout
-#       accounting for those cache types; leave other layouts on the upstream
-#       placement probe.
+#       Keep the planning patches applied from this file. Main resolves
+#       grouping through `vllm_ascend.core.kv_cache_config_builder`, selected
+#       by `NPUPlatform.get_kv_cache_config_builder_cls`; its default
+#       materialization delegates back to these patched functions.
 #    Related PR (if no, explain why):
-#       No upstream PR currently handles Ascend's multi-allocation layouts.
+#       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Move this override into an Ascend KVCacheConfigBuilder, or remove it
-#       once upstream provides a platform hook for multi-allocation accounting.
+#       Remove them when vllm-ascend stops supporting v0.32.0.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1697,9 +1699,16 @@
 #       the target quant config during `load_dspark_model`, then restore it.
 #       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
 #       quant config.
+#       Mark draft reconstruction for platform validation (PR #20570).
+#       Disabled drafts may inherit the target collection phase; additional_config
+#       and the existing Ascend config initialization behavior remain unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/20570
 #    Future Plan:
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
+#       Remove the draft scope when upstream exposes draft construction context
+#       to the platform validation hook.
 #
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1715,6 +1724,8 @@
 #       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
 #       `DeviceOperator`. The A5 adaptor temporarily implements it with the
 #       equivalent `scatter_` operation; other hardware keeps the native path.
+#       Apply this only when the legacy torch allocator exists. Newer vLLM
+#       Triton allocators are reused directly without replacing their kernels.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
