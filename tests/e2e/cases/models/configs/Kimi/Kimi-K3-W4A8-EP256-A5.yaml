@@ -34,6 +34,7 @@ test_cases:
 - name: Kimi-K3-W4A8-EP256-A5-GSM8K-First500
   model: /data/weights/Kimi-K3-w4a8-mxfp-QuaRot-experts256
   envs:
+    SERVER_PORT: "8080"
     VLLM_USE_V2_MODEL_RUNNER: '1'
     HCCL_BUFFSIZE: '800'
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
