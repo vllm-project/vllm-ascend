@@ -37,6 +37,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
+        mock_get_vllm_config.return_value.use_v2_model_runner = False
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         mock_indexer = self._make_vllm_indexer()
 
@@ -64,6 +65,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
+        mock_get_vllm_config.return_value.use_v2_model_runner = False
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
         indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
@@ -77,6 +79,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
+        mock_get_vllm_config.return_value.use_v2_model_runner = False
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
         # The dtype pair is derived from attention_config.indexer_kv_dtype. In UT

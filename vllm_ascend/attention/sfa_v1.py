@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
@@ -12,7 +12,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -28,6 +28,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.indexer import AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -46,6 +47,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -862,6 +864,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # - C8 indexer cache for lightning indexer.
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
+        self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
+        if self.has_indexer and isinstance(self.indexer.k_cache, AscendSFAIndexerCache):
+            self.indexer.k_cache.cache_enabled = self.runtime_has_indexer
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.enable_sparse_sfa_c8:
@@ -884,6 +889,26 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+
+    def customize_kv_cache_spec(self, spec: AscendMLAAttentionSpec) -> AscendMLAAttentionSpec:
+        """Publish the same SFA layout used by preprocessing and attention."""
+        if self.enable_sparse_sfa_turboquant:
+            spec = replace(
+                spec,
+                state_content_bytes=self.sfa_qsfa_packed_kv_head_dim,
+                dtype=torch.int8,
+                cache_dtype_str=self.kv_cache_dtype,
+                cache_sparse_sfa_turboquant=True,
+            )
+        elif self.enable_sparse_sfa_c8:
+            spec = replace(
+                spec,
+                state_content_bytes=self.sfa_qsfa_packed_kv_head_dim * get_dtype_size(self.c8_cache_dtype),
+                dtype=self.c8_cache_dtype,
+                cache_dtype_str=self.kv_cache_dtype,
+                cache_sparse_sfa_c8=True,
+            )
+        return replace(spec, store_on_host=self.store_kv_cache_on_host)
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:

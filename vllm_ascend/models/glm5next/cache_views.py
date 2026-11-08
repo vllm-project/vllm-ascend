@@ -13,6 +13,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
+    get_kv_cache_storage_head_size,
     get_storage_block_size,
 )
 
@@ -72,7 +73,7 @@ def view_compressed_indexer_cache(
             num_blocks * num_blocks_per_kv_block,
             indexer_kernel_block_size,
             kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
+            get_kv_cache_storage_head_size(kv_cache_spec),
         )
     )
     strides = _row_major_strides(shape)
@@ -125,7 +126,7 @@ def _view_nope_main_mla_cache(
             num_blocks * num_blocks_per_kv_block,
             kernel_block_size,
             kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
+            get_kv_cache_storage_head_size(kv_cache_spec),
         )
     )
     strides = _row_major_strides(shape)

@@ -70,6 +70,7 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 
 def make_config():
     return SimpleNamespace(
+        use_v2_model_runner=True,
         model_config=SimpleNamespace(max_model_len=2048),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,

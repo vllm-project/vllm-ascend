@@ -24,7 +24,7 @@ def _ordinary_specs() -> dict[str, KVCacheSpec]:
 
 def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
     specs = _ordinary_specs()
-    vllm_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(use_v2_model_runner=False)
     expected = [Mock(spec=KVCacheGroupSpec)]
     upstream_grouping = Mock(return_value=expected)
     monkeypatch.setattr(

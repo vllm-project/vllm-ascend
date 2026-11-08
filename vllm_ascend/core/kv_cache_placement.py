@@ -13,7 +13,11 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    get_kv_cache_storage_head_size,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor, enable_sfa, kv_cache_spec_uses_packed_sfa_main_cache
 
@@ -80,7 +84,7 @@ def build_kvpp_buffer_sizes(
         sizes = []
         if isinstance(spec, AscendSFAIndexerCacheSpec):
             elements = spec.sfa_dcp_replicated_indexer_size * spec.block_size * spec.num_kv_heads
-            sizes.append(elements * spec.head_size * get_dtype_size(spec.dtype))
+            sizes.append(elements * get_kv_cache_storage_head_size(spec) * get_dtype_size(spec.dtype))
             if spec.scale_dim:
                 sizes.append(elements * spec.scale_dim * get_dtype_size(spec.scale_dtype))
         elif isinstance(spec, AscendMLAAttentionSpec) and kv_cache_spec_uses_packed_sfa_main_cache(spec):
