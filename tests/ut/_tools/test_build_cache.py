@@ -2116,9 +2116,7 @@ class TestReapStaleOpcLocks:
 
     @pytest.fixture()
     def dead_pid(self) -> int:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         proc.wait()
         assert proc.returncode == 0
         return proc.pid
