@@ -69,6 +69,7 @@ def _engram_host_uva_gather_dequant_kernel(
     codes_ptrs,
     scales_ptrs,
     ids,
+    sorted_dst,
     output,
     rows,
     vocab_start,
@@ -80,16 +81,24 @@ def _engram_host_uva_gather_dequant_kernel(
     HEAD_START: tl.constexpr,
     LOCAL_HEADS: tl.constexpr,
     PAD_HEADS: tl.constexpr,
+    SORTED: tl.constexpr,
     QUANTIZED: tl.constexpr,
     MXFP8: tl.constexpr,
 ):
     row = tl.program_id(0)
     if row < rows:
-        token = row // LOCAL_HEADS
-        head_local = row % LOCAL_HEADS
-        index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
-        owned = (index >= vocab_start) & (index < vocab_end)
-        local_row = tl.where(owned, index - vocab_start, 0)
+        if SORTED:
+            local_row = tl.load(ids + row).to(tl.int64)
+            output_row = tl.load(sorted_dst + row).to(tl.int64)
+            owned = (local_row >= 0) & (local_row < vocab_end - vocab_start)
+        else:
+            token = row // LOCAL_HEADS
+            head_local = row % LOCAL_HEADS
+            index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)
+            owned = (index >= vocab_start) & (index < vocab_end)
+            local_row = index - vocab_start
+            output_row = token * PAD_HEADS + head_local
+        local_row = tl.where(owned, local_row, 0)
         chunk = local_row // CHUNK
         local = local_row % CHUNK
         if MXFP8:
@@ -118,6 +127,6 @@ def _engram_host_uva_gather_dequant_kernel(
                 value = value * scale
         result = value.to(tl.bfloat16)
         tl.store(
-            output + (token * PAD_HEADS + head_local) * WIDTH + col,
+            output + output_row * WIDTH + col,
             tl.where(owned, result, tl.zeros_like(result)),
         )

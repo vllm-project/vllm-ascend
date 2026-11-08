@@ -221,11 +221,14 @@ def gather_dequantize_host_uva(
     output: torch.Tensor | None = None,
     vocab_start: int = 0,
     vocab_end: int | None = None,
+    sorted_dst: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Gather registered host rows, preserving BF16 when scales are absent.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
-    ``[tokens, pad_heads, width]``.
+    ``[tokens, pad_heads, width]``. When ``sorted_dst`` is provided, ``ids``
+    contains table-local rows in lookup order and ``sorted_dst`` maps them
+    back to their original flattened output rows.
     """
 
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -233,10 +236,16 @@ def gather_dequantize_host_uva(
     pad_heads = local_heads if pad_heads is None else pad_heads
     width = codes.tensor.shape[-1]
     vocab_end = codes.tensor.shape[0] if vocab_end is None else vocab_end
-    tokens = ids.shape[0]
-    rows = tokens * local_heads
-    if output is None:
-        output = torch.empty((tokens * pad_heads, width), dtype=torch.bfloat16, device=ids.device)
+    sorted_lookup = sorted_dst is not None
+    if sorted_lookup:
+        rows = ids.numel()
+        if output is None:
+            raise ValueError("sorted Host-UVA lookup requires a preallocated output")
+    else:
+        tokens = ids.shape[0]
+        rows = tokens * local_heads
+        if output is None:
+            output = torch.empty((tokens * pad_heads, width), dtype=torch.bfloat16, device=ids.device)
     if rows == 0:
         return output
     init_device_properties_triton()
@@ -247,6 +256,7 @@ def gather_dequantize_host_uva(
         codes.ptrs,
         scales.ptrs if scales is not None else None,
         ids,
+        sorted_dst if sorted_dst is not None else ids,
         output,
         rows,
         vocab_start,
@@ -258,6 +268,7 @@ def gather_dequantize_host_uva(
         HEAD_START=head_start,
         LOCAL_HEADS=local_heads,
         PAD_HEADS=pad_heads,
+        SORTED=sorted_lookup,
         QUANTIZED=scales is not None,
         MXFP8=codes.tensor.dtype == torch.float8_e4m3fn,
         num_warps=4,

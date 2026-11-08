@@ -30,6 +30,45 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+def test_sort_host_lookup_rows_preserves_output_order():
+    indices = torch.tensor([[100, 8, 15, 0], [100, 5, 12, -1]], dtype=torch.int64)
+
+    rows, dst = embedding_mod._sort_host_lookup_rows(indices, 1, 2, 5)
+
+    torch.testing.assert_close(rows, torch.tensor([0, 3, 7, 10]))
+    torch.testing.assert_close(dst, torch.tensor([2, 0, 3, 1], dtype=torch.int32))
+    original = (indices[:, 1:3] - 5).flatten()
+    torch.testing.assert_close(original[dst.long()], rows)
+
+
+@pytest.mark.parametrize("threshold,sorted_lookup", [(0, False), (5, False), (4, True)])
+def test_host_uva_lookup_sort_threshold(monkeypatch, threshold, sorted_lookup):
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.dim = 64
+    table.head_start, table.part_n_hash_cols = 1, 2
+    table.vocab_start_idx, table.vocab_end_idx = 5, 32
+    table.host_sort_min_rows = threshold
+    table._codes_uva, table._scales_uva = object(), None
+    table.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+    table.weight_scale_inv = None
+    indices = torch.tensor([[99, 8, 15], [99, 5, 12]], dtype=torch.int32)
+    output = torch.empty((2, 2, 64), dtype=torch.bfloat16)
+    call = Mock()
+    monkeypatch.setattr(embedding_mod, "gather_dequantize_host_uva", call)
+
+    table.lookup(indices, output)
+
+    lookup_ids = call.call_args.args[2]
+    sorted_dst = call.call_args.kwargs["sorted_dst"]
+    if sorted_lookup:
+        torch.testing.assert_close(lookup_ids, torch.tensor([0, 3, 7, 10], dtype=torch.int32))
+        torch.testing.assert_close(sorted_dst, torch.tensor([2, 0, 3, 1], dtype=torch.int32))
+    else:
+        assert lookup_ids is indices
+        assert sorted_dst is None
+
+
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("tokens", [0, 3])

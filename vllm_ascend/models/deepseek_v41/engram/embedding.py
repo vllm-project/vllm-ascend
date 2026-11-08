@@ -32,6 +32,8 @@ from vllm.model_executor.utils import set_weight_attrs
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
+from vllm_ascend import envs
+
 from .npu import (
     HostUvaBuffer,
     SharedUvaBuffer,
@@ -46,6 +48,18 @@ from .parallel import (
     get_engram_dp_group,
     get_engram_dp_size,
 )
+
+
+def _sort_host_lookup_rows(
+    indices: torch.Tensor,
+    head_start: int,
+    local_heads: int,
+    vocab_start: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sort this shard's table-local rows and retain their output positions."""
+    local_rows = indices[:, head_start : head_start + local_heads] - vocab_start
+    sorted_rows, output_rows = local_rows.flatten().sort()
+    return sorted_rows, output_rows.to(torch.int32)
 
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
@@ -68,6 +82,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.scale_dtype = torch.uint8 if storage_dtype == torch.float8_e4m3fn else torch.float32
         self.cpu_offload = cpu_offload
         self.layer_hash_index = layer_hash_index
+        self.host_sort_min_rows = envs.VLLM_ASCEND_ENGRAM_HOST_SORT_MIN_ROWS
         self._shared_group = None
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
             raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
@@ -395,7 +410,21 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._codes_uva is not None:
             codes_uva = cast(HostUvaBuffer, self._codes_uva)
             scales_uva = cast(HostUvaBuffer, self._scales_uva) if self._scales_uva is not None else None
-            gather_dequantize_host_uva(codes_uva, scales_uva, indices, **launch)
+            sorted_dst = None
+            if self.host_sort_min_rows > 0 and tokens * self.part_n_hash_cols >= self.host_sort_min_rows:
+                indices, sorted_dst = _sort_host_lookup_rows(
+                    indices,
+                    self.head_start,
+                    self.part_n_hash_cols,
+                    self.vocab_start_idx,
+                )
+            gather_dequantize_host_uva(
+                codes_uva,
+                scales_uva,
+                indices,
+                sorted_dst=sorted_dst,
+                **launch,
+            )
         elif self.weight.device.type != "cpu":
             gather_dequantize_engram_int8(self.weight, self.weight_scale_inv, indices, self.dim, **launch)
         else:

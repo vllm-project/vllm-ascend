@@ -72,6 +72,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Minimum number of local Engram Host-UVA lookup rows to sort by table
+    # offset before gathering. Values <= 0 disable sorting (default: 0). This
+    # is a non-sensitive performance tuning knob; tune it on the target NPU.
+    "VLLM_ASCEND_ENGRAM_HOST_SORT_MIN_ROWS": lambda: int(os.getenv("VLLM_ASCEND_ENGRAM_HOST_SORT_MIN_ROWS", "0")),
 }
 
 # end-env-vars-definition
