@@ -1,0 +1,6 @@
+pr: 21276
+entries:
+  - category: breaking
+    text: >-
+      Ascend no longer supports SimpleCPUOffloadConnector for CPU KV cache offloading.
+      Use OffloadingConnector and unset VLLM_USE_SIMPLE_KV_OFFLOAD if you enabled it.
