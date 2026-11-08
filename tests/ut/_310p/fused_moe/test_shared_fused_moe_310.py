@@ -58,7 +58,7 @@ def test_routed_experts_310_uses_parent_unquantized_method_during_init(monkeypat
         specialized_method_factory,
     )
 
-    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
+    routed_experts = AscendRoutedExperts310(n_shared_experts=3)
 
     assert routed_experts.quant_method is specialized_method
     specialized_method_factory.assert_called_once_with(moe_config)
@@ -88,9 +88,8 @@ def test_routed_experts_310_replaces_only_unquantized_method_after_parent_init(m
         specialized_method_factory,
     )
 
-    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
+    routed_experts = AscendRoutedExperts310(n_shared_experts=3)
 
-    assert init_kwargs["tid2eid"] == "tid2eid"
     assert init_kwargs["n_shared_experts"] == 3
     if quant_config is None:
         assert routed_experts.quant_method is specialized_method
