@@ -219,8 +219,11 @@ HAL/HCCL/ACL 动态库加载通过，已有算子二进制哈希保持一致。
 历史 AISBench 3.1.0 的存在已由独立评测环境记录补全，不能因推理环境快照未安装
 AISBench 就认定历史测试没有评测环境。
 
-当前 YAML 的 `/data/weights/`、`/data/datasets/gsm8k500/` 是新的部署路径，
-不是上述历史挂载路径。运行前应配置对应挂载，并核对 GSM8K 加载器是否需要 train.jsonl。
+当前 YAML 的模型路径 `/data/weights/` 是容器部署路径；数据集路径为
+`/data/c30087248/datasets/first500/gsm8k`（无末尾斜杠）。
+运行前应将模型和数据集挂载到 YAML 指定的位置，数据集在容器内保持相同绝对路径。
+该独立目录包含原始测试集前 500 题的 `test.jsonl` 和用于 4-shot 示例的 `train.jsonl`，
+保留原有完整 GSM8K 与 gsm8k500 目录，不修改 `tools/aisbench.py`。
 当前基线 60.0%、容差 3.0 个百分点为用户选定值，尚未通过原生评分校准。
 nightly 注册仅声明调度入口，不代表运行环境和模型已验证。
 
