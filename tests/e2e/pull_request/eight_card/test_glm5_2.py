@@ -57,6 +57,8 @@ def _run_speculative_decoding(
         max_model_len=8192,
         max_num_seqs=16,
         enable_expert_parallel=True,
+        # Keep the overlapped SFA indexer pre-processing path under test.
+        additional_config={"multistream_sfa_indexer_overlap": True},
         disable_log_stats=False,
         speculative_config=speculative_config,
         compilation_config=compilation_config,
