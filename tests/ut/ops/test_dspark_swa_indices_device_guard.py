@@ -41,8 +41,10 @@ class TestDsparkSwaIndicesDeviceGuard(TestBase):
 
     def test_rejects_mixed_devices_naming_the_argument(self):
         block_table, query_start_loc, seq_lens = self._cpu_args()
-        device_slots = torch.empty((16, 1, 4224), dtype=torch.int32, device="npu")
-        with pytest.raises(ValueError, match="indices_output on npu"):
+        # meta-device tensors need no accelerator, so this test also runs on
+        # the CPU-only CI lane.
+        device_slots = torch.empty((16, 1, 4224), dtype=torch.int32, device="meta")
+        with pytest.raises(ValueError, match="indices_output on meta"):
             build_dspark_swa_slot_indices_triton(
                 block_table,
                 num_speculative_tokens=3,
