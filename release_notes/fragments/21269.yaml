@@ -1,4 +1,0 @@
-pr: 21269
-entries:
-  - category: config
-    text: Added an opt-in threshold for sorting DeepSeek V4.1 Engram Host-UVA lookup rows by table offset.
