@@ -1,14 +1,5 @@
-# Historical A5 environment reference (not a validated runtime for this YAML):
-# Base image: quay.io/ascend/vllm-ascend:nightly-releases-v0.30.0-a5
-# The historical container was modified after creation; the image tag alone
-# does not reproduce its installed packages or editable source changes.
-# Full environment record: tools/kimi_k3/TEST_REPORT.md on branch
-# test/kimi-k3-pruned-experts-accuracy (not present on this native-YAML branch).
-# https://github.com/CuiZ2007/vllm-ascend/blob/f9950d2677f5895ff01e1ea39eae8b3a21b8ae5b/tools/kimi_k3/TEST_REPORT.md
-# Historical three-round scores used the older custom evaluation workflow.
-# They do not validate this native AISBench YAML or establish its baseline.
-# Provision AISBench and test dependencies separately; the saved historical
-# environment snapshot did not include AISBench.
+# Kimi-K3 EP256 A5 accuracy case.
+# Test environment and results: A5_ENVIRONMENT.zh-CN.md in this directory.
 # DRAFT: native AISBench accuracy case; no custom runner or dataset Python file.
 # Scope: one A5 node, 8 NPUs, pre-pruned Kimi-K3 W4A8 with 256 routed experts.
 # Source checkpoint: Kimi-K3-w4a8-mxfp-QuaRot. Pruning is a separate prerequisite.
