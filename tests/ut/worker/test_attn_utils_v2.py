@@ -51,6 +51,9 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
+    _canonicalize_split_cache,
+)
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
@@ -1765,6 +1768,26 @@ def test_combined_attention_kernel_blocks_match_physical_rows(splits):
         attn_utils._reshape_combined_attention_kv_cache(
             raw.view(torch.int8), shape, raw.dtype, 9 * 2 * block_elements * 2 + 64, 9
         )
+
+
+def test_mrv2_native_offload_coalesces_reported_interleaved_kv_geometry():
+    num_blocks, splits = 3, 4
+    kernel_shape = (128, 4, 128)
+    component_bytes = 128 * 1024
+    page_bytes = splits * 2 * component_bytes
+    raw = torch.arange(num_blocks * splits * 2, dtype=torch.int8).repeat_interleave(component_bytes)
+    key, value = attn_utils._reshape_combined_attention_kv_cache(
+        raw, (2, num_blocks * splits, *kernel_shape), torch.bfloat16, page_bytes, splits
+    )
+    assert key.stride(0) * key.element_size() == 2 * component_bytes
+    assert key[0].numel() * key.element_size() == component_bytes
+
+    ((view, copy_size),) = _canonicalize_split_cache((key, value), num_blocks, page_bytes, coalesce_interleaved=True)
+
+    assert copy_size == page_bytes
+    assert view.data_ptr() == raw.data_ptr()
+    assert view.stride() == (page_bytes, 1)
+    assert torch.equal(view, raw.view(num_blocks, page_bytes))
 
 
 @pytest.mark.parametrize("splits", [1, 2, 4, 8])

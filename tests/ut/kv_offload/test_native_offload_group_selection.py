@@ -88,7 +88,7 @@ def _prepare_worker(
 ) -> tuple[AscendOffloadingConnectorWorker, list[CanonicalKVCaches]]:
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
-    worker.vllm_config = object()
+    worker.vllm_config = SimpleNamespace(use_v2_model_runner=True)
     captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})

@@ -206,3 +206,57 @@ def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
     finally:
         subscriber.close()
         del llm
+
+
+def test_mrv2_hybrid_cpu_offload_restores_greedy_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    blocks_per_chunk = 8
+    # Ascend attention uses 128-token kernel blocks. Require multiple per page.
+    manager_block_size = 256
+    llm = LLM(
+        model="Qwen/Qwen3.5-0.8B",
+        dtype="bfloat16",
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        mamba_cache_mode="align",
+        block_size=manager_block_size,
+        max_model_len=16384,
+        gpu_memory_utilization=0.5,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "cpu_bytes_to_use": 1 << 30,
+                            "blocks_per_chunk": blocks_per_chunk,
+                            "spec_name": "CPUOffloadingSpec",
+                        },
+                    }
+                ]
+            },
+        ),
+    )
+    try:
+        vllm_config = llm.llm_engine.vllm_config
+        assert vllm_config.use_v2_model_runner
+        assert vllm_config.cache_config.block_size >= manager_block_size
+        chunk_tokens = vllm_config.cache_config.block_size * blocks_per_chunk
+        prompt = TokensPrompt(prompt_token_ids=[42] * (chunk_tokens + 1))
+        sampling = SamplingParams(max_tokens=8, temperature=0)
+        cold = llm.generate(prompt, sampling, use_tqdm=False)[0]
+
+        # Drain asynchronous stores and clear only the device prefix cache.
+        deadline = time.monotonic() + 60
+        while not llm.reset_prefix_cache(reset_connector=False):
+            assert time.monotonic() < deadline, "KV stores did not complete"
+            llm.generate(TokensPrompt(prompt_token_ids=[1, 2]), SamplingParams(max_tokens=1), use_tqdm=False)
+
+        reloaded = llm.generate(prompt, sampling, use_tqdm=False)[0]
+        assert reloaded.num_cached_tokens == chunk_tokens
+        assert reloaded.outputs[0].token_ids == cold.outputs[0].token_ids
+    finally:
+        del llm

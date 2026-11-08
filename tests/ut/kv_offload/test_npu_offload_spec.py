@@ -246,7 +246,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 def _make_layout_worker(kv_cache_config, monkeypatch: pytest.MonkeyPatch):
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
-    worker.vllm_config = object()
+    worker.vllm_config = SimpleNamespace(use_v2_model_runner=True)
     captured: list[Any] = []
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
@@ -286,10 +286,11 @@ def test_hybrid_overlapping_page_reproduces_reported_worker_capacity(monkeypatch
     assert [sum(ref.page_size_bytes for ref in refs) for refs in captured[0].group_data_refs] == [2, state_size]
 
 
-@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3, 8])
 @pytest.mark.parametrize("group_sizes", [(2, 2), (2, 0), (0, 2)])
+@pytest.mark.parametrize("kernel_blocks_per_page", [1, 2])
 def test_overlapping_groups_round_trip_with_real_transfer_descriptors(
-    monkeypatch: pytest.MonkeyPatch, blocks_per_chunk: int, group_sizes: tuple[int, int]
+    monkeypatch: pytest.MonkeyPatch, blocks_per_chunk: int, group_sizes: tuple[int, int], kernel_blocks_per_page: int
 ) -> None:
     attention_spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=3, dtype=torch.int8)
     mamba_spec = MambaSpec(block_size=2, shapes=((3,), (4,)), dtypes=(torch.int8, torch.int8), page_size_padded=12)
@@ -304,10 +305,13 @@ def test_overlapping_groups_round_trip_with_real_transfer_descriptors(
     connector, captured = _make_layout_worker(config, monkeypatch)
     backing = torch.arange(48, dtype=torch.int8).view(4, 12)
     original = backing.clone()
-    connector.register_kv_caches(
-        {"attention": (backing[:, :6], backing[:, 6:]), "mamba": [backing[:, 2:5], backing[:, 5:9]]}
-    )
+    kernel_slots = backing.view(-1, 12 // kernel_blocks_per_page)
+    key, value = kernel_slots.chunk(2, dim=1)
+    connector.register_kv_caches({"attention": (key, value), "mamba": [backing[:, 2:5], backing[:, 5:9]]})
     canonical = captured[0]
+    if kernel_blocks_per_page == 2:
+        # Attention needs only the boundaries introduced by the GDN overlay.
+        assert [len(refs) for refs in canonical.group_data_refs] == [4, 2]
     npu_tensors = [cache.tensor for cache in canonical.tensors]
     row_bytes = 12 * blocks_per_chunk
     host = torch.full((4, row_bytes + 13), -1, dtype=torch.int8)
@@ -327,7 +331,7 @@ def test_overlapping_groups_round_trip_with_real_transfer_descriptors(
     def memcpy(src, dst, sizes, direction):
         for source, destination, size in zip(src.tolist(), dst.tolist(), sizes.tolist()):
             ctypes.memmove(destination, source, size)
-        copied.append(int(sizes.sum()))
+        copied.append((len(sizes), int(sizes.sum())))
 
     monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", memcpy, raising=False)
     block_ids = ([0, 2] if group_sizes[0] else []) + ([1, 3] if group_sizes[1] else [])
@@ -358,7 +362,9 @@ def test_overlapping_groups_round_trip_with_real_transfer_descriptors(
         backing[3, 2:9] = 0
     assert handler(False).transfer_async(2, cpu_spec, npu_spec)
     torch.testing.assert_close(backing, original)
-    assert copied == [group_sizes[0] * 12 + group_sizes[1] * 7] * 2
+    expected_descriptors = sum(count * len(refs) for count, refs in zip(group_sizes, canonical.group_data_refs))
+    expected_bytes = group_sizes[0] * 12 + group_sizes[1] * 7
+    assert copied == [(expected_descriptors, expected_bytes)] * 2
     assert torch.all(host[:, row_bytes:] == -1)
 
 
@@ -487,9 +493,6 @@ def test_upstream_compatible_layout_uses_upstream_canonicalization(
             num_blocks=4,
             kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
             kv_cache_tensors=[],
-            # The connector offloads the groups vLLM selects, not all of them.
-            prefix_cacheable_group_ids=(0,),
-            hisparse_host_num_blocks=None,
         ),
         monkeypatch,
     )
@@ -525,9 +528,6 @@ def test_split_attention_cache_is_zero_copy(
             num_blocks=4,
             kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
             kv_cache_tensors=[],
-            # The connector offloads the groups vLLM selects, not all of them.
-            prefix_cacheable_group_ids=(0,),
-            hisparse_host_num_blocks=None,
         ),
         monkeypatch,
     )
