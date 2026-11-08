@@ -56,8 +56,8 @@
 | 项目 | 当前 YAML 配置 |
 | --- | --- |
 | 模型 | Kimi-K3 W4A8 MXFP/QuaRot，256 个路由专家 |
-| 模型路径 | `/mnt/weight/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256` |
-| 数据集路径 | `/mnt/weight/modelscope/hub/datasets/CuiZ2007/gsm8k` |
+| 模型路径 | `/root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256` |
+| 数据集路径 | `/root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k` |
 | 数据文件 | `test.jsonl`：前 500 题；`train.jsonl`：4-shot 示例 |
 | 服务端口 / Runner | `SERVER_PORT=8080` / `VLLM_USE_V2_MODEL_RUNNER=1` |
 | 通信缓冲 / CPU 线程 | `HCCL_BUFFSIZE=800` / `OMP_NUM_THREADS=1` |
@@ -119,6 +119,10 @@ python -m pytest -sv tests/e2e/common/single_node/test_single_node.py
 | nightly 名称调度解析、参数与文档数值一致性 | 通过 |
 | 数据准备 | 测试集前 500 题比对通过，训练集 7473 条 |
 | 完整格式检查 `bash format.sh ci` | 待完成；钩子环境下载遇到 GitHub 连接超时，本机缺少可用 Bash |
-| 当前 YAML 的 A5 服务启动、推理及 500 题评测 | 待执行 |
-| nightly CI 运行 | 待执行 |
+| 当前 YAML 的 A5 服务启动、推理及 500 题评测 | 首次运行在模型路径解析阶段失败，推理和评测未开始；已更新缓存路径，待重跑 |
+| nightly CI 运行 | 2026-11-08 首次运行结束：vllm-ascend 编译安装通过，YAML 测试在模型路径解析阶段失败；待重跑 |
 | 原生评分验收值校准 | 待执行；当前采用用户选定的 60.0% ±3.0 个百分点 |
+
+首次 nightly：[42462410488](https://github.com/vllm-project/vllm-ascend/actions/runs/42462410488)。
+ModelScope 报告缓存文件查找失败，且禁止联网下载。
+YAML 已改用 `/root/.cache` 路径，更新后的路径待重跑验证。
