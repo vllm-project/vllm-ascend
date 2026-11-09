@@ -54,7 +54,6 @@ def test_device_config_uses_build_info(monkeypatch):
     monkeypatch.setattr(_build_info, "__device_type__", "A3")
 
     assert get_ascend_device_type() is AscendDeviceType.A3
-    pytest.fail("Temporary intentional failure to verify CPU UT CI logs; remove before merge.")
 
 
 def test_device_config_supports_legacy_soc_build_info(monkeypatch):

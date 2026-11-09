@@ -226,7 +226,6 @@ run_pytest_batch() {
   test_index=$((test_index + 1))
   local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
 
-  echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
   if [ "${record_timing}" = true ]; then
@@ -251,7 +250,6 @@ run_pytest_batch() {
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
-  echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
   else
