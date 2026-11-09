@@ -87,7 +87,7 @@ def test_dspark_syncs_finished_proposals_only_without_upstream_hook(
     spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
     spec.draft_logits = torch.arange(24, dtype=torch.float32).reshape(6, 2, 2) if probabilistic else None
     original_logits = spec.draft_logits.clone() if probabilistic else None
-    batch = SimpleNamespace(idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
+    batch = SimpleNamespace(num_reqs=2, idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
     local_tokens = torch.tensor([[9, 8], [7, 6]])
     shared_tokens = torch.tensor([[1, 2], [3, 4]])
     shared_logits = torch.full((2, 2, 2), 0.5)
