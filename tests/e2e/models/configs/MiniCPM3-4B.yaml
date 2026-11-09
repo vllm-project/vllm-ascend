@@ -1,0 +1,48 @@
+model_name: "openbmb/MiniCPM3-4B"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: "bfloat16"
+  max_model_len: 4096
+  # 0.8 keeps ~6 GB headroom on 32 GB cards (e.g. single-card containers);
+  # BF16 weights are ~7.6 GiB, so the KV cache still has plenty of room.
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
+  # Eager mode avoids aclgraph/torchair capture spikes (NPU + host memory),
+  # which can destabilize memory-constrained containers. Graph mode stays
+  # listed as experimental in the support matrix.
+  enforce_eager: true
+
+# Expected GSM8K level for this model (official model-card result: 81.1),
+# checked with the existing RTOL=0.05 in test_lm_eval_correctness.py.
+# Reference run on Atlas A2 (910B4, TP1, BF16, --enforce-eager), lm-eval
+# GSM8K 5-shot with chat template: strict-match 0.7566, flexible-extract
+# 0.7597.
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.77
+  - name: "exact_match,flexible-extract"
+    value: 0.78
+
+# Extended generation coverage consumed by test_minicpm3_generation.py.
+# The same cases run offline and through the OpenAI-compatible server.
+generation:
+  max_tokens: 32
+  long_prompt_tokens: 2048
+  memory_rounds: 3
+  max_memory_growth_mb: 512
+  temperature: 0.7
+  top_p: 0.7
+  seed: 42
+
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+# Fixed batch size: lm-eval's "auto" probing ramps batches up until memory
+# runs out, which is exactly what a 32 GB card or a small container cannot
+# afford. 8 keeps GSM8K throughput reasonable with bounded peaks.
+batch_size: 8
