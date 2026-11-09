@@ -32,11 +32,6 @@ spec:
           - name: vllm-leader
             imagePullPolicy: Always
             image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3") }}
-{% if privileged | default('false') == 'true' %}
-            securityContext:
-              privileged: true
-              runAsUser: 0
-{% endif %}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
@@ -177,11 +172,6 @@ spec:
           - name: vllm-worker
             imagePullPolicy: Always
             image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3") }}
-{% if privileged | default('false') == 'true' %}
-            securityContext:
-              privileged: true
-              runAsUser: 0
-{% endif %}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
