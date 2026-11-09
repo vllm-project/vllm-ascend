@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -27,6 +28,15 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
+from vllm_ascend.attention.utils import (
+    PreprocessType,
+    maybe_save_kv_layer_to_connector,
+    notify_kv_cache_written,
+    wait_for_kv_layer_from_connector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
 from vllm_ascend.utils import is_rot_weight_used, vllm_version_is
 
@@ -37,6 +47,8 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
+
+MIN_CACHE_ONLY_PREFILL_TOKENS = 2048
 
 
 def glm5next_mtp_eh_norm(
@@ -78,9 +90,6 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_text_config
         self.config = config
-        self.prefill_query_pruning_enabled = (
-            vllm_config.model_config.enforce_eager or vllm_config.speculative_config.enforce_eager
-        )
         quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -116,6 +125,57 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             is_mtp_layer=True,
         )
 
+    def _write_prefill_cache(self, hidden_states: torch.Tensor) -> bool:
+        attention = self.mtp_block.self_attn
+        assert isinstance(attention, Glm5NextMLAAttention)
+        layer = attention.mla_attn.mla_attn
+        impl = layer.impl
+        if (
+            type(impl) is not AscendSFAImpl
+            or impl.preprocess_type != PreprocessType.NATIVE
+            or impl.qk_rope_head_dim != 0
+            or not impl.enable_sparse_sfa_c8
+            or impl.enable_sparse_sfa_turboquant
+            or not impl.is_kv_producer
+            or not impl.runtime_has_indexer
+        ):
+            return False
+
+        metadata = get_forward_context().attn_metadata
+        if not isinstance(metadata, dict):
+            return False
+        attn_metadata = metadata.get(layer.layer_name)
+        indexer_metadata = metadata.get(impl.indexer.k_cache.prefix)
+        num_tokens = hidden_states.shape[0]
+        if (
+            type(attn_metadata) is not AscendSFAMetadata
+            or attn_metadata.num_decodes != 0
+            or attn_metadata.num_actual_tokens != num_tokens
+            or attn_metadata.smla_metadata is not None
+            or attn_metadata.slot_mapping.numel() < num_tokens
+            or not isinstance(indexer_metadata, AscendIndexerKPoolMetadata)
+            or indexer_metadata.num_actual_tokens != num_tokens
+        ):
+            return False
+
+        kv_cache = impl._compose_sfa_kv_cache(layer.kv_cache)
+        assert kv_cache is not None and impl.fused_qkv_a_proj is not None
+        hidden_states = self.mtp_block.input_layernorm(hidden_states)
+        q_c, kv = impl.fused_qkv_a_proj(hidden_states)[0].split([impl.q_lora_rank, impl.kv_lora_rank], dim=-1)
+        layer_name = layer.layer_name
+        wait_for_kv_layer_from_connector(layer_name)
+        if impl.layerwise_kv_cache_hook is not None:
+            impl.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+        slots = attn_metadata.slot_mapping
+        k_pe, k_nope, scale = impl.exec_kv(kv, attn_metadata.cos, attn_metadata.sin, kv_cache, slots, attn_metadata)
+        impl._store_packed_kv_cache(k_pe, k_nope, scale, kv_cache, slots, attn_metadata)
+        impl.indexer(hidden_states, q_c, hidden_states, indexer_metadata, compute_topk=False)
+        notify_kv_cache_written(layer_name)
+        with attention_transfer_window():
+            pass
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        return True
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -123,6 +183,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
+        cache_only: bool = False,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
@@ -135,29 +196,17 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             self.enorm.variance_epsilon,
         )
         hidden_states = self.eh_proj(eh_input)
+        if (
+            cache_only
+            and hidden_states.shape[0] >= MIN_CACHE_ONLY_PREFILL_TOKENS
+            and self._write_prefill_cache(hidden_states)
+        ):
+            return hidden_states, hidden_states
         # Fuse the residual add and final RMSNorm. Glm5NextMoE already performs
         # its all-reduce, so no collective is needed here. The post-norm result
         # feeds both draft logits and the next recycled hidden state.
-        draft_input = hidden_states
-        draft_rows = None
-        if self.prefill_query_pruning_enabled and is_forward_context_available():
-            attn_metadata = get_forward_context().attn_metadata
-            if isinstance(attn_metadata, dict):
-                attention = self.mtp_block.self_attn
-                assert isinstance(attention, Glm5NextMLAAttention)
-                layer_name = attention.mla_attn.mla_attn.layer_name
-                draft_rows = getattr(attn_metadata.get(layer_name), "draft_prefill_query_indices", None)
-        if draft_rows is None:
-            hidden_states, residual, _, _ = self.mtp_block(positions=positions, hidden_states=hidden_states)
-        else:
-            hidden_states, residual, _, _ = self.mtp_block(
-                positions=positions, hidden_states=hidden_states, draft_prefill_query_indices=draft_rows
-            )
-            if not draft_rows.numel():
-                return draft_input, draft_input
+        hidden_states, residual, _, _ = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
         hidden_states, _ = self.shared_head.norm(hidden_states, residual=residual)
-        if draft_rows is not None:
-            hidden_states = draft_input.index_copy_(0, draft_rows, hidden_states)
         return hidden_states, hidden_states
 
 
@@ -214,6 +263,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
+        cache_only: bool = False,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -224,6 +274,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             previous_hidden_states,
             inputs_embeds,
             current_step_idx,
+            cache_only=cache_only,
         )
 
     def compute_logits(
@@ -261,6 +312,18 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        parallel = vllm_config.parallel_config
+        speculative = vllm_config.speculative_config
+        assert speculative is not None
+        self._supports_prefill_cache_only = (
+            (vllm_config.model_config.enforce_eager or speculative.enforce_eager)
+            and vllm_config.cache_config.cache_dtype == "int8"
+            and parallel.data_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and self.model.num_mtp_layers == 1
+        )
+        self._prefill_cache_only = False
         self.is_rot_weight_used = is_rot_weight_used(vllm_config)
         if self.is_rot_weight_used:
             self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
@@ -283,6 +346,15 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    @contextmanager
+    def prefill_cache_only(self):
+        previous = self._prefill_cache_only
+        self._prefill_cache_only = self._supports_prefill_cache_only
+        try:
+            yield
+        finally:
+            self._prefill_cache_only = previous
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -296,7 +368,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         # matching the quantized AscendDeepSeekMTP input path.
         if self.is_rot_weight_used:
             hidden_states = self.rot(hidden_states)
-        return self.model(input_ids, positions, hidden_states, inputs_embeds, spec_step_idx)
+        return self.model(
+            input_ids, positions, hidden_states, inputs_embeds, spec_step_idx, cache_only=self._prefill_cache_only
+        )
 
     def compute_logits(
         self,

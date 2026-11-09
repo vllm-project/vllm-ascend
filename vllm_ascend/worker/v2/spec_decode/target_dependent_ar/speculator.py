@@ -20,7 +20,6 @@ import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
-from dataclasses import replace as replace_metadata
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -46,9 +45,8 @@ from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_pa
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
-from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -67,8 +65,6 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
-
-MIN_GLM_DRAFT_PREFILL_QUERY_PRUNING_TOKENS = 2048
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -475,56 +471,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             num_speculative_steps,
         )
 
-    def _with_glm_draft_prefill_queries(
-        self,
-        metadata: dict[str, Any] | None,
-        num_reqs: int,
-        num_tokens: int,
-        mode: CUDAGraphMode,
-        skip_sample: bool,
-    ) -> dict[str, Any] | None:
-        if (
-            metadata is None
-            or mode != CUDAGraphMode.NONE
-            or num_reqs != 1
-            or num_tokens < MIN_GLM_DRAFT_PREFILL_QUERY_PRUNING_TOKENS
-            or self.input_batch is None
-            or not bool(self.input_batch.is_prefilling_np[0])
-        ):
-            return metadata
-        parallel = self.draft_vllm_config.parallel_config
-        model = self.draft_vllm_config.model_config
-        if (
-            model.architecture != "Glm5NextMTPModel"
-            or model.hf_text_config.qk_rope_head_dim != 0
-            or self.draft_vllm_config.cache_config.cache_dtype != "int8"
-            or not (model.enforce_eager or self.speculative_config.enforce_eager)
-            or parallel.data_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-        ):
-            return metadata
-        sfa_layers = [name for name, value in metadata.items() if type(value) is AscendSFAMetadata]
-        indexer_layers = [name for name, value in metadata.items() if isinstance(value, AscendIndexerKPoolMetadata)]
-        if (
-            len(sfa_layers) != 1
-            or len(indexer_layers) != 1
-            or metadata[sfa_layers[0]].num_actual_tokens != num_tokens
-            or metadata[sfa_layers[0]].num_decodes != 0
-            or metadata[sfa_layers[0]].smla_metadata is not None
-            or metadata[indexer_layers[0]].num_actual_tokens != num_tokens
-        ):
-            return metadata
-        # Upstream consumes only the selected draft row, or none on a KV-only step.
-        rows = self.last_token_indices[: 0 if skip_sample else num_reqs]
-        return {
-            **metadata,
-            **{
-                name: replace_metadata(metadata[name], draft_prefill_query_indices=rows)
-                for name in (*sfa_layers, *indexer_layers)
-            },
-        }
-
     def _prefill(
         self,
         num_reqs: int,
@@ -556,9 +502,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         else:
             # vLLM main forwards `skip_sample` so the drafter KV stays in sync
             # without sampling when num_speculative_tokens == 0.
-            attn_metadata = self._with_glm_draft_prefill_queries(
-                attn_metadata, num_reqs, num_tokens, cudagraph_runtime_mode, skip_sample
-            )
             super()._prefill(
                 num_reqs,
                 num_tokens,
