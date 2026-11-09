@@ -1125,6 +1125,7 @@ class TestNPUWorker(TestBase):
 
     def test_execute_dummy_batch(self):
         """Test execute_dummy_batch method"""
+        from vllm_ascend.utils import vllm_version_is
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
@@ -1133,6 +1134,7 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             worker.vllm_config = MagicMock()
+            worker.parallel_config = SimpleNamespace(data_parallel_size=1)
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
@@ -1141,10 +1143,12 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
+            extra_kwargs = {} if vllm_version_is("0.32.0") else {"randomize_inputs": False}
             mock_model_runner._dummy_run.assert_called_once_with(
                 mock_uniform_decode_query_len,
                 uniform_decode=True,
                 skip_gdn_state_update=True,
+                **extra_kwargs,
             )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
@@ -2316,17 +2320,24 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, mock_empty_output)
 
     def test_update_config(self):
-        """Test update_config delegates to model_runner.update_config"""
+        """A replacement must be shared by the config, worker and runner."""
         from vllm_ascend.worker.worker import NPUWorker
 
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-
-            overrides = {"load_config": {"load_format": "dummy"}}
-            worker.update_config(overrides)
-
-            worker.model_runner.update_config.assert_called_once_with(overrides)
+        for use_v2 in (False, True):
+            with self.subTest(use_v2=use_v2), patch("vllm_ascend.worker.worker.update_config") as update:
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.use_v2_model_runner = use_v2
+                worker.model_runner = MagicMock()
+                worker.vllm_config = SimpleNamespace(load_config=object())
+                replacement = object()
+                update.return_value = replacement
+                worker.update_config({"load_config": {"load_format": "dummy"}})
+                self.assertIs(worker.vllm_config.load_config, replacement)
+                self.assertIs(worker.load_config, replacement)
+                self.assertIs(worker.model_runner.load_config, replacement)
+                worker.model_runner.update_config.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "cache_config"):
+                    worker.update_config({"cache_config": {}})
 
     def test_reload_weights(self):
         """Test reload_weights delegates to model_runner.reload_weights"""
@@ -2335,6 +2346,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
 
             worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
 
