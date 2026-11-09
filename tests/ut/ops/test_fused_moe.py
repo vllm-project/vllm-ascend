@@ -1287,13 +1287,15 @@ def test_mxfp_shared_expert_preserves_output_gate(monkeypatch, has_expert_gate):
 
 @pytest.mark.parametrize("quant_type", [QuantType.W8A8, QuantType.W4A8])
 @pytest.mark.parametrize("gate_mode", ["absent", "none", "present"])
-@pytest.mark.parametrize("use_situ", [False, True])
+@pytest.mark.parametrize("use_situ,clamp_limit", [(False, 0.0), (False, 7.0), (True, 0.0)])
 @pytest.mark.parametrize("multistream_overlap", [False, True])
-def test_int_shared_expert_preserves_output_gate(monkeypatch, quant_type, gate_mode, use_situ, multistream_overlap):
+def test_int_shared_expert_preserves_output_gate(
+    monkeypatch, quant_type, gate_mode, use_situ, clamp_limit, multistream_overlap
+):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.multistream_overlap = multistream_overlap
     shared_experts.situ_activation = SimpleNamespace(beta=4.0, linear_beta=25.0) if use_situ else None
-    shared_experts.swiglu_limit = 0.0
+    shared_experts.swiglu_limit = clamp_limit
     shared_experts.quant_type = quant_type
     shared_experts.lora_context = None
     hidden_states = torch.tensor([[1.0, -1.0], [2.0, 1.0]], dtype=torch.bfloat16)
@@ -1347,6 +1349,17 @@ def test_int_shared_expert_preserves_output_gate(monkeypatch, quant_type, gate_m
         assert result is down_output
     torch.testing.assert_close(result, expected)
     activation.assert_called_once()
+    if not use_situ:
+        kwargs = activation.call_args.kwargs
+        if clamp_limit == 0:
+            assert (kwargs["swiglu_mode"], kwargs["clamp_limit"], kwargs["glu_alpha"], kwargs["glu_bias"]) == (
+                0,
+                7.0,
+                1.702,
+                1.0,
+            )
+        else:
+            assert (kwargs["swiglu_mode"], kwargs["clamp_limit"]) == (1, clamp_limit)
     down_matmul.assert_called_once_with(
         quantized_x,
         shared_experts.layer.down_proj.weight,

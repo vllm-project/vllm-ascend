@@ -57,14 +57,21 @@ _REPRO_CASES = [
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("swiglu_mode", [0, 1])
-def test_default_unclipped_swiglu_accepts_zero_clamp(swiglu_mode):
+@pytest.mark.parametrize(
+    "swiglu_mode,tuning",
+    [(0, {}), (1, {}), (0, {"clamp_limit": 7.0, "glu_alpha": 1.702, "glu_bias": 1.0})],
+    ids=["legacy-mode-0", "legacy-mode-1", "v2-standard"],
+)
+def test_unclipped_swiglu(swiglu_mode, tuning):
     import vllm_ascend.vllm_ascend_C  # noqa: F401
 
     torch.manual_seed(723)
     x = torch.randint(-100, 100, (4, 256), dtype=torch.int32, device="npu")
     weight_scale = torch.rand(256, dtype=torch.float32, device="npu") * 0.1
     activation_scale = torch.rand((4, 1), dtype=torch.float32, device="npu") * 0.5
+    x[0, [0, 128]] = 1000
+    weight_scale[[0, 128]] = 0.1
+    activation_scale[0] = 0.5
     expected, expected_scale = _shared_dequant_swiglu_quant(x, weight_scale, activation_scale, 0, torch.bfloat16)
     output, scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
         x=x,
@@ -73,6 +80,7 @@ def test_default_unclipped_swiglu_accepts_zero_clamp(swiglu_mode):
         activate_left=True,
         quant_mode=1,
         swiglu_mode=swiglu_mode,
+        **tuning,
     )
     torch.testing.assert_close(output.cpu(), expected.cpu(), atol=1, rtol=0.1)
     torch.testing.assert_close(scale.cpu(), expected_scale.cpu(), atol=1e-4, rtol=5e-3)
