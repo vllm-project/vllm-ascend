@@ -388,6 +388,19 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
+    def test_eplb_cast_params_delegate_to_the_active_method(self):
+        """EPLB rebuilds these views, so it needs the cast whichever method built them."""
+        params = [{"customize_dtype": torch.float8_e4m3fn}]
+        scheme = self.build_scheme(is_950=False)
+        scheme._bf16_method = MagicMock()
+        scheme._bf16_method.get_eplb_nz_cast_params.return_value = params
+        layer = nn.Module()
+
+        result = scheme.get_eplb_nz_cast_params(layer)
+
+        self.assertEqual(result, params)
+        scheme._bf16_method.get_eplb_nz_cast_params.assert_called_once_with(layer)
+
     def test_apply_delegates_to_the_active_method(self):
         scheme = self.build_scheme(is_950=False)
         scheme._bf16_method = MagicMock()

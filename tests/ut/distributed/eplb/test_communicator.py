@@ -12,7 +12,9 @@ from vllm.distributed.eplb.eplb_communicator import (
 )
 
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendGlooEplbCommunicator
-from vllm_ascend.ops.fused_moe.routed_experts import EplbExpertTensorList
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
+from vllm_ascend.quantization.methods.base import AscendMoEScheme
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
@@ -130,13 +132,15 @@ def test_execute_converts_nz_receives_on_device(communicator, monkeypatch, devic
         get_format.assert_not_called()
 
 
-def _staged_recv(monkeypatch, npu_format, cast_params):
+def _staged_recv(monkeypatch, npu_format, cast_params, views=None):
     """Drive one receive whose destination reports ``npu_format``.
 
     The communicator learns the cast behind each weight view at construction,
-    the way the HIXL one learns the weights.
+    the way the HIXL one learns the weights. ``views`` replaces the stub views
+    when the weight views have to come from somewhere further upstream.
     """
-    views = [EplbExpertTensorList([MagicMock()], cast_params)]
+    if views is None:
+        views = [EplbExpertTensorList([MagicMock()], cast_params)]
     communicator = AscendGlooEplbCommunicator(cpu_group=MagicMock(), all_expert_weights=[views])
     recv_tensor = MagicMock()
     recv_tensor.device.type = "npu"
@@ -188,6 +192,44 @@ def test_execute_rejects_an_internal_format_whose_cast_params_are_unknown(monkey
 
     format_cast.assert_not_called()
     recv_tensor.copy_.assert_not_called()
+
+
+def test_cast_params_reach_the_receive_path_through_the_quant_adapter(monkeypatch):
+    """Production reads the hook off the adapter, not off the scheme.
+
+    An AscendRoutedExperts layer holds an AscendFusedMoEMethod, so a hook the
+    adapter does not forward leaves every weight view with no parameters and
+    the receive path then refuses a destination it could have rebuilt. Tests
+    that call a scheme directly never cross the adapter.
+    """
+    params = {"customize_dtype": torch.float8_e4m3fn, "input_dtype": torch.bfloat16}
+
+    class _Scheme(AscendMoEScheme):
+        def get_weight(self, *args, **kwargs):
+            return {}
+
+        def get_dynamic_quant_param(self, *args, **kwargs):
+            return {}
+
+        def apply(self, *args, **kwargs):
+            raise AssertionError("EPLB weight views do not run a forward pass.")
+
+        def get_eplb_weight_views(self, layer):
+            return [[torch.ones(3, 4, dtype=torch.int8) for _ in range(2)]]
+
+        def get_eplb_nz_cast_params(self, layer):
+            return [params]
+
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.local_num_experts = 2
+    routed_experts.quant_method = AscendFusedMoEMethod(_Scheme(), MagicMock())
+    views = list(routed_experts.get_expert_weights())
+
+    communicator, recv_tensor, staging_tensor, format_cast = _staged_recv(monkeypatch, 50, None, views=views)
+    communicator.execute()
+
+    format_cast.assert_called_once_with(staging_tensor.to.return_value, ACL_FORMAT_FRACTAL_NZ, **params)
+    recv_tensor.copy_.assert_called_once_with(format_cast.return_value, non_blocking=True)
 
 
 def test_cast_params_must_agree_across_layers():

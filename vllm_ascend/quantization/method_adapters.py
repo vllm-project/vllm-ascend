@@ -343,6 +343,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
         return self.quant_method.get_eplb_weight_views(layer)
 
+    def get_eplb_nz_cast_params(self, layer: torch.nn.Module) -> list[dict[str, torch.dtype]]:
+        return self.quant_method.get_eplb_nz_cast_params(layer)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)

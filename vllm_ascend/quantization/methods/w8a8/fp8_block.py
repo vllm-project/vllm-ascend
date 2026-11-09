@@ -450,6 +450,10 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         active = self.mxfp8_method if self.mxfp8_method is not None else self.bf16_method
         return active.get_eplb_weight_views(layer)
 
+    def get_eplb_nz_cast_params(self, layer: torch.nn.Module) -> list[dict[str, torch.dtype]]:
+        active = self.mxfp8_method if self.mxfp8_method is not None else self.bf16_method
+        return active.get_eplb_nz_cast_params(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,

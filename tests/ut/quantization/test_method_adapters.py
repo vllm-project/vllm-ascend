@@ -294,3 +294,13 @@ class TestAscendFusedMoEMethod(TestBase):
 
         self.assertIs(result, weight_views)
         self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)
+
+    def test_get_eplb_nz_cast_params_delegates_to_moe_scheme(self):
+        layer = torch.nn.Module()
+        cast_params = [{"customize_dtype": torch.float8_e4m3fn}, {}]
+        self.mock_scheme.get_eplb_nz_cast_params.return_value = cast_params
+
+        result = self.method.get_eplb_nz_cast_params(layer)
+
+        self.assertIs(result, cast_params)
+        self.mock_scheme.get_eplb_nz_cast_params.assert_called_once_with(layer)
