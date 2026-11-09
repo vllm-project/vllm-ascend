@@ -51,6 +51,10 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
+from vllm_ascend.quantization.methods.mamba_state.leapquant import (
+    leapquant_config_or_none,
+    leapquant_flush_state_rows,
+)
 from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
@@ -935,6 +939,28 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
+
+        # 2.4: LeapQuant window-boundary flush (RFC vllm-ascend#21097, M1).
+        # After this step's recurrent update / prefill scatter, re-quantize
+        # the state of every request whose post-step token count (== seq_len)
+        # is an exact multiple of the window. Within a window the state stays
+        # fp32, so quantization error enters only at boundaries — which is
+        # algebraically the paper's windowed formulation. No-op unless
+        # leapquant_config is enabled (and spec/PD/FULL-graph are rejected at
+        # config validation, so the CPU seq_lens attached by the metadata
+        # builder are exact here).
+        leapquant_config = leapquant_config_or_none()
+        if (
+            leapquant_config is not None
+            and non_spec_state_indices_tensor is not None
+            and (leapquant_seq_lens := getattr(attn_metadata, "leapquant_seq_lens", None)) is not None
+        ):
+            leapquant_flush_state_rows(
+                ssm_state,
+                non_spec_state_indices_tensor,
+                leapquant_seq_lens,
+                config=leapquant_config,
+            )
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:

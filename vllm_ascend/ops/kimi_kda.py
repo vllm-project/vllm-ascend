@@ -36,6 +36,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.quantization.methods.mamba_state.leapquant import (
+    leapquant_config_or_none,
+    leapquant_flush_state_rows,
+)
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -726,6 +730,28 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             core_attn_out.zero_()
             maybe_save_kv_layer_to_connector("", [])
             return
+
+        # LeapQuant window-boundary flush (RFC vllm-ascend#21097, M1): after
+        # this step's recurrent update / prefill scatter, re-quantize the
+        # state of every request whose post-step token count (== seq_len) is
+        # an exact multiple of the window. No-op unless leapquant_config is
+        # enabled (spec decode / PD / FULL cudagraphs are rejected at config
+        # validation).
+        leapquant_config = leapquant_config_or_none()
+        if (
+            leapquant_config is not None
+            and attn_metadata.non_spec_state_indices_tensor is not None
+            and (leapquant_seq_lens := getattr(attn_metadata, "leapquant_seq_lens", None)) is not None
+        ):
+            leapquant_flush_state_rows(
+                recurrent_state,
+                attn_metadata.non_spec_state_indices_tensor,
+                leapquant_seq_lens,
+                config=leapquant_config,
+                state_copy=getattr(self, "_ascend_kda_state_copy", None)
+                if getattr(self, "_kda_state_copy_ready", False)
+                else None,
+            )
 
         # Reuse the caller-owned result buffer. FULL graphs can leave rows
         # outside the live spec/non-spec index sets, so define them before the
