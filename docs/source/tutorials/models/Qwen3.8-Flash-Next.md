@@ -1191,7 +1191,13 @@ The 10K target is the processed input length, including text and image tokens. B
 
 ### 5.4 Long-Context PD Separation Deployment
 
-This case uses eight devices on one 950DT products host, with TP4 × DP1 for both Prefill and Decode. Both roles support a maximum combined input and output length of 1,010,000 tokens, with up to 16 active sequences and 4096 batch tokens. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
+This case uses eight devices on one 950DT products host, with TP4 × DP1 for both Prefill and Decode. Both roles set the maximum combined input and output length to 1,010,000 tokens, with up to 16 active sequences and 4096 batch tokens. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
+
+!!! note "Extending the native 256K context to approximately 1M"
+
+    The checkpoint's native context window is 256K (262144 tokens). This long-context case requires all three settings on **both Prefill and Decode**: the complete YaRN `--hf-overrides` shown below, with `factor=4.0` and `original_max_position_embeddings=262144`; `export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; and `--max-model-len 1010000`. Keep the YaRN configuration and maximum model length identical on both roles; none of these three settings can be omitted.
+
+    Each request must satisfy `input token count + maximum output token count <= max-model-len`. With this configuration, the total must not exceed 1,010,000 tokens.
 
 The commands reuse ports 8247, 8248, and 8246 from the image-and-text case. Stop that deployment before starting this case.
 
@@ -1308,7 +1314,6 @@ The commands reuse ports 8247, 8248, and 8246 from the image-and-text case. Stop
 
     **Key parameters:**
 
-    - `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` permits the extended length. Both roles apply the same YaRN overrides with `factor=4.0` and `original_max_position_embeddings=262144`; retain the complete `rope_parameters` configuration above.
     - Both roles use TP4 × DP1 without pipeline parallelism. The Mooncake declarations use `tp_size=4` and `dp_size=1` for both roles.
     - Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and enables static kernels and recompute scheduling.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false` and use `HCCL_BUFFSIZE=512`. The supplied configuration sets the engine-ready timeout to 2400 seconds on Prefill and 4800 seconds on Decode; the model-execution timeout is 3000 seconds on both roles.
