@@ -27,7 +27,6 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
-    get_sfa_pcp_prefill_metadata,
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -755,7 +754,6 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
     ) -> AscendSFAMetadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
-        common_attn_metadata = get_sfa_pcp_prefill_metadata(common_attn_metadata, pcp_context)
         if pcp_context is None:
             # Decode-only graph capture builds dummy metadata without running
             # PCP's prefill gather, so no PCP context is available or needed.
