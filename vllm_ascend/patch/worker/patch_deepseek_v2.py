@@ -322,7 +322,7 @@ def _patched_deepseek_v2_model_init(self, *args, **kwargs):
             prefix=f"{kwargs.get('prefix', '')}.embed_tokens",
         )
     # V2 relays aux slots upstream; V1 still uses the Ascend tensor payload.
-    self._use_upstream_aux_relay = vllm_config.use_v2_model_runner
+    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner
     self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
     transport_data_type_list = [PPTransportDataType.TOPK_INDICES]
     if not self._use_upstream_aux_relay:
