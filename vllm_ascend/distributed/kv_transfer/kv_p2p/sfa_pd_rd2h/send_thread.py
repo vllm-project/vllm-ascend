@@ -13,7 +13,6 @@ import msgspec
 import torch
 import zmq
 from vllm.logger import logger
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -77,12 +76,14 @@ class MembPullSendingThread(threading.Thread):
         *,
         ready_event: threading.Event,
         state: ProducerSendState,
+        device_id: int,
     ) -> None:
         super().__init__(daemon=True, name="SfaPDMembPullSendingThread")
         self.timeout = 100.0
         self._mf_meta_sent_paths: set[str] = set()
         self._peer_engine_ids: dict[str, str | None] = {}
         self._state = state
+        self.device_id = device_id
         self.last_layer_idx = state.last_layer_idx
         self.ready_event = ready_event
         self.send_queue: queue.Queue[SendTask] = queue.Queue()
@@ -155,11 +156,7 @@ class MembPullSendingThread(threading.Thread):
 
     def run(self) -> None:
         try:
-            from vllm.distributed import get_world_group
-
-            local_rank = get_world_group().local_rank
-            visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
-            torch.npu.set_device(torch.device(f"npu:{visible_device_index}"))
+            torch.npu.set_device(self.device_id)
         except BaseException as error:
             self.startup_error = error
             logger.error("MembPull send thread failed to initialize its NPU device: %s", error)

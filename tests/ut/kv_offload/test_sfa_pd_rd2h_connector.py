@@ -65,8 +65,8 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 )
 
 
-@pytest.mark.parametrize("local_rank,visible_device", [(0, 0), (1, 1), (0, 1), (1, 3), (0, 3), (1, 0)])
-def test_send_thread_uses_visible_device_mapping(local_rank, visible_device):
+@pytest.mark.parametrize("device_id", [0, 1, 3])
+def test_send_thread_uses_worker_device(device_id):
     state = ProducerSendState(
         last_layer_idx=0,
         layer_metadata={},
@@ -76,45 +76,34 @@ def test_send_thread_uses_visible_device_mapping(local_rank, visible_device):
         block_sizes=(),
         layer_storage_slots={},
     )
-    thread = MembPullSendingThread(ready_event=threading.Event(), state=state)
+    thread = MembPullSendingThread(ready_event=threading.Event(), state=state, device_id=device_id)
     thread._stopped = True
     module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
-    with (
-        patch("vllm.distributed.get_world_group") as world_group,
-        patch(f"{module}.current_platform", create=True) as platform,
-        patch(f"{module}.torch.device") as device,
-        patch(f"{module}.torch.npu.set_device") as set_device,
-    ):
-        world_group.return_value.local_rank = local_rank
-        platform.logical_device_id_to_visible_device_id.return_value = visible_device
-        thread.run()
+    with patch(f"{module}.torch.npu.set_device") as set_device:
+        thread.start()
+        thread.join(timeout=5)
 
-        device.assert_called_once_with(f"npu:{visible_device}")
-        set_device.assert_called_once_with(device.return_value)
+        assert not thread.is_alive()
+        set_device.assert_called_once_with(device_id)
         assert thread.ready_event.is_set()
         assert thread.startup_error is None
 
 
-def test_send_thread_reports_device_mapping_failure():
+def test_send_thread_reports_device_binding_failure():
     thread = MembPullSendingThread(
         ready_event=threading.Event(),
         state=ProducerSendState(0, {}, "test-session", 0, 0, (), {}),
+        device_id=3,
     )
     thread._stopped = True
     module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
-    error = IndexError("local rank is outside the assigned devices")
-    with (
-        patch("vllm.distributed.get_world_group") as world_group,
-        patch(f"{module}.current_platform", create=True) as platform,
-        patch(f"{module}.torch.npu.set_device") as set_device,
-    ):
-        world_group.return_value.local_rank = 2
-        platform.logical_device_id_to_visible_device_id.side_effect = error
+    error = RuntimeError("could not bind to NPU")
+    with patch(f"{module}.torch.npu.set_device", side_effect=error) as set_device:
         thread.run()
 
         assert thread.startup_error is error
         assert thread.ready_event.is_set()
-        set_device.assert_not_called()
+        set_device.assert_called_once_with(3)
 
 
 def test_sfa_remote_d2h_connector_is_registered():
