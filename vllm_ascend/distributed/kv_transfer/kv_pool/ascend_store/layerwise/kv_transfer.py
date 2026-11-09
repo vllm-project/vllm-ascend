@@ -959,6 +959,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             ):
+                self._trace_mark("backend_submit")
                 results.extend(
                     require_aligned_batch_results(
                         "batch_copy_get",
@@ -966,9 +967,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                         self.m_store.batch_copy_get(keys, buffers, sizes, offsets),
                     )
                 )
+                self._trace_mark("backend_complete")
             _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
+                self._trace_mark("backend_error")
                 self._mark_invalid_range_indices(req_meta, failed_indices)
                 self._active_load_indices.difference_update(failed_indices)
 
@@ -1002,13 +1005,17 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 if not self._wait_for_event(data.load_gate):
                     return
             if self.external_slot_release_waiter is not None:
+                self._trace_mark("external_slot_wait_begin")
                 self.external_slot_release_waiter(layer_id)
+                self._trace_mark("external_slot_wait_end")
             for task in data.transfer_tasks:
                 shared = task.shared_block_data
                 if shared is None:
                     raise RuntimeError("Layerwise range load requires shared block metadata")
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                self._trace_mark("metadata_begin")
                 req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                self._trace_mark("metadata_end")
                 if not isinstance(req_meta, LayerRangeReqMeta):
                     raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
@@ -1069,17 +1076,22 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if self.load_disabled.is_set():
             if self.external_slot_release_waiter is not None:
+                self._trace_mark("external_slot_wait_begin")
                 self.external_slot_release_waiter(layer_id)
+                self._trace_mark("external_slot_wait_end")
             return False
 
         if len(transfer_tasks) == 0:
             if self.external_slot_release_waiter is not None:
+                self._trace_mark("external_slot_wait_begin")
                 self.external_slot_release_waiter(layer_id)
+                self._trace_mark("external_slot_wait_end")
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             return True
 
         # Build req_meta for all tasks first; if all are None, early return.
+        self._trace_mark("metadata_begin")
         task_metas: list[tuple[LayerTransferTask, LayerBatchReqMeta]] = []
         for task in transfer_tasks:
             shared = task.shared_block_data
@@ -1097,9 +1109,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if req_meta is not None:
                 task_metas.append((task, req_meta))
 
+        self._trace_mark("metadata_end")
         if not task_metas:
             if self.external_slot_release_waiter is not None:
+                self._trace_mark("external_slot_wait_begin")
                 self.external_slot_release_waiter(layer_id)
+                self._trace_mark("external_slot_wait_end")
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             return True
@@ -1127,7 +1142,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         if self.external_slot_release_waiter is not None:
+            self._trace_mark("external_slot_wait_begin")
             self.external_slot_release_waiter(layer_id)
+            self._trace_mark("external_slot_wait_end")
+        self._trace_mark("backend_submit")
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,
@@ -1136,6 +1154,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.max_transfer_blocks,
             self.max_transfer_bytes,
         )
+        self._trace_mark("backend_complete")
+        if res != 0:
+            self._trace_mark("backend_error")
         if layer_id <= 2 or res != 0:
             logger.debug(
                 "load_thread: layer=%d groups=%d blocks=%d res=%d",

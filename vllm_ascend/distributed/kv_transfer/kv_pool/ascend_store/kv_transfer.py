@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from vllm.distributed.kv_events import BlockStored
@@ -24,6 +24,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import RecvTraceSession
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
 
@@ -65,6 +68,7 @@ def get_bulk_by_memory_location(
 
 
 class KVTransferThread(threading.Thread):
+    recv_trace: RecvTraceSession | None = None
     _invalid_block_ids: set[int]
     _invalid_block_ids_lock: threading.Lock
 
@@ -95,6 +99,7 @@ class KVTransferThread(threading.Thread):
         self._request_submit_lock = threading.Lock()
         self._stopping = threading.Event()
         self.request_queue: queue.Queue[Any] = queue.Queue()
+        self.recv_trace = None
         self.finished_requests: set[str] = set()
         self.failed_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
@@ -143,7 +148,15 @@ class KVTransferThread(threading.Thread):
             if self._fatal_error is not None:
                 self._reject_failed_submission(request)
                 return
+            if self.recv_trace is not None:
+                self.recv_trace.enqueue(request)
             self.request_queue.put(request)
+            if self.recv_trace is not None:
+                self.recv_trace.publish(request)
+
+    def _trace_mark(self, event: str) -> None:
+        if self.recv_trace is not None:
+            self.recv_trace.mark(event)
 
     def stop(self) -> None:
         with self._request_submit_lock:
@@ -158,7 +171,12 @@ class KVTransferThread(threading.Thread):
         failure_checker: Callable[[], None] | None = None,
     ) -> bool:
         while not self._stopping.is_set():
-            if event.wait(timeout=_TRANSFER_SHUTDOWN_POLL_S):
+            trace = self.recv_trace
+            if trace is not None and isinstance(event, AttentionComputeStartGate):
+                ready = event.wait(timeout=_TRANSFER_SHUTDOWN_POLL_S, observer=trace.mark)
+            else:
+                ready = event.wait(timeout=_TRANSFER_SHUTDOWN_POLL_S)
+            if ready:
                 return not self._stopping.is_set()
             if failure_checker is not None:
                 failure_checker()
@@ -369,11 +387,24 @@ class KVTransferThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None or self._stopping.is_set():
+                    if request_data is not None and self.recv_trace is not None:
+                        self.recv_trace.dequeue(request_data)
+                        self.recv_trace.finish("cancelled")
                     self.request_queue.task_done()
                     if request_data is None:
                         return
                     continue
-                self._handle_request(request_data)
+                if self.recv_trace is not None:
+                    self.recv_trace.dequeue(request_data)
+                try:
+                    self._handle_request(request_data)
+                except BaseException:
+                    if self.recv_trace is not None:
+                        self.recv_trace.finish("error")
+                    raise
+                else:
+                    if self.recv_trace is not None:
+                        self.recv_trace.finish()
             except Exception as e:
                 with self._request_submit_lock:
                     self._fatal_error = e
