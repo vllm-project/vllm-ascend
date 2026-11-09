@@ -213,10 +213,10 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 128
+    num_prompts: 120
     max_out_len: 1024
-    batch_size: 128
-    request_rate: 2.5
+    batch_size: 120
+    request_rate: 1.2
     baseline: 0
     threshold: 0.95
 
@@ -225,9 +225,9 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 512
+    num_prompts: 480
     max_out_len: 1024
-    batch_size: 128
-    request_rate: 2.5
+    batch_size: 120
+    request_rate: 1.2
     baseline: 2251.5954
     threshold: 0.95
