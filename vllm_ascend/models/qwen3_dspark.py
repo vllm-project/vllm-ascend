@@ -20,36 +20,6 @@ TARGET_LM_HEAD_WEIGHT_NAMES = (
 )
 
 
-@torch.no_grad()
-def load_draft_target_embedding(model, vllm_config: VllmConfig) -> None:
-    """Load a private target vocab shard when PP prevents embedding sharing.
-
-    Install the layer and ownership flag only after loading succeeds. QuaRot
-    checkpoints are converted to the draft's unrotated hidden basis here, so
-    later weight alignment must leave this private embedding unchanged.
-    """
-    if getattr(model, "has_own_embed_tokens", False):
-        return
-    weight = model.model.embed_tokens.weight
-    target_config = vllm_config.model_config.hf_text_config
-    rotation_path = get_rotation_path(vllm_config)
-    rotation = get_rotation_matrix(rotation_path) if rotation_path is not None else None
-    with torch.device(weight.device):
-        embedding = VocabParallelEmbedding(
-            target_config.vocab_size, target_config.hidden_size, params_dtype=weight.dtype
-        )
-    load_quarot_target_layer(
-        embedding,
-        vllm_config.model_config.model,
-        TARGET_EMBED_WEIGHT_NAMES,
-        rotation,
-        "draft embed_tokens.weight",
-    )
-    embedding.quant_method.process_weights_after_loading(embedding)
-    model.model.embed_tokens = embedding
-    model.has_own_embed_tokens = True
-
-
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
 def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     assert linear_weight.shape[1] % rotation_weight.shape[0] == 0, (

@@ -935,6 +935,23 @@
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
+#   2. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model.__init__`
+#    Why:
+#       GLM-5.3 uses the generic DeepseekV2Model on Ascend, where the last PP
+#       stage lacks the target embedding required by DFlash2's sharing check.
+#    How:
+#       In the existing constructor wrapper, create a missing embedding when
+#       upstream spec_decode_needs_target_embed requests it. Keep the target
+#       quantization config and parameter prefix, and let the normal target
+#       checkpoint loader load the TP shard. Do not replace an existing layer.
+#       DFlash sharing and draft QuaRot post-processing remain unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; the generic DeepseekV2Model needs the same embedding
+#       construction condition already used by other upstream target models.
+#    Future Plan:
+#       Remove only this embedding provisioning when the minimum supported vLLM
+#       version provides it in DeepseekV2Model; keep the unrelated PP transport.
+#
 # ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
@@ -1869,21 +1886,4 @@
 #    Future Plan:
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
-#
-# ** File: worker/v2/spec_decode/dflash/speculator.py (scoped loader override)**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.dflash.utils.maybe_share_target_embed`
-#    Why:
-#       The last target PP stage can lack the embedding required by DFlash2.
-#       Upstream raises before Ascend's draft post-processing can load it.
-#    How:
-#       During draft loading only, call the model's explicit embedding reload
-#       hook before the original sharing check. Load a private target vocab
-#       shard, including QuaRot alignment, and retain validation for all other
-#       models. Restore the loader binding on success and failure.
-#    Related PR (if no, explain why):
-#       No upstream PR yet; this uses Ascend's target checkpoint loader.
-#    Future Plan:
-#       Remove the override when upstream supports loading missing target
-#       embeddings for PP drafters before its sharing check.
 #
