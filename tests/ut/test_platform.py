@@ -151,6 +151,34 @@ def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_
     _validate_pcp_dcp_config(config)
 
 
+def test_validate_pcp_dcp_config_warns_deprecation_for_gqa():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=False),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=2,
+        ),
+    )
+    with patch("vllm_ascend.platform.logger.warning_once") as mock_warning:
+        _validate_pcp_dcp_config(config)
+        mock_warning.assert_called_once()
+        assert "RFC #21305" in mock_warning.call_args.args[0]
+        assert "deprecated" in mock_warning.call_args.args[0]
+
+
+def test_validate_pcp_dcp_config_no_deprecation_warning_for_mla():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=True),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=2,
+        ),
+    )
+    with patch("vllm_ascend.platform.logger.warning_once") as mock_warning:
+        _validate_pcp_dcp_config(config)
+        mock_warning.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "pcp_size,dcp_size",
     [
@@ -1792,6 +1820,19 @@ class TestNPUPlatform(TestBase):
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_profiling_chunk_config_warns_deprecation(self, *mocks):
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.scheduler_config.max_num_batched_tokens = 4096
+        with patch("vllm_ascend.ascend_config.logger.warning_once") as mock_warning:
+            ascend_config.check_and_update_config(vllm_config)
+            mock_warning.assert_called()
+            warnings_text = " ".join(call.args[0] for call in mock_warning.call_args_list if call.args)
+            self.assertIn("RFC #21304", warnings_text)
+            self.assertIn("deprecated", warnings_text)
+
     def test_check_and_update_config_profiling_chunk_scheduler_selection(
         self,
         mock_init_ascend,

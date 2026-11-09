@@ -1,5 +1,12 @@
 # Release Notes
 
+## v0.32.0
+
+### Deprecation and Sunset Announcements
+
+- **Dynamic Chunk Size CPP Sunset**: Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated as of v0.32.0 and has entered the sunset process. In modern sparse and linear attention models, dynamic chunking provides negligible benefit while introducing significant scheduling and profiling maintenance overhead. See [RFC #21304](https://github.com/vllm-project/vllm-ascend/issues/21304) for details and migration guidance.
+- **Decode Context Parallelism (DCP) for GQA Models Sunset**: Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 and has entered the sunset process. GQA models naturally shard KV heads across TP ranks and rarely require multi-node KV sharding; in speculative decoding, GQA draft models maintain native TP sharding without requiring DCP. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305) for details.
+
 ## v0.30.0rc1 - 2026.10.11
 
 This is vLLM Ascend v0.30.0rc1, a model-focused release built on the v0.29 release line and aligned with upstream vLLM v0.30.0 via the main2main pipeline. This release focuses on four flagship models: **DeepSeek V4.1**, **GLM-5.3**, **GLM-5.3-Flash**, and **Qwen3.8-27B**, and hardens the shared execution stacks they rely on (Model Runner V2, PCP/DCP parallelism, KV Cache Pool, and speculative decoding). Model or hardware combinations outside the scope declared below are not part of the release claims. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc2/) to get started.
