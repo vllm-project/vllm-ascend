@@ -312,24 +312,18 @@ def get_deepseek_v41_kv_cache_config(
     page_sizes, layer_tuples = _get_worker_layer_tuples(groups)
     capacity = max(available_memory // sum(page_sizes), 0)
     num_blocks = may_override_num_blocks(vllm_config, capacity)
-    # PP workers describe disjoint regions of one backing, as expected by
-    # Core's cache planner. Keep the existing PP=1 placement unchanged.
-    shared_backing = vllm_config.parallel_config.pipeline_parallel_size > 1
-    backing_size = num_blocks * sum(page_sizes)
-    offset = 0
     tensors: list[KVCacheTensor] = []
     for page_size, layer_names in zip(page_sizes, layer_tuples):
         size = num_blocks * page_size
         tensors.append(
             KVCacheTensor(
-                size=backing_size if shared_backing else size,
+                size=size,
                 layers=list(layer_names),
-                offset=offset if shared_backing else 0,
+                offset=0,
                 layer_stride=0,
                 block_stride=page_size,
             )
         )
-        offset += size
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,

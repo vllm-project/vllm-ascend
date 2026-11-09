@@ -434,12 +434,10 @@ def test_pp_global_cache_planner_normalizes_worker_block_counts(runtime, partiti
     for worker, local_specs in zip(planned, workers):
         assert {name for tensor in worker.kv_cache_tensors for name in tensor.layers} == set(local_specs)
         page = get_deepseek_v41_pool_bytes_per_block(worker.kv_cache_groups)
-        assert {tensor.size for tensor in worker.kv_cache_tensors} == {worker.num_blocks * page}
-        end = 0
+        assert sum(tensor.size for tensor in worker.kv_cache_tensors) == worker.num_blocks * page
         for tensor in worker.kv_cache_tensors:
-            assert tensor.offset == end
-            end += worker.num_blocks * tensor.block_stride
-        assert end == worker.num_blocks * page
+            assert tensor.offset == 0
+            assert tensor.size == worker.num_blocks * tensor.block_stride
     scheduler = kv_cache_utils.generate_scheduler_kv_cache_config(planned)
     assert scheduler.num_blocks == planned[0].num_blocks
     assert [group.kv_cache_spec.block_size for group in scheduler.kv_cache_groups] == [
@@ -448,7 +446,7 @@ def test_pp_global_cache_planner_normalizes_worker_block_counts(runtime, partiti
 
 
 @pytest.mark.parametrize("pp_size", [1, 2])
-def test_pp_cache_regions_use_main_allocation_contract(runtime, monkeypatch, pp_size):
+def test_pp_cache_slots_use_existing_allocator_within_budget(runtime, monkeypatch, pp_size):
     from vllm_ascend.worker.v2 import attn_utils
 
     runtime.parallel_config.pipeline_parallel_size = pp_size
@@ -468,13 +466,12 @@ def test_pp_cache_regions_use_main_allocation_contract(runtime, monkeypatch, pp_
 
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
     raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
-    assert len(allocations) == (1 if pp_size > 1 else len(plan.kv_cache_tensors))
+    assert len(allocations) == len(plan.kv_cache_tensors)
     assert sum(value.numel() for value in allocations) == plan.num_blocks * page_bytes
     for index, descriptor in enumerate(plan.kv_cache_tensors):
         region = raw[descriptor.layers[0]]
         assert region.numel() == plan.num_blocks * descriptor.block_stride
-        if pp_size > 1:
-            assert region.data_ptr() == allocations[0].data_ptr() + descriptor.offset
+        assert region.data_ptr() == allocations[index].data_ptr()
         region.fill_(index + 1)
     for index, descriptor in enumerate(plan.kv_cache_tensors):
         assert torch.all(raw[descriptor.layers[0]] == index + 1)
