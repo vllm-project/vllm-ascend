@@ -27,6 +27,7 @@ forward_impl runs, so decode keeps the stock path unchanged.
 """
 
 import torch
+import torch_npu
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
@@ -118,8 +119,11 @@ class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
         from cann_ops_transformer.ops import quant_flash_attn
 
         num_tokens = attn_metadata.num_actual_tokens
-        q_int8, q_descale = _quantize_per_token_head(query[:num_tokens])
-        k_int8, k_descale = _quantize_per_token_head(key[:num_tokens])
+        # Q/K: fused per-token-head quantization (1 kernel each).
+        q_int8, q_descale = torch_npu.npu_dynamic_quant(query[:num_tokens], dst_type=torch.int8)
+        k_int8, k_descale = torch_npu.npu_dynamic_quant(key[:num_tokens], dst_type=torch.int8)
+        # V: per-head over all tokens; no fused kernel available (npu_quantize
+        # rejects BF16+FP32 scale), keep the manual chain.
         v_int8, v_descale = _quantize_per_head(value[:num_tokens])
         p_scale = torch.tensor([QFA_INT8_SCALE_LEVEL], dtype=torch.float32, device=query.device)
 
