@@ -32,9 +32,9 @@ from vllm_ascend.quantization.quant_type import QuantType
 class MegamoeSharedWeights:
     """Shared-expert weights rebuilt for the A5 MegaMoe operator.
 
-    Produced by ``AscendSharedExperts`` after weight loading and attached to
-    the routed-expert layer as ``ascend_megamoe_shared_weights``; quant
-    methods forward it into ``MoEWeights.shared_*`` for the operator call.
+    Produced by ``AscendSharedExperts`` after weight loading and carried by
+    ``MegamoeSharedExpertFusion`` on the routed-expert layer; quant methods
+    forward it into ``MoEWeights.shared_*`` for the operator call.
     Field names mirror the ``MoEWeights.shared_*`` fields: one tensor per
     shared expert, w1 (2*intermediate, hidden) + scale
     (2*intermediate, k//2, 2), w2 (hidden, intermediate) + scale
@@ -45,6 +45,22 @@ class MegamoeSharedWeights:
     w2: list[torch.Tensor]
     w1_scale: list[torch.Tensor]
     w2_scale: list[torch.Tensor]
+
+
+@dataclass(slots=True)
+class MegamoeSharedExpertFusion:
+    """Live handle for the shared expert fused into the A5 MegaMoe operator.
+
+    ``AscendSharedExperts.megamoe_shared_fusion()`` returns one instance and
+    ``AscendMoERunner`` installs it on the routed-expert layer at
+    construction. Weight loading runs after construction, so the fields stay
+    ``None`` until both shared linears have been rebuilt for the MegaMoe
+    layout; consumers treat ``weights is None`` as "fusion inactive".
+    """
+
+    weights: MegamoeSharedWeights | None = None
+    quant_out_dtype: int | None = None
+    weight_type: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

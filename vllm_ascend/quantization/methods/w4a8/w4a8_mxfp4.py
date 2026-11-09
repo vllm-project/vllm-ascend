@@ -251,7 +251,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
-            shared = getattr(layer, "ascend_megamoe_shared_weights", None) if _EXTRA_CTX.use_mega_moe else None
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None) if _EXTRA_CTX.use_mega_moe else None
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=w1,
                 w2=w2,

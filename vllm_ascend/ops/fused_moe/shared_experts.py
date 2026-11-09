@@ -39,7 +39,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSiluAndMul
 from vllm_ascend.ops.fused_moe import moe_utils
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedWeights
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion, MegamoeSharedWeights
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
@@ -118,7 +118,6 @@ class AscendSharedExperts:
         moe_config: FusedMoEConfig,
         quant_type: QuantType,
         quant_method: FusedMoEMethodBase,
-        moe_layer: torch.nn.Module | None = None,
     ):
         """`quant_type` is the ROUTED experts' quant type: it gates whether
         the routed MegaMoe path supports stacking the shared-expert fusion.
@@ -126,7 +125,6 @@ class AscendSharedExperts:
         weight-collection time and may differ (mixed quantization)."""
         self.layer = layer
         self.moe_config = moe_config
-        self.moe_layer = moe_layer
         self.hidden_size = moe_config.hidden_dim
         self.shared_expert_input_size = getattr(
             layer.gate_up_proj,
@@ -152,6 +150,9 @@ class AscendSharedExperts:
         self._megamoe_shared_fusion_disabled = False
         self._megamoe_shared_parts: dict[str, torch.Tensor] = {}
         self._megamoe_shared_quant_type = QuantType.NONE
+        # Handed out by megamoe_shared_fusion() and filled in place once the
+        # shared linears are rebuilt; see MegamoeSharedExpertFusion.
+        self._megamoe_shared_fusion = MegamoeSharedExpertFusion()
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -174,15 +175,15 @@ class AscendSharedExperts:
         """Fuse the shared expert into the A5 MegaMoe operator when supported.
 
         When active, each shared linear's ``process_weights_after_loading`` is
-        wrapped to rebuild the weight into the MegaMoe layout; the payload is
-        attached to the routed-expert layer as
-        ``ascend_megamoe_shared_weights`` and forwarded to the operator as
-        ``shared_l1_weights``/``shared_l2_weights``. The runner then skips the
-        separate shared-expert forward whenever the step dispatches to
-        MegaMoe. Any unsupported configuration keeps the standalone
-        shared-expert execution unchanged.
+        wrapped to rebuild the weight into the MegaMoe layout; the rebuilt
+        payload is exposed through ``megamoe_shared_fusion()`` and installed on
+        the routed-expert layer by ``AscendMoERunner``, then forwarded to the
+        operator as ``shared_l1_weights``/``shared_l2_weights``. The runner
+        then skips the separate shared-expert forward whenever the step
+        dispatches to MegaMoe. Any unsupported configuration keeps the
+        standalone shared-expert execution unchanged.
         """
-        if self.moe_layer is None or not use_cann_megamoe(get_current_vllm_config()):
+        if not use_cann_megamoe(get_current_vllm_config()):
             return
         # Only enable_fused_mc2=3 opts into fusing the shared expert into the
         # MegaMoe operator; =2 keeps the separate shared-expert forward.
@@ -480,18 +481,30 @@ class AscendSharedExperts:
         scale = scale.view(torch.float8_e8m0fnu)
         self._megamoe_shared_parts[slot] = weight
         self._megamoe_shared_parts[slot + "_scale"] = scale
-        self._maybe_finish_megamoe_shared_weights()
+        self._publish_megamoe_shared_fusion()
 
-    def _maybe_finish_megamoe_shared_weights(self) -> None:
-        if self._megamoe_shared_fusion_disabled or self.moe_layer is None:
+    def megamoe_shared_fusion(self) -> MegamoeSharedExpertFusion:
+        """Payload the routed layer needs to run the shared expert in MegaMoe.
+
+        Returned once, right after construction, so ``AscendMoERunner`` can
+        install it explicitly on the routed-expert layer. Weight loading runs
+        later, hence the returned object is live: this class fills its fields
+        as the shared linears are rebuilt, and consumers treat ``weights is
+        None`` as "fusion inactive".
+        """
+        return self._megamoe_shared_fusion
+
+    def _publish_megamoe_shared_fusion(self) -> None:
+        """Fill the live payload once both shared linears are rebuilt.
+
+        Re-publishing keeps RL weight reloads pointing at the fresh tensors.
+        """
+        if self._megamoe_shared_fusion_disabled:
             return
         needed = ("w1", "w2", "w1_scale", "w2_scale")
         if not all(name in self._megamoe_shared_parts for name in needed):
             return
-        # Attach to the routed-expert layer so the quant methods can pick the
-        # payload up in get_fused_mc2_weights. Re-attaching on every rebuild
-        # keeps RL weight reloads pointing at the fresh tensors.
-        self.moe_layer.ascend_megamoe_shared_weights = MegamoeSharedWeights(
+        weights = MegamoeSharedWeights(
             w1=[self._megamoe_shared_parts["w1"]],
             w2=[self._megamoe_shared_parts["w2"]],
             w1_scale=[self._megamoe_shared_parts["w1_scale"]],
@@ -508,8 +521,10 @@ class AscendSharedExperts:
         # _get_cann_mega_moe_quant_settings.
         shared_quant_type = self._megamoe_shared_quant_type
         _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(shared_quant_type)
-        self.moe_layer.ascend_megamoe_shared_quant_out_dtype = shared_quant_out_dtype
-        self.moe_layer.ascend_megamoe_shared_weight_type = shared_weight_type
+        fusion = self._megamoe_shared_fusion
+        fusion.weights = weights
+        fusion.quant_out_dtype = shared_quant_out_dtype
+        fusion.weight_type = shared_weight_type
         if not self.megamoe_shared_weights_ready:
             self.megamoe_shared_weights_ready = True
             logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
@@ -522,6 +537,7 @@ class AscendSharedExperts:
             )
         self._megamoe_shared_fusion_disabled = True
         self._megamoe_shared_parts.clear()
+        self._megamoe_shared_fusion.weights = None
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context

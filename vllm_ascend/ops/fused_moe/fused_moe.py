@@ -130,8 +130,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.moe_config,
                 self.quant_type,
                 self._quant_method,
-                moe_layer=self.routed_experts,
             )
+            # Weight loading runs after construction, so the shared expert
+            # hands out a live payload that it fills in once both shared
+            # linears are rebuilt. Install it explicitly here: the routed
+            # layer is the only module the quant methods
+            # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
+            self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
