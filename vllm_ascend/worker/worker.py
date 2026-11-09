@@ -121,6 +121,7 @@ from vllm_ascend.utils import (
 )
 
 
+# Both supported versions resolve grouping through the platform's builder.
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
