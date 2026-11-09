@@ -435,6 +435,9 @@ owners before the PR can merge. Key points:
 
 - Any owner listed in `.github/CODEOWNERS` counts as an approver, regardless of
   their repository role — owners without org membership are intentional.
+- A pending "changes requested" review from any owner of a changed file blocks
+  the merge even if another owner has approved. Address the feedback, then ask
+  the owner to re-review (they can approve or dismiss their review).
 - The PR author does not count as an approver even when listed as an owner.
 - Submitting or dismissing a review re-evaluates the gate without re-running
   the heavy CI jobs; previously green CI results on the same commit are kept.

@@ -46,6 +46,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.request
 from dataclasses import dataclass, field
 
 CODEOWNERS_PATH = ".github/CODEOWNERS"
@@ -139,22 +140,51 @@ def active_owners_for(rules: list[Rule], path: str) -> list[str]:
     return owners
 
 
+def _token() -> str:
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    raise SystemExit("GH_TOKEN or GITHUB_TOKEN must be set for GitHub API access")
+
+
 def gh_api(endpoint: str, **params: object) -> object:
+    """Paginated GitHub REST call using urllib (no gh CLI dependency).
+
+    Self-hosted runners do not ship the gh CLI, so requests go through the
+    stdlib instead. All pages are fetched and concatenated: for array
+    endpoints items are flattened into one list, for object endpoints the
+    last page wins.
+    """
     repo = os.environ["GITHUB_REPOSITORY"]
-    endpoint = endpoint.format(owner=repo.split("/")[0], repo=repo.split("/")[1], **params)
-    out = subprocess.run(
-        # --paginate + --slurp: gh concatenates raw pages for array endpoints,
-        # which is not valid JSON on its own; --slurp wraps all pages in one
-        # array that we flatten below.
-        ["gh", "api", endpoint, "--paginate", "--slurp"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    pages = json.loads(out.stdout)
-    if pages and isinstance(pages[0], list):
-        return [item for page in pages for item in page]
-    return pages[-1]
+    path = endpoint.format(owner=repo.split("/")[0], repo=repo.split("/")[1], **params)
+    items: list[object] = []
+    is_array = False
+    url: str | None = f"https://api.github.com/{path}?per_page=100"
+    while url:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {_token()}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        with urllib.request.urlopen(request) as response:
+            body = json.load(response)
+        is_array = isinstance(body, list)
+        items.extend(body if is_array else [body])
+        url = _next_link(response.headers.get("Link", ""))
+    return items if is_array else (items[-1] if items else {})
+
+
+def _next_link(link_header: str) -> str | None:
+    """Extract the rel="next" URL from a GitHub Link header."""
+    for part in link_header.split(","):
+        segment = part.strip()
+        if segment.endswith('rel="next"'):
+            return segment[segment.index("<") + 1 : segment.index(">")]
+    return None
 
 
 def get_pr_files(pr_number: int) -> list[str]:
@@ -173,20 +203,56 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
     return latest
 
 
+def resolve_owners(rules: list[Rule], path: str) -> tuple[list[str], bool]:
+    """Owners whose approval is required for ``path``.
+
+    Returns ``(owners, skipped)``. A ``SKIP(owner)`` rule is the last word on
+    its subtree: when it matches after any owner rule (last-match-wins), the
+    path is deliberately unowned and ``skipped`` is True. A ``TODO(owner)``
+    rule fills in owners only when no active rule with owners matched before
+    it and no later SKIP overrides the whole subtree.
+    """
+    owners: list[str] = []
+    skipped = False
+    for rule in rules:
+        if not pattern_matches(rule.pattern, path):
+            continue
+        if rule.status == "skip":
+            owners = []
+            skipped = True
+        elif rule.status == "active" and rule.owners:
+            owners = rule.owners
+            skipped = False
+        elif rule.status == "todo" and not owners and not skipped:
+            owners = rule.owners
+    return owners, skipped
+
+
 def check_approvals(
     pr_number: int, pr_author: str, rules: list[Rule], files: list[str], reviews: dict[str, str]
 ) -> list[str]:
     """Return list of failures (empty means pass)."""
     failures = []
     for path in files:
-        owners = active_owners_for(rules, path)
-        approved = [
-            o.lstrip("@") for o in owners if reviews.get(o.lstrip("@")) == "APPROVED" and o.lstrip("@") != pr_author
-        ]
+        owners, skipped = resolve_owners(rules, path)
+        if skipped:
+            # Deliberately unowned path (SKIP(owner)): no approval required.
+            continue
+        eligible = [o for o in owners if o.lstrip("@") != pr_author]
+        # A pending "changes requested" from any eligible owner blocks the
+        # file even when another owner has approved; the author must address
+        # the feedback and get the owner to re-review (approve or dismiss).
+        blocking = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"]
+        if blocking:
+            failures.append(
+                f"{path}: changes requested by {', '.join('@' + b for b in blocking)}; "
+                "address the feedback, then ask them to re-review (approve or dismiss)"
+            )
+            continue
+        approved = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"]
         if not owners:
             failures.append(f"{path}: no CODEOWNERS owner matches this file")
             continue
-        eligible = [o for o in owners if o.lstrip("@") != pr_author]
         if not eligible:
             failures.append(
                 f"{path}: only owner is the PR author ({pr_author}); another owner must be added to CODEOWNERS"
