@@ -294,3 +294,52 @@ def test_update_expert_map_preserves_upstream_and_legacy_contracts(monkeypatch):
 
     assert routed_experts.ascend_expert_map is legacy_map
     assert expert_map_manager._expert_map is legacy_map
+
+
+@pytest.mark.parametrize("default_device", ["cpu", "meta"])
+def test_init_eplb_allocates_load_on_npu_with_meta_default(monkeypatch, default_device):
+    eplb_config = SimpleNamespace(
+        expert_map_path=None,
+        dynamic_eplb=False,
+        num_redundant_experts=0,
+        eplb_policy_type=0,
+        expert_heat_collection_interval=1,
+    )
+    layer = SimpleNamespace(
+        moe_config=SimpleNamespace(num_experts=4, num_logical_experts=4, num_local_experts=4, ep_size=1),
+        mix_placement=False,
+        _promote_attr_to_buffer=lambda name: None,
+    )
+    monkeypatch.setattr(AscendRoutedExperts, "moe_counter", -1)
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(eplb_config=eplb_config))
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=1)),
+    )
+    monkeypatch.setattr(routed_experts_module, "init_eplb_config", lambda *args, **kwargs: (None, None, None, 0))
+    registered = []
+    monkeypatch.setattr(routed_experts_module.VllmEplbAdaptor, "register_layer", registered.append)
+    zeros = torch.zeros
+
+    def cpu_zeros(*args, **kwargs):
+        device = kwargs.setdefault("device", default_device)
+        if device == "npu":
+            kwargs["device"] = "cpu"
+        return zeros(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "zeros", cpu_zeros)
+
+    def cpu_npu(tensor):
+        if tensor.is_meta:
+            raise NotImplementedError("Cannot copy out of meta tensor; no data!")
+        return tensor.to("cpu")
+
+    monkeypatch.setattr(torch.Tensor, "npu", cpu_npu, raising=False)
+    with torch.device(default_device):
+        AscendRoutedExperts.init_eplb(layer, 0)
+
+    assert layer.moe_load.dtype == torch.int64
+    assert layer.moe_load.shape == (4,)
+    assert torch.equal(layer.moe_load, zeros(4, dtype=torch.int64, device="cpu"))
+    assert registered == [layer]
