@@ -1,10 +1,8 @@
 # Release Notes
 
-## v0.32.0rc1 - 2026.11.02
+## v0.32.0rc1 - 2026.11.09
 This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This release introduces support for **MiniMax-M3.1-Flash** and **Qwen3.8-Flash-Next**, and adds optimizations for **DeepSeek V4.1-Flash** and **GLM-5.3-Flash**. It also improves context parallelism, speculative decoding, and KV Cache management. The hardware and deployment scope below summarizes the configurations documented in each model guide; it does not claim validation for other model and hardware combinations. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
 
-| Model | Supported Hardware | Validated Deployment and Features |
-| --- | --- | --- |
 | Model | Hardware | Supported Features |
 | --- | --- | --- |
 | MiniMax-M3.1-Flash | A2 Products, A3 Products, 950DT Products | W8A8 on A2/A3 and MXFP8 on 950DT; text, image, and video inference; DSpark speculative decoding; single-node and multi-node P/D deployment; KV Cache Pool and text-only 1M-context deployment on A3. |
