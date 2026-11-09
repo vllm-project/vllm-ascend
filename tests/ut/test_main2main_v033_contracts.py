@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import unittest
 from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,6 +54,71 @@ class ArrayBuffer:
 
 
 class TestMain2MainContracts(unittest.TestCase):
+    def test_gemma4_copied_constructor_preserves_native_mm_initialization(self):
+        for native_norm in (False, True):
+            for mode in (None, "missing", "weights", "data"):
+                with self.subTest(native_norm=native_norm, mode=mode):
+                    mm_config = (
+                        None
+                        if mode is None
+                        else SimpleNamespace(**({} if mode == "missing" else {"mm_encoder_tp_mode": mode}))
+                    )
+                    model_config = SimpleNamespace(
+                        hf_config=SimpleNamespace(
+                            vision_config=object(),
+                            audio_config=None,
+                            text_config=SimpleNamespace(hidden_size_per_layer_input=None),
+                        ),
+                        multimodal_config=mm_config,
+                        dtype="bf16",
+                        try_get_generation_config=lambda: {"suppress_tokens": [7]},
+                    )
+                    config = SimpleNamespace(model_config=model_config, quant_config=object(), lora_config=None)
+                    tower = SimpleNamespace(
+                        patch_embedder=SimpleNamespace(input_proj=SimpleNamespace(quant_method=None))
+                    )
+                    norm = object()
+                    build_norm = MagicMock(return_value=norm)
+                    upstream = SimpleNamespace(build_mm_input_norm=build_norm) if native_norm else SimpleNamespace()
+                    language_model = MagicMock()
+                    replace_linear = MagicMock()
+                    namespace: dict[str, Any] = dict(
+                        torch=SimpleNamespace(nn=SimpleNamespace(Module=object)),
+                        gemma4_mm=upstream,
+                        AutoModel=SimpleNamespace(from_config=MagicMock(return_value=tower)),
+                        Gemma4MultimodalEmbedder=MagicMock(),
+                        recursive_replace_linear=replace_linear,
+                        maybe_prefix=lambda prefix, name: f"{prefix}.{name}",
+                        init_vllm_registered_model=MagicMock(return_value=language_model),
+                        AscendW4A4MXFP4DynamicLinearMethod=type("MXFP4", (), {}),
+                        AscendW8A8MXFP8DynamicLinearMethod=type("MXFP8", (), {}),
+                    )
+                    initialize = _method(
+                        "vllm_ascend/models/gemma4_mm.py",
+                        "AscendGemma4ForConditionalGeneration",
+                        "__init__",
+                        namespace,
+                    )
+                    model = SimpleNamespace(
+                        _mark_tower_model=lambda *_args: nullcontext(),
+                        _mark_language_model=lambda *_args: nullcontext(),
+                    )
+                    initialize(model, vllm_config=config, prefix="model")
+                    self.assertEqual(model.use_data_parallel, mode == "data")
+                    if native_norm:
+                        build_norm.assert_called_once_with(model_config)
+                        self.assertIs(model.vision_input_norm, norm)
+                    else:
+                        build_norm.assert_not_called()
+                        self.assertFalse(hasattr(model, "vision_input_norm"))
+                    self.assertIs(model.vision_tower, tower)
+                    replace_linear.assert_called_once_with(tower, config.quant_config, prefix="model.vision_tower")
+                    self.assertIs(model.language_model, language_model)
+                    self.assertIsNone(model.audio_tower)
+                    self.assertIsNone(model.per_layer_embeddings)
+                    self.assertFalse(model._enable_mm_lora)
+                    self.assertEqual(model._suppress_token_ids, [7])
+
     def test_mamba_precopy_temporal_bias_preserves_conv_and_legacy_calls(self):
         path = ROOT / "vllm_ascend/ops/triton/mamba/precopy.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
