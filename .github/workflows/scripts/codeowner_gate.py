@@ -267,18 +267,32 @@ def list_tracked_files(repo_root: str) -> list[str]:
     return out.stdout.splitlines()
 
 
+def is_contentless_file(path: str) -> bool:
+    """True for zero-byte files (empty ``__init__.py``, ``.gitkeep``, ...).
+
+    Contentless files carry no behavior to own, so they are exempt from the
+    ownership requirement. Files missing from the working tree are NOT
+    exempt: CI always checks out full trees, so a missing file only happens
+    in partial local checkouts and must still be reported as unowned.
+    """
+    try:
+        return os.path.getsize(path) == 0 and not os.path.islink(path)
+    except OSError:
+        return False
+
+
 def check_coverage(rules: list[Rule], tracked: list[str]) -> list[str]:
     """CODEOWNERS health: real ownership of tracked files + stale entries.
 
     Strict mode: a file whose resolved owner set is empty fails the check,
     even when an ownerless TODO entry nominally covers it - an entry without
-    owners means nobody is accountable. Only ``SKIP(owner)`` paths are
-    exempt.
+    owners means nobody is accountable. Exempt: ``SKIP(owner)`` paths and
+    contentless (zero-byte) files such as empty ``__init__.py``.
     """
     failures = []
 
     for path in tracked:
-        if path == CODEOWNERS_PATH:
+        if path == CODEOWNERS_PATH or is_contentless_file(path):
             continue
         owners, skipped = resolve_owners(rules, path)
         if skipped or owners:

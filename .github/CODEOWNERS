@@ -40,7 +40,7 @@
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
 /docs/source/user_guide/feature_guide/rl.md @Ronald1995
-/docs/source/user_guide/feature_guide/batch_invariant.md @Ronald1995
+/docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
 /mkdocs.yml @MrZ20
@@ -98,8 +98,6 @@
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan
 
-# sample
-/vllm_ascend/sample @realliujiaxu
 /vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137 @zhenwenqi2024
 
 # spec decode
@@ -143,8 +141,21 @@
 # Worker base
 /vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/worker/worker.py @wxsIcey @Ronald1995
+/vllm_ascend/worker/device_metadata.py @linfeng-yuan
+# TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
+# /vllm_ascend/worker/dspark_utils.py @wxsIcey
+# TODO(owner): /vllm_ascend/worker/encoder_acl_graph.py
+# /vllm_ascend/worker/encoder_acl_graph.py
+# TODO(owner): /vllm_ascend/worker/kvpp_cache.py
+# /vllm_ascend/worker/kvpp_cache.py
+# TODO(owner): /vllm_ascend/worker/npu_input_batch.py
+# /vllm_ascend/worker/npu_input_batch.py
+# TODO(owner): /vllm_ascend/worker/spec_decode_utils.py
+# /vllm_ascend/worker/spec_decode_utils.py
 
 # Worker V2
+# TODO(owner): /vllm_ascend/worker/v2/*.py
+# /vllm_ascend/worker/v2/*.py
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
 # TODO(owner): /vllm_ascend/worker/v2/aclgraph_utils.py
 # /vllm_ascend/worker/v2/aclgraph_utils.py
@@ -197,46 +208,29 @@
 /vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
 /vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
+# profiler
+# TODO(owner): /vllm_ascend/profiler
+# /vllm_ascend/profiler
+
+# model executor
+# TODO(owner): /vllm_ascend/model_executor
+# /vllm_ascend/model_executor
+
+# weight switch
+# TODO(owner): /vllm_ascend/weight_switch
+# /vllm_ascend/weight_switch
+
+# EC manager
+# TODO(owner): /vllm_ascend/ec_manager
+# /vllm_ascend/ec_manager
+
+# Model executor
+# TODO(owner): /vllm_ascend/model_executor
+# /vllm_ascend/model_executor
+
 # Model loader
 /vllm_ascend/model_loader @yilunh998
 /vllm_ascend/model_loader/rfork/ @yangsonglin13
-
-# vllm_ascend module directories (subdirs broken out one level)
-# TODO(owner): /vllm_ascend/ec_manager
-# /vllm_ascend/ec_manager
-# TODO(owner): /vllm_ascend/model_executor
-# /vllm_ascend/model_executor
-# TODO(owner): /vllm_ascend/profiler
-# /vllm_ascend/profiler
-# TODO(owner): /vllm_ascend/weight_switch
-# /vllm_ascend/weight_switch
-# TODO(owner): /benchmarks/
-# /benchmarks/
-
-# worker root files pending owners (uncomment + set owner to activate)
-# TODO(owner): /vllm_ascend/worker/__init__.py
-# /vllm_ascend/worker/__init__.py
-/vllm_ascend/worker/device_metadata.py @linfeng-yuan
-# TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
-# /vllm_ascend/worker/dspark_utils.py @wxsIcey
-# TODO(owner): /vllm_ascend/worker/encoder_acl_graph.py
-# /vllm_ascend/worker/encoder_acl_graph.py
-# TODO(owner): /vllm_ascend/worker/kvpp_cache.py
-# /vllm_ascend/worker/kvpp_cache.py
-# TODO(owner): /vllm_ascend/worker/npu_input_batch.py
-# /vllm_ascend/worker/npu_input_batch.py
-# TODO(owner): /vllm_ascend/worker/spec_decode_utils.py
-# /vllm_ascend/worker/spec_decode_utils.py
-# TODO(owner): /vllm_ascend/worker/utils.py
-# /vllm_ascend/worker/utils.py
-# TODO(owner): /vllm_ascend/*.py
-# /vllm_ascend/*.py
-# TODO(owner): /vllm_ascend/worker/v2/*.py
-# /vllm_ascend/worker/v2/*.py
-# TODO(owner): /vllm_ascend/worker/v2/README.md
-# /vllm_ascend/worker/v2/README.md
-# (covers worker/v2/__init__.py & README.md; specific owned files take
-#  precedence via last-match-wins — keep this line ABOVE them when activated)
 
 # ==================== Deliberately unowned (no entry needed) ====================
 # SKIP(owner): /tests/ut/
