@@ -57,7 +57,7 @@ test_cases:
         batch_size: 16
         # Record accuracy without imposing a quality gate until a known
         # Step3.7 baseline is available.
-        baseline: 92.86
+        baseline: 96.43
         threshold: 4
         temperature: 0.6
         ignore_eos: false
