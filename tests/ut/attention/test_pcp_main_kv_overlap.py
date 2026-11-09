@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,8 +24,9 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 @pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("sharded_decode", [False, True])
+@pytest.mark.parametrize("defer_wait", [False, True])
 def test_main_kv_matches_synchronous_inputs_and_slots(
-    monkeypatch, pcp, tp, dcp, dtype, rope, rows, replicated, quantized, mode, sharded_decode
+    monkeypatch, pcp, tp, dcp, dtype, rope, rows, replicated, quantized, mode, sharded_decode, defer_wait
 ):
     impl_cls = pcp_module.AscendSFADCPImpl if dcp > 1 else AscendSFAImpl
     impl = impl_cls.__new__(impl_cls)
@@ -64,7 +66,7 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
         assert actual_cache is cache and actual_metadata is metadata
         if events:
             count = 3 if rope else 1
-            assert events == ["launch"] * count + ["query"] + ["wait"] * count
+            assert events == ["launch"] * count + (["query"] if defer_wait else []) + ["wait"] * count
         writes.append((values.clone(), actual_cos, actual_sin, actual_slots.clone()))
         return None, None
 
@@ -88,10 +90,13 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
         return output, SimpleNamespace(wait=wait)
 
     monkeypatch.setattr(sparse_mla, "all_gather_async", launch)
-    finish = impl._prepare_kv(inputs, cos, sin, cache, slots, metadata)
-    assert finish is not None and len(writes) == 1
-    events.append("query")
-    assert finish() == expected_result
+    result = impl.exec_kv(inputs, cos, sin, cache, slots, metadata, defer_wait=defer_wait)
+    if defer_wait:
+        assert callable(result) and len(writes) == 1
+        events.append("query")
+        result = result()
+    assert result == expected_result
+    assert len(writes) == 2
     for expected, actual in zip(*writes):
         if expected is None:
             assert actual is None
@@ -100,7 +105,9 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
 
 
 @pytest.mark.parametrize("input_dtype,cache_dtype", [(torch.float16, torch.float16), (torch.bfloat16, torch.float32)])
-def test_main_kv_completion_uses_original_cache_writer(monkeypatch, input_dtype, cache_dtype):
+@pytest.mark.parametrize("defer_wait", [False, True])
+@pytest.mark.parametrize("has_work", [False, True])
+def test_main_kv_completion_uses_original_cache_writer(monkeypatch, input_dtype, cache_dtype, defer_wait, has_work):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.pcp_enabled = True
     impl.qk_rope_head_dim = 0
@@ -119,7 +126,9 @@ def test_main_kv_completion_uses_original_cache_writer(monkeypatch, input_dtype,
     monkeypatch.setattr(sparse_mla, "get_pcp_group", lambda: group)
     monkeypatch.setattr("vllm.v1.attention.ops.pcp.get_pcp_group", lambda: group)
     monkeypatch.setattr(
-        sparse_mla, "all_gather_async", lambda send, _: (group.all_gather(send, 0), SimpleNamespace(wait=lambda: None))
+        sparse_mla,
+        "all_gather_async",
+        lambda send, _: (group.all_gather(send, 0), SimpleNamespace(wait=lambda: None) if has_work else None),
     )
 
     def scatter(cache, slots, values):
@@ -132,15 +141,18 @@ def test_main_kv_completion_uses_original_cache_writer(monkeypatch, input_dtype,
     expected, actual = torch.zeros(4, 3, dtype=cache_dtype), torch.zeros(4, 3, dtype=cache_dtype)
     padded = torch.nn.functional.pad(values, (0, 0, 0, 2))
     AscendSFAImpl._exec_kv_local(impl, group.all_gather(padded, 0), None, None, (expected,), slots, metadata)
-    finish = impl._prepare_kv(values, None, None, (actual,), slots, metadata)
-    finish()
+    result = impl.exec_kv(values, None, None, (actual,), slots, metadata, defer_wait=defer_wait)
+    if defer_wait:
+        assert callable(result)
+        result()
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.parametrize("mode", ["decode", "unsharded", "unexpanded", "replicated_only", "empty"])
-def test_main_kv_non_collective_paths_do_not_submit_work(monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["non_pcp", "decode", "unsharded", "unexpanded", "replicated_only", "empty"])
+@pytest.mark.parametrize("defer_wait", [False, True])
+def test_main_kv_non_collective_paths_do_not_submit_work(monkeypatch, mode, defer_wait):
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
-    impl.pcp_enabled = True
+    impl.pcp_enabled = mode != "non_pcp"
     impl.qk_rope_head_dim = 0
     impl.is_pcp_decode_sharded = False
     metadata = SimpleNamespace(
@@ -156,10 +168,55 @@ def test_main_kv_non_collective_paths_do_not_submit_work(monkeypatch, mode):
     monkeypatch.setattr(sparse_mla, "all_gather_async", gather)
     write = Mock(return_value=(None, None))
     monkeypatch.setattr(AscendSFAImpl, "_exec_kv_local", write)
-    finish = impl._prepare_kv(values, None, None, (values,), slots, metadata)
-    write.assert_not_called()
-    assert finish() == (None, None)
+    result = impl.exec_kv(values, None, None, (values,), slots, metadata, defer_wait=defer_wait)
+    if defer_wait:
+        write.assert_not_called()
+        assert callable(result)
+        result = result()
+    assert result == (None, None)
+    write.assert_called_once()
     gather.assert_not_called()
     expected_rows = 0 if mode in {"unexpanded", "empty"} else 2
     assert torch.equal(write.call_args.args[0], values[:expected_rows])
-    assert torch.equal(write.call_args.args[4], slots[:expected_rows])
+    assert torch.equal(write.call_args.args[4], slots if mode == "non_pcp" else slots[:expected_rows])
+
+
+@pytest.mark.parametrize("defer_wait", [False, True])
+def test_main_kv_retains_contiguous_send_until_completion(monkeypatch, defer_wait):
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.pcp_enabled = True
+    impl.qk_rope_head_dim = 0
+    impl.is_pcp_decode_sharded = False
+    metadata = SimpleNamespace(
+        num_input_tokens=4,
+        num_decode_tokens=0,
+        num_prefills=1,
+        pcp_has_global_prefill=True,
+        uses_pcp_sharded_layout=True,
+    )
+    values = torch.arange(12).view(3, 4).T
+    assert not values.is_contiguous()
+    group = SimpleNamespace(world_size=2)
+    monkeypatch.setattr(sparse_mla, "get_pcp_group", lambda: group)
+
+    def launch(send, actual_group):
+        assert actual_group is group and send.is_contiguous()
+        send_ref = weakref.ref(send)
+        output = torch.empty(8, 3, dtype=send.dtype)
+
+        def wait():
+            retained_send = send_ref()
+            assert retained_send is not None
+            output.copy_(torch.cat((retained_send, retained_send)))
+
+        return output, SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(sparse_mla, "all_gather_async", launch)
+    write = Mock(return_value=(None, None))
+    monkeypatch.setattr(AscendSFAImpl, "_exec_kv_local", write)
+    result = impl.exec_kv(values, None, None, (), torch.arange(8), metadata, defer_wait=defer_wait)
+    if defer_wait:
+        assert callable(result)
+        result()
+    write.assert_called_once()
+    torch.testing.assert_close(write.call_args.args[0], torch.cat((values, values)))

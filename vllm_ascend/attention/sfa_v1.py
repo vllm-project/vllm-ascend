@@ -19,7 +19,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     MLAAttentionImpl,
 )
-from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -1269,16 +1268,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    def _prepare_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata) -> Callable[[], tuple]:
-        """Launch PCP KV exchange now and finish the local cache write after Q projection."""
-        if not self.pcp_enabled:
-            outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-            return lambda: outputs
-        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
-            return lambda: self._exec_kv_local(
-                kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata
-            )
-        if self.qk_rope_head_dim == 0:
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+        *,
+        defer_wait: bool = False,
+    ) -> tuple | Callable[[], tuple]:
+        """Prepare KV once; optionally defer completion until after Q projection."""
+        gather_kv = self.pcp_enabled and needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded)
+        if gather_kv and self.qk_rope_head_dim == 0:
             # NoPE projects actual tokens, but slots retain the padded rank stride.
             pad = attn_metadata.num_input_tokens - kv_no_split.shape[0]
             if pad < 0:
@@ -1286,25 +1289,33 @@ class AscendSFAImpl(MLAAttentionImpl):
             if pad:
                 kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad))
         local_rows = kv_no_split.shape[0]
-        replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
-        assert 0 <= replicated <= local_rows
-        inputs = (kv_no_split,) if self.qk_rope_head_dim == 0 else (kv_no_split, cos, sin)
-        assert all(value.shape[0] == local_rows for value in inputs)
+        replicated = 0
+        inputs: tuple[torch.Tensor, ...] = (kv_no_split,)
         pending: tuple[tuple[torch.Tensor, torch.distributed.Work | None], ...] = ()
         sends: tuple[torch.Tensor, ...] = ()
-        # Preserve replicated/draft decode writes without submitting a collective.
-        if slots.shape[0] <= local_rows or replicated == local_rows:
-            inputs = tuple(value[:replicated] for value in inputs)
-            slots = slots[:replicated]
-        else:
-            group = get_pcp_group()
-            sends = tuple(value[replicated:].contiguous() for value in inputs)
-            pending = tuple(all_gather_async(send, group) for send in sends)
-            slots = slots[: group.world_size * local_rows]
-            if replicated:
-                rank_slots = slots.view(group.world_size, local_rows)
-                slots = torch.cat((rank_slots[0, :replicated], rank_slots[:, replicated:].flatten()))
-            logger.info_once("SFA PCP main KV AllGather overlaps MLA Q projection.")
+        if gather_kv:
+            replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
+            assert 0 <= replicated <= local_rows
+            if self.qk_rope_head_dim:
+                assert cos is not None and sin is not None
+                inputs = (kv_no_split, cos, sin)
+            assert all(value.shape[0] == local_rows for value in inputs)
+            # Preserve replicated/draft decode writes without submitting a collective.
+            if slots.shape[0] <= local_rows or replicated == local_rows:
+                inputs = tuple(value[:replicated] for value in inputs)
+                slots = slots[:replicated]
+            else:
+                group = get_pcp_group()
+                sends = tuple(value[replicated:].contiguous() for value in inputs)
+                pending = tuple(all_gather_async(send, group) for send in sends)
+                slots = slots[: group.world_size * local_rows]
+                if replicated:
+                    rank_slots = slots.view(group.world_size, local_rows)
+                    slots = torch.cat((rank_slots[0, :replicated], rank_slots[:, replicated:].flatten()))
+                if defer_wait:
+                    logger.info_once("SFA PCP main KV AllGather overlaps MLA Q projection.")
+        elif self.pcp_enabled:
+            slots = slots[:local_rows]
 
         def finish():
             # Retain the contiguous sends until HCCL has finished reading them.
@@ -1320,45 +1331,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if pending
                 else inputs
             )
-            assert values[0].shape[0] == slots.numel()
-            gathered_cos, gathered_sin = values[1:] if self.qk_rope_head_dim else (cos, sin)
+            if gather_kv:
+                assert values[0].shape[0] == slots.numel(), (
+                    "SFA PCP cache write requires one slot per gathered token: "
+                    f"tokens={values[0].shape[0]}, slots={slots.numel()}."
+                )
+            gathered_cos, gathered_sin = values[1:] if len(values) > 1 else (cos, sin)
             return self._exec_kv_local(values[0], gathered_cos, gathered_sin, kv_cache, slots, attn_metadata)
 
-        return finish
-
-    def exec_kv(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor | None,
-        sin: torch.Tensor | None,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
-    ):
-        if self.pcp_enabled:
-            if needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
-                num_replicated_tokens = get_pcp_num_replicated_tokens(
-                    attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
-                )
-                if self.qk_rope_head_dim == 0:
-                    # NoPE keeps the builder's padded rank stride for KV gathers.
-                    pad_tokens = attn_metadata.num_input_tokens - kv_no_split.shape[0]
-                    if pad_tokens < 0:
-                        raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
-                    if pad_tokens:
-                        kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad_tokens))
-                    (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_replicated_tokens)
-                else:
-                    (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-                        (kv_no_split, cos, sin), slots, num_replicated_tokens
-                    )
-                assert slots.numel() == kv_no_split.shape[0], (
-                    "SFA PCP cache write requires one slot per gathered token: "
-                    f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
-                )
-            else:
-                slots = slots[: kv_no_split.shape[0]]
-        return self._exec_kv_local(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        return finish if defer_wait else finish()
 
     def _exec_kv_local(
         self,
@@ -2159,21 +2140,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
             kv_outputs: Callable[[], tuple] | tuple
-            kv_outputs = self._prepare_kv(
-                kv_no_split,
-                cos,
-                sin,
-                kv_cache,
-                slot_mapping_sfa,
-                attn_metadata,
-            )
+            kv_args = (kv_no_split, cos, sin, kv_cache, slot_mapping_sfa, attn_metadata)
+            # Preserve immediate non-PCP writes, including offload subclass commits.
+            kv_outputs = self.exec_kv(*kv_args, defer_wait=True) if self.pcp_enabled else self.exec_kv(*kv_args)
             # Prioritize cache inputs before weights consumed after attention.
             if self.runtime_has_indexer and hasattr(type(self.indexer), "prepare_pcp_hidden"):
                 assert k_hidden_states is not None and indexer_attn_metadata is not None
                 k_hidden_states = self.indexer.prepare_pcp_hidden(k_hidden_states, indexer_attn_metadata)
             self._start_o_proj_weight_gather()
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            kv_outputs = kv_outputs()
+            if callable(kv_outputs):
+                kv_outputs = kv_outputs()
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
             if self.qk_rope_head_dim:

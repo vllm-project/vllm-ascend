@@ -552,9 +552,8 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
     impl.q_a_layernorm = lambda value: value
-    impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
     # Cache exchange itself is covered by test_pcp_main_kv_overlap.
-    impl._prepare_kv = lambda *args: lambda: impl.exec_kv(*args)
+    impl.exec_kv = MagicMock(return_value=lambda: (None, torch.zeros(4, 2)))
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
     impl._record_dcp_kv_gather_context = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()
@@ -576,6 +575,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._get_sfa_kv_slot_mapping.assert_called_once_with(metadata)
     assert impl.exec_kv.call_args.args[0].shape[0] == 4
     assert impl.exec_kv.call_args.args[4] is metadata.slot_mapping
+    assert impl.exec_kv.call_args.kwargs == {"defer_wait": True}
     assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
     impl._finalize_o_proj.assert_called_once()
     assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
