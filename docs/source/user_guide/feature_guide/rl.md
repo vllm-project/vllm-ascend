@@ -123,6 +123,7 @@ vLLM-Ascend exposes the following Ascend-specific weight-transfer backends:
 | --- | --- | --- |
 | `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
+| `hccl_m2n` | Redistribute training shards to a different rollout layout on separate NPUs | HCCL batched point-to-point |
 | `sparse_hccl` | Replace selected checkpoint weight values on separate NPUs | HCCL collectives |
 
 The table describes transport choices. Sparse transfer requires the trainer and
@@ -168,6 +169,59 @@ The repository contains runnable examples for weight transfer:
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
+
+#### HCCL M2N
+
+Select `--weight-transfer-config '{"backend": "hccl_m2n"}'` and enable RL
+mode. On the trainer, load the Ascend general plugins before creating the
+transfer engine. Every trainer rank initializes the engine and calls
+`send_weights()`. Trainer rank 0 drives the inference RPCs.
+
+```python
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    ModuleSource,
+    WeightTransferTrainerFactory,
+)
+from vllm.plugins import load_general_plugins
+
+from vllm_ascend.distributed.weight_transfer.hccl_m2n_engine import (
+    HCCLM2NTrainerInitInfo,
+)
+
+load_general_plugins()
+engine = WeightTransferTrainerFactory.trainer_init(
+    init_info=HCCLM2NTrainerInitInfo(
+        master_address=trainer_master_address,
+        master_port=transfer_port,
+        rank=trainer_rank,
+        num_trainer_ranks=num_trainers,
+        world_size=num_trainers + rollout_dp * rollout_tp,
+        dst_mesh_dims=(rollout_dp, rollout_tp),
+    ),
+    client=HTTPVLLMWeightSyncClient(rollout_url),
+    source=ModuleSource(training_model),
+)
+
+# Call on every trainer rank while rollout generation is paused.
+engine.send_weights()
+```
+
+The initial implementation targets dense, unquantized models with FP16,
+BF16, or FP32 ND weights and TP or DP on the rollout side. It supports
+the upstream M2N layout rules for uniformly sharded tensors of up to three
+dimensions. Use disjoint trainer and rollout NPUs and a CANN build with
+`HcclBatchSendRecv` support. The trainer and rollout must use the same
+parameter names and checkpoint semantics.
+
+By default, workers reconstruct each checkpoint tensor and pass it through
+the model loader. Use `direct_write=True` only after verifying that the target
+model's live parameter storage has the layout of its checkpoint shard and
+its loader requires no additional transformation. Upstream destination
+resolution selects eligible direct targets and sends the remaining weights
+through the loader.
+After an update failure, restart the affected trainer and rollout session
+before resuming generation. A partial update may already have changed weights.
 
 #### Sparse HCCL
 
