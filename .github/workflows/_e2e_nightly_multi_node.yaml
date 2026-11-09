@@ -248,14 +248,18 @@ jobs:
           STALE_SECONDS=1200
           NOW=$(date +%s)
           LWS_HEARTBEAT_TEMPLATE='{{range .items}}{{.metadata.name}}{{"|"}}'
-          LWS_HEARTBEAT_TEMPLATE="${LWS_HEARTBEAT_TEMPLATE}"'{{index .metadata.annotations "ci.vllm-ascend/heartbeat"}}{{"\n"}}{{end}}'
+          LWS_HEARTBEAT_TEMPLATE="${LWS_HEARTBEAT_TEMPLATE}"'{{index .metadata.annotations "ci.vllm-ascend/heartbeat"}}{{"|"}}'
+          LWS_HEARTBEAT_TEMPLATE="${LWS_HEARTBEAT_TEMPLATE}"'{{index .metadata.annotations "ci.vllm-ascend/keep"}}{{"\n"}}{{end}}'
           STALE_LIST=$(kubectl get leaderworkerset -n "$NAMESPACE" \
             -l app.kubernetes.io/managed-by=vllm-ascend-ci \
             -o go-template="$LWS_HEARTBEAT_TEMPLATE" \
             2>/dev/null || true)
 
-          printf '%s\n' "$STALE_LIST" | while IFS='|' read -r stale_name heartbeat; do
+          printf '%s\n' "$STALE_LIST" | while IFS='|' read -r stale_name heartbeat keep; do
             [ -z "$stale_name" ] && continue
+            if [ "$keep" = "true" ]; then
+              continue
+            fi
             case "$heartbeat" in
               ''|*[!0-9]*) continue ;;
             esac
