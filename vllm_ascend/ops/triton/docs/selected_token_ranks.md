@@ -19,7 +19,7 @@
   5. Reduce the counting vector to a scalar and store the rank as int64.
 - **Supported modes**: The operator is intended for Atlas A2, Atlas A3, and 950PR&950DT Products in the V2 score implementation. Single-operator tests run eagerly. End-to-end model ACL Graph and MTP coverage is not established by these tests.
 
-  On the paired vLLM `24420b7a` source, standard MRV2 callers invoke `compute_topk_scores`, while the existing Ascend patch assigns the retired `compute_topk_logprobs` name. This rank-only change does not repair that binding. Direct calls to the Ascend wrapper and its operator tests execute this kernel; do not infer a changed standard-service result solely from this PR. See [the related score-binding work](https://github.com/vllm-project/vllm-ascend/pull/20434).
+  On the paired vLLM `24420b7a` source, standard MRV2 callers invoke `compute_topk_scores`. The Ascend patch binds that entry in the defining module and its sampler, prompt-logprob and rejection-sampler callers to `compute_topk_logprobs`. The rank comparison was aligned separately in [#20109](https://github.com/vllm-project/vllm-ascend/pull/20109); this score-binding change reuses that implementation.
 
 ## Parameters
 

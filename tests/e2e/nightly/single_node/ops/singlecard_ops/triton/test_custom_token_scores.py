@@ -102,11 +102,3 @@ def test_custom_duplicate_candidates():
     expected_ids = torch.tensor([[3, 2, 2, 0]], device="npu")
     torch.testing.assert_close(result.logprob_token_ids, expected_ids)
     torch.testing.assert_close(result.logprobs, logits.log_softmax(-1).gather(1, expected_ids))
-
-
-def test_rank_excludes_padded_negative_infinity():
-    init_device_properties_triton()
-    logits = torch.zeros((1, 17), device="npu")
-    logits[0, 5] = -float("inf")
-    result = compute_topk_logprobs(logits, 0, torch.tensor([5], device="npu"))
-    assert result.selected_token_ranks.cpu().tolist() == [17]
