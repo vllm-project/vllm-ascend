@@ -48,6 +48,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     zmq_ctx,
 )
 
+SHUTDOWN_WARNING_INTERVAL_S = 30.0
+
 
 class MooncakePullRecvingThread(threading.Thread):
     """D-side execution thread for Mooncake pull requests.
@@ -138,6 +140,8 @@ class MooncakePullRecvingThread(threading.Thread):
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
         self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]] | None] = queue.Queue()
+        self._request_submit_lock = threading.Lock()
+        self._stopping = False
         self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -148,9 +152,12 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_engine_id: str,
         requests: dict[str, ReqMeta],
     ) -> None:
-        """Queue requests for one remote engine."""
+        """Queue requests for one remote engine until shutdown starts."""
         if requests:
-            self.request_queue.put((remote_engine_id, requests))
+            with self._request_submit_lock:
+                if self._stopping:
+                    raise RuntimeError("Mooncake pull receiver is shutting down; cannot accept new requests")
+                self.request_queue.put((remote_engine_id, requests))
 
     def get_and_clear_finished_requests(self) -> KVConnectorTransferResults:
         """Drain completion and failure together for each finished request."""
@@ -172,10 +179,25 @@ class MooncakePullRecvingThread(threading.Thread):
         return invalid_block_ids
 
     def shutdown(self) -> None:
-        """Drain queued receives before releasing the transfer executor."""
-        if self.is_alive():
-            self.request_queue.put(None)
-            self.join()
+        """Reject new work, then drain accepted transfers before releasing resources.
+
+        Join timeouts report a slow drain; they do not cancel native transfers
+        or allow their KV cache owners to be released before completion.
+        """
+        with self._request_submit_lock:
+            if not self._stopping:
+                self._stopping = True
+                if self.is_alive():
+                    self.request_queue.put(None)
+        started = time.monotonic()
+        while self.is_alive():
+            self.join(timeout=SHUTDOWN_WARNING_INTERVAL_S)
+            if self.is_alive():
+                logger.warning(
+                    "Waiting %.1fs for Mooncake pull receiver to drain accepted transfers; "
+                    "resources remain owned until completion.",
+                    time.monotonic() - started,
+                )
         self.executor.shutdown(wait=True)
 
     def run(self) -> None:
@@ -1612,8 +1634,9 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 raise RuntimeError("Mooncake pull receiving thread failed to start")
 
     def shutdown(self) -> None:
-        if self._recving_thread is not None:
-            self._recving_thread.shutdown()
+        receiver = self._recving_thread
+        if receiver is not None:
+            receiver.shutdown()
             self._recving_thread = None
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
@@ -1621,14 +1644,15 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         if not metadata.requests:
             return
         if self.kv_transfer_config.is_kv_consumer:
-            assert self._recving_thread is not None
+            receiver = self._recving_thread
+            assert receiver is not None
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
                 requests = request_groups.setdefault(request_metadata.remote_engine_id, {})
                 requests[request_id] = request_metadata
 
             for remote_engine_id, requests in request_groups.items():
-                self._recving_thread.add_requests(remote_engine_id, requests)
+                receiver.add_requests(remote_engine_id, requests)
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Return completed receives, including their failure status."""

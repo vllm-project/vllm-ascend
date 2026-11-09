@@ -3,4 +3,5 @@ entries:
   - category: bugfix
     text: >-
       Fixed retained Mooncake pull-worker receiver and executor resources after connector
-      shutdown; queued transfers are drained before those resources are released.
+      shutdown; new work is rejected while accepted transfers drain, with periodic
+      warnings for slow receiver shutdown before resources are released.

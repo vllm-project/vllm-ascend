@@ -5,7 +5,9 @@ import ast
 import queue
 import sys
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -46,20 +48,32 @@ class MooncakeShutdownRepro(unittest.TestCase):
     def setUp(self):
         self.hardware = patch.dict(sys.modules, {"torch_npu": MagicMock(), "acl": MagicMock()})
         self.hardware.start()
-        env = {"torch": MagicMock(), "queue": queue, "logger": MagicMock()}
+        self.logger = MagicMock()
+        env = {
+            "torch": MagicMock(),
+            "queue": queue,
+            "logger": self.logger,
+            "time": time,
+            "as_completed": as_completed,
+            "SHUTDOWN_WARNING_INTERVAL_S": 30.0,
+        }
         receiver_type = load_class(
             "pull_worker.py",
             "MooncakePullRecvingThread",
-            {"run", "shutdown", "_get_remote_endpoint"},
+            {"run", "shutdown", "add_requests", "_handle_requests", "_get_remote_endpoint"},
             threading.Thread,
             env,
         )
         worker_base = load_class("base_worker.py", "MooncakeBaseConnectorWorker", {"shutdown"}, object, env)
-        worker_type = load_class("pull_worker.py", "MooncakePullConnectorWorker", {"shutdown"}, worker_base, env)
+        worker_type = load_class(
+            "pull_worker.py", "MooncakePullConnectorWorker", {"shutdown", "start_load_kv"}, worker_base, env
+        )
         connector_type = load_class("connector.py", "MooncakeBaseConnector", {"shutdown"}, object, env)
         self.receiver = receiver_type.__new__(receiver_type)
         threading.Thread.__init__(self.receiver, daemon=True)
         self.receiver.request_queue = AbortableQueue()
+        self.receiver._request_submit_lock = threading.Lock()
+        self.receiver._stopping = False
         self.receiver.finished_requests = queue.SimpleQueue()
         self.receiver.ready_event = threading.Event()
         self.receiver.device = "cpu"
@@ -68,6 +82,7 @@ class MooncakeShutdownRepro(unittest.TestCase):
         self.receiver._handle_requests = MagicMock(return_value=set())
         self.receiver._mark_request_failed = MagicMock()
         self.worker = worker_type()
+        self.worker.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
         self.worker._recving_thread = self.receiver
         self.connector = connector_type()
         self.connector.connector_worker = self.worker
@@ -145,9 +160,94 @@ class MooncakeShutdownRepro(unittest.TestCase):
             self.connector.shutdown()
         self.assertIs(self.connector.connector_worker, self.worker)
         self.assertIs(self.worker._recving_thread, self.receiver)
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            self.receiver.add_requests("producer", {"late": SimpleNamespace()})
         self.connector.shutdown()
         self.assertEqual(self.receiver.executor.shutdown.call_count, 2)
         self.assertIsNone(self.worker._recving_thread)
+
+    def test_shutdown_before_thread_start_rejects_new_requests(self):
+        self.connector.shutdown()
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            self.receiver.add_requests("producer", {"late": SimpleNamespace()})
+        self.assertTrue(self.receiver.request_queue.empty())
+
+    def test_slow_transfer_warns_and_drains_before_releasing_owner(self):
+        # Keep real receiver, queue, executor and future waiting. Only device
+        # operations, transfer layout construction and native I/O are replaced.
+        receiver = self.receiver
+        executor = ThreadPoolExecutor(max_workers=1)
+        close_executor = executor.shutdown
+        receiver.executor = executor
+        receiver._handle_requests = type(receiver)._handle_requests.__get__(receiver)
+        receiver._get_remote_metadata = MagicMock(
+            return_value=SimpleNamespace(metadata_by_pp_rank={0: None}, pcp_size=1, tp_size=1, dcp_size=1)
+        )
+        receiver.remote_tp_rank_groups = {"producer": {0: {}}}
+        receiver.remote_layer_index_pairs = {"producer": {0: []}}
+        receiver._build_transfer_block_buckets = MagicMock(
+            side_effect=lambda *args: ({(0, 0): {}}, {(0, 0): set(args[5])})
+        )
+        transfer_started = threading.Event()
+        release_transfer = threading.Event()
+        warning_emitted = threading.Event()
+        shutdown_errors: list[BaseException] = []
+
+        def slow_transfer(*args):
+            transfer_started.set()
+            if not release_transfer.wait(timeout=5):
+                raise TimeoutError("test did not release the transfer")
+
+        def shutdown():
+            try:
+                self.connector.shutdown()
+            except BaseException as error:
+                shutdown_errors.append(error)
+
+        receiver._execute_tp_transfer_bucket = slow_transfer
+        self.logger.warning.side_effect = lambda *args: warning_emitted.set()
+        request = SimpleNamespace(remote_engine_id="producer", remote_host="127.0.0.1", remote_port=9000)
+        self.worker.start_load_kv(SimpleNamespace(requests={"active": request}))
+        self.worker.start_load_kv(SimpleNamespace(requests={"queued": request}))
+        shutdown_thread = threading.Thread(target=shutdown, daemon=True)
+        # A shorter warning interval makes the test deterministic without a
+        # sleep-based assumption about when the receiver starts its transfer.
+        with (
+            patch.dict(receiver.shutdown.__globals__, {"SHUTDOWN_WARNING_INTERVAL_S": 0.01}),
+            patch.object(executor, "shutdown", wraps=executor.shutdown) as shutdown_executor,
+        ):
+            try:
+                receiver.start()
+                self.assertTrue(transfer_started.wait(timeout=2))
+                shutdown_thread.start()
+                self.assertTrue(warning_emitted.wait(timeout=2))
+                self.assertTrue(shutdown_thread.is_alive())
+                self.assertIs(self.worker._recving_thread, receiver)
+                self.assertIs(self.connector.connector_worker, self.worker)
+                shutdown_executor.assert_not_called()
+                with self.assertRaisesRegex(RuntimeError, "shutting down"):
+                    self.worker.start_load_kv(SimpleNamespace(requests={"late": request}))
+            finally:
+                release_transfer.set()
+                if shutdown_thread.ident is not None:
+                    shutdown_thread.join(timeout=2)
+                if receiver.is_alive():
+                    receiver.request_queue.put(AbortableQueue.abort_marker)
+                    receiver.join(timeout=2)
+                close_executor(wait=True)
+            shutdown_executor.assert_called_once_with(wait=True)
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(shutdown_errors, [])
+        self.assertFalse(receiver.is_alive())
+        self.assertIsNone(self.worker._recving_thread)
+        self.assertEqual(receiver.request_queue.unfinished_tasks, 0)
+        self.assertEqual(
+            {receiver.finished_requests.get_nowait(), receiver.finished_requests.get_nowait()},
+            {("active", False), ("queued", False)},
+        )
+        self.assertTrue(receiver.finished_requests.empty())
+        with self.assertRaises(RuntimeError):
+            executor.submit(lambda: None)
 
 
 if __name__ == "__main__":
