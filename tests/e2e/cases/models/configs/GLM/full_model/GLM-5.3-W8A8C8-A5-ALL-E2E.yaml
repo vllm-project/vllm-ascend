@@ -118,7 +118,7 @@ templates:
       - "${NODE_RANK}"
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
-      - "--no-enable-prefix-caching"
+      - "--enable-prefix-caching"
       - "--async-scheduling"
       - "--seed"
       - "1024"
@@ -179,7 +179,7 @@ templates:
       - "--headless"
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
-      - "--no-enable-prefix-caching"
+      - "--enable-prefix-caching"
       - "--async-scheduling"
       - "--seed"
       - "1024"
@@ -323,8 +323,31 @@ templates:
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 1}}}'
 
+# One fixed deployment; cache resets isolate measured P/PD from prior prompts.
 benchmarks:
-  short_20ms_warmup:
+  prefill_short_20ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1
+    batch_size: 16
+    request_rate: 0
+  reset_before_prefill_short_20ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  prefill_short_20ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1
+    batch_size: 16
+    request_rate: 0
+  pd_short_20ms_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
@@ -333,7 +356,11 @@ benchmarks:
     max_out_len: 1024
     batch_size: 16
     request_rate: 0
-  short_20ms:
+  reset_before_pd_short_20ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  pd_short_20ms:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
@@ -343,7 +370,52 @@ benchmarks:
     batch_size: 16
     request_rate: 0
     tpot_threshold: 20
-  short_50ms_warmup:
+  reset_before_decode_short_20ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  decode_short_20ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  decode_short_20ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+    tpot_threshold: 20
+  prefill_short_50ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1
+    batch_size: 32
+    request_rate: 0
+  reset_before_prefill_short_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  prefill_short_50ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1
+    batch_size: 32
+    request_rate: 0
+  pd_short_50ms_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
@@ -352,7 +424,11 @@ benchmarks:
     max_out_len: 1024
     batch_size: 32
     request_rate: 0
-  short_50ms:
+  reset_before_pd_short_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  pd_short_50ms:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
@@ -362,7 +438,52 @@ benchmarks:
     batch_size: 32
     request_rate: 0
     tpot_threshold: 50
-  long_30ms_warmup:
+  reset_before_decode_short_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  decode_short_50ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 0
+  decode_short_50ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 0
+    tpot_threshold: 50
+  prefill_long_30ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1
+    batch_size: 8
+    request_rate: 0
+  reset_before_prefill_long_30ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  prefill_long_30ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1
+    batch_size: 8
+    request_rate: 0
+  pd_long_30ms_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
     request_conf: vllm_api_stream_chat
@@ -371,7 +492,11 @@ benchmarks:
     max_out_len: 1024
     batch_size: 8
     request_rate: 0
-  long_30ms:
+  reset_before_pd_long_30ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  pd_long_30ms:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
     request_conf: vllm_api_stream_chat
@@ -381,7 +506,52 @@ benchmarks:
     batch_size: 8
     request_rate: 0
     tpot_threshold: 30
-  long_50ms_warmup:
+  reset_before_decode_long_30ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  decode_long_30ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 8
+    request_rate: 0
+  decode_long_30ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 8
+    request_rate: 0
+    tpot_threshold: 30
+  prefill_long_50ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1
+    batch_size: 16
+    request_rate: 0
+  reset_before_prefill_long_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  prefill_long_50ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1
+    batch_size: 16
+    request_rate: 0
+  pd_long_50ms_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
     request_conf: vllm_api_stream_chat
@@ -390,7 +560,11 @@ benchmarks:
     max_out_len: 1024
     batch_size: 16
     request_rate: 0
-  long_50ms:
+  reset_before_pd_long_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  pd_long_50ms:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
     request_conf: vllm_api_stream_chat
@@ -400,8 +574,33 @@ benchmarks:
     batch_size: 16
     request_rate: 0
     tpot_threshold: 50
-  # GPQA runs once after performance on the same service deployment.
-  # Provisional floor: A3 reference 91.92 minus 5; A5 calibration is pending.
+  reset_before_decode_long_50ms:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
+  decode_long_50ms_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  decode_long_50ms:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+    tpot_threshold: 50
+  reset_before_gpqa:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:7100/reset_prefix_cache
   acc_gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa

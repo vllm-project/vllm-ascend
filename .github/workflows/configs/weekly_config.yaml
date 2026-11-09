@@ -32,14 +32,6 @@ a3:
         size: 8
   multi_node:
     test_config:
-      - name: GLM-5.3-W8A8C8-A3-ALL-PREFILL
-        size: 4
-        config_file_path: GLM-5.3-W8A8C8-A3-ALL-PREFILL.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W8A8C8-A3-ALL-DECODE
-        size: 4
-        config_file_path: GLM-5.3-W8A8C8-A3-ALL-DECODE.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
       - name: GLM-5.3-W8A8C8-A3-ALL-E2E
         size: 4
         config_file_path: GLM-5.3-W8A8C8-A3-ALL-E2E.yaml
@@ -401,25 +393,9 @@ a3-560t:
 a5:
   multi_node:
     test_config:
-      - name: GLM-5.3-W8A8C8-A5-ALL-PREFILL
-        size: 4
-        config_file_path: GLM-5.3-W8A8C8-A5-ALL-PREFILL.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W8A8C8-A5-ALL-DECODE
-        size: 4
-        config_file_path: GLM-5.3-W8A8C8-A5-ALL-DECODE.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
       - name: GLM-5.3-W8A8C8-A5-ALL-E2E
         size: 4
         config_file_path: GLM-5.3-W8A8C8-A5-ALL-E2E.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W4A4C8-A5-ALL-PREFILL
-        size: 4
-        config_file_path: GLM-5.3-W4A4C8-A5-ALL-PREFILL.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM/full_model
-      - name: GLM-5.3-W4A4C8-A5-ALL-DECODE
-        size: 4
-        config_file_path: GLM-5.3-W4A4C8-A5-ALL-DECODE.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM/full_model
       - name: GLM-5.3-W4A4C8-A5-ALL-E2E
         size: 4

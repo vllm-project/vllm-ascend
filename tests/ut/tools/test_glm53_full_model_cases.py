@@ -23,7 +23,7 @@ CONFIG_DIR = ROOT / "tests/e2e/cases/models/configs/GLM/full_model"
 class FullModelConfigTests(unittest.TestCase):
     def test_resolved_commands_fit_allocation_and_agree_on_transfer_topology(self):
         paths = sorted(CONFIG_DIR.glob("*.yaml"))
-        self.assertEqual(len(paths), 9)
+        self.assertEqual(len(paths), 3)
         for path in paths:
             with self.subTest(case=path.stem):
                 config = ExternalDPConfigLoader.from_yaml(
@@ -54,7 +54,7 @@ class FullModelConfigTests(unittest.TestCase):
                         self.assertEqual(command.env["VLLM_PP_LAYER_PARTITION"], "42,36")
                         self.assertEqual("--headless" in command.cmd, rank.node_index == 1)
                         caching = "--enable-prefix-caching" in command.cmd
-                        self.assertEqual(caching, path.stem.endswith("DECODE"))
+                        self.assertTrue(caching)
                     else:
                         decode_ranks.append(rank.dp_rank)
                         self.assertEqual(connector["kv_role"], "kv_consumer")
@@ -69,7 +69,6 @@ class FullModelConfigTests(unittest.TestCase):
             with self.subTest(case=path.stem):
                 config = yaml.safe_load(path.read_text(encoding="utf-8"))
                 a5 = "-A5-" in path.stem
-                prefill_case = path.stem.endswith("PREFILL")
                 for template in config["templates"]:
                     args = template["server_cmd_template"]
                     additional = json.loads(args[args.index("--additional-config") + 1])
@@ -83,62 +82,66 @@ class FullModelConfigTests(unittest.TestCase):
                     else:
                         self.assertIn("--no-enable-prefix-caching", args)
                         self.assertTrue(additional["recompute_scheduler_enable"])
-                        if prefill_case:
-                            self.assertEqual(additional["enable_fused_mc2"], 1)
-                            self.assertNotIn("multistream_overlap_shared_expert", additional)
-                        else:
-                            self.assertNotIn("enable_fused_mc2", additional)
-                            self.assertTrue(additional["multistream_overlap_shared_expert"])
-                            compilation = additional["ascend_compilation_config"]
-                            self.assertTrue(compilation["enable_npugraph_ex"])
-                            self.assertEqual(compilation["enable_static_kernel"], not a5)
+                        self.assertNotIn("enable_fused_mc2", additional)
+                        self.assertTrue(additional["multistream_overlap_shared_expert"])
+                        compilation = additional["ascend_compilation_config"]
+                        self.assertTrue(compilation["enable_npugraph_ex"])
+                        self.assertEqual(compilation["enable_static_kernel"], not a5)
                 benchmarks = {
                     name: bench for name, bench in config["benchmarks"].items() if bench["case_type"] == "performance"
                 }
-                self.assertEqual(len(benchmarks), 8 if a5 else 2)
+                self.assertEqual(len(benchmarks), 24 if a5 else 6)
                 for name, bench in benchmarks.items():
+                    prefill_case = name.startswith("prefill_")
                     self.assertEqual(bench["max_out_len"], 1 if prefill_case else 1024)
-                    expected_rate = 1.8 if not a5 and path.stem.endswith("E2E") else 0
+                    expected_rate = 1.8 if not a5 and name.startswith("pd_") else 0
                     self.assertEqual(bench["request_rate"], expected_rate)
                     if name.endswith("_warmup"):
                         measured = benchmarks[name.removesuffix("_warmup")]
                         for key in ("dataset_path", "batch_size", "max_out_len", "request_rate"):
                             self.assertEqual(bench[key], measured[key])
-                        if a5 or path.stem.endswith("DECODE"):
+                        if a5 or name.startswith("decode_"):
                             self.assertEqual(bench["num_prompts"], measured["num_prompts"])
                     if prefill_case:
                         self.assertNotIn("tpot_threshold", bench)
 
-    def test_a3_16k_release_load_and_cache_policy(self):
-        # Independent release-table values: rows 104, 124 (low latency), 135.
-        expected = {
-            "PREFILL": (7, 28, 0, 1, 14, False),
-            "DECODE": (80, 320, 0, 1024, 320, True),
-            "E2E": (40, 160, 1.8, 1024, 80, False),
-        }
-        for mode, (concurrency, requests, rate, output, warmup_count, cache_p) in expected.items():
-            with self.subTest(mode=mode):
-                path = CONFIG_DIR / f"GLM-5.3-W8A8C8-A3-ALL-{mode}.yaml"
-                config = yaml.safe_load(path.read_text(encoding="utf-8"))
-                names = ["perf_16k_warmup", "perf_16k"] + (["acc_gpqa"] if mode == "E2E" else [])
-                self.assertEqual(list(config["benchmarks"]), names)
-                perf = config["benchmarks"]["perf_16k"]
-                self.assertEqual(
-                    (perf["batch_size"], perf["num_prompts"], perf["request_rate"], perf["max_out_len"]),
-                    (concurrency, requests, rate, output),
-                )
-                self.assertEqual(perf["dataset_path"], "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8")
-                self.assertEqual(config["benchmarks"]["perf_16k_warmup"]["num_prompts"], warmup_count)
-                self.assertEqual(perf.get("tpot_threshold"), None if mode == "PREFILL" else 20)
-                for template in config["templates"]:
-                    cache_enabled = template["node_index"] < 2 and cache_p
-                    args = template["server_cmd_template"]
-                    self.assertEqual("--enable-prefix-caching" in args, cache_enabled)
-                    self.assertEqual("--no-enable-prefix-caching" in args, not cache_enabled)
+    def test_loads_and_cache_boundaries_share_one_deployment(self):
+        expected = {"prefill": (7, 28, 0, 1, 14), "pd": (40, 160, 1.8, 1024, 80), "decode": (80, 320, 0, 1024, 320)}
+        path = CONFIG_DIR / "GLM-5.3-W8A8C8-A3-ALL-E2E.yaml"
+        benches = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmarks"]
+        for mode, (concurrency, requests, rate, output, warmup) in expected.items():
+            case = benches[f"{mode}_perf_16k"]
+            self.assertEqual(
+                (case["batch_size"], case["num_prompts"], case["request_rate"], case["max_out_len"]),
+                (concurrency, requests, rate, output),
+            )
+            self.assertEqual(benches[f"{mode}_perf_16k_warmup"]["num_prompts"], warmup)
+            self.assertEqual(case.get("tpot_threshold"), None if mode == "prefill" else 20)
+        for path in sorted(CONFIG_DIR.glob("*.yaml")):
+            config = ExternalDPConfigLoader.from_yaml(str(path), cluster_ips=[f"192.0.2.{i + 1}" for i in range(4)])
+            master_p = next(rank for rank in RankResolver(config).resolve() if rank.node_index == 0)
+            self.assertEqual(master_p.role, "prefiller")
+            self.assertFalse(master_p.is_headless)
+            self.assertEqual(master_p.port, 7100)
+            cases = config.benchmark_cases
+            names = [case["benchmark_name"] for case in cases]
+            for index, case in enumerate(cases):
+                name = case["benchmark_name"]
+                if name.startswith("reset_before_"):
+                    self.assertEqual(case["case_type"], "curl_cmd")
+                    self.assertIn("--fail", case["cmds"][0])
+                    self.assertIn("http://127.0.0.1:7100/reset_prefix_cache", case["cmds"][0])
+                elif name.startswith(("prefill_", "pd_")) and not name.endswith("_warmup"):
+                    self.assertEqual(names[index - 1], "reset_before_" + name)
+                elif name.startswith("decode_") and not name.endswith("_warmup"):
+                    self.assertEqual(names[index - 1], name + "_warmup")
+                    self.assertEqual(names[index - 2], "reset_before_" + name)
+                    for key in ("dataset_path", "num_prompts", "max_out_len", "batch_size", "request_rate"):
+                        self.assertEqual(cases[index - 1][key], case[key])
 
     def test_matrix_entries_resolve_to_correct_hardware(self):
         resolver = ROOT / ".github/workflows/scripts/resolve_nightly_tests.py"
-        for frequency, expected_counts in (("weekly", {"a3": 3, "a5": 6}),):
+        for frequency, expected_counts in (("weekly", {"a3": 1, "a5": 2}),):
             path = ROOT / f".github/workflows/configs/{frequency}_config.yaml"
             matrix = yaml.safe_load(path.read_text(encoding="utf-8"))
             for soc, expected_count in expected_counts.items():
@@ -179,7 +182,7 @@ class FullModelConfigTests(unittest.TestCase):
         for family in ("W8A8C8-A3", "W8A8C8-A5", "W4A4C8-A5"):
             with self.subTest(family=family):
                 paths = sorted(CONFIG_DIR.glob(f"GLM-5.3-{family}-*.yaml"))
-                self.assertEqual(len(paths), 3)
+                self.assertEqual(len(paths), 1)
                 accuracy_cases = []
                 for path in paths:
                     config = ExternalDPConfigLoader.from_yaml(
@@ -190,7 +193,7 @@ class FullModelConfigTests(unittest.TestCase):
                     if path.stem.endswith("E2E"):
                         self.assertEqual(len(accuracy), 1)
                         self.assertEqual(cases[-1]["benchmark_name"], "acc_gpqa")
-                        self.assertTrue(all(case["case_type"] == "performance" for case in cases[:-1]))
+                        self.assertTrue(all(case["case_type"] in ("performance", "curl_cmd") for case in cases[:-1]))
                         self.assertEqual(cases[-1]["dataset_path"], "vllm-ascend/gpqa")
                         self.assertEqual(cases[-1]["max_out_len"], 65536)
                         self.assertEqual(cases[-1]["batch_size"], 32)
