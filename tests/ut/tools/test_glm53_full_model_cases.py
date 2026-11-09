@@ -86,7 +86,7 @@ class FullModelConfigTests(unittest.TestCase):
                         self.assertTrue(additional["multistream_overlap_shared_expert"])
                         compilation = additional["ascend_compilation_config"]
                         self.assertTrue(compilation["enable_npugraph_ex"])
-                        self.assertEqual(compilation["enable_static_kernel"], not a5)
+                        self.assertFalse(compilation["enable_static_kernel"])
                 benchmarks = {
                     name: bench for name, bench in config["benchmarks"].items() if bench["case_type"] == "performance"
                 }

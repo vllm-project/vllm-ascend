@@ -24,7 +24,8 @@ with P prefix caching enabled and D prefix caching disabled. Both roles use
 Model Runner V2 and MooncakeConnectorV2, with DSA CP disabled. P retains eager
 MTP1, PP partition `42,36`, FlashComm1 and requested fused MC2 mode 2. D retains
 MTP5, FULL_DECODE_ONLY, recompute scheduling and shared-expert overlap. A3 retains
-npugraph_ex/static kernels; A5 retains its previous static/super-disabled, MLAPO
+npugraph_ex with static kernels disabled (super kernels inherit this setting);
+A5 retains its previous static/super-disabled, MLAPO
 and LM-head TP8 settings. Flags are not switched between benchmarks.
 
 The recipes originate from the
