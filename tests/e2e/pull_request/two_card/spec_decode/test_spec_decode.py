@@ -29,7 +29,6 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.inputs import TokensPrompt
-from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
@@ -40,13 +39,6 @@ MODELS = {
     "eagle3": {
         "main": "Qwen/Qwen3-8B",
         "spec": "RedHatAI/Qwen3-8B-speculator.eagle3",
-    },
-}
-
-P_EAGLE_MODELS = {
-    "p-eagle": {
-        "main": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-        "spec": "amazon/Qwen3-Coder-30B-A3B-Instruct-P-EAGLE",
     },
 }
 
@@ -62,7 +54,6 @@ DFLASH2_MODELS = {
 
 BASELINES_SP = {
     "eagle3": [0.68, 0.40, 0.18],
-    "p-eagle": [0.5625, 0.25, 0.0625, 0.0, 0.0, 0.0, 0.0, 0.0],
     "dflash2": [0.855, 0.593, 0.359, 0.290, 0.193, 0.152, 0.076, 0.007],
 }
 
@@ -165,100 +156,6 @@ def test_eagle3_sp_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
-
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-@pytest.mark.parametrize("method", P_EAGLE_MODELS.keys())
-@pytest.mark.parametrize("num_speculative_tokens", [8])
-@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 2])
-def test_p_eagle_acceptance(
-    method: str,
-    num_speculative_tokens: int,
-    draft_tensor_parallel_size: None | int,
-):
-    """
-    Test acceptance rate for parallel drafting speculative decoding
-    using a smaller draft model with parallel_drafting enabled.
-    """
-    # p-eagle stays on Model Runner V1 via the V2 blacklist.
-    main_model_name = P_EAGLE_MODELS[method]["main"]
-    spec_model_name = P_EAGLE_MODELS[method]["spec"]
-
-    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
-    tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_path,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=256,
-    )
-
-    prompts = [
-        {
-            "role": "user",
-            "content": "Hello, your name is",
-        },
-    ]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [prompt],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for prompt in prompts
-    ]
-
-    speculative_config = {
-        "method": "eagle3",
-        "model": spec_model_name,
-        "num_speculative_tokens": num_speculative_tokens,
-        "draft_tensor_parallel_size": draft_tensor_parallel_size,
-        "parallel_drafting": True,
-    }
-
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
-
-    with VllmRunner(
-        main_model_name,
-        max_model_len=4096,
-        disable_log_stats=False,
-        tensor_parallel_size=2,
-        max_num_seqs=256,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.8,
-        speculative_config=speculative_config,
-        compilation_config=compilation_config,
-        enable_prefix_caching=False,
-    ) as llm:
-        outputs = llm.model.generate(prompts, sampling_params)
-        metrics = llm.model.get_metrics()
-
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        output_tokens = output.outputs[0].token_ids
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        print(f"Output tokens: {output_tokens}")
-
-    num_drafts = 0
-    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                num_accepted_tokens_per_pos[pos] += metric.values[pos]
-
-    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
-
-    golden = BASELINES_SP[method]
-
-    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 

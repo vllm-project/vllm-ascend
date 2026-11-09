@@ -162,8 +162,8 @@ class WaveTracker:
         self._wave = 0
         self._sample_waves: dict[str, deque[int]] = {}
 
-    def advance(self, *, allow_manual_dump: bool = True) -> None:
-        if not allow_manual_dump:
+    def advance(self, *, has_scheduled_tokens: bool = True) -> None:
+        if not has_scheduled_tokens:
             return
         with self._lock:
             self._wave += 1
@@ -230,8 +230,8 @@ class DumpQuota:
         self.sync_from_config()
 
     def sync_from_config(self) -> None:
-        self._max_times = int(self._runtime_config.dump_max_times())
-        self._cooldown = float(self._runtime_config.dump_cooldown_seconds())
+        self._max_times = int(self._runtime_config.auto_dump_max_times())
+        self._cooldown = float(self._runtime_config.auto_dump_cooldown_seconds())
 
     @property
     def total_count(self) -> int:
@@ -300,8 +300,6 @@ class RequestGuardState:
     req_id: str
     output_token_ids: list[int] = field(default_factory=list)
     detection_stopped: bool = False
-    # Same-wave append dedupe frontier; not sample-wave stamps.
-    last_append_chunk: tuple[int, ...] | None = None
     # Scheduler finished; keep state until reap (last get_output / idle sweep).
     finished: bool = False
     finish_mark_wave: int | None = None
@@ -589,7 +587,6 @@ class RequestGuardStore:
         if not req_id or not token_ids:
             return
         rid = str(req_id)
-        chunk = tuple(token_ids)
         with self._lock:
             state = self._by_req.get(rid)
             if state is None:
@@ -602,16 +599,7 @@ class RequestGuardStore:
                     self._finished.add(rid)
                     self._reaped_set.discard(rid)
                 self._by_req[rid] = state
-            if state.last_append_chunk == chunk:
-                return
             state.output_token_ids.extend(token_ids)
-            state.last_append_chunk = chunk
-
-    def clear_wave_append_frontier(self) -> None:
-        """Reset same-wave dedupe so identical chunks across steps are kept."""
-        with self._lock:
-            for state in self._by_req.values():
-                state.last_append_chunk = None
 
     def new_output_ids_since(self, req_id: str, consumed: int) -> tuple[int, list[int]]:
         """Return ``(total_len, ids[consumed:])``, copying only the new tail.

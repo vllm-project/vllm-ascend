@@ -3,7 +3,6 @@
 """A5/CANN validation of QFA's strided K/V and six-dimensional scales."""
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -33,7 +32,6 @@ def test_qfa_strided_scales_match_contiguous_reference(query_tokens, ratio):
         scatter_mxfp_pa_nz_kv_cache,
     )
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-    from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
     init_device_properties_triton()
     torch.manual_seed(42)
@@ -113,13 +111,3 @@ def test_qfa_strided_scales_match_contiguous_reference(query_tokens, ratio):
 
     contiguous = tuple(view.view(torch.uint8).contiguous().view(view.dtype) for view in caches)
     torch.testing.assert_close(run(caches), run(contiguous), rtol=1e-3, atol=1e-3)
-    static_scale_before = caches[3].clone()
-    zeroer = AscendKVBlockZeroer(device, pin_memory=False)
-    group = SimpleNamespace(kv_cache_spec=spec, kv_cache_group_id=0, layer_names=["attn"])
-    zeroer.init_meta([group], [512], "mxfp8", set(), {"attn": SimpleNamespace(kv_cache=caches)})
-    zeroer.zero_block_ids([2])
-    torch.npu.synchronize()
-    assert torch.equal(caches[3], static_scale_before)
-    for cache in caches[:3]:
-        assert (cache[2 * ratio :].view(torch.uint8) == 0).all()
-    assert (backing[:128] == 91).all() and (backing[-256:] == 91).all()

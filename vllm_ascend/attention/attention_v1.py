@@ -39,7 +39,6 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -296,9 +295,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.ALWAYS
-
-    def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
-        return False
 
     def _split_decodes_and_prefills(
         self,
@@ -579,6 +575,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
+        if (
+            attn_type == AttentionType.ENCODER_ONLY
+            and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Bidirectional (ENCODER_ONLY) attention does not support prefill context parallelism (PCP): each "
+                "PCP rank only holds its slice of the prompt and the encoder attention path does not gather the "
+                "other ranks' K/V, so the result would silently be wrong. Set --prefill-context-parallel-size to 1."
+            )
         self.use_pcp = (
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -1405,8 +1410,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, output_padded = self.reshape_and_cache(
                     query, key, value, kv_cache, attn_metadata, output
                 )
-        # pooling model branch
-        if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
+        # pooling model branch. ENCODER_ONLY layers are bidirectional even when the metadata of a
+        # hybrid model still says causal (they never go through the EncoderOnlyAttention wrapper).
+        if attn_metadata.model_runner_type == "pooling" and (
+            not attn_metadata.causal or self.attn_type == AttentionType.ENCODER_ONLY
+        ):
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output

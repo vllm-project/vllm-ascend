@@ -85,20 +85,12 @@ def test_triton_warmup_failure_prevents_capture(use_v2):
 
 class TestNPUWorkerV2(TestBase):
     def test_worker_imports_planning_helpers_from_supported_lane(self):
-        from vllm_ascend.utils import vllm_version_is
+        from vllm.v1.core import kv_cache_planning as planning
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
         from vllm_ascend.worker import worker
 
-        if vllm_version_is("0.32.0"):
-            from vllm.v1.core import kv_cache_utils as planning
-
-            self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
-        else:
-            from vllm.v1.core import kv_cache_planning as planning
-            from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
-            # On main the grouping is resolved through the platform's
-            # pluggable KVCacheConfigBuilder, installed in worker.py.
-            self.assertIs(worker.get_kv_cache_config_builder, get_kv_cache_config_builder)
+        self.assertIs(worker.get_kv_cache_config_builder, get_kv_cache_config_builder)
         self.assertIs(worker.unify_hybrid_kv_cache_specs, planning.unify_hybrid_kv_cache_specs)
 
     def test_get_encoder_cudagraph_stats_is_serializable(self):

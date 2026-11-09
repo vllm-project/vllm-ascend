@@ -357,6 +357,11 @@ class RejectionSamplerConfig:
 
     @model_validator(mode="after")
     def _validate(self):
+        if self.enable_block_verify:
+            raise ValueError(
+                "rejection_sampler_config.enable_block_verify is no longer supported: Block Verify was only "
+                "implemented in Model Runner V1. Use enable_entropy_verify instead."
+            )
         if not (0 < self.posterior_threshold <= 1):
             raise ValueError(
                 f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
@@ -439,7 +444,6 @@ class AscendConfig:
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
-            "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 0,
@@ -481,7 +485,6 @@ class AscendConfig:
                 "stair_config": {}
             },
             "rejection_sampler_config": {
-                "enable_block_verify": false,
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4
@@ -536,10 +539,6 @@ class AscendConfig:
                     "dynamic_max_step": 256
                 }
             },
-            "dynamic_spec_config": {
-                "method": null,
-                "method_params": {}
-            },
             "sparse_kv_offload_config": {
                 "enabled": false,
                 "topk_buffer_size": -1,
@@ -588,7 +587,6 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
-    draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -646,7 +644,6 @@ class AscendConfig:
     xlite_graph_config: XliteGraphConfig = dataclasses.field(default_factory=lambda: XliteGraphConfig())
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
     scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
-    dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
@@ -738,6 +735,12 @@ class AscendConfig:
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
             max_batched = vc.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
@@ -915,7 +918,7 @@ class AscendConfig:
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
-        # (and `PassConfig.enable_sp`) in both v0.32.0 and verified main.
+        # (and `PassConfig.enable_sp`) in both v0.33.0 and verified main.
 
         enable_sp_by_pass = False
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
@@ -1310,34 +1313,6 @@ class AscendConfig:
         ):
             return "fullmesh_v1"
         return self.mc2_comm_alg
-
-
-@config
-class DynamicSpecConfig:
-    """
-    Configuration Object for dynamic_spec_config from additional_config
-    """
-
-    # Dynamic speculative-length methods. "dspark" relies on the DSpark
-    # confidence head; models without such a head need another method.
-    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
-
-    # None disables the dynamic speculative-length path.
-    method: str | None = None
-    # Custom parameters of the selected dynamic method; the expected keys
-    # depend on `method` (e.g. dspark accepts
-    # initial_verify_budget_per_req, budget_update_interval and
-    # budget_threshold). Empty by default, in which case each method
-    # falls back to its own built-in defaults.
-    method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate(self):
-        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
-            )
-        return self
 
 
 @config

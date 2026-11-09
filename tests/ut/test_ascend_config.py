@@ -36,7 +36,6 @@ from vllm_ascend.ascend_config import (
     AscendConfig,
     AscendFusionConfig,
     AscendWarmupConfig,
-    DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
@@ -1285,9 +1284,6 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             ProfilingChunkConfig(smooth_factor=1.5)
 
-    def test_dynamic_spec_config_accepts_dflash(self):
-        self.assertEqual(DynamicSpecConfig(method="dflash").method, "dflash")
-
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
@@ -1935,13 +1931,11 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc = VllmConfig()
         vc.additional_config = {
             "enable_pcp_o_proj_weight_sharding": "true",
-            "draft_window_size": "4096",
         }
 
         config = init_ascend_config(vc)
 
         self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
-        self.assertEqual(config.draft_window_size, 4096)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -2049,6 +2043,15 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         self.assertFalse(config.rejection_sampler_config.enable_block_verify)
         self.assertEqual(config.rejection_sampler_config.posterior_threshold, 0.8)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rejection_sampler_config_rejects_block_verify(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"rejection_sampler_config": {"enable_block_verify": True}}
+
+        with self.assertRaisesRegex(ValueError, "enable_block_verify is no longer supported"):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
@@ -2296,7 +2299,6 @@ class TestKVPPConfig(TestBase):
         config.speculative_config.enable_adaptive_verification = True
         KVPPConfig.from_vllm_config(config).validate(config)
         config.speculative_config.enable_adaptive_verification = False
-        config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
         KVPPConfig.from_vllm_config(config).validate(config)
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

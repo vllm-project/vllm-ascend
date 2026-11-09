@@ -24,7 +24,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
 
         # main renamed the QSA side-cache module and its builder/backend; the
         # release tree still ships qsa_cache.py.
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
 
             QSAIndexerMetadataBuilder = qsa_cache.QSAMetadataBuilder

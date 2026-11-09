@@ -1,13 +1,25 @@
-"""SFA-specific CP helpers shared by the attention and indexer builders.
+"""SFA-specific CP cache and address helpers.
 
-These helpers encode the replicated SFA indexer-cache layout, so they stay
-outside ``common_cp`` while avoiding a dependency between the two builders.
+These helpers encode SFA cache transport and the replicated indexer-cache
+layout without depending on the attention implementation or metadata builders.
 """
 
 from typing import Any
 
 import torch
 from vllm.utils.math_utils import cdiv
+
+
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
 
 
 def get_sfa_pcp_global_metadata(

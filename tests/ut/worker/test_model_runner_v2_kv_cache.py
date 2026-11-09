@@ -103,7 +103,7 @@ def test_initialize_builds_aux_output_connector_when_enabled():
 
     # The initializer deep-copies the config, so assert against the resolved one
     # (identity shortcut) instead of comparing the original object by value.
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         get_aux.assert_called_once_with(runner.model, runner.vllm_config, runner.kv_cache_config)
     else:
         # Main creates the connector without the KV-cache config and
