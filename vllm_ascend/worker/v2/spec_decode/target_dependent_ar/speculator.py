@@ -82,7 +82,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     model_state: "AscendModelState"
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -489,29 +489,18 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        if vllm_version_is("0.32.0"):
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-            )
-        else:
-            # vLLM main forwards `skip_sample` so the drafter KV stays in sync
-            # without sampling when num_speculative_tokens == 0.
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-                skip_sample,
-            )
+        # vLLM main forwards `skip_sample` so the drafter KV stays in sync
+        # without sampling when num_speculative_tokens == 0.
+        super()._prefill(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+            skip_sample,
+        )
 
     def _build_attn_metadata(
         self,

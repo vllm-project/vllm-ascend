@@ -224,8 +224,8 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft and vllm_version_is("0.32.0"):
-        # 0.32.0 exposes the permissive-row mask as the fourth sampler argument;
+    if with_grammar and with_draft and vllm_version_is("0.33.0"):
+        # 0.33.0 exposes the permissive-row mask as the fourth sampler argument;
         # main feeds it through the scheduler/draft-token handler instead.
         invalid_drafts = runner.rejection_sampler.call_args.args[3]
         assert invalid_drafts.tolist() == [False, False, True]

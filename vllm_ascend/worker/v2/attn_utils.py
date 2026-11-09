@@ -131,7 +131,7 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
 
     QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
@@ -371,13 +371,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             spec = AscendFlashAttentionBackend.customize_spec(spec)
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
-        # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
-        # the spec while specs are built. The v0.32.0 lane has no ``is_draft``
-        # field and annotates EAGLE groups through the packed hook, so only main
-        # propagates the flag here; without it no group is flagged as the draft
-        # model's and the coordinator fallback treats the target groups as
-        # EAGLE groups too.
-        if not vllm_version_is("0.32.0") and getattr(attn_module, "is_draft_layer", False):
+        # Both supported planners identify EAGLE groups through spec.is_draft.
+        if getattr(attn_module, "is_draft_layer", False):
             spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):

@@ -27,7 +27,7 @@ from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
-from vllm_ascend.utils import create_hccl_pg_options, vllm_version_is
+from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
@@ -121,8 +121,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.torch_distributed_backend = torch_distributed_backend
         # vLLM main keeps the CPU group timeout for cpu_all_reduce_; this patch
         # reimplements GroupCoordinator.__init__ without calling super().
-        if not vllm_version_is("0.32.0"):
-            self.cpu_timeout = get_cpu_distributed_timeout_or_none()
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
         self._acquired_hccl_keys: list[HcclPgKey] = []  # type: ignore[no-redef]
         self._unshared_hccl_groups: list[object] = []  # type: ignore[no-redef]
         self.use_device_communicator = use_device_communicator
