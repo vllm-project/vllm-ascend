@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
@@ -901,6 +902,14 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.clear_dsv41_replay_requests(finished_req_ids)
         return self.connector_worker.get_finished()
 
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        if not self._is_dsv41:
+            return super().get_transfer_results(finished_req_ids)
+        assert self.connector_worker is not None
+        if self._is_kv_producer:
+            self.connector_worker.clear_dsv41_replay_requests(finished_req_ids)
+        return self.connector_worker.get_transfer_results()
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the block ids that have load errors."""
         assert self.connector_worker is not None
@@ -1148,18 +1157,24 @@ class MooncakeLayerwiseConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             do_virtual = params.get("do_virtual", False)
-            local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
-            remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
+            awaiting_kvs = num_external_tokens > 0
+            local_block_ids = blocks.get_block_ids() if awaiting_kvs else []
+            remote_block_ids = (
+                self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
+                if awaiting_kvs or not self.is_dsv41
+                else []
+            )
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
             logger.debug(
                 "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need recv queue", request.request_id
             )
-            self._reqs_need_recv[request.request_id] = (
-                request,
-                [],  # request._all_token_ids,
-                local_block_ids,
-            )
+            if awaiting_kvs or not self.is_dsv41:
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    [],  # request._all_token_ids,
+                    local_block_ids,
+                )
 
             params["do_remote_prefill"] = False
 
@@ -1183,6 +1198,8 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
                 remote_cached_tokens=remote_cached_tokens,
             )
+            if self.is_dsv41:
+                kv_transfer_params["awaiting_kvs"] = awaiting_kvs
             if not do_virtual:
                 future = self.executor.submit(
                     self._access_metaserver, url=params.get("metaserver", None), message=kv_transfer_params
@@ -1196,6 +1213,10 @@ class MooncakeLayerwiseConnectorScheduler:
 
         # Layerwise prefiller add request need send
         if params is not None and params.get("do_remote_decode"):
+            # The proxy still needs the control message to dispatch Prefill.
+            # With no remote load, Decode has no completion to wait for.
+            if self.is_dsv41 and not params.get("awaiting_kvs", params.get("remote_block_ids") not in ([], ())):
+                return
             local_block_ids = list(blocks.get_block_ids())
             logger.debug(
                 "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need send queue", request.request_id
@@ -1770,6 +1791,10 @@ class MooncakeLayerwiseConnectorWorker:
             ready_event.wait()
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         done_recving = (
             self.kv_recv_layer_thread.get_and_clear_done_requests(  # type: ignore[union-attr]
             )
@@ -1787,14 +1812,10 @@ class MooncakeLayerwiseConnectorWorker:
         )
         failed_recving = {self.request_map[s] for s in failed_recving if s in self.request_map}
         is_dsv41 = bool(getattr(self, "dsv41_cache_plan", None))
-        for req_id in failed_recving:
-            if meta := self._recving_metadata.get(req_id):
-                self._invalid_block_ids.update(
-                    block_id
-                    for group in meta.local_block_ids
-                    for block_id in group
-                    if not is_dsv41 or block_id != NULL_BLOCK_ID
-                )
+        if not is_dsv41:
+            for req_id in failed_recving:
+                if meta := self._recving_metadata.get(req_id):
+                    self._invalid_block_ids.update(block_id for group in meta.local_block_ids for block_id in group)
         for req_id in done_recving.union(failed_recving):
             org_req_id = get_external_request_id(req_id)
             self.request_map.pop(org_req_id, None)
@@ -1803,9 +1824,14 @@ class MooncakeLayerwiseConnectorWorker:
             logger.info(
                 "Number of completed KV cache recv requests: %s, receive requests: %s", len(done_recving), done_recving
             )
+        results = KVConnectorTransferResults()
+        results.finished_recving.update(done_recving)
         if is_dsv41:
-            done_recving.update(failed_recving)
-        return set(), done_recving
+            # Hybrid cache block IDs are only unique within their group. The
+            # scheduler must handle the failed receive by request instead.
+            results.finished_recving.update(failed_recving)
+            results.failed_recving.update(failed_recving)
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
