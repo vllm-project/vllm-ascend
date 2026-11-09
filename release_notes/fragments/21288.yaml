@@ -1,0 +1,4 @@
+pr: 21288
+entries:
+  - category: feature
+    text: Added optional bounded HCCL weight updates that split large parameters across fixed-capacity buffers while preserving native model loading.
