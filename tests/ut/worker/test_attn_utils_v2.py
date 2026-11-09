@@ -44,7 +44,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -1213,17 +1213,15 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
         non_causal_multi_token_decode=non_causal,
         dcp_sharded=dcp_sharded,
     )
-    layer = MLAAttention.__new__(MLAAttention)
-    layer.impl = SimpleNamespace(
-        fa_quant_layer=False,
-        enable_sparse_sfa_c8=False,
-        enable_sparse_sfa_turboquant=False,
-    )
+    layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    layer.impl.fa_quant_layer = False
     layer.num_heads = 12
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
     layer.is_draft_layer = is_draft_layer
-    layer.get_kv_cache_spec = lambda _config: source_spec
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source_spec)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -2368,10 +2366,10 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         enable_sparse_sfa_turboquant=False,
         dtype=torch.bfloat16,
     )
-    layer.get_kv_cache_spec = lambda _cfg: MLAAttentionSpec(
+    layer.get_kv_cache_spec = lambda _cfg: AscendMLAAttentionSpec(
         block_size=16,
-        # vLLM's generic MLA spec exposes cache head slots here, not local
-        # query heads. The Ascend spec must deliberately use the module count.
+        # The owner publishes the complete Ascend cache contract.
+        num_heads=64,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
@@ -2380,6 +2378,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         is_draft=False,
         non_causal_multi_token_decode=False,
         tokens_per_state=1,
+        cache_sparse_sfa_c8=sparse_c8,
     )
     return layer
 
