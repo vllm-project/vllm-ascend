@@ -1,0 +1,10 @@
+pr: PRNUM
+entries:
+  - category: bugfix
+    text: >-
+      Fixed EPLB expert-weight transfers over the Gloo communicator for weights whose FRACTAL_NZ
+      layout depends on cast parameters. Such a weight reports a C0 variant rather than FRACTAL_NZ,
+      so the receive path skipped its device staging and the host-to-device copy was rejected. Quant
+      methods now report the NZ cast parameters behind each EPLB weight view, and the receive path
+      rebuilds its staged source from them.
+    hardware: [A5]

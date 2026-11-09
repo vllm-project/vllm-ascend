@@ -362,6 +362,18 @@ def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
+    def __init__(
+        self,
+        tensors: Iterable[torch.Tensor] = (),
+        nz_cast_params: dict[str, torch.dtype] | None = None,
+    ) -> None:
+        super().__init__(tensors)
+        # ``npu_format_cast`` parameters these tensors were cast with. A cast
+        # with customize_dtype/input_dtype lands on a C0 variant of FRACTAL_NZ,
+        # and the Gloo receive path has to reproduce it to rebuild a staged
+        # source copy_ accepts.
+        self.nz_cast_params: dict[str, torch.dtype] = dict(nz_cast_params or {})
+
     @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
@@ -374,14 +386,19 @@ class EplbExpertTensorList(list[torch.Tensor]):
 
     def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
         # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
-        # the per-expert container (and its aliasing semantics) intact.
-        return type(self)(tensor.view(dtype) for tensor in self)
+        # the per-expert container (and its aliasing semantics) intact. The
+        # reinterpretation is where upstream registers the weights, so the cast
+        # parameters have to survive it.
+        return type(self)((tensor.view(dtype) for tensor in self), self.nz_cast_params)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(_empty_like_preserving_npu_format(tensor) for tensor in source)
+            return cls(
+                (_empty_like_preserving_npu_format(tensor) for tensor in source),
+                source.nz_cast_params,
+            )
         return NotImplemented
 
 
@@ -444,8 +461,18 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         weights = list(get_weight_views(self))
         if not weights:
             raise NotImplementedError(f"EPLB weight views are not defined for {self.quant_method.__class__.__name__}.")
+        # A view cast with customize_dtype/input_dtype lands on a C0 variant of
+        # FRACTAL_NZ, and rebuilding it anywhere else needs those parameters.
+        get_cast_params = getattr(self.quant_method, "get_eplb_nz_cast_params", None)
+        cast_params = list(get_cast_params(self)) if get_cast_params is not None else []
+        if cast_params and len(cast_params) != len(weights):
+            raise ValueError(
+                f"{self.quant_method.__class__.__name__} returned {len(cast_params)} EPLB NZ cast parameter "
+                f"sets for {len(weights)} weight views."
+            )
         flattened_weights = []
-        for weight in weights:
+        for index, weight in enumerate(weights):
+            params = cast_params[index] if cast_params else {}
             if isinstance(weight, (list, tuple)):
                 if len(weight) != self.local_num_experts:
                     raise ValueError(
@@ -454,7 +481,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     )
                 if not all(is_weak_contiguous(expert_weight) for expert_weight in weight):
                     raise ValueError("Every tensor in an Ascend EPLB expert tensor list must be weakly contiguous.")
-                flattened_weights.append(EplbExpertTensorList(weight))
+                flattened_weights.append(EplbExpertTensorList(weight, params))
                 continue
             if weight.shape[0] != self.local_num_experts:
                 raise ValueError(

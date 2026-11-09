@@ -330,6 +330,18 @@ class AscendMoEScheme(ABC):
         """Return expert-first weight views consumed by upstream EPLB."""
         return []
 
+    def get_eplb_nz_cast_params(self, layer: torch.nn.Module) -> list[dict[str, torch.dtype]]:
+        """Return the NZ cast parameters behind each ``get_eplb_weight_views()`` entry.
+
+        A weight cast with ``customize_dtype``/``input_dtype`` reports a C0
+        variant such as FRACTAL_NZ_C0_16, and ``copy_`` refuses
+        internal-format tensors whose storage descriptions disagree. EPLB
+        rebuilds both its receive buffers and its staged sources, so it needs
+        the parameters each view was cast with. An empty list means every view
+        was cast without them.
+        """
+        return []
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing for MoE layer.
 

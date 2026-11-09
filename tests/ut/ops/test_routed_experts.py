@@ -40,12 +40,15 @@ class _FakeNpuTensor:
         return self._stride
 
 
-def _routed_experts(weight_views):
+def _routed_experts(weight_views, cast_params=None):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     routed_experts.local_num_experts = 2
-    routed_experts.quant_method = SimpleNamespace(
+    quant_method = SimpleNamespace(
         get_eplb_weight_views=lambda layer: weight_views,
     )
+    if cast_params is not None:
+        quant_method.get_eplb_nz_cast_params = lambda layer: cast_params
+    routed_experts.quant_method = quant_method
     return routed_experts
 
 
@@ -102,6 +105,31 @@ def test_eplb_expert_tensor_list_supports_upstream_uint8_contract():
     buffer = torch.empty_like(registered[0])
     assert isinstance(buffer, EplbExpertTensorList)
     assert all(tensor.dtype == torch.uint8 for tensor in buffer)
+
+
+def test_expert_weight_views_carry_the_cast_params_they_were_built_with():
+    """FRACTAL_NZ is not one layout, so each view states the cast behind it.
+
+    The Gloo communicator reads these at construction to rebuild a staged
+    source its destination will accept.
+    """
+    params = {"customize_dtype": torch.float8_e4m3fn}
+    expert_tensors = [torch.ones(3, 4, dtype=torch.int8), torch.ones(3, 4, dtype=torch.int8)]
+
+    views = list(_routed_experts([expert_tensors, torch.randn(2, 5)], [params, {}]).get_expert_weights())
+
+    assert views[0].nz_cast_params == params
+    # The uint8 reinterpretation upstream registers weights through, and the
+    # buffer allocation, both have to keep them.
+    assert views[0].view(torch.uint8).nz_cast_params == params
+    assert torch.empty_like(views[0]).nz_cast_params == params
+    # A stacked view carries no parameters.
+    assert not hasattr(views[1], "nz_cast_params")
+
+
+def test_get_expert_weights_rejects_a_cast_param_count_that_does_not_match():
+    with pytest.raises(ValueError, match="EPLB NZ cast parameter"):
+        list(_routed_experts([torch.randn(2, 5), torch.randn(2, 3)], [{}]).get_expert_weights())
 
 
 @pytest.mark.parametrize(

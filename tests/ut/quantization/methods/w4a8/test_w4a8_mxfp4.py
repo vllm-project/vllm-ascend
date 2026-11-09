@@ -261,6 +261,37 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         with self.assertRaisesRegex(RuntimeError, "RL weight reload"):
             self.scheme.restore_weights_for_rl_loading(layer)
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_reported_eplb_cast_params_match_the_weight_casts(self, mock_npu, mock_empty_cache):
+        """EPLB rebuilds these weights, so what it is told must be what was done.
+
+        A cast with these parameters lands on FRACTAL_NZ_C0_16 rather than
+        FRACTAL_NZ, and copy_ refuses internal-format tensors whose storage
+        descriptions disagree. If the reported parameters drift from the casts
+        below, every Gloo expert transfer for this method fails.
+        """
+        mock_npu.float4_e2m1fn_x2 = 296
+        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        self.scheme.use_expert_weight_list = True
+
+        for activation in (MoEActivation.SITU, "silu"):
+            with self.subTest(activation=activation):
+                mock_npu.npu_format_cast.reset_mock()
+                layer = self._make_moe_layer()
+                layer.activation = activation
+
+                self.scheme.process_weights_after_loading(layer)
+
+                reported = self.scheme.get_eplb_nz_cast_params(layer)
+                calls = mock_npu.npu_format_cast.call_args_list
+                self.assertEqual(len(calls), 2 * self.num_experts)
+                self.assertEqual([call.kwargs for call in calls[: self.num_experts]], [reported[0]] * self.num_experts)
+                self.assertEqual([call.kwargs for call in calls[self.num_experts :]], [reported[1]] * self.num_experts)
+                # The scales stay ND and carry no parameters.
+                self.assertEqual(reported[2:], [{}, {}])
+                self.assertEqual(len(reported), len(self.scheme.get_eplb_weight_views(layer)))
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=True)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")

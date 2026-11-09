@@ -264,6 +264,25 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     @staticmethod
+    def _is_situ(layer: torch.nn.Module) -> bool:
+        return getattr(layer, "activation", None) in (MoEActivation.SITU, "situ")
+
+    @classmethod
+    def _w13_input_dtype(cls, layer: torch.nn.Module) -> torch.dtype:
+        # SiTU needs the semantic FP4 dtype; ordinary GMM takes torch_npu's.
+        return torch.float4_e2m1fn_x2 if cls._is_situ(layer) else torch_npu.float4_e2m1fn_x2
+
+    def get_eplb_nz_cast_params(self, layer: torch.nn.Module) -> list[dict[str, torch.dtype]]:
+        # Mirror the casts in process_weights_after_loading below. The scales
+        # stay ND, so they carry no parameters.
+        return [
+            {"customize_dtype": torch.float8_e4m3fn, "input_dtype": self._w13_input_dtype(layer)},
+            {"customize_dtype": torch.float8_e4m3fn, "input_dtype": torch_npu.float4_e2m1fn_x2},
+            {},
+            {},
+        ]
+
+    @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list:
         if hasattr(layer, "w13_weight_list"):
             return [
@@ -304,11 +323,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
-            is_situ = getattr(layer, "activation", None) in (
-                MoEActivation.SITU,
-                "situ",
-            )
-            w13_input_dtype = torch.float4_e2m1fn_x2 if is_situ else torch_npu.float4_e2m1fn_x2
+            is_situ = self._is_situ(layer)
+            w13_input_dtype = self._w13_input_dtype(layer)
 
             layer.w13_weight_list = []
             for weight in layer.w13_weight.data.unbind(dim=0):
