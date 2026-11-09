@@ -201,3 +201,10 @@ def test_sync_due_bits_from_src_unset_wave_skips_assert(monkeypatch):
     _patch_dist(monkeypatch, lambda t, src=0, group=None: None)
     group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
     assert sync_due_bits_from_src(group, [True, False]) == [False, False]
+
+
+def test_sync_due_bits_from_src_requires_cpu_group():
+    """No device_group/HCCL fallback — missing cpu_group fails closed."""
+    group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
+    with pytest.raises(RuntimeError, match="requires group.cpu_group"):
+        sync_due_bits_from_src(group, [False, True], wave_idx=1)
