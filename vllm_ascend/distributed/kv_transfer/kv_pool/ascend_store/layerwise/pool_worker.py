@@ -796,6 +796,35 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
         return [keys[start : start + batch_size] for start in range(0, len(keys), batch_size)]
 
+    def _probe_pool_missing_keys(self, keys: list[str], exists, error_context: str) -> list[str]:
+        """Batched existence probe returning the keys not yet in the pool.
+
+        Shared by both layerwise data planes. Failing open (treat as missing)
+        is intentional: an unreadable pool costs hits or transfer bandwidth,
+        while a bogus skip would cost the blocks themselves. Keys are returned
+        in input order, duplicates preserved; callers deduplicate when the
+        probe pattern, not the key list, must stay minimal.
+        """
+        missing: list[str] = []
+        for key_batch in self._layerwise_key_batches(keys):
+            try:
+                states = exists(key_batch)
+                if len(states) != len(key_batch):
+                    raise RuntimeError(
+                        f"{error_context} existence check returned unexpected number of states: "
+                        f"expected={len(key_batch)}, actual={len(states)}"
+                    )
+                missing.extend(key for key, state in zip(key_batch, states, strict=True) if int(state) != 1)
+            except Exception as exc:
+                logger.error(
+                    "%s existence check failed keys=%d error=%s; treating all as missing",
+                    error_context,
+                    len(key_batch),
+                    exc,
+                )
+                missing.extend(key_batch)
+        return missing
+
     def _filter_pool_existing_keys(self, keys: list[str]) -> list[str]:
         """Drop keys whose block is already readable in the pool.
 
@@ -821,25 +850,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             exists = getattr(self.m_store, "batch_is_exist", None)
         if not callable(exists):
             return keys
-
-        missing: list[str] = []
-        for key_batch in self._layerwise_key_batches(keys):
-            try:
-                states = exists(key_batch)
-                if len(states) != len(key_batch):
-                    raise RuntimeError(
-                        "Block-key pool existence check returned unexpected number of states: "
-                        f"expected={len(key_batch)}, actual={len(states)}"
-                    )
-                missing.extend(key for key, state in zip(key_batch, states, strict=True) if int(state) != 1)
-            except Exception as exc:
-                logger.error(
-                    "Block-key pool existence check failed keys=%d error=%s; treating all as missing",
-                    len(key_batch),
-                    exc,
-                )
-                missing.extend(key_batch)
-        return missing
+        return self._probe_pool_missing_keys(keys, exists, "Block-key pool")
 
     def _start_layerwise_put_keys(self, keys: list[str], object_size: int) -> list[int]:
         results: list[int] = []
@@ -1215,24 +1226,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not keys:
             return set()
         unique_keys = list(dict.fromkeys(keys))
-        missing: set[str] = set()
-        for key_batch in self._layerwise_key_batches(unique_keys):
-            try:
-                states = self.m_store.batch_is_exist(key_batch)
-                if len(states) != len(key_batch):
-                    raise RuntimeError(
-                        "MemCache exists check returned unexpected number of states: "
-                        f"expected={len(key_batch)}, actual={len(states)}"
-                    )
-                missing.update(key for key, state in zip(key_batch, states) if int(state) != 1)
-            except Exception as exc:
-                logger.error(
-                    "Pool exists check failed keys=%d error=%s; treating all as missing",
-                    len(key_batch),
-                    exc,
-                )
-                missing.update(key_batch)
-        return missing
+        return set(self._probe_pool_missing_keys(unique_keys, self.m_store.batch_is_exist, "Pool"))
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         if not self.use_layerwise_transfer:
