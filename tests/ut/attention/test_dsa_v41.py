@@ -280,7 +280,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
     monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: metadata_waits.append(args))
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args: None)
     monkeypatch.setattr(AscendDSAV41Impl, "_apply_rotary", lambda *args, **kwargs: None)
-    cache = SimpleNamespace(slot_mapping=positions)
+    cache = SimpleNamespace(slot_mapping=positions, slot_metadata_group_id=None)
     metadata = SimpleNamespace(
         indexer=SimpleNamespace(cache=cache),
         compressor=SimpleNamespace(

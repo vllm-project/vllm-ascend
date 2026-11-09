@@ -189,6 +189,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
             global_metadata=None,
             slot_mapping=slots,
             flat_slot_mapping=slots,
+            slot_metadata_group_id=None,
             num_prefills=int(a5_batch == "prefill"),
             num_decodes=int(a5_batch == "decode"),
             num_reqs=1,
