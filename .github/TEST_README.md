@@ -105,9 +105,10 @@ pin also applies when only one of its `::nodeid` targets is selected. If both a
 bare file and one of its nodeids are selected, the bare file wins to prevent
 duplicate execution. Each entry in `partition` selects an exact key from
 `runner_label.json` and sets the load-balanced group count.
-Logical partition names use display-ready labels such as `a3-2` and
-`a3-800i-2`; GitHub jobs render them as `a3-2 card-(part 1-3)` while the
-numeric `partition` value remains available for artifacts and load balancing.
+Logical partition names are display aliases such as `a3-2` and `a3-4`; each
+maps to an exact `runner_label.json` key (now `linux-aarch64-a3-800i-N`).
+GitHub jobs render them as `a3-2 card-(part 1-3)` while the numeric
+`partition` value remains available for artifacts and load balancing.
 
 Workflows that temporarily reroute selected tests can use
 `--runner-label-override` with an exact label from `runner_label.json`. This
@@ -121,10 +122,14 @@ a transient single-shard partition for that invocation.
 | Recommended | `--test-list-file <file>` | PR precision testing (coverage/AST recommendation) |
 | Explicit | `--explicit-e2e-tests <path>...` | `/e2e` PR comment command |
 | Full suite | `--all-tests` | `ready-all` / `main2main` PRs, scheduled full scans |
+| Curated | `--curated <name>` | Curated suites (e.g. A5) |
 
 The `main2main` PR label reuses the full-suite selection and executes it twice,
 against both the verified vLLM main commit and the matched vLLM release tag.
-| Curated | `--curated <name>` | Curated suites (e.g. A5) |
+Release branches (`releases/v*`) are frozen, so their PRs run tests against the
+matched vLLM release tag only. The `pre-commit` job still checks out the
+branch's pinned `.github/vllm-main-verified.commit` for the static checks
+(mypy), because mypy must resolve every `import vllm...` target at once.
 
 `test_config.yaml` holds the routing metadata consumed by all modes:
 

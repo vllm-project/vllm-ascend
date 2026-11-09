@@ -27,7 +27,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -41,7 +40,10 @@ def _make_runner(need_timing: bool = True):
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
     )
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=None, parallel_config=SimpleNamespace(prefill_context_parallel_size=1)
+    )
+    runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="other_model"),
         # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
@@ -485,7 +487,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the whole descriptor through the retained
-    # PCPManager API (vLLM #57980), also retained in v0.32.0.
+    # PCPManager API (vLLM #57980), also retained in v0.33.0.
     assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
@@ -957,7 +959,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
     # execute_model stages dummy inputs before preparing attention metadata.
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_for_capture_or_profile"
     staged = getattr(manager, stage_name)(dummy)
     block_tables, slots = runner.prepare_dummy_attn(staged)
 
@@ -1343,7 +1345,6 @@ def test_initialize_kv_cache_forwards_allocation_context():
 def test_profile_run_dummy_reserves_mc2(moe_type, randomize_inputs):
     runner = _make_runner()
     runner.max_num_tokens = 16
-    runner.vllm_config = SimpleNamespace()
     runner.get_model = MagicMock(return_value="m")
     runner._dummy_run = MagicMock()
     with (
@@ -2229,3 +2230,51 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize(
+    "scheduled,admitted,host,device,expected_sync",
+    [
+        (8, 8, [0, 5, 10], [0, 5, 10], False),
+        (8, 0, [0, 1, 2], [0, 1, 2], False),
+        (0, 0, [0, 9, 15], [0, 9, 15], False),
+        (8, 4, [0, 3, 6], [0, 1, 6], True),
+    ],
+)
+def test_adaptive_fia_syncs_only_partial_budget(scheduled, admitted, host, device, expected_sync):
+    num_reqs = len(host) - 1
+    host_queries = np.full(num_reqs + 3, -1, dtype=np.int32)
+    host_queries[: num_reqs + 1] = host
+    device_queries = MagicMock()
+    transfer = device_queries.__getitem__.return_value.cpu
+    transfer.return_value.numpy.return_value = np.array(device, dtype=np.int32)
+
+    NPUModelRunner._sync_adaptive_fia_query_start_loc(host_queries, device_queries, num_reqs, scheduled, admitted)
+
+    np.testing.assert_array_equal(host_queries, [*device, device[-1], device[-1]])
+    if expected_sync:
+        transfer.assert_called_once()
+    else:
+        device_queries.__getitem__.assert_not_called()
+
+
+def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
+    manager = SimpleNamespace(
+        _batch_budget=({"a": 2, "b": 1}, {"a": 1, "b": 4}, 1),
+        req_states=SimpleNamespace(req_id_to_index={"a": 1, "b": 0}),
+        _stale_confidences=[SimpleNamespace(np=np.array([[0.5, 0.01], [0.9, 0.8]]))],
+        _stale_idx=0,
+        num_speculative_steps=2,
+        _max_total_logits=5,
+        num_bonus_tokens=1,
+        cost_tables=(np.array([0.0, 0.5, 1.0]), np.arange(20, dtype=float) + 1),
+    )
+    with patch("vllm_ascend.worker.v2.model_runner.logger") as log:
+        log.isEnabledFor.return_value = True
+        NPUModelRunner._log_adaptive_verification_costs(manager)
+
+    args = log.debug.call_args.args
+    assert args[1:5] == (1, 3, 5, 1.0)
+    assert args[5] == [6.0, 7.0, 9.0]
+    np.testing.assert_allclose(args[6], [0.9, 2.12])
+    np.testing.assert_allclose(args[7], [0.7, 0.8])

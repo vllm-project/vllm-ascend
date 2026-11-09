@@ -240,6 +240,23 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
         )
         self.assertEqual(linear.custom_op.comm_group, parallel_state._MLP_TP)
 
+    def test_merged_fp8_shape_allowance_is_set_before_weight_creation(self):
+        quant_config = MagicMock(weight_block_size=[128, 128])
+        quant_method = quant_config.get_quant_method.return_value
+
+        def check_allowance(*, layer, output_partition_sizes, **kwargs):
+            self.assertEqual(output_partition_sizes, [192, 64])
+            self.assertTrue(layer.allow_fp8_block_shape_mismatch)
+
+        quant_method.create_weights.side_effect = check_allowance
+        AscendMergedColumnParallelLinear(
+            input_size=256,
+            output_sizes=[384, 128],
+            bias=False,
+            quant_config=quant_config,
+        )
+        quant_method.create_weights.assert_called_once()
+
 
 class TestAscendReplicatedLinear(BaseLinearTest):
     def test_init_disable_tp(self):

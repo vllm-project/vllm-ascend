@@ -18,8 +18,19 @@ _ROTATION_BLOCK_SIZE = 32
 
 def load_engram_rotation_block(model_root: str, hidden_size: int, rotation_path: Path | None = None) -> torch.Tensor:
     """Use the A3 Quarot basis, or the native A5 identity basis."""
+    declared = rotation_path is not None
     rotation_path = rotation_path or Path(model_root) / "optional/quarot.safetensors"
     if not rotation_path.is_file():
+        if declared:
+            raise FileNotFoundError(
+                "The checkpoint declares a QuaRot global rotation "
+                "(optional.quarot.rotation_map.global_rotation), but the referenced file is "
+                f"missing: {rotation_path}. Copy optional/quarot.safetensors from the "
+                "checkpoint repository into the model directory before serving. Falling "
+                "back to an identity rotation corrupts Engram gating silently: the trunk "
+                "still generates fluent text while the n-gram branch contributes wrong "
+                "values."
+            )
         return torch.eye(_ROTATION_BLOCK_SIZE)
     with safe_open(rotation_path, framework="pt") as checkpoint:
         rotation = checkpoint.get_tensor("global_rotation")
