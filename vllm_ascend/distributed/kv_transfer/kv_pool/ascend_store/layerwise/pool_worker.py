@@ -44,8 +44,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
-    KVCacheStoreKeyLayerRecvingThread,
-    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     KVCacheStoreLayerSendingThreadBase,
@@ -520,66 +518,32 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
-        elif self.can_put:
-            ready_event_sending = threading.Event()
-            self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
-                self.m_store,
-                self.token_database,
-                self.block_size,
-                self.tp_rank,
-                self.tp_size,
-                self.dcp_size,
-                self.put_step,
-                ready_event_sending,
-                self.num_layers,
-                self.layer_save_finished_events,
-                self.sync_save_events,
-                layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
-            )
-            self.kv_send_thread.start()
-            ready_event_sending.wait()
         ready_event = threading.Event()
-        if self.use_block_key_layerwise or self.use_layerwise_transfer:
-            self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
-                self.m_store,
-                self.token_database,
-                self.block_size,
-                self.tp_rank,
-                self.tp_size,
-                self.dcp_size,
-                self.page_size_bytes,
-                ready_event,
-                self.get_event,
-                self.layer_load_finished_events,
-                self.layer_save_finished_events,
-                self.sync_save_events,
-                self.num_layers,
-                self.h2d_stagger_us,
-                self.layerwise_max_transfer_blocks,
-                self.layerwise_max_transfer_bytes,
-                group_builders=self._build_group_layer_builders(),
-                external_slot_release_waiter=self.external_slot_release_waiter,
-                save_failure_checker=(self.kv_send_thread.raise_if_failed if self.kv_send_thread is not None else None),
-                invalid_block_ids=self._invalid_block_ids,
-                invalid_block_ids_lock=self._invalid_block_ids_lock,
-                load_abort_event=self._layer_load_aborted,
-                raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
-            )
-        else:
-            self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
-                self.m_store,
-                self.token_database,
-                self.block_size,
-                self.tp_rank,
-                self.tp_size,
-                self.dcp_size,
-                ready_event,
-                self.get_event,
-                self.layer_load_finished_events,
-                self.layer_save_finished_events,
-                self.num_layers,
-                layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
-            )
+        self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
+            self.m_store,
+            self.token_database,
+            self.block_size,
+            self.tp_rank,
+            self.tp_size,
+            self.dcp_size,
+            self.page_size_bytes,
+            ready_event,
+            self.get_event,
+            self.layer_load_finished_events,
+            self.layer_save_finished_events,
+            self.sync_save_events,
+            self.num_layers,
+            self.h2d_stagger_us,
+            self.layerwise_max_transfer_blocks,
+            self.layerwise_max_transfer_bytes,
+            group_builders=self._build_group_layer_builders(),
+            external_slot_release_waiter=self.external_slot_release_waiter,
+            save_failure_checker=(self.kv_send_thread.raise_if_failed if self.kv_send_thread is not None else None),
+            invalid_block_ids=self._invalid_block_ids,
+            invalid_block_ids_lock=self._invalid_block_ids_lock,
+            load_abort_event=self._layer_load_aborted,
+            raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
+        )
         self.kv_recv_thread.save_disabled = self._save_disabled
         if self.kv_send_thread is not None:
             self.kv_send_thread.save_disabled = self._save_disabled
@@ -1449,11 +1413,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _build_shared_save_data(self) -> None:
         """Build shared block data once and attach to all layer save tasks.
 
-        For GVA path (KVCacheStoreLayerSendingThread): pre-computes
-        SharedBlockData via LayerBatchBuilder.build_shared().
-
-        For Key path (KVCacheStoreKeyLayerSendingThread): pre-computes
-        cached process_tokens via build_cached_process_tokens().
+        For the layerwise send thread (KVCacheStoreLayerSendingThread):
+        pre-computes SharedBlockData via LayerBatchBuilder.build_shared().
 
         In multi-group mode, shared data is built per-group because each
         group has different block_ranges (different effective_block_size).
@@ -1489,19 +1450,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         last_task = task
             if last_task is not None:
                 last_task.write_finish_keys.extend(dict.fromkeys(all_save_keys))
-        elif isinstance(self.kv_send_thread, KVCacheStoreKeyLayerSendingThread):
-            first_task = None
-            for layer_id in range(self.num_layers):
-                if self.layer_save_tasks[layer_id]:
-                    first_task = self.layer_save_tasks[layer_id][0]
-                    break
-            if first_task is None:
-                return
-            cached = self.kv_send_thread.build_cached_process_tokens(first_task)
-            if cached is not None:
-                for layer_id in range(self.num_layers):
-                    for task in self.layer_save_tasks[layer_id]:
-                        task.cached_process_tokens = cached
 
     def _compute_reachable_store_masks(
         self,

@@ -28,7 +28,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
-    LayerPoolKey,
     LayerTransferTask,
     SharedBlockData,
 )
@@ -46,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
-    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
@@ -238,7 +236,6 @@ class TestKVTransferThread(unittest.TestCase):
 class TestLayerStoreRequestTracking(unittest.TestCase):
     def test_multiple_pending_saves_finish_only_after_all_complete(self):
         for thread_type, transfer_size in (
-            (KVCacheStoreKeyLayerSendingThread, 1),
             (KVCacheStoreLayerSendingThread, 16),
         ):
             with self.subTest(thread_type=thread_type.__name__):
@@ -1077,53 +1074,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertNotIn("r1", t.stored_requests)
-
-
-class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
-    def test_handle_request_puts_all_keys_without_exists_check(self):
-        store = FakeStore([1, 1])
-        store.requires_exists_before_put = False
-        sync_event = MagicMock()
-        thread = KVCacheStoreKeyLayerSendingThread(
-            m_store=store,
-            token_database=FakeTokenDatabase(),
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            put_step=1,
-            ready_event=threading.Event(),
-            num_layers=1,
-            layer_save_finished_events=[threading.Event()],
-            sync_save_events=[sync_event],
-        )
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids=[0, 1],
-            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
-            is_last_chunk=False,
-        )
-        metadata = KeyMetadata("m", 0, 0, 0)
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=request, start_block=0, end_block=2)],
-            cached_process_tokens={
-                0: [
-                    (0, 16, [LayerPoolKey(metadata, "h0", 0)]),
-                    (16, 32, [LayerPoolKey(metadata, "h1", 0)]),
-                ]
-            },
-        )
-        thread.request_queue.put([task])
-
-        with patch.object(store, "exists", side_effect=AssertionError("exists should not be called")) as mock_exists:
-            thread._handle_request([task])
-
-        keys, _, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        mock_exists.assert_not_called()
-        sync_event.synchronize.assert_called_once()
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
