@@ -1996,3 +1996,165 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
     assert load_spec.vllm_cached_tokens == aligned_local_tokens
     assert load_spec.kvpool_cached_tokens == pool_hit_tokens
     assert load_spec.can_load
+
+
+# Verify RPC transport failures close resources and prevent a second send on a failed client.
+@pytest.mark.parametrize("stage", ["send_multipart", "recv"])
+def test_lookup_transport_failure_closes_and_short_circuits(stage):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with patch(f"{module}.zmq.Context"), patch(f"{module}.make_zmq_socket") as make_socket:
+        client = LookupKeyClient(make_config())
+        client.encoder = MagicMock()
+        client.encoder.encode.side_effect = [[b"hash"], [b"group"]]
+        socket = make_socket.return_value
+        sent = []
+        received = []
+        closed = []
+        terminated = []
+
+        def send_multipart(*args, **kwargs):
+            sent.append((args, kwargs))
+            if stage == "send_multipart":
+                raise ZMQError("transport failed")
+
+        def recv(*args):
+            received.append(args)
+            if stage == "recv":
+                raise ZMQError("transport failed")
+            return (0).to_bytes(4, "big")
+
+        socket.send_multipart.side_effect = send_multipart
+        socket.recv.side_effect = recv
+        socket.close.side_effect = lambda **kwargs: closed.append(kwargs)
+        client.ctx.term.side_effect = lambda: terminated.append(True)
+        assert client.lookup(32, [b"a"]) == 0
+        assert client.closed
+        assert client.lookup(32, [b"a"]) == 0
+        client.close()
+        assert len(sent) == 1
+        assert len(received) == (stage == "recv")
+        assert closed == [{"linger": 0}]
+        assert terminated == [True]
+
+
+# Verify both uint32 wire fields reject negative and overflowing values before sending.
+@pytest.mark.parametrize("field", ["token_len", "hbm_hit_tokens"])
+@pytest.mark.parametrize("value", [-1, 2**32])
+def test_lookup_rejects_invalid_uint32_before_send(field, value, request):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with patch(f"{module}.zmq.Context"), patch(f"{module}.make_zmq_socket"):
+        client = LookupKeyClient(make_config())
+        client.encoder = MagicMock()
+        client.encoder.encode.side_effect = [[b"hash"], [b"group"]]
+        sent = []
+        received = []
+        client.socket.send_multipart.side_effect = lambda *args: sent.append(args)
+        client.socket.recv.side_effect = lambda: received.append(True)
+        request.addfinalizer(client.close)
+        kwargs = {"token_len": 32, "hbm_hit_tokens": 0, field: value}
+        with pytest.raises(OverflowError):
+            client.lookup(block_hashes=[b"a"], **kwargs)
+        assert sent == []
+        assert received == []
+
+
+# Verify a closed client returns without serializing hashes or touching the socket.
+def test_closed_lookup_skips_encoding_and_socket_access():
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with patch(f"{module}.zmq.Context"), patch(f"{module}.make_zmq_socket"):
+        client = LookupKeyClient(make_config())
+        client.encoder = MagicMock()
+        encoded = []
+        sent = []
+        client.encoder.encode.side_effect = lambda value: encoded.append(value) or b"encoded"
+        client.socket.send_multipart.side_effect = lambda *args: sent.append(args)
+        client.close()
+        assert client.lookup(32, [b"a"]) == 0
+        assert encoded == []
+        assert sent == []
+
+
+# Verify serialization errors propagate without sending an incomplete request.
+def test_lookup_encoding_error_prevents_send(request):
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
+    with patch(f"{module}.zmq.Context"), patch(f"{module}.make_zmq_socket"):
+        client = LookupKeyClient(make_config())
+        client.encoder = MagicMock()
+        sent = []
+        client.encoder.encode.side_effect = ValueError("payload exceeds limit")
+        client.socket.send_multipart.side_effect = lambda *args: sent.append(args)
+        request.addfinalizer(client.close)
+        with pytest.raises(ValueError, match="payload exceeds limit"):
+            client.lookup(32, [b"a"])
+        assert sent == []
+        assert not client.closed
+
+
+# Verify a preempted request rebuilds its full block table, then appends only running deltas.
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_preempt_resume_rebuilds_table_before_running_delta(use_v2):
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"):
+        config = make_config()
+        config.use_v2_model_runner = use_v2
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        request = SimpleNamespace(
+            request_id="resumed",
+            num_computed_tokens=0,
+            num_prompt_tokens=32,
+            prompt_token_ids=list(range(32)),
+            all_token_ids=list(range(32)),
+            block_hashes=[b"a", b"b"],
+        )
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        scheduler._request_trackers["resumed"] = RequestTracker(
+            "resumed",
+            token_len=16,
+            allocated_block_ids=[1],
+            num_saved_tokens=16,
+        )
+        output = SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids={"resumed"},
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            num_scheduled_tokens={},
+        )
+        assert scheduler.build_connector_meta(output).preempted_req_ids == {"resumed"}
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        output.preempted_req_ids = set()
+        output.num_scheduled_tokens = {"resumed": 16}
+        if use_v2:
+            output.scheduled_new_reqs = [
+                SimpleNamespace(
+                    req_id="resumed",
+                    num_computed_tokens=0,
+                    block_ids=([10, 11],),
+                    prompt_token_ids=list(range(32)),
+                    prefill_token_ids=None,
+                )
+            ]
+        else:
+            output.scheduled_cached_reqs = SimpleNamespace(
+                req_ids=["resumed"],
+                new_block_ids=[([10, 11],)],
+                num_computed_tokens=[0],
+            )
+        metadata = scheduler.build_connector_meta(output)
+        req_meta = metadata.requests[0]
+        assert req_meta.block_ids == [10, 11]
+        assert req_meta.block_hashes == [b"a", b"b"]
+        assert list(zip(req_meta.block_hashes, req_meta.block_ids)) == [(b"a", 10), (b"b", 11)]
+        assert req_meta.save_start_token == 0
+        request.num_computed_tokens = 16
+        output.scheduled_new_reqs = []
+        output.scheduled_cached_reqs = SimpleNamespace(
+            req_ids=["resumed"],
+            new_block_ids=[([12],)],
+            num_computed_tokens=[16],
+        )
+        metadata = scheduler.build_connector_meta(output)
+        req_meta = metadata.requests[0]
+        assert req_meta.block_ids == [10, 11, 12]
+        assert req_meta.block_hashes == [b"a", b"b"]
+        assert list(zip(req_meta.block_hashes, req_meta.block_ids)) == [(b"a", 10), (b"b", 11)]
+        assert req_meta.save_start_token == 16

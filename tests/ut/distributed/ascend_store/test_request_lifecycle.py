@@ -3,6 +3,7 @@
 """CPU request lifecycle; only device operations and the external store are fake."""
 
 import ctypes
+import threading
 import time
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
@@ -34,6 +36,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSl
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -164,7 +167,12 @@ def cache_layout(request, speculative_method):
 @pytest.fixture
 def devices_and_store(monkeypatch):
     monkeypatch.setattr(MemoryBackend, "payloads", {})
+    monkeypatch.setattr(LayerwiseMemoryBackend, "committed", set())
+    for registry in (backend_map, pool_worker.backend_map):
+        monkeypatch.setitem(registry, "cpu-layerwise", {"path": __name__, "name": "LayerwiseMemoryBackend"})
     monkeypatch.setitem(backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
+    # The mock-dependency bootstrap may reload the registry during collection.
+    monkeypatch.setitem(pool_worker.backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
@@ -189,6 +197,426 @@ def cache_entries(plan, caches):
 def payload_value(tokens, end, name, plane):
     # Independent of block IDs, hashes, keys and transfer metadata.
     return (sum(tokens[:end]) + sum(name.encode()) + plane * 11) % 101 + 1
+
+
+class BytePoolingSession:
+    """Drive real scheduler/connector/transfer paths; only model compute is synthetic."""
+
+    def __init__(self, layout="strided", load_async=False, use_v2=True, num_blocks=16, use_layerwise=False):
+        self.block_size = 128
+        self.scale = 2 if layout == "segmented" else 1
+        rows = self.block_size // self.scale
+        padding = 0 if layout == "contiguous" else 7
+        names = [f"model.layers.{layer}.self_attn.attn" for layer in range(2)]
+        spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.uint8)
+        self.plan = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(names, spec)],
+        )
+        config = create_vllm_config(
+            max_num_batched_tokens=128,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="AscendStoreConnector",
+                kv_role="kv_both",
+                kv_load_failure_policy="recompute",
+                kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
+                kv_connector_extra_config={
+                    "backend": "cpu-layerwise" if use_layerwise else "cpu",
+                    "load_async": load_async,
+                    "use_layerwise": use_layerwise,
+                },
+            ),
+        )
+        assert config.use_v2_model_runner is use_v2
+        config.scheduler_config.max_model_len = 1024
+        config.cache_config.num_gpu_blocks = num_blocks
+        self.worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, self.plan)
+        self.caches = {}
+        self.padding = []
+        for name in names:
+            raw = aligned_buffer(2 * num_blocks * self.scale * (rows + padding) * 8)
+            backing = raw.view(2, num_blocks * self.scale, rows + padding, 1, 8)
+            backing.fill_(253)
+            self.caches[name] = tuple(backing[:, :, :rows])
+            self.padding.append(backing[:, :, rows:])
+        self.worker.register_kv_caches(self.caches)
+        self.pool = self.worker.connector_worker
+        self.backend = self.pool.m_store
+        self.scheduler = Scheduler(
+            config,
+            self.plan,
+            StructuredOutputManager(config),
+            block_size=128,
+            hash_block_size=128,
+        )
+        self.computed = []
+        self.reported_errors = []
+
+    def new_request(self, req_id, tokens):
+        return Request(
+            request_id=req_id,
+            prompt_token_ids=tokens,
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(128, sha256),
+        )
+
+    def block_ids(self, request):
+        return self.scheduler.kv_cache_manager.get_blocks(request.request_id).get_block_ids()[0]
+
+    def block_views(self, request):
+        for index, block_id in enumerate(self.block_ids(request)):
+            for _, name, plane, tensor in cache_entries(self.plan, self.caches):
+                yield (
+                    index,
+                    name,
+                    plane,
+                    tensor[block_id * self.scale : (block_id + 1) * self.scale],
+                )
+
+    def expected_bytes(self, request, index, name, plane, shape):
+        # Depends on token content and logical position, never on ReqMeta, keys or physical IDs.
+        end = (index + 1) * self.block_size
+        seed = sum(request.prompt_token_ids[:end]) + end + sum(name.encode()) + 17 * plane
+        return ((torch.arange(int(np.prod(shape))).view(shape) + seed) % 251).to(torch.uint8)
+
+    def assert_loaded(self, request, hit_tokens):
+        for index, name, plane, view in self.block_views(request):
+            if (index + 1) * self.block_size <= hit_tokens:
+                assert torch.equal(view, self.expected_bytes(request, index, name, plane, view.shape))
+        self.assert_padding()
+
+    def assert_padding(self):
+        for padding in self.padding:
+            assert torch.all(padding == 253), "KV transfer overwrote a physical-page gap"
+
+    def execute(self, output, request=None, before_compute=None):
+        meta = output.kv_connector_metadata
+        self.worker.handle_preemptions(meta)
+        self.worker.bind_connector_metadata(meta)
+        self.worker.start_load_kv(SimpleNamespace() if output.total_num_scheduled_tokens else None)
+        sending, recving = set(), set()
+        if request is not None and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            deadline = time.monotonic() + 5
+            while request.request_id not in recving:
+                self.pool.kv_recv_thread.raise_if_failed()
+                assert time.monotonic() < deadline, "receive thread did not complete"
+                time.sleep(0.001)
+                done_sending, done_recving = self.worker.get_finished(output.finished_req_ids)
+                sending |= done_sending
+                recving |= done_recving
+        scheduled = output.num_scheduled_tokens.get(request.request_id, 0) if request else 0
+        if before_compute is not None and not self.worker.use_layerwise:
+            before_compute(output)
+        if scheduled:
+            end = request.num_computed_tokens
+            start = end - scheduled
+            self.computed.append((request.request_id, start, end))
+            if self.worker.use_layerwise:
+                for name in self.caches:
+                    self.worker.wait_for_layer_load(name)
+                    for index, block_name, plane, view in self.block_views(request):
+                        if block_name == name and start < (index + 1) * self.block_size <= end:
+                            view.copy_(self.expected_bytes(request, index, name, plane, view.shape))
+                    self.worker.save_kv_layer(name, self.caches[name], None)
+            else:
+                for index, name, plane, view in self.block_views(request):
+                    if start < (index + 1) * self.block_size <= end:
+                        view.copy_(self.expected_bytes(request, index, name, plane, view.shape))
+        if before_compute is not None and self.worker.use_layerwise:
+            # All layers have now consumed their loads. Computation only writes
+            # scheduled suffix pages, so cached prefix bytes remain independent.
+            before_compute(output)
+        self.worker.wait_for_save()
+        # Match the model runner: collect completions after submitting saves.
+        done_sending, done_recving = self.worker.get_finished(output.finished_req_ids)
+        sending |= done_sending
+        recving |= done_recving
+        errors = self.worker.get_block_ids_with_load_errors()
+        self.reported_errors.append(errors)
+        result = create_model_runner_output([request] if scheduled else [])
+        if scheduled and request.num_computed_tokens < len(request.prompt_token_ids):
+            result.sampled_token_ids = [[]]
+        result.kv_connector_output = KVConnectorOutput(
+            finished_sending=sending,
+            finished_recving=recving,
+            invalid_block_ids=errors,
+            kv_connector_worker_meta=self.worker.build_connector_worker_meta(),
+        )
+        self.scheduler.update_from_output(output, result)
+        self.worker.clear_connector_metadata()
+
+    def run(self, request, before_compute=None, add_request=True):
+        if add_request:
+            self.scheduler.add_request(request)
+        for _ in range(12):
+            self.execute(self.scheduler.schedule(), request, before_compute)
+            if request.request_id not in self.scheduler.requests:
+                self.execute(self.scheduler.schedule())
+                assert_scheduler_empty(self.scheduler)
+                self.assert_padding()
+                return
+        pytest.fail("request did not finish after load/recompute")
+
+    def clear_local_cache(self):
+        assert self.scheduler.reset_prefix_cache()
+        for _, _, _, tensor in cache_entries(self.plan, self.caches):
+            tensor.fill_(252)
+
+    def close(self):
+        self.worker.shutdown()
+        self.scheduler.connector.shutdown()
+
+
+class LayerwiseMemoryBackend(MemoryBackend):
+    """Block-key leaf storage; real production layouts supply every byte offset."""
+
+    layerwise_data_plane = "block_key"
+    committed: set[str] = set()
+
+    @classmethod
+    def bind_layerwise_keys(cls, **kwargs):
+        return MooncakeBackend.bind_layerwise_keys(**kwargs)
+
+    def validate_layerwise_support(self):
+        pass
+
+    def batch_is_readable(self, keys):
+        return [key in self.committed for key in keys]
+
+    def batch_put_start(self, keys, sizes):
+        for key, size in zip(keys, sizes, strict=True):
+            if key not in self.payloads:
+                self.payloads[key] = [bytearray(size)]
+            assert len(self.payloads[key][0]) == size
+        return [0] * len(keys)
+
+    def batch_copy_put(self, keys, all_buffers, all_sizes, all_dst_offsets):
+        for key, buffers, sizes, offsets in zip(keys, all_buffers, all_sizes, all_dst_offsets, strict=True):
+            target = self.payloads[key][0]
+            for addr, size, offset in zip(buffers, sizes, offsets, strict=True):
+                self.check_address(addr, size)
+                assert 0 <= offset <= offset + size <= len(target)
+                target[offset : offset + size] = ctypes.string_at(addr, size)
+        return [0] * len(keys)
+
+    def batch_commit(self, keys):
+        self.committed.update(keys)
+        return [0] * len(keys)
+
+    def batch_revoke(self, keys):
+        for key in keys:
+            self.payloads.pop(key, None)
+            self.committed.discard(key)
+        return [0] * len(keys)
+
+    def batch_get_start(self, keys):
+        return [0 if key in self.committed else 1 for key in keys]
+
+    def batch_copy_get(self, keys, all_buffers, all_sizes, all_src_offsets):
+        for key, buffers, sizes, offsets in zip(keys, all_buffers, all_sizes, all_src_offsets, strict=True):
+            source = self.payloads[key][0]
+            for addr, size, offset in zip(buffers, sizes, offsets, strict=True):
+                self.check_address(addr, size)
+                assert 0 <= offset <= offset + size <= len(source)
+                ctypes.memmove(addr, bytes(source[offset : offset + size]), size)
+            self.loads.append(key)
+        return [0] * len(keys)
+
+    def batch_get_end(self, keys):
+        return 0
+
+
+@pytest.fixture
+def byte_pooling_session(devices_and_store, request, monkeypatch):
+    def create(**kwargs):
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if kwargs.get("use_v2", True) else "0")
+        session = BytePoolingSession(**kwargs)
+        request.addfinalizer(session.close)
+        return session
+
+    return create
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "strided", "segmented"])
+@pytest.mark.parametrize("load_async", [False, True])
+def test_scheduler_worker_roundtrip_preserves_bytes_and_page_gaps(byte_pooling_session, layout, load_async):
+    session = byte_pooling_session(layout=layout, load_async=load_async)
+    producer = session.new_request("byte-producer", list(range(384)))
+    producer_blocks = []
+    session.run(producer, lambda output: producer_blocks.extend(session.block_ids(producer)))
+    assert session.backend.payloads
+    session.clear_local_cache()
+    consumer = session.new_request("byte-consumer", list(range(385)))
+    loaded = []
+
+    def check_loaded(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(consumer, 384)
+                loaded.extend(session.block_ids(consumer)[:3])
+
+    session.run(consumer, check_loaded)
+    assert len(loaded) == 3
+    assert loaded != producer_blocks[-3:]
+    assert session.backend.loads
+    starts = [start for req_id, start, _ in session.computed if req_id == consumer.request_id]
+    assert starts == [384]
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize("load_async", [False, True])
+def test_preempted_request_restores_bytes_into_new_blocks_before_appending(byte_pooling_session, use_v2, load_async):
+    session = byte_pooling_session(use_v2=use_v2, load_async=load_async)
+    request = session.new_request("byte-resume", list(range(384)))
+    session.scheduler.add_request(request)
+    session.execute(session.scheduler.schedule(), request)
+    session.pool.wait_for_previous_save()
+    previous_blocks = list(session.block_ids(request))
+    assert session.scheduler.reset_prefix_cache(reset_running_requests=True)
+    # Dispatch the preemption on one tick, then resume from the waiting queue on
+    # the next tick when capacity is available.
+    session.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    session.execute(session.scheduler.schedule())
+    session.scheduler.set_pause_state(PauseState.UNPAUSED)
+    # Old addresses contain deliberately wrong bytes; a stale block table cannot pass.
+    for _, _, _, tensor in cache_entries(session.plan, session.caches):
+        tensor.fill_(252)
+    restored = []
+
+    def check_restored(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(request, 128)
+                restored.extend(session.block_ids(request))
+
+    session.run(request, check_restored, add_request=False)
+    assert restored and restored[0] != previous_blocks[0]
+    session.clear_local_cache()
+    consumer = session.new_request("after-resume", list(range(385)))
+    loaded = []
+
+    def check_complete_prefix(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(consumer, 384)
+                loaded.append(True)
+
+    session.run(consumer, check_complete_prefix)
+    assert loaded == [True]
+
+
+@pytest.mark.parametrize("load_async", [False, True])
+@pytest.mark.parametrize("failed_chunk", [0, 1])
+def test_load_failure_reaches_scheduler_and_recomputes_failed_suffix(
+    byte_pooling_session, monkeypatch, load_async, failed_chunk
+):
+    session = byte_pooling_session(load_async=load_async)
+    session.run(session.new_request("failure-producer", list(range(384))))
+    session.clear_local_cache()
+    real_get = session.backend.get
+    failed_blocks = []
+    first_read = True
+
+    def fail_one_chunk(keys, addresses, sizes):
+        nonlocal first_read
+        if not first_read:
+            return real_get(keys, addresses, sizes)
+        first_read = False
+        results = []
+        for index, (key, row, lengths) in enumerate(zip(keys, addresses, sizes, strict=True)):
+            if index == failed_chunk:
+                # Eviction after lookup: retry must recompute the unavailable suffix.
+                session.backend.payloads.pop(key)
+            results.append(1 if index == failed_chunk else real_get([key], [row], [lengths])[0])
+        return results
+
+    monkeypatch.setattr(session.backend, "get", fail_one_chunk)
+    consumer = session.new_request("failure-consumer", list(range(385)))
+    recovered_views = {}
+
+    def capture_blocks(output):
+        for index, name, plane, view in session.block_views(consumer):
+            recovered_views[index, name, plane] = view
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                failed_blocks.append(session.block_ids(consumer)[failed_chunk])
+
+    session.run(consumer, capture_blocks)
+    assert failed_blocks
+    assert {failed_blocks[0]} in session.reported_errors
+    starts = [start for req_id, start, _ in session.computed if req_id == consumer.request_id]
+    assert failed_chunk * 128 in starts, "scheduler did not recompute from the failed logical chunk"
+    # Inspect real recomputed pages before another request reuses them.
+    assert len(recovered_views) >= 3 * 2 * 2
+    for (index, name, plane), view in recovered_views.items():
+        if (index + 1) * 128 <= 384:
+            assert torch.equal(view, session.expected_bytes(consumer, index, name, plane, view.shape))
+
+
+def test_released_save_fence_protects_bytes_before_physical_block_reuse(byte_pooling_session, monkeypatch):
+    session = byte_pooling_session(num_blocks=2)
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    fence_entered = threading.Event()
+    forward_entered = threading.Event()
+    failures = []
+    real_put = session.backend.put
+
+    def delayed_put(*args):
+        write_entered.set()
+        assert release_write.wait(5), "test did not release the paused store write"
+        return real_put(*args)
+
+    monkeypatch.setattr(session.backend, "put", delayed_put)
+    producer = session.new_request("fence-producer", list(range(128)))
+    session.scheduler.add_request(producer)
+    first_output = session.scheduler.schedule()
+    old_block = session.block_ids(producer)[0]
+    session.execute(first_output, producer)
+    consumer = session.new_request("reuse-writer", list(range(1000, 1128)))
+    thread = None
+    try:
+        assert write_entered.wait(5)
+        assert producer.request_id not in session.scheduler.requests
+        assert session.scheduler.reset_prefix_cache()
+        session.scheduler.add_request(consumer)
+        output = session.scheduler.schedule()
+        assert session.block_ids(consumer)[0] == old_block
+
+        def reuse_block():
+            try:
+                fence_entered.set()
+                session.execute(output, consumer, lambda output: forward_entered.set())
+            except BaseException as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=reuse_block, daemon=True)
+        thread.start()
+        assert fence_entered.wait(5)
+        assert not forward_entered.wait(0.1), "reused block was overwritten while the old save was pending"
+    finally:
+        release_write.set()
+        if thread is not None:
+            thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not failures
+    assert forward_entered.is_set()
+    assert consumer.request_id not in session.scheduler.requests
+    session.execute(session.scheduler.schedule())
+    session.clear_local_cache()
+    reader = session.new_request("fence-reader", list(range(128)))
+    verified = []
+
+    def check_old_payload(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(reader, 128)
+                verified.append(True)
+
+    session.run(reader, check_old_payload)
+    assert verified == [True]
 
 
 @pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
