@@ -1,7 +1,7 @@
 # GLM-5.3 W8A8C8 RP3 PD coverage.
 # 16 physical A3 cards (32 logical NPUs); combined RP3 feature smoke with a nonempty completion.
 # Bound prefill batches to 1024 tokens for full-weight startup and inference memory.
-# Full-weight prefillers need a 0.98 memory budget to leave room for KV cache.
+# Full-weight services use a 0.98 memory budget and 16K context for this smoke.
 test_name: GLM-5.3-W8A8C8-A3-FUNCTION
 model: Eco-Tech/GLM-5.3-w8a8c8
 num_nodes: 4
@@ -151,7 +151,7 @@ templates:
   - --seed
   - '1024'
   - --max-model-len
-  - '200000'
+  - '16384'
   - --max-num-batched-tokens
   - '1024'
   - --trust-remote-code
@@ -227,7 +227,7 @@ templates:
   - --seed
   - '1024'
   - --max-model-len
-  - '200000'
+  - '16384'
   - --max-num-batched-tokens
   - '1024'
   - --trust-remote-code
@@ -295,14 +295,14 @@ templates:
   - --seed
   - '1024'
   - --max-model-len
-  - '200000'
+  - '16384'
   - --max-num-batched-tokens
   - '256'
   - --trust-remote-code
   - --max-num-seqs
   - '64'
   - --gpu-memory-utilization
-  - '0.92'
+  - '0.98'
   - --async-scheduling
   - --quantization
   - ascend
@@ -365,14 +365,14 @@ templates:
   - --seed
   - '1024'
   - --max-model-len
-  - '200000'
+  - '16384'
   - --max-num-batched-tokens
   - '256'
   - --trust-remote-code
   - --max-num-seqs
   - '64'
   - --gpu-memory-utilization
-  - '0.92'
+  - '0.98'
   - --async-scheduling
   - --quantization
   - ascend
