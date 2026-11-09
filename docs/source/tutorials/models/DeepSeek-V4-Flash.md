@@ -1527,7 +1527,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
     | Decode | 16 | 1 | 1 | 16 | 7100-7115 |
 
     The deployment follows the same Memcache service setup as
-    [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#531-prepare-the-memcache-services),
+    [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#5321-prepare-the-memcache-services),
     while all non-pooling options and the parallel layout follow the
     [A3 series](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
     continues to transfer KV

@@ -217,7 +217,7 @@
 #    Why:
 #       GLM-5.3 always generates reasoning. This compatibility fallback
 #       normalizes thinking=False and enable_thinking=False to prevent
-#       reasoning from leaking into content; v0.32.0 also handles this
+#       reasoning from leaking into content; v0.33.0 also handles this
 #       upstream through PR #56994.
 #    How:
 #       Detect the GLM-5.3 template using the upstream signature and normalize
@@ -258,9 +258,8 @@
 #       vLLM #44243 has landed in the supported upstream version, so this
 #       override is kept only for the drop exemption of entry 2; remove it
 #       together with entry 2 once upstream exposes the PD role.
-#   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_utils` on
-#      v0.32.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
-#      #61183),
+#   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_planning`
+#      on both supported versions, vLLM #61183),
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:
@@ -301,20 +300,17 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
-#   2. `vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder._get_pool_bytes_per_block`
+#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
+#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
 #    Why:
-#       The builder-based vLLM planner probes one block and requires every
-#       device tensor to share one backing size. Ascend's DSV4.1, DSV4, GLM5,
-#       and TurboQuant layouts can use several differently sized allocations.
+#       Ascend cache layouts need platform-specific materialization and memory
+#       accounting.
 #    How:
-#       Return the aggregate per-block pool size from existing Ascend layout
-#       accounting for those cache types; leave other layouts on the upstream
-#       placement probe.
-#    Related PR (if no, explain why):
-#       No upstream PR currently handles Ascend's multi-allocation layouts.
-#    Future Plan:
-#       Move this override into an Ascend KVCacheConfigBuilder, or remove it
-#       once upstream provides a platform hook for multi-allocation accounting.
+#       Both supported versions select AscendKVCacheConfigBuilder through
+#       NPUPlatform. Its default materialization delegates to the patched
+#       planning functions.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/53558
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -727,7 +723,7 @@
 #
 #   3. `xgrammar.GrammarCompiler.compile_json_schema`
 #    Why:
-#       vLLM #58067 (included in v0.32.0 and verified main) passes
+#       vLLM #58067 (included in v0.33.0 and verified main) passes
 #       `separators=(",", ":")` when `disable_any_whitespace` is set. The
 #       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
 #       stricter grammar makes small models loop on `","` until `max_tokens`
@@ -1147,22 +1143,9 @@
 #       fused attention preparation.
 #
 #
-# ** 11. File: worker/patch_mm_input_norm.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fusion.mm_input_norm.FusedMMInputNorm`
-#    Why:
-#       v0.32.0 persists processor-derived normalization buffers, so legacy
-#       sharded checkpoints fail with missing visual.input_norm.weight/bias.
-#       Dummy loading can also overwrite these constants.
-#    How:
-#       Wrap construction once and register weight/bias as nonpersistent
-#       buffers, preserving device normalization and strict weight validation.
-#       Applying this on upstream main with the fix retains the same behavior.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/62767
-#    Future Plan:
-#       Remove when all supported vLLM baselines contain commit
-#       90c4a1a73eecea0428ee4303ad96c9fdeaac3f80 (or an equivalent backport).
+# ** 11. File: worker/patch_mm_input_norm.py (removed) **
+# Both vLLM v0.33.0 and verified main include #62767 and keep the
+# processor-derived normalization buffers nonpersistent.
 #
 # ** 12. File: worker/patch_ascend_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

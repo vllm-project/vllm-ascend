@@ -3,7 +3,7 @@
 ## Description
 
 - **Location**: `vllm_ascend/ops/triton/pcp_kv_cache.py` — wrapper `copy_pcp_kv_cache`, Triton kernel `_copy_pcp_kv_cache_kernel`.
-- **Function**: Packs the KV cache rows selected by `slots` into a contiguous tensor. `AscendSFAPCPImpl._sfa_preprocess_prolog_v3` uses it to gather newly written prefill KV across PCP ranks before scattering the gathered rows back to their cache slots.
+- **Function**: Packs the KV cache rows selected by `slots` into a contiguous tensor. `AscendSFAImpl._sync_pcp_kv_cache` uses it to gather newly written prefill KV across PCP ranks before scattering the gathered rows back to their cache slots.
 - **Formula** (for output row `t` and slot `s = slots[t]`):
     - If `s < 0`, `packed[t, :] = 0`.
     - Otherwise, `block = s // cache_block_size` and `offset = s % cache_block_size`.
@@ -59,7 +59,7 @@ assert packed.cpu().tolist() == [
 
 ## Origin and Differences
 
-- **Origin**: Added for PCP SFA Prolog V3 KV synchronization in `vllm_ascend/attention/context_parallel/sfa_cp.py`.
+- **Caller**: `AscendSFAImpl._sync_pcp_kv_cache` in `vllm_ascend/attention/sfa_v1.py` synchronizes PCP SFA Prolog V3 KV rows.
 - **Differences**: Unlike a general cache copy, this helper reads only the requested slots into contiguous rows for an all-gather. The C8 path copies the entire stored byte payload, while the separate-cache path concatenates latent K and RoPE features. Row batching is limited by an Ascend UB estimate.
 
 ## Test Cases

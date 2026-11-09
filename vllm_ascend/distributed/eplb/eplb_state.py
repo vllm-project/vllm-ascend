@@ -41,6 +41,10 @@ ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
 _EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+# ForwardContext.additional_kwargs key holding one gathered AllGather source
+# mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
+# proxy cannot create the list atomically, which DBO needs.
+_ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
 
 
 @contextmanager
@@ -125,18 +129,36 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if all_gather_mask is not None:
             assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
             num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
-            is_padding = self.allgather_source_is_padding
-            if is_padding is None:
-                is_padding = getattr(get_forward_context(), "is_padding", None)
-            token_mask = make_allgather_mask(
-                num_source_tokens,
-                num_unpadded_tokens,
-                self.should_record_tensor,
-                is_padding=is_padding,
-                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
-                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+            # Every MoE layer of this model derives the same mask from the same
+            # per-forward inputs, so gathering it in each one repeats a
+            # collective as many times as the model has MoE layers. Hold it on
+            # the forward context, which lives exactly as long as the mask is
+            # valid: warmup, graph capture and draft forwards each enter their
+            # own, and none of them passes through the EPLB controller.
+            # ``setdefault`` because DBO runs its micro-batches on two threads
+            # that share one context, and a lost list would leave the ranks
+            # gathering a different number of times.
+            ubatch = dbo_current_ubatch_id()
+            forward_context = get_forward_context()
+            slots = forward_context.additional_kwargs.setdefault(
+                _ALLGATHER_SOURCE_MASK_SLOTS,
+                [None] * len(self.num_unpadded_tokens_tensors),
             )
-            token_mask = all_gather_mask(token_mask)
+            token_mask = slots[ubatch]
+            if token_mask is None:
+                is_padding = self.allgather_source_is_padding
+                if is_padding is None:
+                    is_padding = getattr(forward_context, "is_padding", None)
+                token_mask = make_allgather_mask(
+                    num_source_tokens,
+                    num_unpadded_tokens,
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                    tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                    tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+                )
+                token_mask = all_gather_mask(token_mask)
+                slots[ubatch] = token_mask
             local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
             assert self.allgather_record_tensor is not None
             torch.maximum(

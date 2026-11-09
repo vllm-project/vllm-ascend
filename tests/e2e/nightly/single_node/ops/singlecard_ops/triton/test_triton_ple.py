@@ -45,7 +45,7 @@ def test_output_accuracy_uses_mixed_tolerance(dtype, max_abs_limit):
         _check_output_accuracy(expected, actual)
 
 
-def test_model_dispatch_uses_ascend_decode_and_upstream_spec(monkeypatch):
+def test_model_dispatch_uses_ascend_kernels(monkeypatch):
     from vllm.models.qwen4_exp.amd import ple_layer
 
     patch_upstream_ple_short_conv()
@@ -53,7 +53,7 @@ def test_model_dispatch_uses_ascend_decode_and_upstream_spec(monkeypatch):
     calls = []
     monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("ascend_prefill"))
     monkeypatch.setattr(ple_adapter, "ple_conv_decode", lambda *args, **kwargs: calls.append("decode"))
-    monkeypatch.setattr(ple_adapter, "upstream_ple_conv", lambda *args, **kwargs: calls.append(kwargs["mode"]))
+    monkeypatch.setattr(ple_adapter, "ple_conv_spec", lambda *args, **kwargs: calls.append("spec"))
     for mode in ("prefill", "decode", "spec"):
         ple_layer.ple_conv(mode=mode)
     assert calls == ["ascend_prefill", "decode", "spec"]
@@ -66,7 +66,8 @@ def test_decode_batch_sizes():
         for dtype in (torch.bfloat16, torch.float16):
             inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
             weights = torch.randn(channels, 4, device="npu", dtype=dtype)
-            state = torch.randn(tokens + 1, 12, channels, device="npu", dtype=dtype).transpose(1, 2)
+            # Ascend kernels use the SD layout [slots, window, channels].
+            state = torch.randn(tokens + 1, 12, channels, device="npu", dtype=dtype)
             residual = torch.randn_like(inputs)
             outer_residual = torch.randn_like(inputs)
             kwargs = dict(
@@ -80,7 +81,7 @@ def test_decode_batch_sizes():
             )
             expected, actual = residual.clone(), residual.clone()
             expected_state, actual_state = state.clone(), state.clone()
-            upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
+            upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
             _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
             torch.npu.synchronize()
             assert torch.equal(expected, actual)
@@ -98,7 +99,8 @@ def test_modes_and_token_mapping():
                 state_width = 12
                 x = torch.randn(tokens, channels, device="npu", dtype=dtype)
                 weights = torch.randn(channels, 4, device="npu", dtype=dtype)
-                state = torch.randn(requests + 1, channels, state_width, device="npu", dtype=dtype)
+                # Ascend kernels use the SD layout [slots, window, channels].
+                state = torch.randn(requests + 1, state_width, channels, device="npu", dtype=dtype)
                 residual = torch.randn_like(x)
                 outer = torch.randn_like(x) if outer_enabled else None
                 slots = torch.arange(1, requests + 1, device="npu", dtype=torch.int32)
@@ -136,7 +138,7 @@ def test_modes_and_token_mapping():
                     kwargs.pop("spec_query_len")
                 expected, actual = residual.clone(), residual.clone()
                 expected_state, actual_state = state.clone(), state.clone()
-                upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
+                upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
                 _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
                 torch.npu.synchronize()
                 pass_ratio, max_abs = _check_output_accuracy(expected, actual)
@@ -156,13 +158,14 @@ def test_prefill_one_request():
             channels = 10240
             x = torch.randn(tokens, channels, device="npu", dtype=dtype)
             weights = torch.randn(channels, 4, device="npu", dtype=dtype)
-            # Long prefill uses the model's channel-contiguous state view;
-            # the short case also covers a contiguous [slot, channel, window].
+            # Both cases use the SD layout [slot, window, channel]. The long
+            # prefill uses the model's channel-contiguous view; the short case
+            # also covers a transposed window-contiguous view.
             if tokens == 8192:
-                original_state = torch.randn(2, 12, channels, device="npu", dtype=dtype).transpose(1, 2)
-                assert original_state.stride(1) == 1
+                original_state = torch.randn(2, 12, channels, device="npu", dtype=dtype)
+                assert original_state.stride(2) == 1
             else:
-                original_state = torch.randn(2, channels, 12, device="npu", dtype=dtype)
+                original_state = torch.randn(2, channels, 12, device="npu", dtype=dtype).transpose(1, 2)
             original_output = torch.randn_like(x)
             for initialized in (True, False):
                 for null_slot in (False, True):
@@ -187,7 +190,11 @@ def test_prefill_one_request():
                             query_start_loc=torch.tensor([0, tokens], device="npu", dtype=torch.int32),
                             has_initial_states=torch.tensor([initialized], device="npu"),
                         )
-                        upstream_ple_conv(**kwargs, residual=expected_output, conv_state=expected_state)
+                        upstream_ple_conv(
+                            **kwargs,
+                            residual=expected_output,
+                            conv_state=expected_state.transpose(1, 2),
+                        )
                         _ple_conv_ascend(**kwargs, residual=actual_output, conv_state=actual_state)
                         torch.npu.synchronize()
                         pass_ratio, max_abs = _check_output_accuracy(expected_output, actual_output)
@@ -210,7 +217,8 @@ def test_prefill_multiple_requests_across_token_chunks():
     for dtype in (torch.bfloat16, torch.float16):
         inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
         weights = torch.randn(channels, 4, device="npu", dtype=dtype)
-        state = torch.randn(4, 12, channels, device="npu", dtype=dtype).transpose(1, 2)
+        # Ascend kernels use the SD layout [slots, window, channels].
+        state = torch.randn(4, 12, channels, device="npu", dtype=dtype)
         residual = torch.randn_like(inputs)
         outer_residual = torch.randn_like(inputs)
         kwargs = dict(
@@ -225,7 +233,7 @@ def test_prefill_multiple_requests_across_token_chunks():
         )
         expected, actual = residual.clone(), residual.clone()
         expected_state, actual_state = state.clone(), state.clone()
-        upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
+        upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
         _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
         torch.npu.synchronize()
         _check_output_accuracy(expected, actual)
