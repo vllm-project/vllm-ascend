@@ -32,9 +32,16 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import KVPPConfig, StairConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (
+    KVPPConfig,
+    StairConfig,
+    get_ascend_config,
+    init_ascend_config,
+    is_draft_config_context,
+)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
+    DeviceAdaptorFamily,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -58,7 +65,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -113,6 +119,10 @@ class NPUPlatform(Platform):
         "mxfp8",
     ]
 
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+
     @property
     def pass_key(self) -> str:
         """
@@ -127,8 +137,11 @@ class NPUPlatform(Platform):
         pass
 
     @classmethod
-    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
-        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+    def register_triton_kernel_overrides(cls) -> None:
+        if get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.COMPATIBILITY:
+            from vllm_ascend._310p.worker.v2.sample.dispatch import register_sampling_kernel_overrides
+
+            register_sampling_kernel_overrides()
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
@@ -470,6 +483,21 @@ class NPUPlatform(Platform):
         if model_config is not None and model_config.hf_config.model_type == "deepseek_v4":
             return
 
+        # DeepSeek V4.1 keys its page geometry on the physical block size as well, and
+        # its cache specs are built with the size refresh_block_size() settled before
+        # the model is constructed. The parent's Phase 1 would replace that size with
+        # one derived from get_supported_kernel_block_sizes(); the V4.1 cache backend
+        # does not override that call, so it answers with the default 16 while the
+        # allocated cache keeps the settled size. AscendDSAV41MetadataBuilder then
+        # rebuilds the V4.1 MLA spec from the worker's *current* cache_config.block_size,
+        # so the metadata would describe a different page geometry (rows per page and
+        # the resulting sparse coordinates) than the cache it is applied to.
+        # Phase 2 is for hybrid models, Phase 3 for mixed KV dtypes, and the mamba
+        # handling below is gated on mamba_cache_mode; none of those is a DeepSeek V4.1
+        # configuration either. Keep the settled size, exactly as for DeepSeek V4.
+        if model_config is not None and _get_deepseek_v4_variant(model_config) == "V4.1":
+            return
+
         super().update_block_size_for_backend(vllm_config)
 
         # TODO: NPU still sets block_size in check_and_update_config.
@@ -544,9 +572,8 @@ class NPUPlatform(Platform):
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
         # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default.
-        # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision.
+        # make V2 the unconditional platform default. Feature validation is
+        # left to upstream.
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
         # override the default runner selection.
         apply_v2_model_runner_config_patch()
@@ -575,30 +602,27 @@ class NPUPlatform(Platform):
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
-        if not vllm_version_is("0.32.0"):
-            from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+        from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
-            seen: set[int] = set()
-            for config in (
-                getattr(vllm_config.model_config, "hf_config", None),
-                getattr(vllm_config.model_config, "hf_text_config", None),
-            ):
-                if config is None or id(config) in seen:
-                    continue
-                seen.add(id(config))
-                if getattr(config, "compress_ratios", None) is None:
-                    ratios = get_compress_ratios(config)
-                    if ratios:
-                        config.compress_ratios = list(ratios)
+        seen: set[int] = set()
+        for config in (
+            getattr(vllm_config.model_config, "hf_config", None),
+            getattr(vllm_config.model_config, "hf_text_config", None),
+        ):
+            if config is None or id(config) in seen:
+                continue
+            seen.add(id(config))
+            if getattr(config, "compress_ratios", None) is None:
+                ratios = get_compress_ratios(config)
+                if ratios:
+                    config.compress_ratios = list(ratios)
 
-        _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
-        _validate_aux_output_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1052,15 +1076,6 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
         )
 
 
-def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
-    if (
-        vllm_config.model_config.architecture in ("DeepseekV41ForCausalLM", "DeepseekV41DSparkModel")
-        and get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
-        and not vllm_config.use_v2_model_runner
-    ):
-        raise ValueError("DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
-
-
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if vllm_config.parallel_config.enable_eplb:
         offload = vllm_config.offload_config
@@ -1109,7 +1124,13 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 sorted(_V2_EPLB_CONFIG_FIELDS),
             )
         load_collection_phase = eplb_config.get("load_collection_phase", "all")
-        if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb:
+        # Disabled drafts inherit this target-only setting but never collect
+        # EPLB load. Keep target validation strict and preserve other checks.
+        if (
+            load_collection_phase != "all"
+            and not vllm_config.parallel_config.enable_eplb
+            and not is_draft_config_context()
+        ):
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
@@ -1944,30 +1965,23 @@ def _validate_model_pcp_dcp_config(
 def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
     """Validate GQA/MQA PCP+DCP sizes for the target model."""
     parallel_config = vllm_config.parallel_config
+    model_config = vllm_config.model_config
+    if (
+        parallel_config.decode_context_parallel_size > 1
+        and not getattr(model_config, "use_mla", False)
+        and not model_uses_sfa_sparse(model_config)
+    ):
+        logger.warning_once(
+            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
+            "and has entered the sunset process. It will be removed in a future release. "
+            "GQA draft models can maintain native TP sharding under target DCP. "
+            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        )
     _validate_model_pcp_dcp_config(
         vllm_config.model_config,
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
-
-
-def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
-    """Reject AuxOutput configurations the Ascend runner cannot service.
-
-    vLLM main moved routed-experts output to the AuxOutput connector and
-    requires Model Runner V2 for it. Ascend is an out-of-tree platform, so the
-    upstream check is skipped and only the V2 NPUModelRunner wires the worker
-    connector up. Without this guard a V1 run enables the scheduler-side
-    connector and crashes with "auxiliary output worker output is missing".
-    """
-    if getattr(vllm_config, "aux_output_config", None) is None:
-        return
-    if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
-        raise ValueError(
-            "enable_return_routed_experts (AuxOutput Connector) is only "
-            "supported by Model Runner V2 on Ascend. Set "
-            "VLLM_USE_V2_MODEL_RUNNER=1."
-        )
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:

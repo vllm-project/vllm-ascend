@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -88,6 +88,34 @@ def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
 
     assert layer.bias is not None
     assert not layer.bias.requires_grad
+
+
+@patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", create=True, side_effect=mock_add_rms_norm_bias)
+@patch("torch_npu.npu_add_rms_norm", create=True, side_effect=mock_add_rms_norm)
+def test_GemmaRMSNorm_residual_uses_native_op(
+    mock_native, mock_bias_op, _custom_op_enabled, dummy_tensor, default_vllm_config
+):
+    """GemmaRMSNorm has no beta, so AddRmsNormBias has nothing to fuse.
+
+    The operator is only reachable where the custom OPP is installed, while the
+    native operator computes the same result everywhere.
+
+    ``enable_custom_op`` is pinned to True even though the method no longer
+    consults it: that is what the removed branch keyed on, so the pin makes this
+    test fail against the previous implementation on a CPU runner too, where the
+    ambient value is False and both implementations would otherwise agree.
+    """
+    layer = GemmaRMSNorm(hidden_size=8, eps=1e-05)
+    assert not hasattr(layer, "bias")
+
+    residual = torch.randn(4, 8, dtype=torch.float16)
+    out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
+
+    mock_native.assert_called_once()
+    mock_bias_op.assert_not_called()
+    assert torch.allclose(out_x, 2 * dummy_tensor)
+    assert torch.allclose(out_residual, 2 * residual)
 
 
 def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):

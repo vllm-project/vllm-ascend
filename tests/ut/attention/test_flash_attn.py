@@ -501,7 +501,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         expected_padding = None if recover else original.page_size_padded
         assert spec.page_size_bytes == (expected_padding or natural_page)
         assert spec.page_size_padded == expected_padding
-    # v0.32.0 has no draft marker; check propagation when upstream supports it.
+    # Both supported versions propagate the draft marker.
     if hasattr(original, "is_draft"):
         assert spec.is_draft is is_draft
     assert config.cache_config.skip_page_size_padded == padding

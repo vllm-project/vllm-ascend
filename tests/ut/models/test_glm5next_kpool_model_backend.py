@@ -38,8 +38,8 @@ with patch.dict(
 
 
 def test_glm_indexer_rejects_unsupported_cache_dtype_before_constructing_layers():
-    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="mxfp4"))
-    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16, fp8 or int8"):
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="int8"))
+    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16 or fp8"):
         Indexer(config, None, 8, 8, None, None, None)
 
 
@@ -422,7 +422,6 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
-    backend.kpool_int8 = False
     backend.n_head = 2
     backend.head_dim = 2
     backend.topk_tokens = 2
@@ -645,7 +644,6 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
-    backend.kpool_int8 = False
     backend.n_head = 2
     backend.head_dim = 2
     backend.topk_tokens = 2

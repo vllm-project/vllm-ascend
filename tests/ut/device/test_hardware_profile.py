@@ -53,14 +53,19 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES
+    | {
+        HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.NPU_TOP_K_TOP_P,
+    },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
-        HardwareCapability.POOL_KEY_INDEXER_INT8,
+        HardwareCapability.NPU_TOP_K_TOP_P,
     },
     AscendDeviceType._310P: frozenset(
         {
@@ -79,7 +84,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.SCATTER_ND_CACHE_STORE,
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
-            HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
@@ -103,11 +107,14 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
+            HardwareCapability.NPU_TOP_K_TOP_P,
+            HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,
@@ -209,6 +216,33 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
     assert profile.capabilities == expected_capabilities
     for capability in HardwareCapability:
         assert profile.supports(capability) is (capability in expected_capabilities)
+
+
+@pytest.mark.parametrize(
+    "device_type,expected_min_query_len",
+    [
+        (AscendDeviceType.A2, 9),
+        (AscendDeviceType.A3, None),
+        (AscendDeviceType.A5, None),
+        (AscendDeviceType._310P, None),
+    ],
+)
+def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_query_len):
+    profile = get_hardware_profile(device_type)
+    assert profile.gdn_fixed_spec_recurrent_fallback_min_query_len == expected_min_query_len
+
+
+@pytest.mark.parametrize(
+    "device_type,expected_precision",
+    [
+        (AscendDeviceType.A2, 0),
+        (AscendDeviceType.A3, 0),
+        (AscendDeviceType.A5, 1),
+        (AscendDeviceType._310P, 0),
+    ],
+)
+def test_minimax_m3_gbsa_bf16_softmax_precision_policy(device_type, expected_precision):
+    assert get_hardware_profile(device_type).minimax_m3_gbsa_bf16_softmax_precision == expected_precision
 
 
 def test_current_hardware_profile_uses_device_config() -> None:

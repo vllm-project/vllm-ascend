@@ -258,7 +258,7 @@ class UvaBufferWrapper:
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
 
 
-if not vllm_version_is("0.32.0"):
+if not vllm_version_is("0.33.0"):
 
     def _copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
         buf = self._next_buf(n)

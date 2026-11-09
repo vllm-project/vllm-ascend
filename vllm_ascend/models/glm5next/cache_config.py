@@ -14,6 +14,12 @@ from math import lcm
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
+
+# Both supported versions expose planning helpers in kv_cache_planning.
+from vllm.v1.core.kv_cache_planning import (
+    create_kv_cache_group_specs,
+    may_override_num_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -30,20 +36,6 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #61183 moved these helpers to `kv_cache_planning` on main; the v0.32.0
-# lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        create_kv_cache_group_specs,
-        may_override_num_blocks,
-    )
-else:
-    from vllm.v1.core.kv_cache_planning import (
-        create_kv_cache_group_specs,
-        may_override_num_blocks,
-    )
 
 
 @dataclass(frozen=True)
@@ -133,7 +125,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
     )
     if scale_alignments:
-        # Quantized keys share pages with the FP32 tail; keep whole tail rows and aligned
+        # C8 shares pages with the FP32 tail; keep whole tail rows and aligned
         # scales when a scheduler page is split into indexer kernel blocks.
         small_page_alignment = lcm(
             *(_unpadded_page_size(spec) // spec.block_size for spec in tail_specs), *scale_alignments

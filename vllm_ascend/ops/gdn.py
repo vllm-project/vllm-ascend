@@ -31,6 +31,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
+from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
@@ -48,9 +49,8 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
-from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -89,21 +89,12 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
         .to(device=packed_param.device, dtype=packed_param.dtype)
         .contiguous()
     )
-    # vLLM main (#62326) keeps the parameter object by default and drops
-    # `prefer_copy`; v0.32.0 still requires `prefer_copy=True`.
-    if vllm_version_is("0.32.0"):
-        replace_parameter(
-            conv1d,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-            prefer_copy=True,
-        )
-    else:
-        replace_parameter(
-            conv1d,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-        )
+    # replace_parameter preserves the parameter object on both supported versions.
+    replace_parameter(
+        conv1d,
+        _PACKED_CONV_WEIGHT_NAME,
+        packed_weight,
+    )
 
 
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
@@ -192,6 +183,12 @@ def _flatten_recurrent_state_indices(
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
     return state_indices[seq_ids, slot_ids].contiguous()
+
+
+# The fla_npu AscendC recurrent GDN kernel silently returns without writing
+# output when a sequence exceeds this many tokens. Wider speculative windows
+# must use the uncapped FLA Triton recurrent kernel instead.
+_MAX_RECURRENT_GDN_TOKENS = 8
 
 
 def _split_head_first_conv_output(
@@ -524,7 +521,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
-            output_spec = causal_conv1d_update(
+            conv_update = (
+                causal_conv1d_update_varlen
+                if attn_metadata.spec_decode_metadata.use_upstream_conv
+                else causal_conv1d_update
+            )
+            output_spec = conv_update(
                 mixed_qkv_spec,
                 self_kv_cache[0],
                 conv_weights_T,
@@ -712,25 +714,46 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
-                ssm_state,
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    spec_state_indices_tensor,
-                    query_spec.shape[1],
-                    spec_causal_conv1d_meta.query_start_loc,
-                ),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
+                spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
+            )
+            if use_upstream_recurrent:
+                # The native packed-index API bounds accepted_prev by the
+                # current query length. Reuse vLLM's strided state-table API
+                # for adaptive graphs and windows wider than the AscendC cap.
+                core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=spec_causal_conv1d_meta.query_start_loc,
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                )
+            else:
+                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+                core_attn_out_spec = recurrent_gated_delta_rule(
+                    query_spec.squeeze(0),
+                    key_spec.squeeze(0),
+                    value_spec.squeeze(0),
+                    ssm_state,
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=_flatten_recurrent_state_indices(
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
