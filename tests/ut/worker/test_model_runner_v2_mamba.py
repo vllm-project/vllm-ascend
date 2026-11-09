@@ -292,13 +292,16 @@ def test_dummy_mamba_copy_never_leaves_live_connector_deferral(bulk_after_load):
         state.preprocess_state(batch, (), config, computed)
         connector.prepare_mamba_state_copy.assert_not_called()
         ctx.run_fused_precopy.assert_called_once()
-        assert state._layerwise_mamba_copy is None
+        pending = state._layerwise_mamba_copy
+        assert pending is None
         assert state._pending_bulk_copy is None
         # The first real request must not inherit 34 pending warmup layers.
         state.kvpp_is_dummy_run = False
         state.preprocess_state(batch, (), config, computed)
         connector.prepare_mamba_state_copy.assert_called_once_with(state)
-        assert len(state._layerwise_mamba_copy.pending_layers) == 34
+        pending = state._layerwise_mamba_copy
+        assert pending is not None
+        assert len(pending.pending_layers) == 34
 
 
 def test_ensure_align_ctx_falls_back_to_mamba_ctx():
