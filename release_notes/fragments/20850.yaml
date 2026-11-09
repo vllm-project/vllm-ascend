@@ -1,0 +1,4 @@
+pr: 20850
+entries:
+  - category: bugfix
+    text: Fixed current-config visibility during weight reload and unnecessary pipeline-parallel metadata synchronization.
