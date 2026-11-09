@@ -157,7 +157,7 @@ print_summary() {
     echo -e "  ${status}: ${target}"
     echo -e "    log: ${log_file}"
   done
-  if [ "${#failed_logs[@]}" -gt 0 ]; then
+  if [ "${npu_type}" != "cpu" ] && [ "${#failed_logs[@]}" -gt 0 ]; then
     echo -e "\033[1;31m=== FAILED TEST LOGS ===\033[0m"
     for failed in "${failed_logs[@]}"; do
       IFS='|' read -r target log_file <<< "${failed}"
