@@ -12,11 +12,9 @@ coverage with missing-rank detection, and the cross-NPU HCCL round trip.
 
 The Weight Checker exposes three dev-mode actions over
 POST /weight_checker — checksum, reset and compare — so an RL stack can
-prove that a weight update landed on every rank. The transaction machinery
-(layer-reduced model, fixed-random payload, sleep/wake brackets) is shared
-with the NPU weight-transfer tests in
-tests/e2e/pull_request/rlhf/weight_transfer_test_utils.py, and the HCCL
-trainer handshake is mirrored from test_hccl_weight_transfer.py.
+prove that a weight update landed on every rank. The fixed-random weight
+source and transfer setup are shared with the NPU weight-transfer tests in
+tests/e2e/common/rlhf/weight_transfer/.
 """
 
 import json
@@ -32,20 +30,42 @@ from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactor
 from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+from tests.e2e.common.rlhf.common import (
     CONTROL_TIMEOUT,
-    RELOAD_TIMEOUT,
-    FixedRandomWeightSource,
-    WeightUpdateModelCase,
-    checksums,
-    live_update_serve_args,
-    packed_buffer_size_for,
-    post_route,
-    ranks,
+    post_control as post_route,
     register_engines_once,
+    server_visible_devices,
     wait_for_free_device_memory,
-    weight_checker,
 )
+from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.reference_check import live_update_serve_args
+from tests.e2e.common.rlhf.weight_transfer.weight_source import (
+    FixedRandomWeightSource,
+    packed_buffer_size_for,
+)
+
+RELOAD_TIMEOUT = 300
+
+
+def weight_checker(server, action: str, baseline: dict[str, str] | None = None) -> requests.Response:
+    """Call POST /weight_checker; compare also needs a baseline."""
+    body: dict[str, Any] = {"action": action}
+    if baseline is not None:
+        body["baseline"] = baseline
+    return requests.post(server.url_for("weight_checker"), json=body, timeout=RELOAD_TIMEOUT)
+
+
+def checksums(server) -> dict[str, str]:
+    """Return the server's per-parameter weight checksums."""
+    response = weight_checker(server, "checksum")
+    response.raise_for_status()
+    return response.json()["checksums"]
+
+
+def ranks(keys) -> set[str]:
+    """Extract dp:pp:pcp:tp rank prefixes from checksum keys."""
+    return {key.rsplit(":", 1)[0] for key in keys}
+
 
 # Matches the validated acceptance setup; leaves HBM headroom for the
 # co-located trainer in the same-chip transfer lanes.
@@ -96,7 +116,7 @@ def _basic_serve_args(port: int, *, extra_args=()) -> list[str]:
 def _env_dict(*device_indexes: int) -> dict[str, str]:
     return {
         "VLLM_SERVER_DEV_MODE": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(index) for index in device_indexes),
+        "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(device_indexes[0], len(device_indexes)),
     }
 
 
