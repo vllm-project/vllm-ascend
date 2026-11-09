@@ -1246,7 +1246,9 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{
         "enable_shared_expert_dp": true,
-        "recompute_scheduler_enable": true,
+        "scheduler_config": {
+          "recompute_scheduler_enable": true
+        },
         "enable_flashcomm1": false,
         "ascend_compilation_config": {
           "enable_npugraph_ex": true,
@@ -1779,10 +1781,14 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     P0 and P1 both expose Prefill APIs in this pool deployment. In the common
     Prefill template from Section 5.3, keep the launcher-supplied DP arguments
     and add the external DP rank argument:
-    `--data-parallel-rank "$4"`. Keep P0's `--api-server-count 1`; on P1
-    replace the Section 5.3 headless role with `--api-server-count 1`.
-    This makes both Prefill ranks API-serving. Keep Decode DP settings from
-    Section 5.3.
+    `--data-parallel-rank "$4"`. Keep P0's `--api-server-count 1`.
+
+    In P1's `run_p1.sh` wrapper from Section 5.3, replace
+    `export SERVER_ROLE_ARGS="--headless --data-parallel-start-rank 1"` with
+    `export SERVER_ROLE_ARGS="--api-server-count 1"`. The common `run_p.sh`
+    expands `${SERVER_ROLE_ARGS:-}` into the `vllm serve` command; the launcher
+    supplies P1's DP rank, so do not keep the headless/start-rank flags. This
+    makes both Prefill ranks API-serving. Keep Decode DP settings from Section 5.3.
 
     Configure the pool proxy for both Prefill APIs and all Decode APIs:
 
@@ -1798,7 +1804,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ##### Prepare MemCache
 
     Follow the [MemCache backend setup](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for prerequisites and installation. For A2, check the guide's [HDK/CANN compatibility reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference): HDK 25.5 or later is recommended and CANN 9.1.0 or later is required.
-    Confirm `/etc/hccn.conf` is visible inside every engine container (mount the host file when needed), and that the Section 5.3 `LOCAL_IP` and `NIC_NAME` match the A2 RoCE interface. This A2 setup uses `device_rdma`; A3 HCCS-specific `device_sdma` and FabricMem settings belong in the A3 instructions. Install `memfabric-hybrid>=1.3.0` and `memcache-hybrid>=1.3.0`, and install `fastokens` on each vLLM engine node. All nodes must reach the same MetaService.
+    Confirm `/etc/hccn.conf` is visible inside every engine container (mount the host file when needed), and that the Section 5.3 `LOCAL_IP` and `NIC_NAME` match the A2 RoCE interface. This A2 setup uses `device_rdma`; A3 HCCS-specific `device_sdma` and FabricMem settings belong in the A3 instructions. Install `memfabric-hybrid>=1.3.0` and `memcache-hybrid>=1.3.0`. All nodes must reach the same MetaService.
 
     Prepare `mmc-meta.conf` on the MetaService host:
 
@@ -1851,7 +1857,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ```shell
     export PYTHONHASHSEED=0
-    export VLLM_USE_FASTOKENS=1
     export ACL_OP_INIT_MODE=1
     export MEMCACHE_ROOT="<MEMCACHE_ROOT>"
     export PYTHON_LIB_DIR="<PYTHON_LIB_DIR>"
@@ -1859,6 +1864,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     export LD_LIBRARY_PATH="${MEMCACHE_ROOT}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
     export PYTHONPATH="${PYTHON_LIB_DIR}:${PYTHONPATH:-}"
     ```
+
+    `ACL_OP_INIT_MODE=1` selects ACL operator initialization mode to speed up operator compilation.
 
     Start MetaService before the vLLM engines using Step 4 in the
     [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
@@ -1903,7 +1910,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
             "kv_connector_extra_config": {
               "backend": "memcache",
               "use_layerwise": false,
-              "lookup_rpc_port": "0"
+              "lookup_rpc_port": '"$((37000 + $4))"'
             }
           }
         ]
@@ -1947,7 +1954,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
             "kv_connector_extra_config": {
               "backend": "memcache",
               "use_layerwise": false,
-              "lookup_rpc_port": "0"
+              "lookup_rpc_port": '"$((37100 + $4))"'
             }
           }
         ]
@@ -1955,11 +1962,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     }'
     ```
 
-    The configured `lookup_rpc_port` value `0` identifies a local IPC endpoint
-    and is not TCP port zero. DP replicas within one vLLM service are isolated
-    automatically; independently launched services sharing an RPC base
-    directory need distinct identifiers. Check the Mooncake base ports and
-    derived worker/scheduler port ranges for conflicts with other listeners.
+    `launch_online_dp.py` starts each DP rank in a separate engine process, so set
+    `lookup_rpc_port` uniquely for every P/D engine: `37000 + $4` on Prefill and
+    `37100 + $4` on Decode, where `$4` is the launcher-supplied DP rank. This
+    value identifies a local IPC endpoint; it is not a TCP listening port. Also
+    check Mooncake worker and scheduler TCP port ranges for conflicts with other
+    listeners.
 
     ##### Start and verify the pool
 
