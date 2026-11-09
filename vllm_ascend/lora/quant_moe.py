@@ -357,12 +357,18 @@ def _apply_w4a8_moe_lora(
         act_quant_type=torch.int8,
         use_mxfp_quant=False,
     )
-    # INT4 weights keep the [E, 1, N] per-channel scale layout here, and the
-    # scale-bias tensor is the quantized gmm's bias term, not a fused LoRA bias.
+    # W4A8 only supports per-channel weights, so the A8W4 gmm scale must always
+    # be in [E, 1, N] layout (unsqueeze -2). The loader squeezes the w13
+    # per-channel scale down to [E, N]; feeding that to npu_grouped_matmul makes
+    # the kernel tiling read the flattened per-channel scale as the quant group
+    # count and abort with "K should be divisible by quantGroupNum". The w2
+    # scale is kept unsqueezed by the loader and is passed through unchanged.
+    # The scale-bias tensor is the quantized gmm's bias term, not a fused LoRA
+    # bias.
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[quantized_input],
         weight=w1,
-        scale=[w1_scale[0].to(w2_scale[0].dtype)],
+        scale=[w1_scale[0].to(w2_scale[0].dtype).unsqueeze(-2)],
         bias=weights.w1_scale_bias,
         per_token_scale=[input_scale],
         split_item=2,
