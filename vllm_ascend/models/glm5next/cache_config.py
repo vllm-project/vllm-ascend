@@ -35,10 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.utils import vllm_version_is
 
-# NPUModelRunner._allocate_int8_cache_tensor reserves this many extra bytes
-# per backing when KV transfer requires a 2 MiB aligned address.
-GLM5_NEXT_CACHE_ALIGNMENT = 2 * 1024 * 1024
-
 # vLLM #61183 moved these helpers to `kv_cache_planning` on main; the v0.32.0
 # lane still ships them in `kv_cache_utils`.
 if vllm_version_is("0.32.0"):
@@ -467,26 +463,7 @@ def _build_glm5_next_kv_cache_config(vllm_config: VllmConfig, groups: list[KVCac
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
     )
-    parallel = vllm_config.parallel_config
-    if getattr(parallel, "tensor_parallel_size", 1) == 1 and parallel.prefill_context_parallel_size > 1:
-        # GLM KDA, unlike its attention caches, partitions heads over PCP at TP=1.
-        # Declare that model layout rather than inferring it in a store backend.
-        plan.layerwise_head_sharded_groups = frozenset(
-            group_id
-            for group_id, group in enumerate(groups)
-            if any(
-                isinstance(spec, MambaSpec) and not getattr(spec, "tp_replicated", False)
-                for spec in (
-                    group.kv_cache_spec.kv_cache_specs.values()
-                    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-                    else (group.kv_cache_spec,)
-                )
-            )
-        )
-        if plan.layerwise_head_sharded_groups:
-            plan.layerwise_key_namespace = f"@pcp{parallel.prefill_context_parallel_size}-tp1"
     if getattr(vllm_config, "kv_transfer_config", None) is not None:
-        plan.kv_cache_allocation_alignment = GLM5_NEXT_CACHE_ALIGNMENT
         apply_layerwise_kv_cache_plan(plan, vllm_config)
     return plan
 

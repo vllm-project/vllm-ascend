@@ -14,10 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
-    get_layerwise_kv_cache_specs,
-    get_layerwise_reuse_config,
+    LayerwiseCacheConfig,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
@@ -68,19 +65,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.load_async = False
         if self.use_layerwise_transfer:
-            self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
+            self._init_layerwise_offload(kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.layerwise_head_sharded_groups: frozenset[int] = (
-            getattr(kv_cache_config, "layerwise_head_sharded_groups", frozenset())
-            if self.use_layerwise_transfer
-            else frozenset()
-        )
-        key_namespace = getattr(kv_cache_config, "layerwise_key_namespace", "") if self.use_layerwise_transfer else ""
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
-                model_name=vllm_config.model_config.model.split("/")[-1] + key_namespace,
+                model_name=vllm_config.model_config.model.split("/")[-1],
                 use_hybrid=self.use_hybrid,
                 grouped_block_size=self.grouped_block_size,
             )
@@ -105,23 +96,16 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _async_load_enabled(self) -> bool:
         return False
 
-    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
-        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
-        if kv_cache_config is not None and reuse_config is not None:
-            reuse_layout = getattr(kv_cache_config, "layerwise_reuse_layout", None) or build_layerwise_reuse_layout(
-                get_layerwise_kv_cache_specs(kv_cache_config), self.num_layers, reuse_config
-            )
-            if reuse_layout.layer_cache_specs:
-                self.num_layers = max(
-                    self.num_layers,
-                    max(reuse_layout.layer_cache_specs) + 1,
-                )
+    def _init_layerwise_offload(self, kv_cache_config: KVCacheConfig | None, extra_config: dict[str, Any]) -> None:
+        reuse_layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
+        if reuse_layout is not None:
+            if reuse_layout.layers:
+                self.num_layers = max(self.num_layers, max(reuse_layout.layers) + 1)
             self.layerwise_offload = reuse_layout.has_layer_reuse
-        else:
-            self.layerwise_offload = build_layerwise_cache_layout(
-                self.num_layers,
-                extra_config,
-            ).has_layer_reuse
+            return
+        if LayerwiseCacheConfig.parse(self.num_layers, extra_config).has_layer_reuse:
+            raise ValueError("Layerwise offload requires a compiled model reuse plan.")
+        self.layerwise_offload = False
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
@@ -346,9 +330,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         head_or_tp_ranks = (
             self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
         )
-        if group_id in getattr(self, "layerwise_head_sharded_groups", ()) or (
-            getattr(self, "use_layerwise_transfer", False) and getattr(self, "use_kvpp", False)
-        ):
+        if getattr(self, "use_layerwise_transfer", False) and getattr(self, "use_kvpp", False):
             head_or_tp_ranks *= getattr(self, "pcp_size", 1)
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:

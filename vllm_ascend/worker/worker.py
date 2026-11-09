@@ -94,10 +94,8 @@ from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
+    apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
-    get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -117,6 +115,8 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
     vllm_version_is,
 )
+
+KV_CACHE_ALIGNMENT = 2 * 1024 * 1024
 
 # vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
 # in kv_cache_utils, so importing the main-only module breaks worker startup.
@@ -671,16 +671,18 @@ class NPUWorker(WorkerBase):
         else:
             from vllm.v1.core import kv_cache_planning as planning
         groups = get_kv_cache_groups(self.vllm_config, specs)
-        return planning.get_kv_cache_config_from_groups(
+        plan = planning.get_kv_cache_config_from_groups(
             self.vllm_config, groups, sum(spec.page_size_bytes for spec in specs.values())
         )
+        apply_layerwise_kv_cache_plan(plan, self.vllm_config)
+        return plan
 
     def _reserve_kv_cache_alignment(self, available_bytes: int) -> int:
         if get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is None:
             return available_bytes
         specs = self.get_kv_cache_spec()
         plan = self._get_layerwise_physical_plan(specs)
-        reserve = len(plan.kv_cache_tensors) * getattr(plan, "kv_cache_allocation_alignment", 0)
+        reserve = len(plan.kv_cache_tensors) * KV_CACHE_ALIGNMENT
         logger.info("Reserve %d bytes for KV cache backing alignment.", reserve)
         return max(available_bytes - reserve, 0)
 
@@ -768,26 +770,6 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
-
-        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
-        if extra_config is not None:
-            memory_info = getattr(self, "_gva_layerwise_memory_info", None)
-            if memory_info is None:
-                num_layers = self.model_config.get_num_layers(self.parallel_config)
-                layout = build_layerwise_cache_layout(num_layers, extra_config)
-                num_buffer_assignments = len(layout.storage_indices)
-                factor = num_layers / num_buffer_assignments if layout.has_layer_reuse else 1.0
-            else:
-                num_layers, num_buffer_assignments, factor = memory_info
-            if factor != 1.0:
-                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
-                logger.info(
-                    "Layerwise KV cache reuse maps %d layers onto %d buffer assignments; "
-                    "scale logical KV budget by %.3f.",
-                    num_layers,
-                    num_buffer_assignments,
-                    factor,
-                )
 
         logger.debug(profile_result)
         logger.info_once(
@@ -1239,68 +1221,8 @@ class NPUWorker(WorkerBase):
                 return None
             return connector.get_aligned_num_cpu_blocks()
 
-    def _get_layerwise_kv_cache_memory_info(
-        self,
-        kv_cache_spec: dict[str, KVCacheSpec],
-        extra_config: dict[str, Any],
-        *,
-        excluded_layer_names: set[str] | None = None,
-    ) -> tuple[int, int, float]:
-        if not kv_cache_spec:
-            return 0, 0, 1.0
-        # Match the allocation planner: persistent draft pages are not target
-        # scratch slots and must be counted once each in the physical budget.
-        excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
-        target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
-        base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
-        num_layers = len(physical_layers)
-        if num_layers < base_layers:
-            return num_layers, num_layers, 1.0
-        # Physical builders already account for the final shared backings.
-        # Consume that same layout rather than applying a logical multiplier.
-        config = getattr(self, "vllm_config", None)
-        plan = self._get_layerwise_physical_plan(kv_cache_spec) if config is not None else None
-        layout = getattr(plan, "layerwise_reuse_layout", None)
-        if layout is not None:
-            assignments = len(layout.buffer_slots) if layout.has_layer_reuse else num_layers
-            return num_layers, assignments, 1.0
-        reuse_layout = build_layerwise_reuse_layout(
-            target_specs,
-            base_layers,
-            extra_config,
-        )
-        if not reuse_layout.has_layer_reuse:
-            return num_layers, num_layers, 1.0
-        num_buffer_assignments = len(reuse_layout.buffer_slots)
-
-        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = sum(kv_cache_spec[name].page_size_bytes for name in excluded_layer_names)
-        for slot in reuse_layout.buffer_slots:
-            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
-            for layer in slot:
-                indexer = reuse_layout.layer_cache_specs[layer].indexer
-                if indexer is not None:
-                    physical_page_bytes += indexer.spec.page_size_bytes
-                    break
-        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
-
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
-        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
-        if extra_config is not None:
-            speculator = getattr(self.model_runner, "speculator", None)
-            speculative = self.vllm_config.speculative_config
-            draft_names = (
-                set(speculator.draft_attn_layer_names)
-                if speculative is not None and speculative.method == "dspark" and speculator is not None
-                else set()
-            )
-            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
-                kv_cache_spec,
-                extra_config,
-                excluded_layer_names=draft_names,
-            )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
             register_kvpp_draft_layers(
