@@ -1683,6 +1683,7 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
     state._offload_draft_attn_groups = []
     state._offload_draft_layer_names = {"draft.layer"}
     state._offload_req_ids = SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64))
+    state._offload_request_identity = model_state_module.RequestIdentityRegistry()
     state._offload_token_to_req = SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32))
     state._offload_pool_slots = SimpleNamespace(np=np.zeros(4, dtype=np.int32), cpu=torch.zeros(4, dtype=torch.int32))
     state._offload_pool_active = SimpleNamespace(np=np.zeros(4, dtype=np.bool_), cpu=torch.zeros(4, dtype=torch.bool))
@@ -1734,6 +1735,8 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
 
     assert result == {"main.layer": metadata}
     update.assert_called_once()
+    assert update.call_args.kwargs["request_identity"] is state._offload_request_identity
+    assert update.call_args.kwargs["is_dummy"] is False
     prepared = state._offload_request_states.prepare.call_args.kwargs
     assert prepared["prebound_slots"] == {"request-1": 0}
     assert prepared["live_req_ids"] is state._offload_live_req_ids

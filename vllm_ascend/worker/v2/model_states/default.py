@@ -39,8 +39,10 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
+    reset_sparse_kv_offload_request_owners,
     update_sparse_kv_offload_metadata,
 )
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
@@ -89,11 +91,15 @@ class AscendModelState(DefaultModelState):
         self._offload_pool_slots: CpuGpuBuffer | None = None
         self._offload_pool_active: CpuGpuBuffer | None = None
         self._offload_request_states: CopySfaRequestStates | None = None
+        self._offload_request_identity: RequestIdentityRegistry | None = None
         self._offload_live_req_ids: Collection[str] = ()
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
         self._offload_draft_layer_names: set[str] = set()
         sparse_cfg = get_ascend_config().sparse_kv_offload_config
         if sparse_cfg.enabled:
+            self._offload_request_identity = RequestIdentityRegistry(
+                on_wrap=lambda: reset_sparse_kv_offload_request_owners(self.vllm_config)
+            )
             pin_memory = is_pin_memory_available()
             self._offload_req_ids = CpuGpuBuffer(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -335,6 +341,8 @@ class AscendModelState(DefaultModelState):
 
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
+        if self._offload_request_identity is not None:
+            self._offload_request_identity.remove(req_id)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
 
@@ -466,6 +474,7 @@ class AscendModelState(DefaultModelState):
         offload_token_to_req = getattr(self, "_offload_token_to_req", None)
         if offload_req_ids is not None:
             assert offload_token_to_req is not None
+            assert self._offload_request_identity is not None
             update_sparse_kv_offload_metadata(
                 input_batch.num_tokens,
                 input_batch.num_reqs,
@@ -475,6 +484,8 @@ class AscendModelState(DefaultModelState):
                 input_batch.query_start_loc_np,
                 offload_req_ids,
                 offload_token_to_req,
+                request_identity=self._offload_request_identity,
+                is_dummy=getattr(input_batch, "is_dummy", False),
             )
         pool_slots = getattr(self, "_offload_pool_slots", None)
         pool_active = getattr(self, "_offload_pool_active", None)
