@@ -174,12 +174,13 @@ missing historical KV rows for the shared layers in its group. Each shared
 layer waits for its own prefetch before attention and loads the current
 token's KV after that layer writes it.
 
-This mode requires Model Runner V2, TP=1, and DP=1 without speculative decoding. Use
-`--max-num-seqs 1` and either `--enforce-eager` or the following Decode graph
-configuration:
+This mode uses Model Runner V2 with TP=1 and DP=1 and supports one token per
+request in a Decode batch. Set `--max-num-seqs` to the concurrency limit.
+Each batch row has its own hot slots and the row is invalidated when its
+request changes. For example, to capture one- and two-request Decode graphs:
 
 ```bash
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'
+--max-num-seqs 2 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2]}'
 ```
 
 ## 4. Start the P/D Proxy

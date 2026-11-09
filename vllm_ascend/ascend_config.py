@@ -1790,15 +1790,11 @@ class SparseKVOffloadConfig:
         if self.selective_offload and not vllm_config.model_config.enforce_eager:
             from vllm.config import CUDAGraphMode
 
-            # shortcut: one decode row per graph, until hot slots are isolated per request.
-            if (
-                vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
-                or vllm_config.scheduler_config.max_num_seqs != 1
-                or vllm_config.compilation_config.cudagraph_capture_sizes != [1]
-            ):
-                raise ValueError(
-                    "selective_offload graph requires FULL_DECODE_ONLY, max_num_seqs=1, and cudagraph_capture_sizes=[1]"
-                )
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+                raise ValueError("selective_offload graph requires FULL_DECODE_ONLY")
+            sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+            if not sizes or max(sizes) > vllm_config.scheduler_config.max_num_seqs:
+                raise ValueError("selective_offload cudagraph_capture_sizes must fit max_num_seqs")
         if parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size > 1:
             raise ValueError("Sparse KV offload don't support context parallel now.")
         if parallel_config.pipeline_parallel_size > 1:

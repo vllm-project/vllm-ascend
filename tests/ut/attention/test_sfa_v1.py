@@ -42,7 +42,7 @@ from vllm_ascend.quantization.methods import (
 
 def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
     host = [torch.empty(4), torch.empty(4)]
-    hot = [torch.empty(3), torch.empty(3)]
+    hot = [torch.empty(6), torch.empty(6)]
     manager = SimpleNamespace(
         block_size=2,
         topk=3,
@@ -52,29 +52,38 @@ def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
         topk_buffers_v=hot,
         token_size_bytes_k=4,
         token_size_bytes_v=4,
-        selective_hot_keys=torch.full((2, 4), -1, dtype=torch.int64),
-        selective_hot_requests=torch.full((2, 1), -1, dtype=torch.int64),
-        selective_copy_src=torch.empty((2, 6), dtype=torch.int64),
-        selective_copy_dst=torch.empty((2, 6), dtype=torch.int64),
-        selective_copy_lengths=torch.empty((2, 6), dtype=torch.int32),
-        selective_copy_count=torch.tensor(6),
-        selective_physical=torch.empty((2, 1, 1, 3), dtype=torch.int32),
-        selective_current=torch.empty((2, 3), dtype=torch.bool),
+        selective_hot_keys=torch.full((2, 2, 4), -1, dtype=torch.int64),
+        selective_hot_requests=torch.full((2, 2, 1), -1, dtype=torch.int64),
+        selective_copy_src=torch.empty((2, 12), dtype=torch.int64),
+        selective_copy_dst=torch.empty((2, 12), dtype=torch.int64),
+        selective_copy_lengths=torch.empty((2, 12), dtype=torch.int32),
+        selective_copy_counts=torch.tensor([6, 12]),
+        selective_hot_offsets=torch.tensor([[0], [3]]),
+        selective_physical=torch.empty((2, 2, 1, 3), dtype=torch.int32),
+        selective_current=torch.empty((2, 2, 3), dtype=torch.bool),
         copy_sfa_kv=MagicMock(),
     )
-    metadata = SimpleNamespace(block_table=torch.tensor([[1, 0]]), req_ids_tensor=torch.tensor([1]))
-    indices = torch.tensor([0, 2, -1])
+    metadata = SimpleNamespace(block_table=torch.tensor([[1, 0], [0, 1]]), req_ids_tensor=torch.tensor([1, 2]))
+    indices = torch.tensor([[0, 2, -1], [0, 1, -1]])
     for layer in range(2):
         AscendSFAKVOffloadImpl._prepare_selective_kv(
-            manager, layer, indices, metadata, torch.tensor([3]), prefetch=True
+            manager, layer, indices, metadata, torch.tensor([3, 2]), prefetch=True
         )
 
     assert manager.copy_sfa_kv.call_count == 2
-    assert manager.selective_current.tolist() == [[False, True, False]] * 2
-    assert manager.selective_copy_lengths.tolist() == [[4, 0, 0, 4, 0, 0]] * 2
+    assert manager.selective_current.tolist() == [[[False, True, False], [False, True, False]]] * 2
+    assert manager.selective_copy_lengths.tolist() == [[4, 0, 0, 4, 0, 0] * 2] * 2
     assert manager.selective_copy_src[0, 0] == host[0].data_ptr() + 8
     assert manager.selective_copy_src[1, 0] == host[1].data_ptr() + 8
-    assert manager.selective_physical[:, 0, 0, 2].tolist() == [-1, -1]
+    assert manager.selective_copy_src[0, 3] == host[0].data_ptr()
+    assert manager.selective_copy_dst[0, 0] < hot[0].data_ptr() + 12
+    assert manager.selective_copy_dst[0, 3] >= hot[0].data_ptr() + 12
+    assert manager.selective_physical[:, :, 0, 2].tolist() == [[-1, -1]] * 2
+
+    metadata.req_ids_tensor = torch.tensor([2, 0])
+    AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, torch.tensor([3, 2]), prefetch=True)
+    assert manager.selective_copy_lengths[0].tolist() == [4, 0, 0, 0, 0, 0] * 2
+    assert manager.selective_physical[0, 1].tolist() == [[-1, -1, -1]]
 
 
 class TestAscendSFABackend(TestBase):

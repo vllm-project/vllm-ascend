@@ -1,5 +1,5 @@
 pr: 21294
 entries:
   - category: feature
-    text: Added opt-in shared-layer KV offload for sparse attention models on Ascend A5, with single-request Decode graph replay.
+    text: Added opt-in shared-layer KV offload for sparse attention models on Ascend A5, with batched Decode graph replay.
     hardware: [A5]

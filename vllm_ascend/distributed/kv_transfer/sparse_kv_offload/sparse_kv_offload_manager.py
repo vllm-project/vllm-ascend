@@ -102,22 +102,22 @@ def _sparse_kv_ops():
 
 def plan_selective_hot_slots(keys, previous_request, request, source_slots, valid):
     """Keep selected resident rows and assign misses to unselected slots."""
-    capacity = keys.numel() - 1  # Last entry absorbs invalid/padded selections.
-    if capacity < source_slots.numel():
+    capacity = keys.shape[-1] - 1  # Last entry in each row absorbs invalid selections.
+    if capacity < source_slots.shape[-1]:
         raise ValueError("Selective hot capacity must cover every TopK entry")
-    resident = torch.where(previous_request == request, keys[:capacity], -1)
+    resident = torch.where(previous_request == request, keys[..., :capacity], -1)
     sorted_keys, order = torch.sort(resident)
     positions = torch.searchsorted(sorted_keys, source_slots).clamp_max(capacity - 1)
-    hits = valid & (sorted_keys[positions] == source_slots)
-    hit_slots = order[positions]
-    used = torch.zeros(capacity + 1, dtype=torch.int64, device=keys.device)
-    used.scatter_(0, torch.where(hits, hit_slots, capacity), 1)
-    free = torch.argsort((used[:capacity] * 2 + (resident >= 0).to(torch.int64)).float())
+    hits = valid & (sorted_keys.gather(-1, positions) == source_slots)
+    hit_slots = order.gather(-1, positions)
+    used = torch.zeros_like(keys)
+    used.scatter_(-1, torch.where(hits, hit_slots, capacity), 1)
+    free = torch.argsort((used[..., :capacity] * 2 + (resident >= 0).to(torch.int64)).float())
     misses = valid & ~hits
-    miss_positions = (misses.to(torch.int64).cumsum(0) - 1).clamp_min(0)
-    slots = torch.where(hits, hit_slots, free[miss_positions])
-    updated = torch.cat((resident, keys[-1:])).clone()
-    updated.scatter_(0, torch.where(valid, slots, capacity), torch.where(valid, source_slots, -1))
+    miss_positions = (misses.to(torch.int64).cumsum(-1) - 1).clamp_min(0)
+    slots = torch.where(hits, hit_slots, free.gather(-1, miss_positions))
+    updated = torch.cat((resident, keys[..., -1:]), dim=-1)
+    updated.scatter_(-1, torch.where(valid, slots, capacity), torch.where(valid, source_slots, -1))
     return slots, misses, updated
 
 
@@ -831,15 +831,18 @@ class SparseKVOffloadManager:
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
         if getattr(getattr(self, "sparse_kv_offload_config", None), "selective_offload", False):
             device = self.topk_buffers_k[0].device
+            rows = self.topk_buffers_k[0].shape[0]
             # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
-            descriptor_shape = (self.num_layers, 2 * self.topk)
+            descriptor_shape = (self.num_layers, 2 * rows * self.topk)
             self.selective_copy_src = torch.empty(descriptor_shape, dtype=torch.int64, device=device)
             self.selective_copy_dst = torch.empty_like(self.selective_copy_src)
             self.selective_copy_lengths = torch.empty(descriptor_shape, dtype=torch.int32, device=device)
-            self.selective_copy_count = torch.full((), 2 * self.topk, dtype=torch.int32, device=device)
-            self.selective_physical = torch.empty((self.num_layers, 1, 1, self.topk), dtype=torch.int32, device=device)
-            self.selective_current = torch.empty((self.num_layers, self.topk), dtype=torch.bool, device=device)
-            self.selective_prefetch_topk = torch.empty(self.topk, dtype=torch.int64, device=device)
+            self.selective_copy_counts = torch.arange(1, rows + 1, dtype=torch.int32, device=device) * (2 * self.topk)
+            self.selective_physical = torch.empty(
+                (self.num_layers, rows, 1, self.topk), dtype=torch.int32, device=device
+            )
+            self.selective_current = torch.empty((self.num_layers, rows, self.topk), dtype=torch.bool, device=device)
+            self.selective_prefetch_topk = torch.empty((rows, self.topk), dtype=torch.int64, device=device)
             self.selective_prefetch_stream = torch_npu.npu.Stream(device=device)
             self.selective_prefetch_ready = [torch_npu.npu.Event() for _ in self.offload_layer_names]
             host_layers = {extract_layer_index(name): name for name in self.offload_layer_names}
@@ -851,15 +854,19 @@ class SparseKVOffloadManager:
                 else:
                     self.selective_followers.setdefault(leader, []).append(host_layers[index])
             hot_blocks = cdiv(self.topk_buffer_size, self.block_size)
-            self.selective_hot_block_table = torch.arange(hot_blocks, dtype=torch.int32, device=device).view(1, -1)
-            self.selective_query_len = torch.ones(1, dtype=torch.int32, device=device)
-            self.selective_hot_len = torch.full((1,), hot_blocks * self.block_size, dtype=torch.int32, device=device)
+            self.selective_hot_block_table = torch.arange(rows * hot_blocks, dtype=torch.int32, device=device).view(
+                rows, -1
+            )
+            self.selective_hot_offsets = (
+                torch.arange(rows, dtype=torch.int64, device=device).view(-1, 1) * self.topk_buffer_size
+            )
+            self.selective_hot_len = torch.full((rows,), self.topk_buffer_size, dtype=torch.int32, device=device)
             self.selective_hot_keys = [
-                torch.full((self.topk_buffer_size + 1,), -1, dtype=torch.int64, device=device)
+                torch.full((rows, self.topk_buffer_size + 1), -1, dtype=torch.int64, device=device)
                 for _ in self.offload_layer_names
             ]
             self.selective_hot_requests = [
-                torch.full((1,), -1, dtype=torch.int64, device=device) for _ in self.offload_layer_names
+                torch.full((rows, 1), -1, dtype=torch.int64, device=device) for _ in self.offload_layer_names
             ]
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(

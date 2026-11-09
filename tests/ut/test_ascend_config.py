@@ -988,10 +988,11 @@ class TestSparseKVOffloadConfig(TestBase):
             vllm_config, {"enabled": True, "selective_offload": True, "topk_buffer_size": 256}
         )
         vllm_config.scheduler_config.max_num_seqs = 2
-        with self.assertRaisesRegex(ValueError, "max_num_seqs=1"):
-            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "selective_offload": True})
-        vllm_config.scheduler_config.max_num_seqs = 1
         vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2]
+        SparseKVOffloadConfig.from_additional_config(
+            vllm_config, {"enabled": True, "selective_offload": True, "topk_buffer_size": 256}
+        )
+        vllm_config.scheduler_config.max_num_seqs = 1
         with self.assertRaisesRegex(ValueError, "cudagraph_capture_sizes"):
             SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "selective_offload": True})
         vllm_config.model_config.enforce_eager = True
