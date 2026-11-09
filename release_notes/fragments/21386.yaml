@@ -1,0 +1,4 @@
+pr: 21386
+entries:
+  - category: bugfix
+    text: Fixed Step3.5 and Step3.7 model initialization with vLLM 0.33 by aligning per-layer attention and RoPE configuration with the upstream API.
