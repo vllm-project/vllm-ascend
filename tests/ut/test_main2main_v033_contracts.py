@@ -160,7 +160,7 @@ class TestMain2MainContracts(unittest.TestCase):
                         self.assertEqual(args[16:], (1024, True, 1))
 
     def test_replayssm_temporal_guard_retains_conv_copy_and_count_normalization(self):
-        path = ROOT / "vllm_ascend/ops/triton/v1/mamba/postprocess.py"
+        path = ROOT / "vllm_ascend/ops/triton/mamba/postprocess.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
         kernel = next(
             n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "postprocess_mamba_fused_kernel"
