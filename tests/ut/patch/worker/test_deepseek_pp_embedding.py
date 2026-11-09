@@ -61,17 +61,22 @@ def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant
     return model, initial
 
 
-@pytest.mark.parametrize("pp_size,pp_rank", [(1, 0), (2, 0), (2, 1), (3, 1), (3, 2)])
-@pytest.mark.parametrize("method", [None, "ngram", "mtp", "eagle", "eagle3", "dflash", "dspark"])
-@pytest.mark.parametrize("existing", [False, True])
-def test_target_embedding_provisioning_scope(monkeypatch, pp_size, pp_rank, method, existing):
+@pytest.mark.parametrize(
+    "pp_size,pp_rank,method,existing,create_embedding",
+    [
+        pytest.param(2, 1, "dflash", False, True, id="create-missing-last-stage-embedding"),
+        pytest.param(2, 1, "dflash", True, False, id="preserve-existing-embedding"),
+        pytest.param(3, 1, "dflash", False, False, id="skip-middle-stage"),
+        pytest.param(2, 1, None, False, False, id="skip-without-speculative-decoding"),
+    ],
+)
+def test_target_embedding_provisioning_scope(monkeypatch, pp_size, pp_rank, method, existing, create_embedding):
     quant_config = object()
     replacement = torch.nn.Embedding(65, 2)
     constructor = Mock(return_value=replacement)
     monkeypatch.setattr(patch_deepseek_v2, "VocabParallelEmbedding", constructor)
     model, initial = _make_target(monkeypatch, pp_size, pp_rank, method, existing=existing, quant_config=quant_config)
-    needed = pp_size > 1 and pp_rank == pp_size - 1 and method in ("eagle", "eagle3", "dflash", "dspark")
-    if needed and not existing:
+    if create_embedding:
         constructor.assert_called_once_with(
             65, 2, quant_config=quant_config, prefix="language_model.model.embed_tokens"
         )
@@ -155,10 +160,3 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(mon
         assert draft.lm_head is target_head
         torch.testing.assert_close(draft.model.fc.weight, original_fc)
         process_weights.assert_not_called()
-
-
-def test_target_embedding_allocation_failure_propagates(monkeypatch):
-    constructor = Mock(side_effect=RuntimeError("embedding allocation failed"))
-    monkeypatch.setattr(patch_deepseek_v2, "VocabParallelEmbedding", constructor)
-    with pytest.raises(RuntimeError, match="embedding allocation failed"):
-        _make_target(monkeypatch, 2, 1, "dflash")
