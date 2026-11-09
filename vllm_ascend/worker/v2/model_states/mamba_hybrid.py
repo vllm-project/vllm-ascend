@@ -40,7 +40,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -225,7 +225,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # vLLM #55688 counts state tensors from each layer's bindings.
             # v0.33 still uses the constructor without forward_context.
             context_kwargs: dict[str, Any] = {}
-            if hasattr(mamba_utils, "postprocess_mamba_gpu"):
+            if not vllm_version_is("0.33.0"):
                 context_kwargs["forward_context"] = self.vllm_config.compilation_config.static_forward_context
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,

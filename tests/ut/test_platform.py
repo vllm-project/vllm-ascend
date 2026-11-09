@@ -33,6 +33,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
+    vllm_version_is,
 )
 
 
@@ -999,7 +1000,8 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
 
-    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self):
+    @patch("vllm_ascend.platform.vllm_version_is", return_value=False)
+    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self, _mock_version):
         for name, value in (
             ("prefill_cudagraph_capture_token_sizes", [1, 3, 7]),
             ("max_prefill_cudagraph_capture_tokens", 7),
@@ -1035,9 +1037,10 @@ class TestNPUPlatform(TestBase):
                     config.additional_config = {"ascend_compilation_config": {}}
                     config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
                     config.get_draft_decode_cudagraph_request_sizes = lambda: []
-                    split_sizes = getattr(VllmConfig, "_split_cudagraph_capture_sizes", None)
-                    if split_sizes is not None:
-                        config._split_cudagraph_capture_sizes = partial(split_sizes, config)
+                    if not vllm_version_is("0.33.0"):
+                        config._split_cudagraph_capture_sizes = partial(
+                            VllmConfig._split_cudagraph_capture_sizes, config
+                        )
                     config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
                     self.platform.apply_config_platform_defaults(config)
                     config._set_cudagraph_sizes()
@@ -1071,14 +1074,15 @@ class TestNPUPlatform(TestBase):
                         config.additional_config = {"ascend_compilation_config": {}}
                         config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
                         config.get_draft_decode_cudagraph_request_sizes = lambda: []
-                        split_sizes = getattr(VllmConfig, "_split_cudagraph_capture_sizes", None)
-                        if split_sizes is not None:
-                            config._split_cudagraph_capture_sizes = partial(split_sizes, config)
+                        if not vllm_version_is("0.33.0"):
+                            config._split_cudagraph_capture_sizes = partial(
+                                VllmConfig._split_cudagraph_capture_sizes, config
+                            )
                         config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
                         config._set_cudagraph_sizes()
-                        decode_sizes = getattr(
-                            config.compilation_config, "decode_cudagraph_capture_request_sizes", None
-                        )
+                        decode_sizes = None
+                        if not vllm_version_is("0.33.0"):
+                            decode_sizes = config.compilation_config.decode_cudagraph_capture_request_sizes
                         if decode_sizes is not None:
                             decode_sizes = list(decode_sizes)
                         with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
@@ -1088,7 +1092,7 @@ class TestNPUPlatform(TestBase):
                         # Engine handshakes re-enter the native config resolver.
                         config._set_cudagraph_sizes()
                         config._set_cudagraph_sizes()
-                        if split_sizes is not None:
+                        if not vllm_version_is("0.33.0"):
                             self.assertEqual(
                                 config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes
                             )

@@ -19,12 +19,12 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -267,7 +267,7 @@ def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
     mock_create.assert_called_once()
     # Enforce the installed upstream signature, rather than accepting any
     # keyword/omitted argument through an unconstrained MagicMock.
-    if hasattr(mamba_utils, "postprocess_mamba_gpu"):
+    if not vllm_version_is("0.33.0"):
         assert (
             mock_create.call_args.kwargs["forward_context"]
             is state.vllm_config.compilation_config.static_forward_context

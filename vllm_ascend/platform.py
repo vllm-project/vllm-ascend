@@ -65,6 +65,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -1436,13 +1437,13 @@ def _setup_compile_backend(
         # were derived from the truncated grid, so regenerate them alongside
         # the restored off-stride default rather than mixing two size sets.
         # Explicit split sizes never receive reduced_cg_cap (see below).
-        for name in (
-            "prefill_cudagraph_capture_token_sizes",
-            "max_prefill_cudagraph_capture_tokens",
-            "decode_cudagraph_capture_request_sizes",
-            "max_decode_cudagraph_capture_requests",
-        ):
-            if hasattr(compilation_config, name):
+        if not vllm_version_is("0.33.0"):
+            for name in (
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            ):
                 setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
@@ -1461,7 +1462,9 @@ def _setup_compile_backend(
         # Main V2 resolves prefill tokens and decode requests separately.
         # The TP token-layout restriction applies to the prefill grid; keep
         # the resolved decode request grid used by the graph managers intact.
-        prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+        prefill_sizes = None
+        if not vllm_version_is("0.33.0"):
+            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
         original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
@@ -1866,8 +1869,8 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
         return None
-    if any(
-        getattr(compilation_config, name, None) is not None
+    if not vllm_version_is("0.33.0") and any(
+        getattr(compilation_config, name) is not None
         for name in (
             "prefill_cudagraph_capture_token_sizes",
             "max_prefill_cudagraph_capture_tokens",

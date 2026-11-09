@@ -7,6 +7,7 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.utils import vllm_version_is
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
@@ -56,9 +57,8 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = kv_cache
     # #55688 moves ReplaySSM tracker ownership out of cache binding. Older
     # vLLM versions still require the legacy sharing hook after binding.
-    share_trackers = getattr(utils, "share_replayssm_ring_trackers", None)
-    if share_trackers is not None:
-        share_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+    if vllm_version_is("0.33.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 def bind_kv_cache_to_layers(
@@ -82,6 +82,5 @@ def bind_kv_cache_to_layers(
         else:
             layer.kv_cache = kv_cache
     ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
-    share_trackers = getattr(utils, "share_replayssm_ring_trackers", None)
-    if share_trackers is not None:
-        share_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+    if vllm_version_is("0.33.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)

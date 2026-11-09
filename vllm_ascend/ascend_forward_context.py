@@ -21,6 +21,7 @@ from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES,
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
+    vllm_version_is,
 )
 
 # Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
@@ -271,7 +272,9 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
         compilation_config = vllm_config.compilation_config
-        decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None)
+        decode_sizes = None
+        if not vllm_version_is("0.33.0"):
+            decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         if decode_sizes is not None:
             # Main's shared token union also includes independent one-token
             # draft graphs up to max_num_seqs (#63406). Keep the communication
