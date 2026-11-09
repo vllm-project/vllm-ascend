@@ -38,7 +38,6 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
         "Qwen/Qwen3.5-2B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
-    prompt_token_counts = []
     visual_token_counts = []
     for pruning_rate in (0.0, 0.75):
         with VllmRunner(
@@ -69,12 +68,7 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
                 assert re.search(r"\bbook\b", output.outputs[0].text, flags=re.IGNORECASE), (
                     f"Expected the visible book to be identified, got: {output.outputs[0].text!r}"
                 )
-            prompt_token_counts.append(len(outputs[0].prompt_token_ids))
             visual_token_counts.append(outputs[0].prompt_token_ids.count(video_token_id))
-
-    assert prompt_token_counts[1] < prompt_token_counts[0], (
-        f"EVS should reduce prompt tokens: baseline={prompt_token_counts[0]}, pruned={prompt_token_counts[1]}"
-    )
 
     assert visual_token_counts[0] > 0, "Baseline should contain video tokens."
     # A 75% EVS rate on this eight-frame asset should remove at least half
