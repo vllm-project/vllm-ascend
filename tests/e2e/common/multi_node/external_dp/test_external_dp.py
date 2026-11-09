@@ -219,6 +219,10 @@ def _run_spec_decode_acceptance_ext(
 
 def test_external_dp() -> None:
     config = ExternalDPConfigLoader.from_yaml()
+    if config.test_name == "DeepSeek-V4.1-Flash-w8a8-PD-MRV2":
+        # Enable advised huge pages for Engram on both nodes of this case only.
+        logger.info("Configuring /dev/shm huge=advise for Engram")
+        subprocess.run(["mount", "-o", "remount,huge=advise", "/dev/shm"], check=True)
     _install_special_dependencies(config)
     ranks = RankResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)
