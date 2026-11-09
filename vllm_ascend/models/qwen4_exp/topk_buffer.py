@@ -3,6 +3,10 @@
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from torch import nn
 
 # Context-local construction state, reset even if model construction fails.
 # Draft models are constructed outside this scope and retain per-layer indices.
@@ -18,13 +22,13 @@ def share_target_topk_buffers(enabled: bool):
         _target_topk_buffers.reset(token)
 
 
-def share_topk_buffer(attention) -> None:
+def share_topk_buffer(attention: "nn.Module") -> None:
     buffers = _target_topk_buffers.get()
     if buffers is None:
         return
     buffer = attention.topk_indices_buffer
     # Keep distinct layouts/devices separate, including heterogeneous layers.
-    key = (tuple(buffer.shape), buffer.dtype, buffer.device)
+    key = (tuple(buffer.shape), buffer.stride(), buffer.dtype, buffer.device)
     shared = buffers.setdefault(key, buffer)
     # Assignment preserves the upstream non-persistent buffer registration.
     attention.topk_indices_buffer = shared
