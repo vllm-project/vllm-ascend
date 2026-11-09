@@ -17,7 +17,6 @@ from functools import partial
 import torch
 from safetensors import safe_open
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
-from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.logger import logger
 from vllm.model_executor.model_loader.weight_utils import (
@@ -215,9 +214,8 @@ def _resolve_expert_tensor(
     return (key, suffix) if key is not None else None
 
 
-def _collect_safetensors_shards(vllm_config: VllmConfig, model: torch.nn.Module) -> list[str]:
+def _collect_safetensors_shards(model_path: str, model: torch.nn.Module) -> list[str]:
     """Collect the safetensors shards the model loads from the local checkpoint directory."""
-    model_path = vllm_config.model_config.model
     if not os.path.isdir(model_path):
         raise RuntimeError(
             f"[FT] scale_down expert reload reads a local checkpoint only, but '{model_path}' is not a directory."
@@ -259,14 +257,15 @@ def _collect_matching_weights(
                 if found is None:
                     continue
                 key, suffix = found
-                matched.add(key)
                 if suffix in wanted_suffixes:
+                    # Only a collected tensor counts as matched.
+                    matched.add(key)
                     expert_weights.setdefault(key, {})[suffix] = f.get_tensor(raw_name)
 
 
 def reload_experts_from_disk(
     model: torch.nn.Module,
-    vllm_config: VllmConfig,
+    model_path: str,
     reassignments: set[tuple[int, int]],
 ) -> int:
     """Reload reassigned (moe_layer_idx, logical_expert_id) weights from disk.
@@ -276,6 +275,11 @@ def reload_experts_from_disk(
     back. Only experts landing in this rank's physical block are reloaded, into
     the slot from ``eplb_state.logical_to_physical_map`` after
     ``_commit_eplb_maps``.
+
+    ``model_path`` is the checkpoint directory ``model`` was loaded from, which
+    for a drafter can differ from the target's (a separate draft checkpoint).
+    Layer names, placement maps, shards, and checkpoint name normalization
+    come from ``model``.
     """
     if not reassignments:
         return 0
@@ -313,12 +317,9 @@ def reload_experts_from_disk(
     matched: set[tuple[int, int]] = set()
 
     logger.info("[FT] Reloading %d reassigned (layer, expert) pair(s) on this rank from disk.", len(local_slots))
-    shards = _collect_safetensors_shards(vllm_config, model)
+    shards = _collect_safetensors_shards(model_path, model)
     if not shards:
-        raise RuntimeError(
-            "[FT] scale_down expert reload requires a safetensors checkpoint; "
-            f"{vllm_config.model_config.model} has none."
-        )
+        raise RuntimeError(f"[FT] scale_down expert reload requires a safetensors checkpoint; {model_path} has none.")
     _collect_matching_weights(shards, name_mapper, wanted, _WANTED_SUFFIXES, expert_weights, matched)
     # A pair with no checkpoint weight would silently keep its slot's previous occupant, so fail.
     unmatched = [layer_expert for layer_expert in local_slots if layer_expert not in matched]
