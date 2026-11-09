@@ -287,18 +287,18 @@ class TestSkipInApprovals:
     def test_skip_overrides_active_rule(self):
         # /tests is actively owned, but the later SKIP(owner) /tests/ut/
         # carves out a deliberately-unowned subtree.
-        rules = gate.parse_codeowners("/tests @wenjun91\n" "# SKIP(owner): /tests/ut/\n" "# SKIP(owner): /tests/ut/\n")
+        rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n# SKIP(owner): /tests/ut/\n")
         failures = gate.check_approvals(1, "author", rules, ["tests/ut/foo.py"], {})
         assert failures == []
 
     def test_active_outside_skip_still_gated(self):
-        rules = gate.parse_codeowners("/tests @wenjun91\n" "# SKIP(owner): /tests/ut/\n")
+        rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n")
         failures = gate.check_approvals(1, "author", rules, ["tests/e2e/foo.py"], {})
         assert any("wenjun91" in f for f in failures)
 
     def test_skip_before_active_does_not_win(self):
         # An active rule after the SKIP re-owns the subtree.
-        rules = gate.parse_codeowners("# SKIP(owner): /tests/ut/\n" "# /tests/ut/\n" "/tests @wenjun91\n")
+        rules = gate.parse_codeowners("# SKIP(owner): /tests/ut/\n# /tests/ut/\n/tests @wenjun91\n")
         owners, skipped = gate.resolve_owners(rules, "tests/ut/foo.py")
         assert not skipped and owners == ["@wenjun91"]
 
