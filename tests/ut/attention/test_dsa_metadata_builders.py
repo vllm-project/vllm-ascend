@@ -52,8 +52,9 @@ def make_builder(cls, ratio=0):
     builder.start_pos_prefill = torch.full((4,), -1, dtype=torch.int32)
     builder.qli_seqused_k = torch.full((4,), -1, dtype=torch.int32)
     builder.qli_cmp_residual_k = torch.full((4,), -1, dtype=torch.int32)
-    builder.sas_metadata_buffer = torch.zeros(dsa_v1.DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
-    builder.qli_metadata_buffer = torch.zeros_like(builder.sas_metadata_buffer)
+    builder.sas_metadata_buffer_size = dsa_v1.SAS_METADATA_BUFFER_SIZE
+    builder.sas_metadata_buffer = torch.zeros(builder.sas_metadata_buffer_size, dtype=torch.int32)
+    builder.qli_metadata_buffer = torch.zeros(dsa_v1.QLI_METADATA_BUFFER_SIZE, dtype=torch.int32)
     builder.seqused_q = torch.zeros(4, dtype=torch.int32)
     builder.cu_seqlens_ori_kv = torch.zeros(4, dtype=torch.int32)
     builder.cu_seqlens_cmp_kv = torch.zeros(4, dtype=torch.int32)
@@ -98,7 +99,7 @@ class TestDSAMetadataBuilders(TestCase):
         )
         self.sas_op = Mock(
             side_effect=lambda **kw: torch.full(
-                (dsa_v1.DSA_METADATA_BUFFER_SIZE,),
+                (dsa_v1.SAS_METADATA_BUFFER_SIZE,),
                 2 if kw["ori_mask_mode"] == 0 else 1,
                 dtype=torch.int32,
             )
@@ -108,7 +109,7 @@ class TestDSAMetadataBuilders(TestCase):
                 torch.ops._C_ascend,
                 "npu_quant_lightning_indexer_v2_metadata",
                 create=True,
-                return_value=torch.ones(dsa_v1.DSA_METADATA_BUFFER_SIZE, dtype=torch.int32),
+                return_value=torch.ones(dsa_v1.QLI_METADATA_BUFFER_SIZE, dtype=torch.int32),
             )
         )
         plan = SimpleNamespace(
