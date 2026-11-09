@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,6 +41,11 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     def register_connector(*_args):
         registration_order.append("connector")
 
+    tracker_context: AbstractContextManager[MagicMock | None]
+    if hasattr(upstream, "get_replayssm_block_copy_tensors"):
+        tracker_context = patch.object(upstream, "get_replayssm_block_copy_tensors", return_value=trackers)
+    else:
+        tracker_context = nullcontext(None)
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
@@ -52,11 +57,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         patch.object(upstream, "ModelCudaGraphManager"),
         patch.object(upstream, "check_attention_cp_compatibility"),
         patch.object(upstream, "init_kv_cache", return_value=caches),
-        (
-            patch.object(upstream, "get_replayssm_block_copy_tensors", return_value=trackers)
-            if hasattr(upstream, "get_replayssm_block_copy_tensors")
-            else nullcontext(None)
-        ) as collect_trackers,
+        tracker_context as collect_trackers,
         patch.object(upstream, "get_kv_connector", side_effect=register_connector) as connector,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
