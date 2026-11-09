@@ -121,6 +121,10 @@ class NPUPlatform(Platform):
         "mxfp8",
     ]
 
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+
     @property
     def pass_key(self) -> str:
         """
@@ -140,10 +144,6 @@ class NPUPlatform(Platform):
             from vllm_ascend._310p.worker.v2.sample.dispatch import register_sampling_kernel_overrides
 
             register_sampling_kernel_overrides()
-
-    @classmethod
-    def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
-        return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
