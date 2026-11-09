@@ -54,16 +54,19 @@ class TestParse:
 class TestMatching:
     def test_dir_prefix(self, rules):
         rule = gate.match_rule(rules, "vllm_ascend/device/foo.py")
-        assert rule.pattern == "vllm_ascend/device"
+        assert rule is not None and rule.pattern == "vllm_ascend/device"
 
     def test_glob(self, rules):
-        assert gate.match_rule(rules, "vllm_ascend/ops/foo.py").owners == ["@carol"]
+        rule = gate.match_rule(rules, "vllm_ascend/ops/foo.py")
+        assert rule is not None and rule.owners == ["@carol"]
         assert gate.match_rule(rules, "vllm_ascend/ops/sub/foo.py") is None
 
     def test_last_match_wins(self):
         rules = gate.parse_codeowners("/a @x\n/a/b @y\n")
-        assert gate.match_rule(rules, "a/b/c.py").owners == ["@y"]
-        assert gate.match_rule(rules, "a/z.py").owners == ["@x"]
+        rule = gate.match_rule(rules, "a/b/c.py")
+        assert rule is not None and rule.owners == ["@y"]
+        other = gate.match_rule(rules, "a/z.py")
+        assert other is not None and other.owners == ["@x"]
 
 
 class TestApprovals:
