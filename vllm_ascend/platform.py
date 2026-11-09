@@ -1955,6 +1955,18 @@ def _validate_model_pcp_dcp_config(
 def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
     """Validate GQA/MQA PCP+DCP sizes for the target model."""
     parallel_config = vllm_config.parallel_config
+    model_config = vllm_config.model_config
+    if (
+        parallel_config.decode_context_parallel_size > 1
+        and not getattr(model_config, "use_mla", False)
+        and not model_uses_sfa_sparse(model_config)
+    ):
+        logger.warning_once(
+            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
+            "and has entered the sunset process. It will be removed in a future release. "
+            "GQA draft models can maintain native TP sharding under target DCP. "
+            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        )
     _validate_model_pcp_dcp_config(
         vllm_config.model_config,
         parallel_config.prefill_context_parallel_size,

@@ -715,6 +715,12 @@ class AscendConfig:
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
             max_batched = vc.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
