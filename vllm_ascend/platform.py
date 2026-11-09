@@ -1358,6 +1358,16 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             cudagraph_mode,
         )
         compilation_config.cudagraph_mode = cudagraph_mode
+    if (
+        model_config
+        and model_config.pooler_config is not None
+        and not getattr(model_config, "enforce_eager", False)
+        and ascend_config.ascend_compilation_config.enforce_pooling_mode_full_graph
+    ):
+        logger.info_once(
+            "Pooling model is forced to use full graph: setting CUDAGraphMode to FULL."
+        )
+        compilation_config.cudagraph_mode = CUDAGraphMode.FULL
 
 
 def _setup_compile_backend(

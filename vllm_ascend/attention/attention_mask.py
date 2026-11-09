@@ -37,6 +37,9 @@ class AttentionMaskBuilder:
         self._seq_len_cached = 0
         self.device = device
         self.chunked_prefill_attn_mask = None
+        # Persistent device attention mask, key=(shape, dtype, device).
+        self.attn_mask_device_cache_enabled = _get_attn_mask_device_cache_enabled()
+        self.attn_mask_device_cache = {}
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
@@ -45,6 +48,19 @@ class AttentionMaskBuilder:
         assert self.attn_mask_cache is not None, "Something is wrong in generate_attn_mask."
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
+        if self.attn_mask_device_cache_enabled:
+            key = (max_seq_len, dtype, self.device)
+            attn_mask = self.attn_mask_device_cache.get(key)
+            # Save attention mask to device.
+            if attn_mask is None:
+                attn_mask = torch.empty(
+                    (max_seq_len, max_seq_len), dtype=dtype, device=self.device
+                )
+                self.attn_mask_device_cache[key] = attn_mask
+            attn_mask.copy_(
+                self.attn_mask_cache[:max_seq_len, :max_seq_len], non_blocking=True
+            )
+            return attn_mask
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous().to(self.device, non_blocking=True)
 
     def get_splitfuse_attn_mask(self) -> torch.Tensor:
@@ -68,3 +84,11 @@ class AttentionMaskBuilder:
             return self.get_attn_mask(2048, torch.bool)
 
         return self.get_splitfuse_attn_mask()
+
+def _get_attn_mask_device_cache_enabled():
+    from vllm_ascend.ascend_config import get_ascend_config
+    try:
+        config = get_ascend_config()
+    except RuntimeError:
+        return False
+    return bool(config.ascend_compilation_config.enforce_pooling_mode_full_graph)

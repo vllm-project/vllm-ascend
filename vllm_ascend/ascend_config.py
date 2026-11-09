@@ -122,6 +122,7 @@ class AscendCompilationConfig:
     enable_npugraph_ex: bool = True
     enable_static_kernel: bool = False
     enable_super_kernel: bool = False
+    enforce_pooling_mode_full_graph: bool = False
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
