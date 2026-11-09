@@ -784,7 +784,8 @@ class LoadSpec:
     layerwise_snapshot_block_index: int | None = None
     # Distinguish the preceding step of this request from external prefix hits.
     layerwise_previous_step: bool = False
-    # First block stored under request-scoped keys, including unhashed full blocks.
+    # First request-scoped block in cache_transfer_granularity units,
+    # including unhashed full blocks; workers project it into each group.
     layerwise_snapshot_start_block: int | None = None
 
 
@@ -798,6 +799,9 @@ class RequestTracker:
     # The block ids that has been allocated so far, grouped by KV cache group.
     # NOTE: allocated blocks could be more than the number of tokens.
     allocated_block_ids_by_group: list[list[int]]
+
+    # Namespace for request-scoped snapshots; renewed after preemption/reuse.
+    layerwise_request_id: str | None = None
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -935,6 +939,8 @@ class ReqMeta:
 
     block_hashes: list[BlockHash]
 
+    layerwise_request_id: str | None = None
+
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
 
@@ -1001,10 +1007,12 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        layerwise_request_id: str | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
+        self.layerwise_request_id = layerwise_request_id
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
@@ -1199,6 +1207,7 @@ class ReqMeta:
         logger.debug("request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not skip_save, load_spec)
         return ReqMeta(
             req_id=tracker.req_id,
+            layerwise_request_id=tracker.layerwise_request_id,
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,

@@ -164,6 +164,7 @@ def make_worker(
         config.speculative_config = None
     config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
+    config.kv_transfer_config.kv_connector = "AscendStoreConnector"
     config.kv_transfer_config.kv_connector_extra_config = {
         "backend": "mooncake",
         **(extra_config or {}),

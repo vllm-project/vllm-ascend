@@ -352,3 +352,113 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
+
+
+@pytest.mark.parametrize("buffers", [1, 2])
+def test_mooncake_glm_main_packs_reuse_preserves_resident_auxiliary_capacity(buffers):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+        apply_layerwise_kv_cache_plan,
+    )
+
+    config = make_config()
+    config.model_config.get_num_layers = lambda parallel: 12
+    config.parallel_config.tensor_parallel_size = 8
+    config.parallel_config.enable_expert_parallel = True
+    config.speculative_config = None
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "backend": "mooncake",
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": buffers,
+            "layerwise_independent_layers": [],
+        },
+    )
+    specs = {}
+    for offset in (0, 4, 8):
+        for name, spec in make_specs().items():
+            layer = int(name.split("layers.")[1].split(".")[0])
+            name = name.replace(f"layers.{layer}.", f"layers.{layer + offset}.")
+            specs[name] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    byte_cost = get_glm5_next_pool_bytes_per_block(groups, config)
+    plan = get_glm5_next_kv_cache_config(config, groups, byte_cost * 9)
+    assert plan.num_blocks == 9
+    assert len(plan.kv_cache_tensors) == buffers + 3
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == byte_cost * 9
+    assert len(plan.layerwise_cache_topology.main_packs) == 3
+    assert len(plan.layerwise_reuse_layout.buffer_slots) == buffers
+    names = [name for tensor in plan.kv_cache_tensors for name in tensor.layers]
+    assert sorted(names) == sorted(specs)
+    for tensor in plan.kv_cache_tensors:
+        if any("indexer" in name for name in tensor.layers):
+            assert len(tensor.layers) == 2
+            assert all("indexer" in name for name in tensor.layers)
+    tensors = plan.kv_cache_tensors
+    apply_layerwise_kv_cache_plan(plan, config)
+    assert plan.kv_cache_tensors is tensors
+
+
+@pytest.mark.parametrize("method", ["deepseek_mtp", "dspark"])
+@pytest.mark.parametrize("speculative_blocks", [0, 3])
+def test_mooncake_glm_speculative_state_and_draft_cache_remain_resident(method, speculative_blocks):
+    config = make_config()
+    config.model_config.get_num_layers = lambda parallel: 16
+    config.parallel_config.tensor_parallel_size = 8
+    config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=3)
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "backend": "mooncake",
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [0],
+        },
+    )
+    specs = {}
+    for offset in (0, 4, 8, 12, 16):
+        for name, spec in make_specs().items():
+            layer = int(name.split("layers.")[1].split(".")[0])
+            if offset == 16 and layer != 3:
+                continue
+            index = 16 if offset == 16 else layer + offset
+            name = name.replace(f"layers.{layer}.", f"layers.{index}.")
+            specs[name] = (
+                replace(spec, mamba_cache_mode="align", num_speculative_blocks=speculative_blocks)
+                if isinstance(spec, MambaSpec)
+                else spec
+            )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    byte_cost = get_glm5_next_pool_bytes_per_block(groups, config)
+    plan = get_glm5_next_kv_cache_config(config, groups, byte_cost * 9)
+    assert plan.layerwise_kv_cache_reuse
+    assert sum(t.size for t in plan.kv_cache_tensors) == byte_cost * 9
+    recurrent = {
+        int(name.split("layers.")[1].split(".")[0]) for name, spec in specs.items() if isinstance(spec, MambaSpec)
+    }
+    layout = plan.layerwise_reuse_layout
+    assert recurrent <= set(layout.independent_layers)
+    assert not recurrent.intersection(layout.prefetch_layer_map)
+    assert not recurrent.intersection(layout.prefetch_layer_map.values())
+    assert set(plan.layerwise_draft_layer_names) == {name for name in specs if "layers.16." in name}
+    for tensor in plan.kv_cache_tensors:
+        if any(name in plan.layerwise_draft_layer_names for name in tensor.layers):
+            assert all(name in plan.layerwise_draft_layer_names for name in tensor.layers)
+
+
+def test_worker_preserves_generic_mtp_draft_bytes_in_reuse_budget():
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.model_config = SimpleNamespace(get_num_layers=lambda parallel: 4)
+    worker.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
+    worker.vllm_config = SimpleNamespace(speculative_config=SimpleNamespace(method="deepseek_mtp"))
+    extra = {"backend": "mooncake", "layerwise_num_shared_buffers": 1, "layerwise_independent_layers": []}
+    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.int8)
+    specs = {f"model.layers.{i}.attn": spec for i in range(5)}
+    # Four target pages fold into one slot; the native MTP page stays resident.
+    assert worker._get_layerwise_kv_cache_memory_info(specs, extra) == (4, 1, 2.5)
