@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
-from vllm.distributed.eplb.eplb_state import _commit_eplb_maps
+from vllm.distributed.eplb.eplb_state import EplbModelState, _commit_eplb_maps
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_ep_group,
@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.utils import set_gloo_backend_timeout
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.sentinel.eplb_redistribute import (
@@ -156,6 +157,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down requires EPLB with num_redundant_experts > 0 to re-host the dead rank's experts."
             )
+        self._resolve_drafter()
         ascend_config = get_ascend_config()
         if ascend_config.enable_fused_mc2:
             raise ValueError(
@@ -182,37 +184,83 @@ class WorkerSentinel(GPUWorkerSentinel):
         dead slots, steal spare slots, rebuild the logical maps) are kept; on
         top of that, refreshes the Ascend kernel-facing routing tables into
         the densified id space and shrinks the MC2 physical-expert width.
+
+        Each EPLB-registered model (main model and drafter) is redistributed
+        against its own placement and reloaded from its own checkpoint; results
+        are never shared across models.
         """
         model_runner = self.worker.model_runner
-        eplb_model_state = self._eplb_model_state()
 
-        p2l = eplb_model_state.physical_to_logical_map
-        num_logical = eplb_model_state.logical_replica_count.shape[1]
-        ep_world_size = get_ep_group().world_size
-        num_local_experts = p2l.shape[1] // ep_world_size
+        models: list[tuple[torch.nn.Module, EplbModelState, str]] = [
+            (model_runner.model, self._eplb_model_state(), self.worker.vllm_config.model_config.model)
+        ]
+        drafter = self._resolve_drafter()
+        if drafter is not None:
+            draft_layer = drafter[1].model.moe_layers[0]
+            draft_ep_size = getattr(draft_layer, "routed_experts", draft_layer).moe_config.ep_size
+            target_ep_size = get_ep_group().world_size
+            if draft_ep_size != target_ep_size:
+                raise ValueError(
+                    f"[FT] scale_down requires the drafter's EP size ({draft_ep_size}) to match the "
+                    f"target's ({target_ep_size}); otherwise expert weights are reloaded into the "
+                    f"wrong physical slots."
+                )
+            models.append(drafter)
+
+        for model, model_state, model_path in models:
+            self._redistribute_model(model, model_state, model_path, dead_ep_ranks)
+
+    def _redistribute_model(
+        self,
+        model: torch.nn.Module,
+        model_state: EplbModelState,
+        model_path: str,
+        dead_ep_ranks: set[int],
+    ) -> None:
+        """Redistribute one model and reload through its checkpoint namespace.
+
+        ``model`` owns the checkpoint name mapper and may wrap ``model_state.model``.
+        """
+        p2l = model_state.physical_to_logical_map
+        num_logical = model_state.logical_replica_count.shape[1]
+        num_local_experts = p2l.shape[1] // get_ep_group().world_size
 
         mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
         reassignments = redistribute_expert_placement(p2l, num_logical, num_local_experts)
-        # p2l was updated in place; the commit derives l2p/lrc from it.
-        _commit_eplb_maps(eplb_model_state, p2l.cpu())
-        # Keep the model-side expert map: slot ownership is unchanged, and the
-        # map is physical-id indexed, so p2l (logical ids) must not be written into it.
-
-        if reassignments:
-            reload_experts_from_disk(model_runner.model, self.worker.vllm_config, reassignments)
-
         logger.info(
-            "[FT] Expert redistribution: num_logical=%d, ep_world_size=%d, reassignments=%d",
+            "[FT] %s expert redistribution: moe_layers=%d, num_logical=%d, reassignments=%d",
+            type(model).__name__,
+            p2l.shape[0],
             num_logical,
-            ep_world_size,
             len(reassignments),
         )
+        _commit_eplb_maps(model_state, p2l.cpu())
+        # Keep the model-side expert map: slot ownership is unchanged, and the
+        # map is physical-id indexed, so p2l (logical ids) must not be written into it.
+        if reassignments:
+            reload_experts_from_disk(model, model_path, reassignments)
+        refresh_model_routing_tables(model_state)
+        self._densify_routing_tables(model_state)
 
-        # Propagate the new placement into the Ascend routing tables (in-place,
-        # so captured graphs keep pointing at valid storage), then renumber
-        # their ids into the densified space for the MC2 kernels.
-        refresh_model_routing_tables(eplb_model_state)
-        self._densify_routing_tables(eplb_model_state)
+    def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, str] | None:
+        """Resolve a drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
+        model_runner = self.worker.model_runner
+        drafter = getattr(getattr(model_runner, "speculator", None), "model", None)
+        draft_moe = get_mixture_of_experts_model(drafter)
+        if draft_moe is None and not getattr(drafter, "moe_layers", None):
+            return None
+
+        for model_state in model_runner.eplb_state.model_states.values():
+            if model_state.model is draft_moe:
+                speculative_config = self.worker.vllm_config.speculative_config
+                if speculative_config is None or speculative_config.draft_model_config is None:
+                    raise ValueError("[FT] scale_down requires draft_model_config for an EPLB-registered drafter.")
+                return drafter, model_state, speculative_config.draft_model_config.model
+
+        raise ValueError(
+            "[FT] scale_down requires the MoE drafter to be registered with EPLB; "
+            "otherwise its expert placement would keep pointing at dead ranks."
+        )
 
     def _densify_routing_tables(self, eplb_model_state) -> None:
         """Renumber the kernel-facing routing tables into the densified id space.
