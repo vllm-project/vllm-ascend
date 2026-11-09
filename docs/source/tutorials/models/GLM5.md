@@ -1113,7 +1113,7 @@ if __name__ == "__main__":
             "kv_port": "30000",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1175,7 +1175,7 @@ if __name__ == "__main__":
             "kv_port": "30000",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1233,7 +1233,7 @@ if __name__ == "__main__":
             "kv_port": "30200",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
@@ -1291,7 +1291,7 @@ if __name__ == "__main__":
             "kv_port": "30200",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pcp_size": 16, "pp_layer_partition": "41,37"},
                 "decode": {"dp_size": 8, "tp_size": 4}
             }
         }'
