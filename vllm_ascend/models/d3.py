@@ -36,7 +36,7 @@ class AscendD3ForSequenceClassification(_AscendVLPreprocessMixin, D3ForSequenceC
 
     # `is_unused_checkpoint_weight` must stay directly callable on the class (see
     # `tests/ut/models/test_d3_registration.py`); upstream defines it as a plain
-    # instance method, so re-declare it as `staticmethod` here rather than
+    # instance method, so redeclare it as `staticmethod` here rather than
     # reusing `super()`'s version, which needs a bound instance.
     @staticmethod
     def is_unused_checkpoint_weight(name: str) -> bool:
