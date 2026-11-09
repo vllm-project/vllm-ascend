@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -82,6 +82,7 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
+    _is_glm_model,
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
     enable_sfa,
@@ -157,6 +158,25 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
+        """Publish the complete cache demand using the selected execution format."""
+        spec = super().get_kv_cache_spec(vllm_config)
+        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
+        storage_heads = self.num_heads
+        if _is_glm_model(vllm_config.model_config) or model_type == "kimi_linear":
+            # The planner counts physical latent slots. Query heads remain on
+            # the attention layer and its execution backend.
+            storage_heads = spec.num_heads
+        values.update(
+            num_heads=storage_heads,
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
+        )
+        return self.impl.apply_kv_cache_layout(AscendMLAAttentionSpec(**values))
 
 
 @dataclass
@@ -1015,6 +1035,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+    def apply_kv_cache_layout(self, spec: AscendMLAAttentionSpec) -> AscendMLAAttentionSpec:
+        """Describe the format already selected by this execution instance."""
+        if self.fa_quant_layer:
+            # Retain the existing FA quant storage width, including RoPE.
+            return replace(
+                spec,
+                head_size=self.head_size + self.qk_rope_head_dim,
+                dtype=self.dtype,
+                cache_dtype_str=None,
+            )
+        return spec
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar, TypeVar
 
 import torch
@@ -48,6 +48,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -862,6 +863,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # - C8 indexer cache for lightning indexer.
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
+        self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
+        self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.enable_sparse_sfa_c8:
@@ -911,6 +914,26 @@ class AscendSFAImpl(MLAAttentionImpl):
                     exc,
                 )
                 self.enable_pcp_o_proj_weight_sharding = False
+
+    def apply_kv_cache_layout(self, spec: AscendMLAAttentionSpec) -> AscendMLAAttentionSpec:
+        """Publish the packed width already used by SFA cache writes and reads."""
+        if self.enable_sparse_sfa_turboquant:
+            spec = replace(
+                spec,
+                head_size=self.sfa_qsfa_packed_kv_head_dim,
+                dtype=torch.int8,
+                cache_dtype_str=self.kv_cache_dtype,
+                cache_sparse_sfa_turboquant=True,
+            )
+        elif self.enable_sparse_sfa_c8:
+            spec = replace(
+                spec,
+                head_size=self.sfa_qsfa_packed_kv_head_dim,
+                dtype=self.c8_cache_dtype,
+                cache_dtype_str=self.kv_cache_dtype,
+                cache_sparse_sfa_c8=True,
+            )
+        return replace(spec, store_on_host=self.store_kv_cache_on_host)
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:

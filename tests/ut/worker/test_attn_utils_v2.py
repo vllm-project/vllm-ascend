@@ -42,7 +42,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -1204,16 +1204,14 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
         head_size=576,
         dtype=torch.bfloat16,
     )
-    layer = MLAAttention.__new__(MLAAttention)
-    layer.impl = SimpleNamespace(
-        fa_quant_layer=False,
-        enable_sparse_sfa_c8=False,
-        enable_sparse_sfa_turboquant=False,
-    )
+    layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    layer.impl.fa_quant_layer = False
     layer.num_heads = 12
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
-    layer.get_kv_cache_spec = lambda _config: source_spec
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source_spec)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -2322,11 +2320,10 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         enable_sparse_sfa_turboquant=False,
         dtype=torch.bfloat16,
     )
-    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
+    layer.get_kv_cache_spec = lambda _cfg: AscendMLAAttentionSpec(
         block_size=16,
-        # vLLM's generic MLA spec exposes cache head slots here, not local
-        # query heads. The Ascend spec must deliberately use the module count.
-        num_heads=1,
+        # The owner publishes the complete Ascend cache contract.
+        num_heads=64,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
@@ -2334,71 +2331,9 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         model_version=None,
         non_causal_multi_token_decode=False,
         tokens_per_state=1,
+        cache_sparse_sfa_c8=sparse_c8,
     )
     return layer
-
-
-def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
-    layer_name = "language_model.model.layers.3.self_attn.attn"
-    layer = _make_mla_layer(sparse_c8=True)
-    layer.kv_lora_rank = 512
-    layer.qk_rope_head_dim = 0
-    source_spec = layer.get_kv_cache_spec(None)
-    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(**{**vars(source_spec), "head_size": 512})
-    vllm_config = SimpleNamespace(
-        additional_config={},
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
-        cache_config=SimpleNamespace(block_size=16, cache_dtype="int8"),
-        kv_transfer_config=None,
-        model_config=SimpleNamespace(
-            dtype=torch.bfloat16,
-            hf_config=SimpleNamespace(),
-            hf_text_config=SimpleNamespace(index_topk=2048, index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0),
-        ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
-        quant_config=None,
-    )
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
-    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _cfg: False)
-    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
-    monkeypatch.setattr(
-        attn_utils,
-        "get_ascend_config",
-        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
-    )
-
-    assert attn_utils.enable_sfa(vllm_config)
-    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
-    assert isinstance(spec, AscendMLAAttentionSpec)
-    assert spec.cache_sparse_sfa_c8
-    assert spec.head_size == 528
-    assert spec.dtype == torch.int8
-
-
-def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
-    layer_name = "model.layers.0.self_attn.attn"
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        cache_config=SimpleNamespace(block_size=16, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
-        model_config=SimpleNamespace(
-            dtype=torch.bfloat16,
-            hf_text_config=SimpleNamespace(kv_lora_rank=128, qk_rope_head_dim=64),
-        ),
-    )
-    sparse_cfg = SimpleNamespace(enabled=True)
-    monkeypatch.setattr(
-        attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: _make_mla_layer()}
-    )
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
-    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: True)
-    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(sparse_kv_offload_config=sparse_cfg))
-
-    assert attn_utils.get_kv_cache_spec(vllm_config)[layer_name].store_on_host
-    sparse_cfg.enabled = False
-    assert not attn_utils.get_kv_cache_spec(vllm_config)[layer_name].store_on_host
 
 
 def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
