@@ -63,7 +63,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     masked_block_runs,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import RecvTraceSession
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import (
+    RecvTraceSession,
+    trace_session_path,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
@@ -478,7 +481,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if self.kv_recv_thread is not None and self.kv_recv_thread.recv_trace is not None:
                 try:
                     self.kv_recv_thread.recv_trace.close()
-                except OSError:
+                except Exception:
                     logger.exception("Failed to write layerwise receive trace")
             if self._step_load_keys:
                 result = self.m_store.batch_remove_lease(list(self._step_load_keys))
@@ -577,7 +580,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if trace_path:
             self.kv_recv_thread.recv_trace = RecvTraceSession(
                 self.kv_recv_thread,
-                str(trace_path) + f".tp{self.tp_rank}.pid{os.getpid()}.json",
+                trace_session_path(str(trace_path), self.tp_rank),
                 self._extra_config.get("layerwise_trace_capacity", 100000),
                 float(self._extra_config.get("layerwise_trace_interval_ms", 1)),
                 metrics_probe=lambda: {

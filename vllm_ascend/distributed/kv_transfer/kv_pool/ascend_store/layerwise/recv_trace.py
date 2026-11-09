@@ -11,6 +11,7 @@ timestamps or proof of uninterrupted readiness between samples.
 from __future__ import annotations
 
 import json
+import os
 import resource
 import sys
 import threading
@@ -19,9 +20,15 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 Readiness = Mapping[str, bool | None]
 TRACE_FLUSH_INTERVAL_S = 5.0
+
+
+def trace_session_path(prefix: str, tp_rank: int) -> str:
+    """Keep worker snapshots distinct even with shared paths and PID namespaces."""
+    return f"{prefix}.tp{tp_rank}.pid{os.getpid()}.{uuid4().hex}.json"
 
 
 @dataclass
@@ -282,10 +289,13 @@ class RecvTraceSession:
                 if self._waiting:
                     self.timeline.sample()
                 if self.metrics_probe is not None and time.monotonic() >= next_metrics:
-                    fields = dict(self.metrics_probe())
-                    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                    fields["host_peak_rss_bytes"] = int(rss if sys.platform == "darwin" else rss * 1024)
-                    self.timeline.mark(-1, "resources", **fields)
+                    try:
+                        fields = dict(self.metrics_probe())
+                        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                        fields["host_peak_rss_bytes"] = int(rss if sys.platform == "darwin" else rss * 1024)
+                        self.timeline.mark(-1, "resources", **fields)
+                    except Exception as exc:
+                        self.timeline.mark(-1, "metrics_error", error=type(exc).__name__)
                     next_metrics = time.monotonic() + 0.1
                 if time.monotonic() >= next_flush:
                     self._flush()
