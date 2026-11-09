@@ -27,6 +27,8 @@ from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
+    _mx_quantize,
+    requantize_block_fp8_to_mx_inplace,
     resolve_block_scales,
 )
 from vllm_ascend.weight_switch import (
@@ -57,6 +59,25 @@ def make_block_weight(out_features, in_features, block_n, block_k, seed=0):
     weight = torch.randn(out_features, in_features, generator=generator).to(torch.float8_e4m3fn)
     scale_inv = torch.rand((out_features + block_n - 1) // block_n, (in_features + block_k - 1) // block_k) + 0.5
     return weight, scale_inv
+
+
+def mx_quant_stand_in(tensor, **kwargs):
+    """Value-dependent stand-in for ``npu_dynamic_mx_quant``.
+
+    Groups run along the last dim and the shared exponent comes from the group's
+    own values, so a band loop that dropped, duplicated or misplaced rows would
+    produce different bytes instead of matching a constant. The scale is handed
+    back with the group axis split into pairs, the layout the real operator uses
+    and ``_mx_quantize`` flattens.
+    """
+    rows, cols = tensor.shape
+    groups = tensor.float().reshape(rows, cols // MX_GROUP_SIZE, MX_GROUP_SIZE)
+    amax = groups.abs().amax(dim=-1, keepdim=True)
+    exponent = torch.floor(torch.log2(amax.clamp(min=1e-30))) - 8
+    scale = torch.where(amax == 0, torch.ones_like(exponent), torch.pow(2.0, exponent))
+    quantized = (groups / scale).to(torch.float8_e4m3fn).reshape(rows, cols)
+    code = (exponent.reshape(rows, cols // MX_GROUP_SIZE) + 127).clamp(0, 255).to(torch.uint8)
+    return quantized, code.reshape(rows, cols // MX_GROUP_SIZE // 2, 2)
 
 
 class TestResolveBlockScales(TestBase):
@@ -97,6 +118,75 @@ class TestResolveBlockScales(TestBase):
         weight = torch.randn(2, 256, 256).to(torch.float8_e4m3fn)
         with self.assertRaisesRegex(ValueError, "2D"):
             resolve_block_scales(weight, torch.ones(2, 2, 2), 128, 128, torch.bfloat16)
+
+
+class TestRequantizeBlockFp8ToMx(TestBase):
+    """The band loop has to agree with resolving the matrix and quantizing it whole."""
+
+    # 320 rows over 128-row bands gives two full bands and a short one; 256
+    # columns gives an even group count, which the operator's pair layout needs.
+    OUT_FEATURES, IN_FEATURES = 320, 256
+    BLOCK_N, BLOCK_K = 64, 128
+    NUM_GROUPS = IN_FEATURES // MX_GROUP_SIZE
+
+    def _scale_out(self, out_features=None):
+        return torch.empty((out_features or self.OUT_FEATURES, self.NUM_GROUPS), dtype=torch.uint8)
+
+    def test_banding_matches_quantizing_the_whole_matrix(self):
+        weight, scale_inv = make_block_weight(self.OUT_FEATURES, self.IN_FEATURES, self.BLOCK_N, self.BLOCK_K, seed=7)
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_mx_quant.side_effect = mx_quant_stand_in
+            dense = resolve_block_scales(weight, scale_inv, self.BLOCK_N, self.BLOCK_K, torch.bfloat16)
+            want_weight, want_scale = _mx_quantize(dense, 0)
+
+            got_weight, got_scale = weight.clone(), self._scale_out()
+            with patch(f"{MODULE}._ROWS_PER_DEQUANT_STEP", 128):
+                requantize_block_fp8_to_mx_inplace(
+                    got_weight, scale_inv, self.BLOCK_N, self.BLOCK_K, torch.bfloat16, 0, got_scale
+                )
+
+        self.assertTrue(torch.equal(got_weight.view(torch.uint8), want_weight.view(torch.uint8)))
+        self.assertTrue(torch.equal(got_scale, want_scale.to(torch.uint8)))
+
+    def test_every_row_is_converted_exactly_once(self):
+        """The saving: the operator only ever sees bands, so nothing stages the matrix."""
+        weight, scale_inv = make_block_weight(self.OUT_FEATURES, self.IN_FEATURES, self.BLOCK_N, self.BLOCK_K, seed=9)
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_mx_quant.side_effect = mx_quant_stand_in
+            with patch(f"{MODULE}._ROWS_PER_DEQUANT_STEP", 128):
+                requantize_block_fp8_to_mx_inplace(
+                    weight, scale_inv, self.BLOCK_N, self.BLOCK_K, torch.bfloat16, 0, self._scale_out()
+                )
+
+        band_rows = [call.args[0].shape[0] for call in mock_npu.npu_dynamic_mx_quant.call_args_list]
+        self.assertEqual(band_rows, [128, 128, 64])
+        self.assertEqual(sum(band_rows), self.OUT_FEATURES)
+
+    def test_the_fp8_buffer_is_rewritten_in_place(self):
+        weight, scale_inv = make_block_weight(128, self.IN_FEATURES, 128, self.BLOCK_K, seed=8)
+        original_storage = weight.untyped_storage().data_ptr()
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_mx_quant.side_effect = mx_quant_stand_in
+            requantize_block_fp8_to_mx_inplace(
+                weight, scale_inv, 128, self.BLOCK_K, torch.bfloat16, 0, self._scale_out(128)
+            )
+        self.assertEqual(weight.untyped_storage().data_ptr(), original_storage)
+
+    def test_the_band_reaches_the_operator_in_the_requested_dtype(self):
+        weight, scale_inv = make_block_weight(128, self.IN_FEATURES, 128, self.BLOCK_K, seed=10)
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_mx_quant.side_effect = mx_quant_stand_in
+            requantize_block_fp8_to_mx_inplace(
+                weight, scale_inv, 128, self.BLOCK_K, torch.float16, 0, self._scale_out(128)
+            )
+        self.assertEqual(mock_npu.npu_dynamic_mx_quant.call_args.args[0].dtype, torch.float16)
+
+    def test_unpaired_scale_shape_is_rejected(self):
+        weight = torch.randn(256, self.IN_FEATURES).to(torch.float8_e4m3fn)
+        with self.assertRaisesRegex(ValueError, "unpaired"):
+            requantize_block_fp8_to_mx_inplace(
+                weight, torch.ones(2, 3), 128, self.BLOCK_K, torch.bfloat16, 0, self._scale_out(256)
+            )
 
 
 class TestAscendFp8BlockLinearMethod(TestBase):

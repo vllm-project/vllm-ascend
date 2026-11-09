@@ -4,3 +4,9 @@ entries:
     text: Enabled Mistral Large 4 Model Runner V2 graph execution and DSpark speculative decoding on Ascend.
     model: mistral-large-4
     hardware: [Ascend 950]
+  - category: performance
+    text: >-
+      Block-wise FP8 checkpoints now requantize to MXFP8 one row band at a time, so loading a
+      MoE layer no longer holds a dense model-dtype copy of each expert. For a Mistral Large 4
+      expert that staging buffer drops from 151 MB to 13 MB.
+    hardware: [Ascend 950]

@@ -33,6 +33,7 @@ Both paths read the same checkpoint, so no per-model patch or offline
 re-quantization step is needed.
 """
 
+from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -64,19 +65,7 @@ BLOCK_FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 _ROWS_PER_DEQUANT_STEP = 1024
 
 
-def resolve_block_scales(
-    weight: torch.Tensor,
-    scale_inv: torch.Tensor,
-    block_n: int,
-    block_k: int,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Expand a block-wise FP8 matrix into a dense ``out_dtype`` matrix.
-
-    ``weight`` is ``[out_features, in_features]`` and ``scale_inv`` carries one
-    scale per ``block_n x block_k`` tile. The scales stay in float32 during the
-    multiply so a block's shared scale is not itself rounded to bfloat16.
-    """
+def _validate_block_scale_shape(weight: torch.Tensor, scale_inv: torch.Tensor, block_n: int, block_k: int) -> None:
     if weight.dim() != 2:
         raise ValueError(f"Expected a 2D block-quantized weight, got shape {tuple(weight.shape)}.")
 
@@ -90,7 +79,20 @@ def resolve_block_scales(
             "`weight_scale_inv` are mismatched or unpaired."
         )
 
-    resolved = torch.empty((out_features, in_features), dtype=out_dtype, device=weight.device)
+
+def _iter_resolved_bands(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_n: int,
+    block_k: int,
+) -> Iterator[tuple[int, int, torch.Tensor]]:
+    """Yield ``(row_start, row_end, band)`` float32 row bands of a block matrix.
+
+    Bands are cut on ``block_n`` boundaries so one band needs only its own
+    slice of ``scale_inv``, and each band is a fresh tensor: the caller may
+    write back over the rows it was just handed.
+    """
+    out_features, in_features = weight.shape
     rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
     for row_start in range(0, out_features, rows_per_step):
         row_end = min(row_start + rows_per_step, out_features)
@@ -101,8 +103,57 @@ def resolve_block_scales(
         )
         row_scales = row_scales.repeat_interleave(block_n, dim=0)[: row_end - row_start]
         row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
-        resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
+        yield row_start, row_end, weight[row_start:row_end].to(torch.float32) * row_scales
+
+
+def resolve_block_scales(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_n: int,
+    block_k: int,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Expand a block-wise FP8 matrix into a dense ``out_dtype`` matrix.
+
+    ``weight`` is ``[out_features, in_features]`` and ``scale_inv`` carries one
+    scale per ``block_n x block_k`` tile. The scales stay in float32 during the
+    multiply so a block's shared scale is not itself rounded to bfloat16.
+    """
+    _validate_block_scale_shape(weight, scale_inv, block_n, block_k)
+
+    resolved = torch.empty(weight.shape, dtype=out_dtype, device=weight.device)
+    for row_start, row_end, band in _iter_resolved_bands(weight, scale_inv, block_n, block_k):
+        resolved[row_start:row_end] = band
     return resolved
+
+
+def requantize_block_fp8_to_mx_inplace(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_n: int,
+    block_k: int,
+    band_dtype: torch.dtype,
+    scale_alg: int,
+    mx_scale_out: torch.Tensor,
+) -> None:
+    """Rewrite one block-wise FP8 matrix to MXFP8 in place, a band at a time.
+
+    The arithmetic is the same as resolving the whole matrix and quantizing it
+    in one call: an MXFP8 group runs along the reduction dim, and a band only
+    ever splits output rows, so every group still sees all of its own elements
+    and lands on the same shared exponent. What the band loop avoids is the
+    dense ``band_dtype`` copy of the matrix that the resolve-then-quantize
+    pair has to hold -- for a Mistral Large 4 expert that copy is 151 MB of
+    ``w13`` per expert, allocated and read once more on every one of them.
+    """
+    _validate_block_scale_shape(weight, scale_inv, block_n, block_k)
+
+    for row_start, row_end, band in _iter_resolved_bands(weight, scale_inv, block_n, block_k):
+        quantized, band_scale = _mx_quantize(band.to(band_dtype), scale_alg)
+        weight[row_start:row_end].copy_(quantized)
+        mx_scale_out[row_start:row_end].copy_(
+            band_scale.view(torch.uint8).reshape(mx_scale_out[row_start:row_end].shape)
+        )
 
 
 def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -368,8 +419,9 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
     def _requantize_experts_inplace(self, layer: torch.nn.Module, weight_name: str, scale_name: str) -> torch.Tensor:
         """Rewrite every expert of one MoE weight from block-wise FP8 to MXFP8.
 
-        The FP8 weight buffer is reused, so peak memory is one expert of staging
-        rather than a dense copy of the whole expert stack.
+        The FP8 weight buffer is reused and each expert is converted a row band
+        at a time, so the staging buffer is one band rather than a dense copy of
+        either the expert stack or any single expert.
         """
         mxfp8_method = self.mxfp8_method
         if mxfp8_method is None:
@@ -384,12 +436,15 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             device=weight.device,
         )
         for expert in range(num_experts):
-            resolved = resolve_block_scales(
-                weight[expert], scale_inv[expert], self.block_n, self.block_k, self.model_dtype
+            requantize_block_fp8_to_mx_inplace(
+                weight[expert],
+                scale_inv[expert],
+                self.block_n,
+                self.block_k,
+                self.model_dtype,
+                scale_alg,
+                mx_scale[expert],
             )
-            quantized, expert_scale = _mx_quantize(resolved, scale_alg)
-            weight[expert].copy_(quantized)
-            mx_scale[expert].copy_(expert_scale.view(torch.uint8).reshape(mx_scale[expert].shape))
         return mx_scale
 
     def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
