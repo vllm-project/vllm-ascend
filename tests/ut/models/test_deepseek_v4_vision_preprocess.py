@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 import torch
 from PIL import Image
-from transformers import BatchFeature
+from transformers import DeepseekV4Config
+from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails
+from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 
 from vllm_ascend.models.deepseek_v4 import mm_preprocess as prep
 from vllm_ascend.models.deepseek_v4.mm_preprocess import (
@@ -25,7 +26,7 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
 
 class _StubInfo:
     def __init__(self):
-        self.tokenizer = _NonThreadSafeTokenizer()
+        self.tokenizer = _TokenizedPromptTokenizer()
 
     @property
     def ctx(self):
@@ -38,42 +39,17 @@ class _StubInfo:
         return self.tokenizer
 
 
-class _NonThreadSafeTokenizer:
-    def __init__(self, entered=None, release=None):
-        self._state_lock = threading.Lock()
-        self._active = False
-        self._entered = entered
-        self._release = release
+class _TokenizedPromptTokenizer:
+    def convert_tokens_to_ids(self, token):
+        if token == prep.IMAGE_PLACEHOLDER:
+            return 7
+        return prep.IMAGE_SENTINEL_BASE_ID + prep.IMAGE_SENTINEL_TOKEN_NAMES.index(token)
 
-    def __deepcopy__(self, memo):
-        return _NonThreadSafeTokenizer()
+    def __call__(self, *args, **kwargs):
+        raise AssertionError("The renderer has already tokenized the prompt")
 
-    def __call__(self, prompt, return_tensors, **kwargs):
-        with self._state_lock:
-            if self._active:
-                raise RuntimeError("Already borrowed")
-            self._active = True
-        try:
-            if self._entered is not None:
-                self._entered.set()
-            if self._release is not None:
-                self._release.wait(timeout=1)
-            time.sleep(0.01)
-            return {"input_ids": torch.tensor([[1]])}
-        finally:
-            with self._state_lock:
-                self._active = False
-
-
-class _ConcurrentStubInfo(_StubInfo):
-    def __init__(self):
-        self.tokenizer = _NonThreadSafeTokenizer()
-
-    def get_hf_processor(self, **kwargs):
-        return lambda **processor_kwargs: BatchFeature({})
-
-    def get_tokenizer(self):
-        return self.tokenizer
+    def encode(self, *args, **kwargs):
+        raise AssertionError("The renderer has already tokenized the prompt")
 
 
 @pytest.fixture
@@ -164,7 +140,8 @@ def test_local_image_processor_builds_vit_and_llm_inputs():
     assert output["perm"].numel() == output["llm_grid"].prod().item()
 
 
-def test_v027_prompt_updates_add_position_dependent_compress_pad():
+@pytest.mark.parametrize("start_pos", range(COMPRESS_PAD_TO))
+def test_prompt_updates_add_position_dependent_compress_pad(start_pos):
     base = prep.IMAGE_SENTINEL_BASE_ID
     image_token_id = 7
     n_llm_h, n_llm_w = 3, 2
@@ -177,7 +154,8 @@ def test_v027_prompt_updates_add_position_dependent_compress_pad():
         target=[image_token_id],
         replacement=PromptUpdateDetails.select_token_id(full, base + IMAGE),
     )
-    prompt = [11, 12, image_token_id, 13, 14, 15, image_token_id, 16]
+    prefix = [11] * start_pos
+    prompt = prefix + [image_token_id, 13, 14, 15, image_token_id, 16]
     mm_prompt_updates = {"image": [[update.resolve(0)], [update.resolve(1)]]}
 
     token_ids, placeholders = processor._apply_prompt_updates(
@@ -185,7 +163,7 @@ def test_v027_prompt_updates_add_position_dependent_compress_pad():
         mm_prompt_updates,
     )
 
-    expected = [11, 12]
+    expected = list(prefix)
     first_types, _ = prep.build_image_block(
         n_llm_h,
         n_llm_w,
@@ -210,30 +188,74 @@ def test_v027_prompt_updates_add_position_dependent_compress_pad():
         assert placeholder.is_embed.tolist() == [token == base + IMAGE for token in placeholder.tokens]
 
 
-def test_hf_tokenizer_call_is_thread_safe():
-    entered = threading.Event()
-    release = threading.Event()
-    info = _ConcurrentStubInfo()
-    info.tokenizer = _NonThreadSafeTokenizer(entered, release)
-    processor = DeepseekV4VLMultiModalProcessor(info, None)
+@pytest.fixture
+def processing_info():
+    mm_config = MultiModalConfig(limit_per_prompt={"image": 2})
+    model_config = SimpleNamespace(
+        model="deepseek-v4-vision-ut",
+        hf_config=DeepseekV4Config(
+            vision_patch_size=14,
+            vision_downsample_ratio=3,
+            vision_max_n_token=384,
+            vision_min_pixels=147456,
+            vision_max_wh_ratio=8,
+        ),
+        dtype=torch.bfloat16,
+        multimodal_config=mm_config,
+        get_multimodal_config=lambda: mm_config,
+    )
+    ctx = InputProcessingContext(model_config, _TokenizedPromptTokenizer())
+    return prep.DeepseekV4VLProcessingInfo(ctx)
+
+
+@pytest.mark.parametrize("start_pos", range(COMPRESS_PAD_TO))
+@pytest.mark.parametrize("image_sizes", [(), ((128, 96),), ((128, 96), (84, 168))])
+def test_processor_apply_preserves_image_order_and_embedding_masks(processing_info, start_pos, image_sizes):
+    processor = DeepseekV4VLMultiModalProcessor(processing_info, None)
+    images = [Image.new("RGB", size) for size in image_sizes]
+    image_items = processing_info.parse_mm_data({"image": images} if images else {})
+    prompt = [11] * start_pos + [token for i in range(len(images)) for token in (7, 13 + i)] + [16]
+
+    output = processor.apply(ProcessorInputs(prompt, image_items), TimingContext(enabled=False))
+
+    expected = [11] * start_pos
+    placeholders = output["mm_placeholders"].get("image", [])
+    assert len(placeholders) == len(images)
+    for i, (image, placeholder) in enumerate(zip(images, placeholders)):
+        processed = processing_info.get_hf_processor()(images=[image])
+        n_llm_h, n_llm_w = processed["llm_grid"][0].tolist()
+        types, _ = prep.build_image_block(n_llm_h, n_llm_w, len(expected))
+        tokens = prep.IMAGE_SENTINEL_BASE_ID + types
+        assert placeholder.offset == len(expected)
+        assert placeholder.length == len(tokens)
+        assert torch.equal(placeholder.is_embed, types == IMAGE)
+        assert placeholder.get_num_embeds() == n_llm_h * n_llm_w
+        expected.extend(tokens.tolist())
+        expected.append(13 + i)
+
+    expected.append(16)
+    assert output["prompt_token_ids"] == expected
+
+
+def test_processor_apply_is_thread_safe_without_retokenizing(processing_info):
+    processor = DeepseekV4VLMultiModalProcessor(processing_info, None)
+    inputs = ProcessorInputs(
+        [11, 7, 16],
+        processing_info.parse_mm_data({"image": [Image.new("RGB", (128, 96))]}),
+    )
 
     def process():
-        return processor._call_hf_processor(
-            "prompt",
-            {"images": []},
-            {},
-            {},
-        )["input_ids"]
+        return processor.apply(inputs, TimingContext(enabled=False))
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        competing_call = pool.submit(
-            info.tokenizer,
-            "chat template",
-            "pt",
-        )
-        assert entered.wait(timeout=1)
-        outputs = list(pool.map(lambda _: process(), range(16)))
-        release.set()
-        competing_call.result()
+    expected = process()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outputs = list(pool.map(lambda _: process(), range(8)))
 
-    assert all(torch.equal(output, torch.tensor([[1]])) for output in outputs)
+    for output in outputs:
+        assert output["prompt_token_ids"] == expected["prompt_token_ids"]
+        assert output["mm_hashes"] == expected["mm_hashes"]
+        for key in ("patches", "vit_grid", "llm_grid", "perm", "types"):
+            assert torch.equal(
+                output["mm_kwargs"]["image"][0][key].data,
+                expected["mm_kwargs"]["image"][0][key].data,
+            )
