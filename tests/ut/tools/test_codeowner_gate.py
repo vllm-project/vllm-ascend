@@ -4,6 +4,7 @@
 #
 """Unit tests for .github/workflows/scripts/codeowner_gate.py."""
 
+import json
 import os
 import sys
 
@@ -157,28 +158,105 @@ class TestActiveOwnersFor:
         assert gate.active_owners_for(rules, "a/x.py") == ["@pending"]
 
 
-class TestGhApiSlurp:
+class TestGhApi:
+    """gh_api uses urllib with GH_TOKEN; no gh CLI dependency."""
+
+    def _mock_urlopen(self, monkeypatch, pages):
+        """pages: list of (body, link_header) served in order."""
+        import io
+
+        responses = iter(pages)
+
+        class FakeResponse:
+            def __init__(self, body, link):
+                self._io = io.BytesIO(json.dumps(body).encode())
+                self.headers = {"Link": link}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self._io.read()
+
+        def fake_urlopen(request):
+            body, link = next(responses)
+            return FakeResponse(body, link)
+
+        monkeypatch.setattr(gate.urllib.request, "urlopen", fake_urlopen)
+
     def test_flattens_paginated_arrays(self, monkeypatch):
-        calls = []
-
-        def fake_run(cmd, capture_output, text, check):
-            calls.append(cmd)
-            out = '[["r1", "r2"], ["r3"]]'
-            import types
-
-            return types.SimpleNamespace(stdout=out, returncode=0)
-
-        monkeypatch.setattr(gate.subprocess, "run", fake_run)
+        self._mock_urlopen(
+            monkeypatch,
+            [(["r1", "r2"], '<https://api.github.com/x?page=2>; rel="next"'), (["r3"], "")],
+        )
         monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-        result = gate.gh_api("repos/{owner}/{repo}/x")
-        assert result == ["r1", "r2", "r3"]
+        monkeypatch.setenv("GH_TOKEN", "t")
+        assert gate.gh_api("repos/{owner}/{repo}/x") == ["r1", "r2", "r3"]
 
     def test_object_endpoint_returns_last_page(self, monkeypatch):
-        import types
-
-        def fake_run(cmd, capture_output, text, check):
-            return types.SimpleNamespace(stdout='[{"a":1}, {"a":2}]', returncode=0)
-
-        monkeypatch.setattr(gate.subprocess, "run", fake_run)
+        self._mock_urlopen(
+            monkeypatch,
+            [({"a": 1}, '<https://api.github.com/y?page=2>; rel="next"'), ({"a": 2}, "")],
+        )
         monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
         assert gate.gh_api("repos/{owner}/{repo}/y") == {"a": 2}
+
+    def test_missing_token_raises(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        with pytest.raises(SystemExit):
+            gate.gh_api("repos/{owner}/{repo}/z")
+
+
+class TestSkipInApprovals:
+    def test_skip_overrides_active_rule(self):
+        # /tests is actively owned, but the later SKIP(owner) /tests/ut/
+        # carves out a deliberately-unowned subtree.
+        rules = gate.parse_codeowners("/tests @wenjun91\n" "# SKIP(owner): /tests/ut/\n" "# SKIP(owner): /tests/ut/\n")
+        failures = gate.check_approvals(1, "author", rules, ["tests/ut/foo.py"], {})
+        assert failures == []
+
+    def test_active_outside_skip_still_gated(self):
+        rules = gate.parse_codeowners("/tests @wenjun91\n" "# SKIP(owner): /tests/ut/\n")
+        failures = gate.check_approvals(1, "author", rules, ["tests/e2e/foo.py"], {})
+        assert any("wenjun91" in f for f in failures)
+
+    def test_skip_before_active_does_not_win(self):
+        # Last-match-wins: an active rule after the SKIP re-owns the subtree.
+        rules = gate.parse_codeowners("# SKIP(owner): /tests/ut/\n" "# /tests/ut/\n" "/tests @wenjun91\n")
+        owners, skipped = gate.resolve_owners(rules, "tests/ut/foo.py")
+        assert not skipped and owners == ["@wenjun91"]
+
+    def test_todo_owner_approval_counts(self, rules):
+        failures = gate.check_approvals(1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"})
+        assert failures == []
+
+
+class TestChangesRequested:
+    def test_changes_requested_blocks_despite_approval(self, rules):
+        failures = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"}
+        )
+        assert any("changes requested by @alice" in f for f in failures)
+
+    def test_blocking_owner_re_review_clears_gate(self, rules):
+        failures = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED", "bob": "APPROVED"}
+        )
+        assert failures == []
+
+    def test_dismissed_review_does_not_block(self, rules):
+        failures = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
+        )
+        assert failures == []
+
+    def test_author_requested_changes_not_counted(self):
+        rules = gate.parse_codeowners("/a @solo\n")
+        failures = gate.check_approvals(1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"})
+        assert any("only owner is the PR author" in f for f in failures)
