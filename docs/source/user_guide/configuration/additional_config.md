@@ -406,4 +406,13 @@ Checkpoint export retains a view of the pre-convolution input; the pinned FLA
 convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
+For Qwen4Exp, the option also enables PLE short-convolution checkpoints when
+PP=1 and PCP=1, and the convolution cache uses the model dtype or FP32. All
+recurrent layers must support checkpoint export; otherwise the existing split
+scheduling remains in use. PCP keeps its dedicated PLE backend and does not
+advertise internal checkpoints. PLE exports the raw input history using cache
+views without changing the convolution calculation. Checkpoint blocks and
+export kernels add memory and execution overhead, so qualify the combined GDN
+and PLE path for accuracy and net performance on the deployment hardware.
+
 Validate correctness, quality and performance on the deployment hardware before deploying in production.

@@ -36,7 +36,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
 from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
-from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
+from .ple import AscendPCPPLELayer, AscendQwen4ExpPLELayer, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -67,7 +67,7 @@ def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLEL
     # the layer in the static forward context.
     if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         return AscendPCPPLELayer(config, vllm_config=vllm_config, **kwargs)
-    return Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
+    return AscendQwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
 
 
 # The upstream decoder resolves this module global when it creates each PLE.
