@@ -443,7 +443,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         # Must expand into Prefill PP ranks 0..N-1, not duplicate the local rank.
         self.assertEqual(len(new_keys), 2)
         self.assertEqual(
-            [ChunkedTokenDatabase._read_key_field(k, "pp_rank") for k in new_keys],
+            [ChunkedTokenDatabase._split_key_field(k, "pp_rank")[1] for k in new_keys],
             [0, 1],
         )
         self.assertEqual(len(set(new_keys)), 2)
@@ -460,7 +460,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         new_keys, _, _ = db.decode_adaptor_prefill_pp(keys, [[1, 2, 3, 4]], [[10, 20, 30, 40]], kv_cache_group_id=1)
 
         self.assertEqual(
-            [ChunkedTokenDatabase._read_key_field(k, "pp_rank") for k in new_keys],
+            [ChunkedTokenDatabase._split_key_field(k, "pp_rank")[1] for k in new_keys],
             [0, 1],
         )
 

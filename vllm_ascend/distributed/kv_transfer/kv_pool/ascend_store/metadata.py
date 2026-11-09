@@ -678,21 +678,8 @@ class ChunkedTokenDatabase:
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
 
     @staticmethod
-    def _read_key_field(key: str, field: str) -> int | None:
-        """Read an integer field embedded as '@field:value@' in a cache key."""
-        marker = f"@{field}:"
-        start = key.find(marker)
-        if start < 0:
-            return None
-        value_start = start + len(marker)
-        value_end = key.find("@", value_start)
-        if value_end < 0:
-            value_end = len(key)
-        return int(key[value_start:value_end])
-
-    @staticmethod
-    def _replace_key_field(key: str, field: str, value: int) -> str:
-        """Replace an integer field embedded as '@field:value@' in a cache key."""
+    def _split_key_field(key: str, field: str) -> tuple[str, int, str]:
+        """Split '@field:value@' into (prefix, value, suffix) in a cache key."""
         marker = f"@{field}:"
         start = key.find(marker)
         if start < 0:
@@ -701,7 +688,7 @@ class ChunkedTokenDatabase:
         value_end = key.find("@", value_start)
         if value_end < 0:
             value_end = len(key)
-        return f"{key[:value_start]}{value}{key[value_end:]}"
+        return key[:value_start], int(key[value_start:value_end]), key[value_end:]
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:
@@ -717,7 +704,8 @@ class ChunkedTokenDatabase:
         expected_pp_rank = self.metadata[kv_cache_group_id].pp_rank
         group_num_layers = self.group_num_layers.get(cache_role, {}).get(kv_cache_group_id, 0)
         for i, (addr_list, size_list) in enumerate(zip(addr, size)):
-            actual_pp_rank = self._read_key_field(key[i], "pp_rank")
+            # Parse the key once per logical key, not once per PP partition.
+            key_prefix, actual_pp_rank, key_suffix = self._split_key_field(key[i], "pp_rank")
             if actual_pp_rank != expected_pp_rank:
                 raise ValueError(
                     "Prefill-PP key expansion rank mismatch: "
@@ -731,7 +719,7 @@ class ChunkedTokenDatabase:
             expanded_keys = []
             for j, part in enumerate(self.partitions):
                 end = len(addr_list) if j == len(self.partitions) - 1 else start + part * caches_per_layer
-                new_str = self._replace_key_field(key[i], "pp_rank", j)
+                new_str = f"{key_prefix}{j}{key_suffix}"
                 expanded_keys.append(new_str)
                 new_key.append(new_str)
                 new_addr.append(addr_list[start:end])
