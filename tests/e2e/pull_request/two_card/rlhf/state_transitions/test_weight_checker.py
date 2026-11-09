@@ -29,13 +29,14 @@ from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 
-from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.common.rlhf.common import (
     CONTROL_TIMEOUT,
-    post_control as post_route,
     register_engines_once,
     server_visible_devices,
     wait_for_free_device_memory,
+)
+from tests.e2e.common.rlhf.common import (
+    post_control as post_route,
 )
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import live_update_serve_args
@@ -43,6 +44,7 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
     packed_buffer_size_for,
 )
+from tests.e2e.conftest import RemoteOpenAIServer
 
 RELOAD_TIMEOUT = 300
 
