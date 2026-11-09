@@ -37,6 +37,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
 from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
 from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
+from .topk_buffer import share_target_topk_buffers
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -90,7 +91,9 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
             head_shards = get_head_parallel_size(parallel)
             if text_config.linear_num_key_heads % head_shards or text_config.linear_num_value_heads % head_shards:
                 raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # Keep private scratch buffers for PCP and interleaved microbatches.
+        with share_target_topk_buffers(not use_pcp and not vllm_config.parallel_config.enable_dbo):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         if use_pcp:
             from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
 
