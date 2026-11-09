@@ -10,6 +10,8 @@ import torch
 import torch_npu
 
 from vllm_ascend.attention import dsa_v41
+from vllm_ascend.attention import utils as attention_utils
+from vllm_ascend.models.deepseek_v41.model import DeepseekV41Attention
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
@@ -27,6 +29,40 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
     )
     dsa_v41.dsa_v41_forward(hidden, output, "layer")
     impl.forward.assert_called_once_with(attn, None, hidden, output)
+
+
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_v41_attention_notifies_connector_after_cache_write(monkeypatch, has_metadata):
+    """Layerwise sends must use the registered cache name after KV is written."""
+    hidden = torch.ones(2, 8)
+    cache = SimpleNamespace(prefix="model.layers.2.self_attn.swa_cache", kv_cache=[torch.zeros_like(hidden)])
+    attn = SimpleNamespace(
+        v41_layer_name="model.layers.2.self_attn.v41_attn", dsa_attn=SimpleNamespace(swa_cache_layer=cache)
+    )
+    metadata = object() if has_metadata else None
+    connector = Mock()
+    connector.has_connector_metadata.return_value = True
+    monkeypatch.setattr(attention_utils, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(attention_utils, "is_v1_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(attention_utils, "get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(attention_utils, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata))
+
+    def forward(hidden_states, output, layer_name):
+        assert layer_name == attn.v41_layer_name
+        cache.kv_cache[0].copy_(hidden_states)
+        output.copy_(hidden_states)
+
+    def save(layer_name, kv_cache, attn_metadata):
+        assert layer_name == cache.prefix
+        assert kv_cache is cache.kv_cache
+        assert attn_metadata is metadata
+        torch.testing.assert_close(kv_cache[0], hidden)
+
+    monkeypatch.setattr(torch.ops.vllm, "dsa_v41_forward", forward)
+    connector.save_kv_layer.side_effect = save
+    output = DeepseekV41Attention.forward(attn, None, hidden)
+    torch.testing.assert_close(output, hidden)
+    assert connector.save_kv_layer.call_count == int(has_metadata)
 
 
 @pytest.mark.parametrize("overlap", [False, True])

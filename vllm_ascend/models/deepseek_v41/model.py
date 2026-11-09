@@ -59,6 +59,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
+from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -760,6 +761,8 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
     def forward(self, positions, hidden_states, llama_4_scaling=None):
         output = torch.empty_like(hidden_states)
         torch.ops.vllm.dsa_v41_forward(hidden_states, output, self.v41_layer_name)
+        cache = self.dsa_attn.swa_cache_layer
+        maybe_save_kv_layer_to_connector(cache.prefix, cache.kv_cache)
         return output
 
     def write_kv(self, hidden_states):
