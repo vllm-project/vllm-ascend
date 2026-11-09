@@ -51,6 +51,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
+    get_fia_decode_threshold,
     is_dcp_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -251,6 +252,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
     metadata_cls: type[AscendMetadata] = AscendMetadata
+    supports_draft_extra_slots = True
 
     def __init__(
         self,
@@ -271,15 +273,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         self.speculative_config = vllm_config.speculative_config
-        self.decode_threshold = 1
-        if self.speculative_config:
-            spec_token_num = self.speculative_config.num_speculative_tokens
-            self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
-                npu_fused_infer_attention_score TND layout's limit of 16, \
-                got {self.decode_threshold}"
-            )
+        self.decode_threshold = get_fia_decode_threshold(
+            vllm_config,
+            supports_draft_extra_slots=(
+                self.supports_draft_extra_slots
+                and not self.use_pcp
+                and vllm_config.parallel_config.decode_context_parallel_size == 1
+                and kv_cache_spec is not None
+                and kv_cache_spec.dtype in (torch.bfloat16, torch.float16)
+            ),
+        )
 
         self.reorder_batch_threshold = self.decode_threshold
 

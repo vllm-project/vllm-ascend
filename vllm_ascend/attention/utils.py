@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
+FIA_TND_MAX_DECODE_QUERY_LEN = 16
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
@@ -496,6 +497,29 @@ def filter_chunked_req_indices(
     if not filtered_ranges:
         return torch.empty(0, dtype=torch.long, device=seq_len.device)
     return torch.cat(filtered_ranges)
+
+
+def get_fia_decode_threshold(vllm_config: VllmConfig, *, supports_draft_extra_slots: bool) -> int:
+    """Return the decode width supported by this FIA metadata builder."""
+    spec = vllm_config.speculative_config
+    if spec is None or spec.num_speculative_tokens is None:
+        return 1
+
+    verification_width = 1 + spec.num_speculative_tokens
+    assert verification_width <= FIA_TND_MAX_DECODE_QUERY_LEN, (
+        f"decode_threshold exceeded npu_fused_infer_attention_score TND layout's limit of "
+        f"{FIA_TND_MAX_DECODE_QUERY_LEN}, got {verification_width}"
+    )
+    if (
+        supports_draft_extra_slots
+        and vllm_config.use_v2_model_runner
+        and spec.method == "draft_model"
+        and not spec.parallel_drafting
+    ):
+        # Standalone AR adds the correction token to the target query. If it
+        # exceeds FIA's decode limit, keep that query on the prefill path.
+        return min(verification_width + spec.max_num_new_slots_for_drafting, FIA_TND_MAX_DECODE_QUERY_LEN)
+    return verification_width
 
 
 def split_decodes_and_prefills(

@@ -53,6 +53,7 @@ from vllm_ascend.attention.utils import (
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
+    get_fia_decode_threshold,
     is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
     merge_prefill_chunks,
@@ -324,17 +325,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
         self.speculative_config = vllm_config.speculative_config
-        self.decode_threshold = 1
-        if self.speculative_config:
-            spec_token_num = self.speculative_config.num_speculative_tokens
-            self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
-                npu_fused_infer_attention_score TND layout's limit of 16, \
-                got {self.decode_threshold}"
-            )
-
-        self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         # mla_nope_zero_rope_cache: MLA-NoPE models (qk_rope_head_dim == 0) feed
         # FIA an all-zero rope operand shaped like the paged KV cache. Hold the
@@ -379,6 +369,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             self.flashmla_state = FlashMLAMetadataBuilder(
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
             )
+
+        self.decode_threshold = get_fia_decode_threshold(
+            vllm_config,
+            supports_draft_extra_slots=not (self.use_pcp or self.use_dcp or self.flashmla_state is not None),
+        )
+        self.reorder_batch_threshold = self.decode_threshold
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
         """Keep FIA prefill metadata, but build decode inputs from device state."""
