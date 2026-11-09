@@ -641,25 +641,18 @@ def _run_remote(args: argparse.Namespace, prompts: list[tuple[str, str]]) -> dic
     }
 
 
-def _speculative_config_literal(raw_args: str) -> str | None:
-    """Return the balanced ``{...}`` text of the ``'speculative_config'`` value, without evaluating the rest.
+def _balanced_brace_end(text: str, open_index: int) -> int | None:
+    """Return the index of the ``}`` that matches the ``{`` at ``open_index``, tracking quotes/escapes.
 
-    The server's ``non-default args`` line is a Python repr that can contain non-literal objects elsewhere
-    (for example dtypes), which makes a whole-line ``ast.literal_eval`` fail even though the speculative
-    configuration itself is a plain dict.
+    Scans the whole string from ``open_index`` so braces or commas inside quoted string values (even ones
+    that happen to spell out another key's name, like ``"fake 'speculative_config':"``) are never mistaken
+    for real structure.
     """
-    key = "'speculative_config':"
-    start = raw_args.find(key)
-    if start < 0:
-        return None
-    brace = raw_args.find("{", start + len(key))
-    if brace < 0 or raw_args[start + len(key) : brace].strip():
-        return None  # the value is not a dict literal (for example None)
     depth = 0
     quote: str | None = None
-    i = brace
-    while i < len(raw_args):
-        char = raw_args[i]
+    i = open_index
+    while i < len(text):
+        char = text[i]
         if quote:
             if char == "\\":
                 i += 2
@@ -673,8 +666,70 @@ def _speculative_config_literal(raw_args: str) -> str | None:
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return raw_args[brace : i + 1]
+                return i
         i += 1
+    return None
+
+
+def _top_level_dict_segments(dict_literal: str) -> list[str]:
+    """Split a ``{...}`` literal's body into its top-level ``key: value`` segments.
+
+    Commas or colons inside quoted strings or nested containers (dicts, lists, tuples) do not end a
+    segment, so a key name that happens to appear inside another field's string value is never mistaken
+    for a real top-level key.
+    """
+    body = dict_literal[1:-1]
+    segments: list[str] = []
+    depth = 0
+    quote: str | None = None
+    start = 0
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if quote:
+            if char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char in "{[(":
+            depth += 1
+        elif char in "}])":
+            depth -= 1
+        elif char == "," and depth == 0:
+            segments.append(body[start:i])
+            start = i + 1
+        i += 1
+    segments.append(body[start:])
+    return segments
+
+
+def _speculative_config_literal(raw_args: str) -> str | None:
+    """Return the ``{...}`` text of the top-level ``'speculative_config'`` value, without evaluating
+    anything else on the line.
+
+    The server's ``non-default args`` line is a Python repr that can contain non-literal objects elsewhere
+    (for example dtypes), which makes a whole-line ``ast.literal_eval`` fail even though the speculative
+    configuration itself is a plain dict. Looking for the key only among the outer dict's own top-level
+    segments (rather than a plain substring search over the whole line) avoids misreading a key name that
+    happens to appear inside some other field's string value.
+    """
+    outer_start = raw_args.find("{")
+    if outer_start < 0:
+        return None
+    outer_end = _balanced_brace_end(raw_args, outer_start)
+    if outer_end is None:
+        return None
+    for segment in _top_level_dict_segments(raw_args[outer_start : outer_end + 1]):
+        stripped = segment.strip()
+        if not (stripped.startswith("'speculative_config'") or stripped.startswith('"speculative_config"')):
+            continue
+        if ":" not in stripped:
+            return None
+        value = stripped.split(":", 1)[1].strip()
+        return value if value.startswith("{") and value.endswith("}") else None  # None for e.g. `None`
     return None
 
 

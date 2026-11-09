@@ -391,6 +391,23 @@ def test_server_config_parser_accepts_explicit_none_when_line_is_not_a_literal()
     assert _server_speculative_config(log) is None
 
 
+def test_server_config_parser_ignores_a_fake_key_name_inside_another_fields_string_value():
+    # Another field's string value happens to spell out the literal text "'speculative_config':". A plain
+    # substring search over the whole line would find this fake occurrence first and misread its contents
+    # (here, a set literal "{1}", not even a dict) as the real speculative_config.
+    log = (
+        "non-default args: {'dtype': torch.bfloat16, "
+        "'note': \"fake 'speculative_config': {1}\", "
+        "'speculative_config': {'num_speculative_tokens': 9, 'draft_sample_method': 'greedy', "
+        "'enforce_eager': True}}\n"
+    )
+    assert _server_speculative_config(log) == {
+        "num_speculative_tokens": 9,
+        "draft_sample_method": "greedy",
+        "enforce_eager": True,
+    }
+
+
 def test_remote_runner_evidence_rejects_client_default_masquerading_as_server_config(tmp_path: Path):
     # A client-side default must never override the configuration recorded by the server.
     evidence = tmp_path / "startup.log"
