@@ -210,7 +210,7 @@ def _install_logprob_audit(worker):
     # Capture the implementation after the Ascend worker has installed its
     # patches. Both raw-logprob samplers use this function on main and v0.33.
     original = logprob.compute_token_logprobs
-    errors = []
+    errors: list[torch.Tensor] = []
     worker.model_runner._test_logprob_errors = errors
 
     def audit(logits, token_ids):
