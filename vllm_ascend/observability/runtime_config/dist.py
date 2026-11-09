@@ -25,7 +25,7 @@ Two concerns, one module (both are transport-layer, no config knowledge):
 Task-bus pattern (last-PP TP broadcast **wave-head**):
 
 1. **One** source-owned ``broadcast([wave_idx, due_0, due_1, …])`` from TP0 —
-   ask which lanes have work (``sync_due_bits_from_src``)
+   ask which lanes have work (``broadcast_due_bits_from_src``)
 2. For each due lane → its own ``broadcast_object`` (config and dump stay
    separate)
 
@@ -257,7 +257,7 @@ def _require_cpu_group(group: Any) -> Any:
     return gate
 
 
-def sync_due_bits_from_src(
+def broadcast_due_bits_from_src(
     group: Any,
     due_locals: Sequence[bool],
     *,
@@ -316,7 +316,7 @@ def broadcast_when_due(
     """If ``due``, ``broadcast_object`` from ``src``; else return ``None``.
 
     All ranks must pass the same agreed ``due`` from
-    :func:`sync_due_bits_from_src`.
+    :func:`broadcast_due_bits_from_src`.
     """
     if not due:
         return None
