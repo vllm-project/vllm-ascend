@@ -19,14 +19,13 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
-  tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 290
-  tests/e2e/pull_request/one_card/_310p/test_qwen35_dense_model_310p.py: 810
-  tests/e2e/pull_request/one_card/_310p/test_lora_310p.py: 800
-  tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 480
-  tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 330
-  tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 510
-  tests/e2e/pull_request/one_card/_310p/test_sampling_temp_310p.py: 190
-  tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 330
+  # 310P MRv2 timings from E2E run 42575673303, before scoring runner reuse.
+  tests/e2e/pull_request/one_card/_310p/test_qwen35_dense_model_310p.py: 713
+  tests/e2e/pull_request/one_card/_310p/test_lora_310p.py: 438
+  tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 672
+  tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 323
+  tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 307
+  tests/e2e/pull_request/one_card/_310p/test_sampling_temp_310p.py: 194
   tests/e2e/pull_request/one_card/aclgraph/test_device_metadata.py: 30
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 150
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 180
