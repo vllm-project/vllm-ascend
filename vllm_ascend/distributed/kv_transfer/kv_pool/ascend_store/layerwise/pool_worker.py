@@ -30,9 +30,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     require_aligned_batch_results,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
-    prepare_group_sessions,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
@@ -64,6 +61,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     get_partial_block_index,
     masked_block_runs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
@@ -154,6 +152,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
         self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
+        # The plane routes the plane-specific parts of each transfer step; it
+        # resolves worker helpers at call time, so post-init flag adjustments
+        # in tests keep affecting it.
+        self._data_plane = make_data_plane(self)
 
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return super()._compute_use_hybrid(vllm_config, kv_cache_groups) or (
@@ -881,126 +883,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._end_layerwise_load_keys(keys)
 
     def _finish_current_layerwise_load_sessions(self) -> None:
-        if not self.use_block_key_layerwise:
-            return
-        if self._layer_load_aborted.is_set():
-            req_ids = self._current_layerwise_request_ids.copy()
-            self._release_layerwise_requests_for_retry(req_ids)
-        else:
-            req_ids = self._current_layerwise_last_chunk_req_ids.copy()
-            self._release_layerwise_requests_terminal(req_ids)
-        self._current_layerwise_request_ids.difference_update(req_ids)
-        self._current_layerwise_last_chunk_req_ids.difference_update(req_ids)
-
-    def _prepare_layerwise_put_session(self, request: ReqMeta) -> None:
-        request.save_block_keys = []
-        request.save_last_block_key = None
-        if not self._is_layerwise_save_owner() or not request.can_save:
-            return
-
-        start_block = request.save_start_token // self.block_size
-        end_block = request.save_end_token // self.block_size
-        if request.load_spec is not None and request.load_spec.can_load:
-            pool_hit_tokens = (
-                request.load_spec.kvpool_store_skip_tokens
-                if request.load_spec.kvpool_store_skip_tokens is not None
-                else request.load_spec.kvpool_cached_tokens
-            )
-            start_block = max(start_block, pool_hit_tokens // self.block_size)
-        group_block_hashes = get_block_hashes(request.block_hashes, self.block_size, self.hash_block_size)
-        request.save_key_block_offset = start_block
-        request.save_block_keys = [None] * max(0, end_block - start_block)
-        key_slots: list[tuple[str, int | None, int]] = []
-        for block_index in range(start_block, min(end_block, len(group_block_hashes))):
-            key = self._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index]))
-            request.save_block_keys[block_index - start_block] = key
-            key_slots.append((key, block_index - start_block, block_index))
-
-        if request.partial_block_index is not None:
-            request.save_last_block_key = self._make_mooncake_layerwise_key(f"{request.req_id}_lastblock")
-            key_slots.append((request.save_last_block_key, None, request.partial_block_index))
-
-        requested_keys = list(dict.fromkeys(key for key, _, _ in key_slots))
-        if not requested_keys:
-            return
-        with self._put_started_keys_lock:
-            previously_started = set(requested_keys) & self._put_started_keys
-            new_keys = [key for key in requested_keys if key not in self._put_started_keys]
-
-        started = set(previously_started)
-        if new_keys:
-            try:
-                results = self._start_layerwise_put_keys(new_keys, self._layerwise_object_size_bytes())
-            except Exception as exc:
-                logger.error("Layerwise batch_put_start failed keys=%s error=%s", new_keys, exc)
-                with self._put_started_keys_lock:
-                    self._put_started_keys.update(new_keys)
-                self._queue_layerwise_revoke_keys(new_keys)
-            else:
-                newly_started = {key for key, result in zip(new_keys, results, strict=True) if result == 0}
-                with self._put_started_keys_lock:
-                    self._put_started_keys.update(newly_started)
-                started.update(newly_started)
-
-        for key, slot, _ in key_slots:
-            if key in started:
-                if slot is None:
-                    request.save_last_block_key = key
-            elif slot is None:
-                request.save_last_block_key = None
-            else:
-                request.save_block_keys[slot] = None
-        self._layerwise_session_tracker.register_put_keys(
-            request.req_id,
-            ((key, block_index) for key, _, block_index in key_slots if key in started),
-        )
-
-    def _prepare_layerwise_get_session(self, request: ReqMeta) -> list[tuple[str, int, int | None]]:
-        request.load_block_keys = []
-        request.load_last_block_key = None
-        request.load_keys = []
-        current_entries: list[tuple[str, int]] = []
-        load_spec = request.load_spec
-        if load_spec is not None and load_spec.can_load:
-            cached_tokens = load_spec.kvpool_cached_tokens
-            if not self.use_eagle and load_spec.kvpool_store_skip_tokens is not None:
-                cached_tokens = load_spec.kvpool_store_skip_tokens
-            start_block = load_spec.vllm_cached_tokens // self.block_size
-            cached_full_blocks = cached_tokens // self.block_size
-            group_block_hashes = get_block_hashes(request.block_hashes, self.block_size, self.hash_block_size)
-            end_block = min(cached_full_blocks, len(group_block_hashes))
-            for block_index in range(start_block, end_block):
-                current_entries.append(
-                    (
-                        self._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index])),
-                        block_index,
-                    )
-                )
-            needs_last_block = cached_tokens % self.block_size != 0 or (
-                cached_tokens > 0 and end_block < cached_full_blocks
-            )
-            partial_block_index = cached_full_blocks if cached_tokens % self.block_size else cached_full_blocks - 1
-            if needs_last_block and 0 <= partial_block_index < len(request.block_ids):
-                current_entries.append(
-                    (
-                        self._make_mooncake_layerwise_key(f"{request.req_id}_lastblock"),
-                        partial_block_index,
-                    )
-                )
-
-        load_entries = self._layerwise_session_tracker.prepare_load_entries(request.req_id, current_entries)
-        valid_entries = [
-            (key, block_index) for key, block_index in load_entries if 0 <= block_index < len(request.block_ids)
-        ]
-        if not valid_entries:
-            return []
-        request.load_key_block_offset = 0
-        request.load_block_keys = [None] * (max(block_index for _, block_index in valid_entries) + 1)
-        key_slots: list[tuple[str, int, int | None]] = []
-        for key, block_index in valid_entries:
-            request.load_block_keys[block_index] = key
-            key_slots.append((key, request.block_ids[block_index], block_index))
-        return key_slots
+        self._data_plane.finish_current_load_sessions()
 
     def _open_layerwise_get_sessions(self, request_key_slots: list[tuple[ReqMeta, str, int, int | None]]) -> None:
         if not request_key_slots:
@@ -1045,25 +928,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.load_block_keys[slot] = None
         for request_identity, request in requests_by_id.items():
             request.load_keys = request_load_keys[request_identity]
-
-    def _prepare_block_key_layerwise_sessions(self, requests: list[ReqMeta]) -> None:
-        self._layer_load_aborted.clear()
-        self._current_layerwise_request_ids = {request.req_id for request in requests}
-        self._current_layerwise_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
-        get_key_slots: list[tuple[ReqMeta, str, int, int | None]] = []
-        for request in requests:
-            get_key_slots.extend(
-                (request, key, block_id, slot) for key, block_id, slot in self._prepare_layerwise_get_session(request)
-            )
-        self._open_layerwise_get_sessions(get_key_slots)
-        for request in requests:
-            self._prepare_layerwise_put_session(request)
-
-    def _prepare_layerwise_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
-        if self.block_key_hybrid:
-            return prepare_group_sessions(self, requests)
-        self._prepare_block_key_layerwise_sessions(requests)
-        return {}
 
     def _process_save_for_layer_batch(
         self,
@@ -2077,24 +1941,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not requests:
             return
         # Mooncake uses the projected stage-local cache layout, including any
-        # draft layers. The GVA/key planes retain their existing PP key count.
+        # draft layers. The GVA plane retains its existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
         else:
             num_local = self.num_layers
         for request in requests:
             request.store_masks = self._compute_reachable_store_masks(request)
-        group_requests = {}
-        if self.use_block_key_layerwise:
-            group_requests = self._prepare_layerwise_sessions(requests)
+        group_requests = self._data_plane.prepare_sessions(requests)
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
         # Protect the previous partial before allocating the next snapshot.
-        self._prepare_load_gvas(requests)
-        self._alloc_gvas_for_save(requests)
+        self._data_plane.prepare_load_gvas(requests)
+        self._data_plane.alloc_save_gvas(requests)
         self._build_shared_save_data()
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):

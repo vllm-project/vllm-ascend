@@ -308,7 +308,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             load_spec=LoadSpec(0, 32, True, 64),
         )
         with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
-            views = mooncake_layerwise.prepare_group_sessions(worker, [request])
+            views = worker._data_plane.prepare_sessions([request])
         worker.token_database.load_mask.assert_called_with(request.block_hashes, 32)
         self.assertFalse(views[3])
         self.assertTrue(all(slot < 2 for _, _, _, slot in open_get.call_args.args[0]))

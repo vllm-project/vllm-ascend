@@ -1,27 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Group-aware Mooncake sessions using the shared hybrid reachability masks."""
+"""Mooncake layerwise wire keys and layout-identity helpers."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from copy import copy
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    ReqMeta,
-    block_hash_to_str,
-    get_block_hashes,
-)
-
-if TYPE_CHECKING:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
 def make_block_key(
@@ -155,164 +146,3 @@ def hybrid_block_key(
 ) -> str:
     stage = "" if pp_rank is None else f"@pp_rank:{pp_rank}"
     return f"{model}@mooncake_hybrid_v1:{layout}{stage}@group:{group}@block:{block_size}@{block_hash}@{head}"
-
-
-def selected(mask, index: int) -> bool:
-    return mask is None or (0 <= index < len(mask) and bool(mask[index]))
-
-
-def prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
-    worker._layer_load_aborted.clear()
-    with worker._put_started_keys_lock:
-        previously_started = worker._put_started_keys.copy()
-    try:
-        return _prepare_group_sessions(worker, requests)
-    except Exception:
-        # Preparation has not submitted payload transfers yet. Roll back other
-        # groups too if a later group's session allocation fails.
-        worker._layer_load_aborted.set()
-        with worker._put_started_keys_lock:
-            keys = list(worker._put_started_keys - previously_started)
-        worker._queue_layerwise_revoke_keys(keys)
-        worker._finish_current_layerwise_load_sessions()
-        raise
-
-
-def _prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
-    """Views isolate per-group key slots while preserving real request ownership.
-
-    Hybrid pooling publishes only complete blocks. Partial compressor/SWA state
-    is not a portable snapshot: the shared coordinator supplies aligned extents
-    and masks for the reachable state at each boundary.
-    """
-    result: dict[int, list[ReqMeta]] = {group: [] for group in range(worker.num_kv_cache_groups)}
-    get_slots: list[tuple[ReqMeta, str, int, int | None]] = []
-    tracker = worker._layerwise_session_tracker
-    worker._current_layerwise_request_ids = {request.req_id for request in requests}
-    worker._current_layerwise_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
-    for request in requests:
-        cached_tokens = request.save_start_token
-        if request.load_spec is not None and request.load_spec.can_load:
-            cached_tokens = request.load_spec.kvpool_cached_tokens
-            if (
-                not worker.use_eagle
-                and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups
-                and request.load_spec.kvpool_store_skip_tokens is not None
-            ):
-                cached_tokens = request.load_spec.kvpool_store_skip_tokens
-        load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
-        for group in worker.cacheable_group_ids:
-            # Skip private rings before deriving token hashes: their physical
-            # capacity need not even be divisible by the hash block size.
-            block_size = worker.grouped_block_size[group]
-            view = copy(request)
-            # Keep the complete group block table: LayerBatchBuilder indexes it
-            # using task.group_id. Only key/session metadata is group-local.
-            view.save_block_keys = []
-            view.load_block_keys = []
-            view.load_keys = []
-            view.save_last_block_key = view.load_last_block_key = None
-            view.partial_block_index = None
-            result[group].append(view)
-            ids = request.block_ids_by_group[group]
-            hashes = get_block_hashes(request.block_hashes, block_size, worker.hash_block_size)
-            load_mask = load_masks[group] if load_masks is not None else None
-            store_mask = request.store_masks[group] if request.store_masks is not None else None
-
-            def key(index, group=group, hashes=hashes):
-                return worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
-
-            start = request.load_spec.vllm_cached_tokens // block_size if request.load_spec is not None else 0
-            entries = (
-                [
-                    (key(index), index)
-                    for index in range(start, min(cached_tokens // block_size, len(hashes), len(ids)))
-                    if selected(load_mask, index)
-                ]
-                if request.load_spec is not None and request.load_spec.can_load
-                else []
-            )
-            entries = tracker.prepare_load_entries(request.req_id, entries, group_id=group)
-            entries = [
-                (name, index)
-                for name, index in entries
-                if start <= index < min(len(ids), cached_tokens // block_size) and selected(load_mask, index)
-            ]
-            view.load_key_block_offset = 0
-            view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
-            for name, index in entries:
-                view.load_block_keys[index] = name
-                get_slots.append((view, name, ids[index], index))
-
-            start = request.save_start_token // block_size
-            end = min(request.save_end_token // block_size, len(hashes), len(ids))
-            if request.load_spec is not None and request.load_spec.can_load:
-                pool_hit = request.load_spec.kvpool_store_skip_tokens
-                if pool_hit is None:
-                    pool_hit = request.load_spec.kvpool_cached_tokens
-                start = max(start, pool_hit // block_size)
-            view.save_end_token = end * block_size
-            view.save_key_block_offset = start
-            view.save_block_keys = [None] * max(0, end - start)
-            if not request.can_save or not worker._is_layerwise_save_owner(group):
-                continue
-            key_indices = [(key(index), index) for index in range(start, end) if selected(store_mask, index)]
-            names = [name for name, _ in key_indices]
-            with worker._put_started_keys_lock:
-                started = set(names) & worker._put_started_keys
-            new = [name for name in names if name not in started]
-            # A block that is already readable in the pool must never be re-put.
-            # Mooncake refuses to write into a committed object
-            # (MMC_UNMATCHED_KEY) and the aborted session leaves that object
-            # unusable for every reader. `_put_started_keys` only covers writers
-            # still in flight, and it is cleared once a session commits, so
-            # every later request sharing the prefix — and every concurrent
-            # prefill rank, whose keys carry no DP component — would otherwise
-            # re-open a session over the same committed blocks forever.
-            # The non-layerwise path filters through
-            # Backend.requires_exists_before_put; the hybrid path must too.
-            if new:
-                missing = worker._filter_pool_existing_keys(new)
-                if len(missing) != len(new):
-                    logger.debug(
-                        "Mooncake hybrid: req=%s group=%d skipping %d/%d blocks already pooled",
-                        request.req_id,
-                        group,
-                        len(new) - len(missing),
-                        len(new),
-                    )
-                new = missing
-            if new:
-                try:
-                    codes = worker._start_layerwise_put_keys(new, sum(worker.group_block_len[group]))
-                except Exception:
-                    worker._queue_layerwise_revoke_keys(new)
-                    raise
-                started_now = {name for name, code in zip(new, codes, strict=True) if code == 0}
-                rejected = [name for name, code in zip(new, codes, strict=True) if code != 0]
-                if rejected:
-                    # Non-zero means the session was never opened, so this rank
-                    # owns nothing to revoke — and revoking a key another rank
-                    # committed would discard its object. Report instead of
-                    # acting: this used to be dropped in silence, which is how a
-                    # permanently unhittable pool went unnoticed.
-                    logger.warning(
-                        "Mooncake hybrid put_start rejected %d/%d keys for group %d (codes=%s); "
-                        "those blocks stay unsaved this step.",
-                        len(rejected),
-                        len(new),
-                        group,
-                        [code for code in codes if code != 0][:4],
-                    )
-                started.update(started_now)
-                if started_now:
-                    with worker._put_started_keys_lock:
-                        worker._put_started_keys.update(started_now)
-            for name, index in key_indices:
-                if name in started:
-                    view.save_block_keys[index - start] = name
-            tracker.register_put_keys(
-                request.req_id, ((name, index) for name, index in key_indices if name in started), group_id=group
-            )
-    worker._open_layerwise_get_sessions(get_slots)
-    return result
