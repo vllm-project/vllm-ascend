@@ -12,8 +12,8 @@ Ascend SWA cache differs in ways the adapter absorbs:
 * ``kv_cache`` is a one-element list and is absent until the KV allocator binds
   it, so ``numel()``/``shape[0]`` must not be called on the raw attribute.
 
-The subclass retains upstream history allocation and lifecycle. Its hash
-launch is split into request search and hashing for the Ascend compiler.
+The subclass retains upstream history allocation and lifecycle. A Triton
+request search feeds the Ascend C hash operator.
 """
 
 import torch
@@ -70,11 +70,7 @@ def create_engram_hash_state(vllm_config, config, swa_cache_layer) -> NgramHashS
 
 
 class AscendNgramHashState(NgramHashState):
-    """Reuse upstream history lifecycle, splitting only the NPU hash launch.
-
-    Triton-Ascend cannot compile the combined request-search/hash kernel.
-    Keep that compiler workaround in this subclass, without changing vLLM.
-    """
+    """Reuse upstream history lifecycle with separate request search and C hashing."""
 
     def forward(
         self,
@@ -99,8 +95,7 @@ class AscendNgramHashState(NgramHashState):
         output = input_ids.new_empty((num_tokens, num_layers, (max_ngram - 1) * num_heads), dtype=torch.int32)
         if num_tokens == 0:
             return output
-        # Ascend needs the request search out of the hash body (E3); one launch
-        # still covers every layer.
+        # Build request IDs once for every layer consumed by the C hash operator.
         req_ids = input_ids.new_empty(num_tokens, dtype=torch.int32)
         from vllm_ascend.ops.triton.engram_hash import _engram_req_index_kernel
 
@@ -129,9 +124,7 @@ class AscendNgramHashState(NgramHashState):
                 256,
                 DEAD_ID,
             )
-        from vllm_ascend.ops.triton.engram_hash import _hash_ids_kernel
-
-        _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](
+        torch.ops._C_ascend.engram_hash_ids(
             input_ids,
             self.token_map,
             dead_mask,
@@ -160,14 +153,12 @@ class AscendNgramHashState(NgramHashState):
             cache_block_size=self.block_size,
             MAX_NGRAM=max_ngram,
             num_heads=num_heads,
-            BLOCK_T=32,
-            BLOCK_H=triton.next_power_of_2(num_heads),
             dead_id=DEAD_ID,
             lookback_depth=lookback_token_ids.shape[1],
             lookback_row_stride=lookback_token_ids.stride(0),
             lookback_col_stride=lookback_token_ids.stride(1),
             lookback_mask_row_stride=lookback_dead_mask.stride(0),
             lookback_mask_col_stride=lookback_dead_mask.stride(1),
-            num_warps=4,
+            num_layers=num_layers,
         )
         return output
