@@ -63,5 +63,3 @@ The reference is `torch.nn.functional.log_softmax` in fp32 followed by `torch.ga
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_token_logprobs.py
 ```
-
-For selected-token ranking, see [selected_token_ranks](selected_token_ranks.md).
