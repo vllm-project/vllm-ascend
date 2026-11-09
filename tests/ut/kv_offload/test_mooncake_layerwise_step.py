@@ -4,12 +4,14 @@ Expected request fields are hardcoded from the worker formulas; the controller i
 never used to build its own expectations.
 """
 
+import copy
 import sys
 import types
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 fake_torch_npu = types.ModuleType("torch_npu")
@@ -52,8 +54,7 @@ def _req(**overrides):
     return SimpleNamespace(**fields)
 
 
-def _metadata(requests, producer=True):
-    spec = SimpleNamespace(kv_cache_spec_type="FullAttentionSpec")
+def _metadata(requests):
     return SimpleNamespace(
         requests=requests,
         send_task=SimpleNamespace(
@@ -64,12 +65,12 @@ def _metadata(requests, producer=True):
             group_block_len_tensor=None,
             group_seq_start_tensor=None,
         ),
-        spec=spec,
-        producer=producer,
+        spec=SimpleNamespace(kv_cache_spec_type="FullAttentionSpec"),
+        producer=True,
     )
 
 
-def _controller(*, align=None, split=None, mark=None, send_queue=None):
+def _controller(*, align=None, split=None, mark=None, complete=None, send_queue=None):
     return LayerwiseStepController(
         vllm_config=SimpleNamespace(
             kv_transfer_config=SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
@@ -113,53 +114,51 @@ def _controller(*, align=None, split=None, mark=None, send_queue=None):
         update_decoder_info=lambda _req_id, req_meta: req_meta,
         get_nz_cache=lambda cache, _idx: cache,
         mark_layer_reuse_pending=mark or MagicMock(),
-        complete_layer_reuse=MagicMock(),
+        complete_layer_reuse=complete or MagicMock(),
         send_task_factory=_send_task_factory,
     )
 
 
-class _GuardedMetadata:
-    _writes: list[tuple[str, object]]
-    requests: dict[str, Any]
-    send_task: SimpleNamespace
-
-    def __init__(self, requests):
-        object.__setattr__(self, "_writes", [])
-        object.__setattr__(self, "requests", requests)
-        object.__setattr__(
-            self,
-            "send_task",
-            SimpleNamespace(
-                group_rearrange_block_ids=None,
-                group_num_blocks=None,
-                group_num_tokens=None,
-                group_block_table=None,
-                group_block_len_tensor=None,
-                group_seq_start_tensor=None,
-            ),
+def _assert_tree_equal(actual: Any, expected: Any, path: str = "root") -> None:
+    """Recursively compare the prepared snapshot with the live metadata tree."""
+    if isinstance(actual, SimpleNamespace) and isinstance(expected, SimpleNamespace):
+        assert actual.__dict__.keys() == expected.__dict__.keys(), (
+            f"{path}: attribute names changed: {sorted(actual.__dict__)} != {sorted(expected.__dict__)}"
         )
-
-    def __setattr__(self, name, value):
-        if not name.startswith("_"):
-            self._writes.append((name, value))
-        object.__setattr__(self, name, value)
+        for key in actual.__dict__:
+            _assert_tree_equal(actual.__dict__[key], expected.__dict__[key], f"{path}.{key}")
+        return
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        assert list(actual.keys()) == list(expected.keys()), (
+            f"{path}: dict keys changed: {list(actual)} != {list(expected)}"
+        )
+        for key in actual:
+            _assert_tree_equal(actual[key], expected[key], f"{path}[{key!r}]")
+        return
+    if isinstance(actual, (list, tuple)) and isinstance(expected, (list, tuple)):
+        assert type(actual) is type(expected), f"{path}: sequence type changed"
+        assert len(actual) == len(expected), f"{path}: sequence length changed: {len(actual)} != {len(expected)}"
+        for idx, (left, right) in enumerate(zip(actual, expected)):
+            _assert_tree_equal(left, right, f"{path}[{idx}]")
+        return
+    assert actual == expected, f"{path}: value changed: {actual!r} != {expected!r}"
 
 
 def test_prepare_builds_plan_from_hand_computed_request_fields():
     metadata = _metadata({"req": _req()})
     plan = _controller().prepare(metadata)
 
-    assert isinstance(plan, LayerwiseTransferPlan)
-    assert plan.producer is True
-    assert list(plan.requests) == ["req"]
+    assert isinstance(plan, LayerwiseTransferPlan), "prepare must return LayerwiseTransferPlan"
+    assert plan.producer is True, "producer flag must be true"
+    assert list(plan.requests) == ["req"], f"plan request keys must be ['req'], got {list(plan.requests)}"
     prepared = plan.requests["req"]
     assert prepared.local_block_ids == [[3]], "kernel local ids must be [[3]]"
     assert prepared.remote_block_ids == [[5]], "kernel remote ids must be [[5]]"
-    assert prepared.remote_host == "host"
-    assert prepared.remote_port == 30000
-    assert prepared.trans_count == [1]
+    assert prepared.remote_host == "host", f"remote_host must be host, got {prepared.remote_host!r}"
+    assert prepared.remote_port == 30000, f"remote_port must be 30000, got {prepared.remote_port!r}"
+    assert prepared.trans_count == [1], f"trans_count must be [1], got {prepared.trans_count!r}"
     assert plan.send_task is metadata.send_task, "no resharding keeps the scheduler send task"
-    assert plan.send_task_update is None
+    assert plan.send_task_update is None, "no resharding must not build a send-task update"
 
 
 def test_prepare_aligns_plan_copy_and_apply_replays_original_write():
@@ -180,40 +179,65 @@ def test_prepare_aligns_plan_copy_and_apply_replays_original_write():
     assert metadata.requests is not plan.requests, "apply replaces metadata.requests with the plan mapping"
 
 
-def test_prepare_plan_is_pure_until_apply():
-    metadata = _GuardedMetadata({"req": _req(remote_block_ids=[[4]])})
-    original_req = metadata.requests["req"]
-    before = (list(original_req.remote_block_ids), original_req.remote_host, original_req.remote_port)
+def test_prepare_zero_write_deep_snapshot_guard():
+    metadata = _metadata({"req": _req(remote_block_ids=[[4]])})
+    requests_before = metadata.requests
+    req_ids_before = {req_id: id(req_meta) for req_id, req_meta in metadata.requests.items()}
+    snapshot = copy.deepcopy(metadata)
 
-    plan = _controller(align=lambda req_meta: setattr(req_meta, "remote_block_ids", [[50]])).prepare(metadata)
-
-    after = (list(original_req.remote_block_ids), original_req.remote_host, original_req.remote_port)
-    assert metadata._writes == [], "prepare must not set attributes on scheduler metadata"
-    assert after == before, "prepare must not mutate scheduler ReqMeta"
-
-    _controller(align=lambda req_meta: None).apply(plan, metadata)
-    assert metadata._writes, "apply must write metadata.requests"
-    assert metadata.requests["req"].local_block_ids == [[3]]
-
-
-def test_apply_replays_send_task_group_writes():
-    metadata = _metadata(
-        {"req": _req(local_block_ids=[[3]], remote_block_ids=[[5]])},
-    )
-    controller = _controller()
-    controller.attn_resharding_group_idx = {0}
+    controller = _controller(align=lambda req_meta: setattr(req_meta, "remote_block_ids", [[50]]))
     plan = controller.prepare(metadata)
-    assert plan.send_task_update is not None
-    assert plan.send_task_update.group_rearrange_block_ids == [[3]]
+
+    assert metadata.requests is requests_before, "prepare must not replace metadata.requests"
+    assert {req_id: id(req_meta) for req_id, req_meta in metadata.requests.items()} == req_ids_before, (
+        "prepare must not replace any ReqMeta object"
+    )
+    _assert_tree_equal(copy.deepcopy(metadata), snapshot)
 
     controller.apply(plan, metadata)
 
-    assert metadata.send_task.group_rearrange_block_ids == [[3]]
-    assert metadata.send_task.group_num_blocks == [1]
-    assert metadata.send_task.group_num_tokens == [16]
-    assert metadata.send_task.group_block_table[0].tolist() == [[3]]
-    assert metadata.send_task.group_block_len_tensor[0].tolist() == [16]
-    assert metadata.send_task.group_seq_start_tensor[0].tolist() == [0]
+    assert metadata.requests is not requests_before, "apply must replace metadata.requests"
+    with pytest.raises(AssertionError):
+        _assert_tree_equal(copy.deepcopy(metadata), snapshot)
+
+
+def test_apply_replays_chunk_finish_on_original_req():
+    def split(req_meta, _req_idx, _req_id, _group_idx):
+        req_meta.chunk_finish = True
+        return {
+            ("host", 30000): {
+                "local_block_ids": [3],
+                "remote_block_ids": [5],
+                "trans_count": 1,
+            }
+        }
+
+    metadata = _metadata({"req": _req(chunk_finish=False)})
+    original_req = metadata.requests["req"]
+    controller = _controller(split=split)
+    plan = controller.prepare(metadata)
+
+    assert original_req.chunk_finish is False, "prepare must not write chunk_finish on scheduler ReqMeta"
+    controller.apply(plan, metadata)
+    assert original_req.chunk_finish is True, "apply must replay chunk_finish=True on scheduler ReqMeta"
+
+
+def test_apply_replays_send_task_group_writes():
+    metadata = _metadata({"req": _req(local_block_ids=[[3]], remote_block_ids=[[5]])})
+    controller = _controller()
+    controller.attn_resharding_group_idx = {0}
+    plan = controller.prepare(metadata)
+    assert plan.send_task_update is not None, "resharding must build a send-task update"
+    assert plan.send_task_update.group_rearrange_block_ids == [[3]], "group rearrange ids must be [[3]]"
+
+    controller.apply(plan, metadata)
+
+    assert metadata.send_task.group_rearrange_block_ids == [[3]], "group_rearrange_block_ids must be [[3]]"
+    assert metadata.send_task.group_num_blocks == [1], "group_num_blocks must be [1]"
+    assert metadata.send_task.group_num_tokens == [16], "group_num_tokens must be [16]"
+    assert metadata.send_task.group_block_table[0].tolist() == [[3]], "block table must be [[3]]"
+    assert metadata.send_task.group_block_len_tensor[0].tolist() == [16], "block len tensor must be [16]"
+    assert metadata.send_task.group_seq_start_tensor[0].tolist() == [0], "seq start tensor must be [0]"
 
 
 def test_save_layer_marks_reuse_pending_and_queues_once():
@@ -227,7 +251,7 @@ def test_save_layer_marks_reuse_pending_and_queues_once():
 
     mark.assert_called_once_with(0)
     assert send_queue.put.call_count == 1, "one layer send task must be queued"
-    assert controller.current_layer == 1
+    assert controller.current_layer == 1, f"current_layer must be 1, got {controller.current_layer}"
 
 
 def test_facade_on_kv_cache_written_noops_without_plan():
@@ -254,3 +278,90 @@ def test_facade_on_kv_cache_written_noops_without_plan():
     connector.on_kv_cache_written("layer0")
 
     connector.connector_worker.on_kv_cache_written.assert_not_called()
+
+
+def test_save_layer_rejects_missing_plan_send_task():
+    metadata = _metadata({"req": _req()})
+    controller = _controller()
+    plan = controller.prepare(metadata)
+    plan.send_task = None
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller.save_layer("layer0", [], MagicMock(), plan)
+
+    assert str(excinfo.value) == "Layerwise plan is missing send_task"
+
+
+def test_on_written_rejects_missing_physical_layer():
+    controller = _controller()
+    controller.index_to_name = {0: []}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller.on_written("layer0")
+
+    assert str(excinfo.value) == "Mooncake layerwise metadata is missing physical layer 0"
+
+
+def test_on_written_rejects_hook_not_in_physical_layer():
+    controller = _controller()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller.on_written("other")
+
+    assert str(excinfo.value) == ("Mooncake layer hook 'other' does not belong to physical layer 0: ['layer0']")
+
+
+def test_save_layer_rejects_missing_physical_layer():
+    metadata = _metadata({"req": _req()})
+    controller = _controller()
+    plan = controller.prepare(metadata)
+    controller.index_to_name = {0: []}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller.save_layer("layer0", [], MagicMock(), plan)
+
+    assert str(excinfo.value) == "Mooncake layerwise metadata is missing physical layer 0"
+
+
+def test_save_layer_rejects_hook_not_in_physical_layer():
+    metadata = _metadata({"req": _req()})
+    controller = _controller()
+    plan = controller.prepare(metadata)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller.save_layer("other", [], MagicMock(), plan)
+
+    assert str(excinfo.value) == ("Mooncake layer hook 'other' does not belong to physical layer 0: ['layer0']")
+
+
+def test_prepare_rejects_multiple_transfer_tasks():
+    def split(_req_meta, _req_idx, _req_id, _group_idx):
+        return {
+            ("host-a", 30000): {"local_block_ids": [1], "remote_block_ids": [2], "trans_count": 1},
+            ("host-b", 30001): {"local_block_ids": [3], "remote_block_ids": [4], "trans_count": 1},
+        }
+
+    metadata = _metadata({"req": _req()})
+    controller = _controller(split=split)
+
+    with pytest.raises(AssertionError) as excinfo:
+        controller.prepare(metadata)
+
+    assert str(excinfo.value) == "Not support add mutil transfer task for req_id:req"
+
+
+def test_save_layer_put_failure_rolls_back_reuse_gate():
+    send_queue = MagicMock()
+    send_queue.put.side_effect = RuntimeError("put boom")
+    mark = MagicMock()
+    complete = MagicMock()
+    metadata = _metadata({"req": _req(local_block_ids=[[1]])})
+    controller = _controller(mark=mark, complete=complete, send_queue=send_queue)
+    plan = controller.prepare(metadata)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller.save_layer("layer0", [], MagicMock(), plan)
+
+    assert str(excinfo.value) == "put boom"
+    mark.assert_called_once_with(0)
+    complete.assert_called_once_with(0, "put boom")

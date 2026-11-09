@@ -863,11 +863,11 @@ def test_group_pulls_metadata_hma_dcp_two_delegates_selected_shards():
         remote_pcp_size=1,
         remote_dcp_size=2,
     )
-    assert result is sentinel
-    assert len(calls) == 1
+    assert result is sentinel, "dcp=2 must return the delegated sentinel"
+    assert len(calls) == 1, f"dcp shard pull helper must be called once, got {len(calls)}"
     args, kwargs = calls[0]
-    assert args[0] == [[30000]]
-    assert kwargs == {}
+    assert args == ([[30000]], 2, 30000, 1), f"dcp helper args mismatch: {args!r}"
+    assert kwargs == {}, f"dcp helper must receive keyword-free call, got {kwargs!r}"
 
 
 def test_group_pulls_metadata_rejects_port_count_not_divisible_by_tp_pulls():
@@ -885,7 +885,9 @@ def test_group_pulls_metadata_rejects_port_count_not_divisible_by_tp_pulls():
             get_hybrid_remote_rank_group_pulls=lambda *_a, **_k: ([], {}),
             get_dcp_shard_pulls=lambda *_a, **_k: [],
         )
-    assert str(excinfo.value) == "tp_num_need_pulls: 2, remote_ports: [30000, 30001, 30002]"
+    assert str(excinfo.value) == "tp_num_need_pulls: 2, remote_ports: [30000, 30001, 30002]", (
+        "port-count assertion text must match"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1018,7 +1020,9 @@ def test_hybrid_remote_rank_group_pulls_rejects_indivisible_mamba_tp():
             get_attention_group_num_key_value_heads=lambda _spec: 1,
             get_attention_group_remote_rank=lambda *_a, **_k: [],
         )
-    assert str(excinfo.value) == ("Hybrid Mamba prefill tp size(3) must be divisible by decode tp size(2).")
+    assert str(excinfo.value) == ("Hybrid Mamba prefill tp size(3) must be divisible by decode tp size(2)."), (
+        "Mamba TP divisibility text must match"
+    )
 
 
 def test_hybrid_remote_rank_group_pulls_rejects_wrong_rank_count():
@@ -1035,7 +1039,9 @@ def test_hybrid_remote_rank_group_pulls_rejects_wrong_rank_count():
             get_attention_group_num_key_value_heads=lambda _spec: 4,
             get_attention_group_remote_rank=lambda *_a, **_k: [1],
         )
-    assert str(excinfo.value) == ("chosen_rank_list([1]) does not match num_group_pulls(2) and prefill pp size(1).")
+    assert str(excinfo.value) == ("chosen_rank_list([1]) does not match num_group_pulls(2) and prefill pp size(1)."), (
+        "chosen-rank-count text must match"
+    )
 
 
 def test_sfa_replicate_k_block_ids_disabled_returns_empty():
