@@ -830,13 +830,11 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
-    name: run-selected-tests-a3-sn (vllm@${{ matrix.vllm_version_short }})
+    name: run-selected-tests-a3-sn (vllm@${{ matrix.vllm_version }})
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.pre-commit.outputs.main_commit }}
-        vllm_version_short:
-          - ${{ needs.pre-commit.outputs.main_commit_short }}
+          - ${{ needs.pre-commit.outputs.vllm_ref }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -857,13 +855,11 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
-    name: run-selected-tests-a5-sn (vllm@${{ matrix.vllm_version_short }})
+    name: run-selected-tests-a5-sn (vllm@${{ matrix.vllm_version }})
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.pre-commit.outputs.main_commit }}
-        vllm_version_short:
-          - ${{ needs.pre-commit.outputs.main_commit_short }}
+          - ${{ needs.pre-commit.outputs.vllm_ref }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
