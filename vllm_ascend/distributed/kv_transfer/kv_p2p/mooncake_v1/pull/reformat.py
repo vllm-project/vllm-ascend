@@ -16,14 +16,14 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config as _real_get_ascend_config
 from vllm_ascend.utils import enable_custom_op
 
-# The pull entry module used to import ``is_conv_state_dim_first`` into its own
-# namespace, and existing mamba-transfer tests patch that module attribute.
-# Resolve the helper through the entry module at call time so those patches keep
-# intercepting the call after the move; fall back to the real helper when this
-# module is imported standalone.
+# The pull entry module used to bind ``is_conv_state_dim_first`` and
+# ``get_ascend_config`` in its own namespace, and existing tests patch those
+# module attributes. Resolve both helpers through the entry module at call time
+# so the patches keep intercepting the calls after the move; fall back to the
+# real helpers when this module is imported standalone.
 _ENTRY_MODULE = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
 
 
@@ -34,6 +34,15 @@ def is_conv_state_dim_first() -> bool:
         from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first as real_fn
 
         fn = real_fn
+    return fn()
+
+
+def get_ascend_config() -> Any:
+    """Resolve through the entry module at call time (test patch surface)."""
+    entry = sys.modules.get(_ENTRY_MODULE)
+    fn: Callable[[], Any] | None = getattr(entry, "get_ascend_config", None) if entry is not None else None
+    if fn is None:
+        fn = _real_get_ascend_config
     return fn()
 
 

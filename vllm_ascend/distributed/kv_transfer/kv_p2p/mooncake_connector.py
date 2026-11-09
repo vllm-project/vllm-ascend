@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import numpy as np
 import torch
+import torch_npu  # noqa: F401  (entry patch surface used by existing tests)
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
