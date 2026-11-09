@@ -39,17 +39,20 @@ import inspect
 import os
 import sys
 import types
+import weakref
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.distributed.weight_transfer.base import WeightTransferEngine
+from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
+from vllm_ascend.worker.v2 import utils as v2_utils
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
@@ -220,6 +223,7 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_importer = MagicMock()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -238,6 +242,7 @@ def test_receive_packed_weights_loads_model():
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
+        importer=engine._packed_importer,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
 
@@ -249,6 +254,11 @@ def test_trainer_init_uses_assigned_npu_without_cuda(packed):
     accelerator = types.SimpleNamespace(current_device_index=lambda: 2)
     with (
         patch.object(torch, "accelerator", accelerator, create=True),
+        patch.object(
+            v2_utils,
+            "torch",
+            types.SimpleNamespace(cuda=MagicMock(), npu=MagicMock(), empty=MagicMock(), device=torch.device),
+        ),
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-7") as uuid,
         patch.object(torch.cuda, "get_device_properties", side_effect=AssertionError("CUDA used")),
     ):
@@ -273,15 +283,16 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     engine.is_sender = is_sender
     engine.packed = True
     engine.npu_uuid = "node-0"
+    engine.gpu_uuid = engine.npu_uuid
     engine.packed_buffer_size_bytes = 16
     engine.source = MagicMock()
     events: list[str] = []
 
     def chunks(**kwargs):
-        assert kwargs["npu_uuid"] == "node-0"
+        assert kwargs["gpu_uuid"] == "node-0"
         assert kwargs["buffer_size_bytes"] == 16
         for i in range(2):
-            yield dict(
+            yield PackedIpcChunk(
                 names=[f"w{i}"], dtype_names=["float32"], shapes=[[4]], tensor_sizes=[16], ipc_handle={"node-0": (i,)}
             )
             assert events[-1] == "sync"
@@ -300,12 +311,29 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
 
 
 @pytest.mark.parametrize("is_sender", [False, True])
-def test_multi_rank_handles_are_merged_and_synchronized_on_npu(is_sender):
-    engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
-    engine.is_sender = is_sender
+@pytest.mark.parametrize("world_size", [0, 1, 2])
+def test_standalone_trainer_inherits_npu_collectives_and_cleanup(is_sender, world_size):
     local = [{"node-0": (0,)}, {"node-0": (1,)}]
     remote = [{"node-1": (2,)}, {"node-1": (3,)}]
     events = []
+    fake_torch = types.SimpleNamespace(
+        cuda=MagicMock(),
+        npu=MagicMock(),
+        empty=MagicMock(),
+        device=torch.device,
+        accelerator=types.SimpleNamespace(
+            current_device_index=lambda: 0,
+            synchronize=lambda: fake_torch.npu.synchronize(),
+        ),
+        distributed=MagicMock(),
+    )
+    fake_torch.cuda.synchronize.side_effect = AssertionError("CUDA used")
+    fake_torch.cuda.ipc_collect.side_effect = AssertionError("CUDA used")
+    fake_torch.npu.synchronize.side_effect = lambda: events.append("npu")
+    fake_torch.npu.ipc_collect.side_effect = lambda: events.append("collect")
+    fake_torch.distributed.is_initialized.return_value = world_size > 0
+    fake_torch.distributed.get_world_size.return_value = world_size
+    fake_torch.distributed.barrier.side_effect = lambda: events.append("barrier")
 
     def gather(output, handles):
         assert handles is local
@@ -313,16 +341,22 @@ def test_multi_rank_handles_are_merged_and_synchronized_on_npu(is_sender):
         events.append("gather")
 
     with (
-        patch.object(torch.distributed, "is_initialized", return_value=True),
-        patch.object(torch.distributed, "get_world_size", return_value=2),
-        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
-        patch.object(torch.distributed, "barrier", side_effect=lambda: events.append("barrier")),
-        patch.object(torch, "npu", types.SimpleNamespace(synchronize=lambda: events.append("npu")), create=True),
-        patch.object(torch.cuda, "synchronize", side_effect=AssertionError("CUDA used")),
+        patch(f"{_MODULE}.torch", fake_torch),
+        patch("vllm.distributed.weight_transfer.ipc_engine.torch", fake_torch),
+        patch.object(v2_utils, "torch", fake_torch),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
     ):
+        fake_torch.distributed.all_gather_object.side_effect = gather
+        # A fresh trainer must establish mappings itself, without a model runner.
+        engine = NPUIPCTrainerWeightTransferEngine(client=MagicMock(), source=[], is_sender=is_sender)
         result = engine._all_gather_and_merge_handles(local)
-    assert events == ["gather", "barrier", "npu"]
-    assert result == ([{**local[i], **remote[i]} for i in range(2)] if is_sender else [{}, {}])
+        engine._post_send_sync()
+    if world_size < 2:
+        assert result is local
+        assert events == ["collect"]
+    else:
+        assert events == ["gather", "barrier", "npu", "barrier", "collect"]
+        assert result == ([{**local[i], **remote[i]} for i in range(2)] if is_sender else [{}, {}])
 
 
 def test_packed_receive_rejects_missing_sizes():
@@ -374,3 +408,82 @@ def test_uuid_uses_assigned_device_with_visibility_mapping():
             assert npu_ipc_engine.npu_generate_uuid(1) == "host-7"
     finally:
         npu_ipc_engine.npu_generate_uuid.cache_clear()
+
+
+@pytest.mark.parametrize("cleanup", ["finish_weight_update", "shutdown"])
+def test_packed_export_imported_once_with_fresh_payload_and_release(cleanup):
+    """Multiple chunks share an import, but load fresh independent weights."""
+
+    def fake_base_init(self, config, vllm_config, device, model):
+        self.device, self.model = device, model
+        self.model_config = None
+
+    model = MagicMock()
+    with patch.object(WeightTransferEngine, "__init__", fake_base_init):
+        engine = NPUIPCWeightTransferEngine(None, None, torch.device("cpu:0"), model)
+    engine.packed = True
+    staging = torch.tensor([1.0, 2.0])
+    imports, loaded = [], []
+
+    def rebuild(*args):
+        assert args[6] == 0
+        mapping = staging.view(torch.uint8)
+        imports.append(weakref.ref(mapping))
+        return mapping
+
+    model.load_weights.side_effect = lambda weights: loaded.append(weights[0][1])
+    info = engine.update_info_cls(
+        names=["w"],
+        dtype_names=["float32"],
+        shapes=[[2]],
+        tensor_sizes=[8],
+        ipc_handles={"node-0": (None,) * 6 + (999, "export-1")},
+    )
+    with (
+        _patch_rebuild_npu_tensor(rebuild),
+        _patch_reload_module(),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+    ):
+        engine.receive_weights(info)
+        staging.copy_(torch.tensor([3.0, 4.0]))
+        engine.receive_weights(info)
+        assert len(imports) == 1
+        assert imports[0]() is not None
+        assert torch.equal(loaded[0], torch.tensor([1.0, 2.0]))
+        assert torch.equal(loaded[1], torch.tensor([3.0, 4.0]))
+        getattr(engine, cleanup)()
+        assert imports[0]() is None
+        # Cleanup is idempotent; a later update must open a new mapping.
+        getattr(engine, cleanup)()
+        engine.receive_weights(info)
+        assert len(imports) == 2
+        engine.shutdown()
+        assert imports[1]() is None
+
+
+def test_packed_export_replacement_and_failed_rebuild_release():
+    from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedBufferImporter
+
+    importer = NPUPackedBufferImporter()
+    staging = torch.zeros(8, dtype=torch.uint8)
+    refs = []
+
+    def rebuild(*args):
+        if args[-1] == "bad-export":
+            raise RuntimeError("cannot import")
+        mapping = staging.view(-1)
+        refs.append(weakref.ref(mapping))
+        return mapping
+
+    with _patch_rebuild_npu_tensor(rebuild):
+        importer.rebuild(["same-storage", "refcount-slot-1"])
+        importer.rebuild(["same-storage", "refcount-slot-1"])
+        assert len(refs) == 1
+        importer.rebuild(["same-storage", "refcount-slot-2"])
+        assert refs[0]() is None
+        assert refs[1]() is not None
+        with pytest.raises(RuntimeError, match="cannot import"):
+            importer.rebuild(["same-storage", "bad-export"])
+        assert refs[1]() is not None
+        importer.close()
+        assert refs[1]() is None

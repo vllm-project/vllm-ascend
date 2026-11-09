@@ -28,12 +28,16 @@ from __future__ import annotations
 import sys
 import types
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch.overrides import TorchFunctionMode
+from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
+from vllm_ascend.distributed.weight_transfer import packed_tensor as packed_module
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_broadcast_consumer,
@@ -67,6 +71,34 @@ class _FakeNpuStream:
         return None
 
 
+class _CPUAllocationMode(TorchFunctionMode):
+    """Make valid NPU factory calls run on CPU without rebinding torch.empty."""
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.empty:
+            device = kwargs.get("device")
+            if getattr(device, "type", None) == "npu" or (isinstance(device, str) and device.split(":", 1)[0] == "npu"):
+                kwargs = {**kwargs, "device": "cpu"}
+        return func(*args, **kwargs)
+
+
+class _ObserveAllocations(TorchFunctionMode):
+    """Record the requested device and execute allocations on CPU."""
+
+    def __init__(self):
+        super().__init__()
+        self.devices = []
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.empty:
+            device = kwargs.get("device")
+            self.devices.append(None if device is None else str(device))
+            kwargs = {**kwargs, "device": "cpu"}
+        return func(*args, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _stub_torch_npu():
     """Patch every ``torch.npu.*`` reference and ``device="npu"`` the module uses.
@@ -75,11 +107,11 @@ def _stub_torch_npu():
     at call time via attribute access on the ``torch.npu`` submodule, and creates
     buffers with ``torch.empty(..., device="npu")``.  On a pure CPU build neither
     ``torch.npu`` nor the ``"npu"`` device exists, so both must be stubbed:
-    ``torch.npu`` is replaced with a fake namespace and ``torch.empty`` is wrapped
-    to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
+    ``torch.npu`` is replaced with a fake namespace and a factory mode redirects
+    ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
-    fake_npu = types.SimpleNamespace(
+    fake_npu = MagicMock(
         Stream=_FakeNpuStream,
         current_stream=_FakeNpuStream,
         synchronize=lambda *a, **kw: None,
@@ -87,26 +119,176 @@ def _stub_torch_npu():
         # already implements ``__enter__``/``__exit__`` so just return it.
         stream=lambda s: s,
     )
-    original_empty = torch.empty
-
-    def _fake_empty(*args, **kwargs):
-        device = kwargs.get("device")
-        if getattr(device, "type", None) == "npu" or (isinstance(device, str) and device.split(":", 1)[0] == "npu"):
-            kwargs["device"] = "cpu"
-        return original_empty(*args, **kwargs)
-
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "cuda", MagicMock(current_stream=_FakeNpuStream)),
+        _CPUAllocationMode(),
+        patch.object(torch.accelerator, "current_stream", _FakeNpuStream, create=True),
+        patch.object(torch.accelerator, "current_device_index", return_value=0, create=True),
+        patch(
+            "vllm.distributed.weight_transfer.packed_tensor.reduce_tensor",
+            side_effect=lambda tensor: packed_module.reduce_tensor(tensor),
+        ),
+    ):
         yield
+
+
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_packed_sender_roundtrip_without_global_replacement(empty_only):
+    from vllm.distributed.weight_transfer import ipc_engine
+
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerWeightTransferEngine
+
+    tensors = (
+        [("empty", torch.empty(0, 3))]
+        if empty_only
+        else [("a", torch.tensor([1.0, 2.0])), ("b", torch.tensor([3.0, 4.0]))]
+    )
+    source = MagicMock()
+    source.__iter__.return_value = iter(tensors)
+    source.iter_full.return_value = iter(tensors)
+    buffers, received = [], []
+
+    def export(buffer):
+        buffers.append(buffer)
+        return None, (0,) * 7
+
+    importer = packed_module.NPUPackedBufferImporter()
+    client = MagicMock()
+
+    def receive(payload):
+        received.extend(
+            packed_npu_ipc_consumer(
+                payload["ipc_handles"],
+                "node-0",
+                payload["names"],
+                payload["shapes"],
+                payload["dtype_names"],
+                payload["tensor_sizes"],
+                0,
+                importer=importer,
+            )
+        )
+
+    client.update_weights.side_effect = receive
+    client.finish_weight_update.side_effect = importer.close
+    original_empty = torch.empty
+    original_producer = ipc_engine.packed_ipc_producer
+    with (
+        patch("vllm_ascend.distributed.weight_transfer.npu_ipc_engine.npu_generate_uuid", return_value="node-0"),
+        patch(f"{_MODULE}.reduce_tensor", side_effect=export),
+        _install_fake_rebuild_npu_tensor(torch.empty(0, dtype=torch.uint8)),
+    ):
+        rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
+        rebuild.side_effect = lambda *args: buffers[0]
+        engine = NPUIPCTrainerWeightTransferEngine(
+            client=client, source=source, packed=True, packed_buffer_size_bytes=8
+        )
+        engine.send_weights()
+        assert rebuild.call_count == 1
+        assert torch.empty is original_empty
+        assert ipc_engine.packed_ipc_producer is original_producer
+    assert len(buffers) == 1
+    assert client.update_weights.call_count == (1 if empty_only else 2)
+    assert [name for name, _ in received] == [name for name, _ in tensors]
+    assert all(torch.equal(actual, expected) for (_, actual), (_, expected) in zip(received, tensors))
+    client.start_weight_update.assert_called_once_with()
+    client.finish_weight_update.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
     "device",
-    ["npu", "npu:0", types.SimpleNamespace(type="npu")],
+    ["npu", "npu:0", torch.device("npu")],
     ids=["unindexed-string", "indexed-string", "device-type"],
 )
 def test_cpu_fixture_redirects_all_npu_device_forms(device):
     """Guard test infrastructure against indexed/device-object allocations."""
     assert torch.empty(1, device=device).device.type == "cpu"
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        ("cuda", "npu"),
+        ("cuda:2", "npu:2"),
+        (torch.device("cuda"), "npu"),
+        (torch.device("cuda:3"), "npu:3"),
+        ("cpu", "cpu"),
+        (torch.device("cpu"), "cpu"),
+        ("meta", "meta"),
+        (None, None),
+    ],
+)
+def test_allocation_mode_is_scoped_and_composes(device, expected):
+    original_empty = torch.empty
+    with _ObserveAllocations() as observer:
+        with packed_module._NPUIPCAllocationMode(), packed_module._NPUIPCAllocationMode():
+            tensor = torch.empty(2, device=device, dtype=torch.uint8)
+            assert tensor.dtype == torch.uint8
+            assert observer.devices[-1] == expected
+            assert torch.empty is original_empty
+        torch.empty(1, device="cuda")
+        assert observer.devices[-1] == "cuda"
+    assert torch.empty is original_empty
+
+
+@pytest.mark.parametrize("termination", ["yield", "close", "error"])
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_producer_mode_does_not_leak_to_caller(termination, empty_only):
+    tensors = [("empty", torch.empty(0))] if empty_only else [("a", torch.ones(2)), ("b", torch.ones(2))]
+
+    def transform(item):
+        if termination == "error":
+            raise RuntimeError("post processing failed")
+        return item[1]
+
+    patcher, _ = _install_fake_reduce_tensor()
+    original_empty = torch.empty
+    with patcher, _ObserveAllocations() as observer:
+        producer = packed_npu_ipc_producer(iter(tensors), "node-0", transform, 8)
+        try:
+            if termination == "error":
+                with pytest.raises(RuntimeError, match="post processing failed"):
+                    next(producer)
+            else:
+                next(producer)
+                if termination == "close":
+                    producer.close()
+            torch.empty(1, device="cuda")
+            assert observer.devices[-1] == "cuda"
+            assert torch.empty is original_empty
+        finally:
+            producer.close()
+
+
+def test_allocation_mode_is_not_inherited_by_other_threads():
+    def allocate():
+        with _ObserveAllocations() as observer:
+            torch.empty(1, device="cuda")
+        return observer.devices
+
+    with packed_module._NPUIPCAllocationMode(), ThreadPoolExecutor(max_workers=1) as executor:
+        assert executor.submit(allocate).result(timeout=5) == ["cuda"]
+
+
+def test_allocation_mode_exits_after_allocator_error():
+    class RejectAllocation(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            if func is torch.empty:
+                raise RuntimeError("allocation failed")
+            return func(*args, **(kwargs or {}))
+
+    original_empty = torch.empty
+    with (
+        pytest.raises(RuntimeError, match="allocation failed"),
+        RejectAllocation(),
+        packed_module._NPUIPCAllocationMode(),
+    ):
+        torch.empty(1, device="cuda")
+    with _ObserveAllocations() as observer:
+        torch.empty(1, device="cuda")
+        assert observer.devices == ["cuda"]
+    assert torch.empty is original_empty
 
 
 # ---------------------------------------------------------------------------
@@ -359,14 +541,14 @@ def _install_fake_reduce_tensor():
 
 
 def test_packed_npu_ipc_producer_single_chunk():
-    """A small tensor fits in one chunk; one dict is yielded."""
+    """A small tensor fits in one upstream-compatible chunk."""
     patcher, args_sentinel = _install_fake_reduce_tensor()
     with patcher:
         tensor = torch.full((4,), 1.5, dtype=torch.float32)
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", tensor)]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -374,11 +556,11 @@ def test_packed_npu_ipc_producer_single_chunk():
 
     assert len(chunks) == 1
     chunk = chunks[0]
-    assert chunk["names"] == ["w"]
-    assert chunk["shapes"] == [[4]]
-    assert chunk["dtype_names"] == ["float32"]
-    assert chunk["tensor_sizes"] == [16]  # 4 float32 = 16 bytes
-    assert chunk["ipc_handle"] == {"node-0": args_sentinel}
+    assert chunk.names == ["w"]
+    assert chunk.shapes == [[4]]
+    assert chunk.dtype_names == ["float32"]
+    assert chunk.tensor_sizes == [16]  # 4 float32 = 16 bytes
+    assert chunk.ipc_handle == {"node-0": args_sentinel}
 
 
 def test_packed_npu_ipc_producer_empty_iterator():
@@ -388,12 +570,33 @@ def test_packed_npu_ipc_producer_empty_iterator():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
         )
     assert chunks == []
+
+
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_upstream_adapter_preserves_empty_prefix_and_callback_order(empty_only):
+    tensors = [("leading", torch.empty(0, 2))]
+    if not empty_only:
+        tensors.append(("weight", torch.tensor([1.0, 2.0])))
+    tensors.append(("trailing", torch.empty(0)))
+    seen = []
+
+    def transform(item):
+        seen.append(item[0])
+        return item[1]
+
+    patcher, _ = _install_fake_reduce_tensor()
+    with patcher:
+        chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", transform, 8))
+    assert len(chunks) == 1
+    assert chunks[0].names == [name for name, _ in tensors]
+    assert chunks[0].tensor_sizes == ([0, 0] if empty_only else [0, 8, 0])
+    assert seen == [name for name, _ in tensors]
 
 
 def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
@@ -407,7 +610,7 @@ def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter(tensors),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=20,  # Only one 16-byte tensor fits per chunk
             )
@@ -415,13 +618,13 @@ def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
 
     assert len(chunks) == 2
     # First chunk holds the first tensor only.
-    assert chunks[0]["names"] == ["a"]
-    assert chunks[0]["tensor_sizes"] == [16]
+    assert chunks[0].names == ["a"]
+    assert chunks[0].tensor_sizes == [16]
     # Second chunk holds the second tensor.
-    assert chunks[1]["names"] == ["b"]
-    assert chunks[1]["tensor_sizes"] == [16]
+    assert chunks[1].names == ["b"]
+    assert chunks[1].tensor_sizes == [16]
     # Every chunk carries the same IPC handle (reusable single buffer).
-    assert all(c["ipc_handle"] == {"node-0": args_sentinel} for c in chunks)
+    assert all(c.ipc_handle == {"node-0": args_sentinel} for c in chunks)
 
 
 def test_packed_npu_ipc_producer_raises_when_single_tensor_exceeds_buffer():
@@ -433,7 +636,7 @@ def test_packed_npu_ipc_producer_raises_when_single_tensor_exceeds_buffer():
             list(
                 packed_npu_ipc_producer(
                     iterator=iter([("big", big)]),
-                    npu_uuid="node-0",
+                    gpu_uuid="node-0",
                     post_iter_func=lambda item: item[1],
                     buffer_size_bytes=128,
                 )
@@ -452,13 +655,13 @@ def test_packed_npu_ipc_producer_dtype_name_extraction():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter(tensors),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
         )
     assert len(chunks) == 1
-    assert chunks[0]["dtype_names"] == ["float16", "bfloat16", "int64"]
+    assert chunks[0].dtype_names == ["float16", "bfloat16", "int64"]
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +978,7 @@ def test_packed_npu_ipc_producer_post_iter_func_transforms_tensor():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", original)]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1] * 3,
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -783,8 +986,8 @@ def test_packed_npu_ipc_producer_post_iter_func_transforms_tensor():
 
     assert len(chunks) == 1
     # Chunk metadata records the original shape/dtype, not the transformed one.
-    assert chunks[0]["shapes"] == [[4]]
-    assert chunks[0]["dtype_names"] == ["float32"]
+    assert chunks[0].shapes == [[4]]
+    assert chunks[0].dtype_names == ["float32"]
 
 
 def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
@@ -796,16 +999,16 @@ def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("a", a), ("b", b)]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
         )
 
     assert len(chunks) == 1
-    assert chunks[0]["names"] == ["a", "b"]
-    assert chunks[0]["shapes"] == [[2], [3]]
-    assert chunks[0]["tensor_sizes"] == [8, 12]
+    assert chunks[0].names == ["a", "b"]
+    assert chunks[0].shapes == [[2], [3]]
+    assert chunks[0].tensor_sizes == [8, 12]
 
 
 def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
@@ -819,14 +1022,14 @@ def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", torch.zeros(4, dtype=torch.float32))]),
-                npu_uuid="physical-npu-7",
+                gpu_uuid="physical-npu-7",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
         )
 
-    assert "physical-npu-7" in chunks[0]["ipc_handle"]
-    assert chunks[0]["ipc_handle"]["physical-npu-7"] == args_sentinel
+    assert "physical-npu-7" in chunks[0].ipc_handle
+    assert chunks[0].ipc_handle["physical-npu-7"] == args_sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -935,15 +1138,15 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
         assert len(chunks) == 1  # IPC callers here deliberately fit in one chunk.
         chunk_count = len(chunks)
         chunk = chunks[0]
-        assert isinstance(chunk, dict)  # Keep the existing IPC wire representation.
+        assert isinstance(chunk, PackedIpcChunk)
         with _install_fake_rebuild_npu_tensor(buffers[0]):
             received = packed_npu_ipc_consumer(
-                chunk["ipc_handle"],
+                chunk.ipc_handle,
                 "node-0",
-                chunk["names"],
-                chunk["shapes"],
-                chunk["dtype_names"],
-                chunk["tensor_sizes"],
+                chunk.names,
+                chunk.shapes,
+                chunk.dtype_names,
+                chunk.tensor_sizes,
                 0,
             )
     for buffer in buffers:

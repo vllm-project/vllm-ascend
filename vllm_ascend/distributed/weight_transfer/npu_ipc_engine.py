@@ -22,12 +22,15 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
 from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.base import (
         VLLMWeightSyncClient,
         WeightSource,
@@ -118,6 +121,16 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
+    def __init__(
+        self,
+        config: "WeightTransferConfig",
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
+    ) -> None:
+        super().__init__(config, vllm_config, device, model)
+        self._packed_importer = NPUPackedBufferImporter()
+
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -155,6 +168,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
@@ -197,8 +211,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     """Trainer-side NPU IPC weight transfer engine.
 
     Inherits the handshake, send lifecycle, unpacked sender and payload
-    construction. Only CUDA-specific initialization, collectives, packing
-    and cleanup need NPU implementations.
+    construction, collectives and cleanup. Device identity and the small
+    packed-send adapter remain NPU-specific.
     """
 
     init_info_cls = NPUIPCTrainerInitInfo
@@ -212,14 +226,19 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
+        from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
         # IPCTrainerWeightTransferEngine.__init__ queries CUDA properties.
         # Initialize its device-independent base, then supply NPU identity.
-        TrainerWeightTransferEngine.__init__(
-            self,
-            client=client,
-            source=source,
-            is_sender=is_sender,
-        )
+        # Standalone trainers do not initialize an NPU model runner. Apply
+        # its persistent CUDA mappings for upstream synchronization and IPC cleanup.
+        with torch_cuda_wrapper():
+            TrainerWeightTransferEngine.__init__(
+                self,
+                client=client,
+                source=source,
+                is_sender=is_sender,
+            )
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
@@ -227,67 +246,22 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         # Upstream's unpacked sender treats gpu_uuid as an opaque wire key.
         self.gpu_uuid = self.npu_uuid
 
-    def _all_gather_and_merge_handles(
-        self,
-        handles: list[dict[str, tuple]],
-    ) -> list[dict[str, tuple]]:
-        """All-gather and merge IPC handle dicts across ranks in one call.
-
-        Each rank contributes a list of ``{npu_uuid: ipc_args}`` dicts.
-        A single all_gather_object collects every rank's full list, then
-        the sender merges per-index so each dict maps every NPU UUID to
-        its args. No-op (returns handles unchanged) when no distributed
-        group exists.
-        """
-        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-            return handles
-
-        world_size = torch.distributed.get_world_size()
-        gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
-        torch.distributed.all_gather_object(gathered, handles)
-        torch.distributed.barrier()
-        torch.npu.synchronize()
-
-        if self.is_sender:
-            merged: list[dict[str, tuple]] = []
-            for param_idx in range(len(handles)):
-                m: dict[str, tuple] = {}
-                for rank_handles in gathered:
-                    if rank_handles is not None:
-                        m.update(rank_handles[param_idx])
-                merged.append(m)
-            return merged
-        return [{} for _ in handles]
-
-    @staticmethod
-    def _post_send_sync() -> None:
-        """Synchronize each send and keep all trainer ranks in step."""
-        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-            torch.distributed.barrier()
-        torch.npu.synchronize()
-
     def _send_packed(self, source: "WeightSource") -> None:
-        """Send weights in bounded-memory chunks (packed mode)."""
-        # vLLM main replaced `WeightSource.__iter__` with `iter_full()`;
-        # v0.32.0 still iterates the source directly.
+        """Use the NPU producer without replacing upstream module globals."""
         iterator = iter(source) if vllm_version_is("0.32.0") else source.iter_full()
         for chunk in packed_npu_ipc_producer(
             iterator=iterator,
-            npu_uuid=self.npu_uuid,
+            gpu_uuid=self.gpu_uuid,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
-            ipc_handle = self._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
+            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
             self._do_send(
-                names=chunk["names"],
-                dtype_names=chunk["dtype_names"],
-                shapes=chunk["shapes"],
+                names=chunk.names,
+                dtype_names=chunk.dtype_names,
+                shapes=chunk.shapes,
                 ipc_handles=ipc_handle,
-                tensor_sizes=chunk["tensor_sizes"],
+                tensor_sizes=chunk.tensor_sizes,
             )
-            # Per-chunk barrier: the producer reuses a single IPC buffer
-            # across chunks. Without syncing every rank here, non-sender
-            # ranks race ahead and overwrite their buffer while their
-            # colocated worker is still reading the current chunk, silently
-            # corrupting the transfer.
+            # Every trainer rank must wait before its IPC buffer is reused.
             self._post_send_sync()
