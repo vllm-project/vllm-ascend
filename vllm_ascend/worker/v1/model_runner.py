@@ -3082,6 +3082,15 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata=sampling_metadata,
             )
 
+        # Update spec_token_ids with real draft tokens from pre step only when
+        # output_token_ids is needed (penalties or bad_words are in use).
+        # Keep this in sync with upstream GPUModelRunner._sample(): without it
+        # the rejection sampler reads the stale spec_token_ids and applies
+        # penalties to the wrong tokens under async scheduling + spec decode.
+        if self.use_async_scheduling and self._draft_token_req_ids is not None:
+            draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
+            self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
+
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
         draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
