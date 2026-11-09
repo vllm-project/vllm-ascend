@@ -38,7 +38,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -350,11 +349,10 @@ def test_raw_sequence_lifecycle(
             scheduler.update_from_output(output, result)
             if drafts:
                 expected_computed = computed_before_update - len(drafts) + accepted
-                if not vllm_version_is("0.32.0"):
-                    # vLLM main trims ``num_computed_tokens`` to cover only the
-                    # tokens actually kept when a request stops mid token-list.
-                    appended = request.num_output_tokens - output_tokens_before_update
-                    expected_computed -= (accepted + 1) - appended
+                # vLLM main trims ``num_computed_tokens`` to cover only the
+                # tokens actually kept when a request stops mid token-list.
+                appended = request.num_output_tokens - output_tokens_before_update
+                expected_computed -= (accepted + 1) - appended
                 assert request.num_computed_tokens == expected_computed
             if speculative_method:
                 scheduler.update_draft_token_ids(
@@ -434,7 +432,7 @@ def test_raw_sequence_lifecycle(
         # pure full-attention dspark layout sees the doubled local prefix hit.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
-        if not vllm_version_is("0.32.0") and speculative_method == "dspark" and only_full_attention:
+        if speculative_method == "dspark" and only_full_attention:
             mixed_local = 256
         run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
