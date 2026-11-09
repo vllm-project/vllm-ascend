@@ -16,13 +16,14 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import MLAAttentionImpl
+from vllm.v1.attention.backend import AttentionType, MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
@@ -33,6 +34,7 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
+    enable_sfa,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
 )
@@ -48,6 +50,10 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+# Qualified fixed suffix FIA geometry: query heads, KV heads, and head size.
+SUFFIX_FIA_HEAD_GEOMETRY = (32, 8, 128)
+SUFFIX_FIA_BLOCK_SIZE = 128
+SUFFIX_FIA_NUM_SPECULATIVE_TOKENS = 4
 
 
 def supports_strided_mla_cache(
@@ -295,6 +301,109 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
         and spec.page_size_bytes == spec.real_page_size_bytes
         and using_paged_attention(None, vllm_config, spec.head_size)
     )
+
+
+def is_suffix_fia_cache_enabled(vllm_config: VllmConfig, impl) -> bool:
+    """Select the qualified fixed-K4 FIA domain, independently of PA execution.
+
+    This is a config/implementation policy, not a runtime attention eligibility
+    check. Readers must additionally validate their tensor and metadata views.
+    Incomplete configs deliberately keep the existing cache/attention paths.
+    """
+    # Import lazily to avoid a circular dependency with attention_v1.
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+    if type(impl) is not AscendAttentionBackendImpl:
+        return False
+    try:
+        if not get_current_hardware_profile().supports(HardwareCapability.SUFFIX_FIA_CACHE):
+            return False
+        spec = vllm_config.speculative_config
+        if (
+            vllm_config.use_v2_model_runner is not True
+            or spec is None
+            or spec.method != "suffix"
+            or spec.num_speculative_tokens != SUFFIX_FIA_NUM_SPECULATIVE_TOKENS
+            or spec.enable_adaptive_verification is not False
+            or spec.num_speculative_tokens_per_batch_size is not None
+        ):
+            return False
+        model = vllm_config.model_config
+        parallel = vllm_config.parallel_config
+        cache = vllm_config.cache_config
+        ascend = get_ascend_config()
+        hf_config = getattr(model, "hf_text_config", None) or getattr(model, "hf_config", None)
+        if hf_config is None:
+            return False
+        return (
+            hf_config.model_type == "qwen3"
+            and model.runner_type == "generate"
+            and model.dtype == torch.bfloat16
+            and model.use_mla is False
+            and model.quantization is None
+            and vllm_config.quant_config is None
+            and vllm_config.compilation_config is not None
+            and vllm_config.kv_transfer_config is None
+            and vllm_config.offload_config.uva.cpu_offload_gb == 0
+            and vllm_config.offload_config.prefetch.offload_group_size == 0
+            and parallel.tensor_parallel_size == 1
+            and parallel.pipeline_parallel_size == 1
+            and parallel.data_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.enable_expert_parallel is False
+            and cache.block_size == SUFFIX_FIA_BLOCK_SIZE
+            and cache.cache_dtype in ("auto", "bfloat16")
+            and cache.kv_offloading_size is None
+            and cache.kv_sharing_fast_prefill is False
+            and ascend.sparse_kv_offload_config.enabled is False
+            and ascend.dynamic_spec_config.method is None
+            and isinstance(ascend.pa_shape_list, list)
+            and not ascend.pa_shape_list
+            and not enable_sfa(vllm_config)
+            and impl.attn_type == AttentionType.DECODER
+            and impl.sliding_window is None
+            and impl.alibi_slopes is None
+            and impl.sinks is None
+            and impl.enable_c8_quant is False
+            and impl.kv_cache_dtype == torch.bfloat16
+            and impl.use_pcp is False
+            and impl.is_pcp_decode_sharded is False
+            and impl.kv_sharing_target_layer_name is None
+            and impl.kv_cache_layout in (None, "NHD", "HND", "LBNHC", "LBHNC")
+            and (impl.num_heads, impl.num_kv_heads, impl.head_size) == SUFFIX_FIA_HEAD_GEOMETRY
+        )
+    except (AttributeError, TypeError, ValueError, RuntimeError, AssertionError):
+        # A missing/unreadable prerequisite is not an opt-in to a new layout.
+        return False
+
+
+def requires_contiguous_suffix_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Require split K/V only for an unpadded, unshared qualified suffix layer."""
+    if not is_suffix_fia_cache_enabled(vllm_config, getattr(layer, "impl", None)):
+        return False
+    try:
+        return (
+            isinstance(layer.layer_name, str)
+            and bool(layer.layer_name)
+            and layer.kv_sharing_target_layer_name is None
+            and type(spec) is FullAttentionSpec
+            and spec.dtype == torch.bfloat16
+            and spec.block_size == SUFFIX_FIA_BLOCK_SIZE
+            and (spec.num_kv_heads, spec.head_size) == SUFFIX_FIA_HEAD_GEOMETRY[1:]
+            and spec.head_size_v == spec.head_size
+            and spec.num_heads == spec.num_kv_heads
+            and spec.kv_quant_mode == KVQuantMode.NONE
+            and spec.tokens_per_state == 1
+            and spec.state_content_bytes is None
+            and spec.sliding_window is None
+            and spec.attention_chunk_size is None
+            and spec.non_causal is False
+            and spec.page_size_bytes == spec.real_page_size_bytes
+            and not getattr(spec, "store_on_host", False)
+        )
+    except (AttributeError, TypeError, ValueError, RuntimeError, AssertionError):
+        return False
 
 
 def is_dcp_enabled():
