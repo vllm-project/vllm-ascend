@@ -101,6 +101,10 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
+      # 线下 karc 节点到 pypi.org 出口极慢（squid 120s 后 ABORTED），
+      # 指向华为云 pypi 镜像（实测 0.3s 返回完整 simple 索引）。
+      UV_DEFAULT_INDEX: https://mirrors.huaweicloud.com/repository/pypi/simple
+      PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -110,7 +114,12 @@ jobs:
         MAX_JOBS: 4
         UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
-        UV_HTTP_TIMEOUT: 120
+        # karc 经 squid 并发下载时单个连接会被拖过 120s 超时（线上报
+        # "Failed to download distribution due to network timeout"），
+        # 放宽超时、加重试并把并发降到 2。
+        UV_HTTP_TIMEOUT: 600
+        UV_HTTP_RETRIES: 5
+        UV_CONCURRENT_DOWNLOADS: 2
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
     steps:
