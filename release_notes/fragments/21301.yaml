@@ -1,0 +1,4 @@
+pr: 21301
+entries:
+  - category: feature
+    text: Added opt-in Mooncake Store layerwise KV offload with shared prefill buffers, native MTP residency, and exact recurrent-state snapshots.
