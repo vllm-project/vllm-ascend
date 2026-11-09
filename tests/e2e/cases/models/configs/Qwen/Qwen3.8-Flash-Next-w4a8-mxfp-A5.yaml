@@ -6,8 +6,8 @@
 # Performance baselines are provisional conservative values calibrated from
 # one successful release Nightly CI run on 2026-11-02 (overall output token/s).
 test_cases:
-  - name: "Qwen3.8-Flash-Next-w8a8-mxfp8-mtp-A5"
-    model: "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mxfp8-mtp"
+  - name: "Qwen3.8-Flash-Next-w4a8-mxfp-A5"
+    model: "Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp"
     envs:
       VLLM_USE_MODELSCOPE: "true"
       VLLM_SERVER_DEV_MODE: "1"
@@ -25,7 +25,7 @@ test_cases:
       - "--port"
       - "$SERVER_PORT"
       - "--served-model-name"
-      - "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mxfp8-mtp"
+      - "Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
