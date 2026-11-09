@@ -19,9 +19,14 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3Model,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.models.qwen3_dspark import align_draft_weights
+from vllm_ascend.ops.triton.spec_decode import dflash2_score_edges  # noqa: F401
 from vllm_ascend.utils import get_rotation_path
+
+_MAX_FUSED_SELECTOR_TOP_K = 32
+_MAX_FUSED_SELECTOR_RANK = 256
 
 
 def _grouped_conv(
@@ -167,6 +172,38 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
+    # Bound the fused tile workspace; unusual checkpoints retain the reference.
+    if (
+        HAS_TRITON
+        and candidate_ids.device.type == "npu"
+        and predecessor_table.dtype in (torch.float16, torch.bfloat16)
+        and successor_table.dtype == predecessor_table.dtype == hidden.dtype
+        and predecessor_table.is_contiguous()
+        and successor_table.is_contiguous()
+        and 0 < top_k <= _MAX_FUSED_SELECTOR_TOP_K
+        and 0 < predecessor_table.shape[1] <= _MAX_FUSED_SELECTOR_RANK
+    ):
+        return torch.ops.vllm.ascend_dflash2_score_edges(
+            predecessor_table, successor_table, candidate_ids, unary_logits, hidden, anchor_token_ids
+        )
+    return _score_edges_reference(
+        predecessor_table, successor_table, candidate_ids, unary_logits, hidden, anchor_token_ids, top_k
+    )
+
+
+def _score_edges_reference(
+    predecessor_table: torch.Tensor,
+    successor_table: torch.Tensor,
+    candidate_ids: torch.Tensor,
+    unary_logits: torch.Tensor,
+    hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+    top_k: int,
+) -> torch.Tensor:
+    if candidate_ids.numel() == 0:
+        return candidate_ids.new_empty((*candidate_ids.shape, top_k), dtype=torch.float32)
+    # Chunked-prefill anchors may be target-only tokens; these drafts are unused.
+    anchor_token_ids = anchor_token_ids.clamp(0, predecessor_table.shape[0] - 1)
     successors = successor_table[candidate_ids]
     predecessor_ids = torch.cat(
         (
@@ -176,7 +213,10 @@ def _score_edges(
         dim=1,
     )
     predecessors = predecessor_table[predecessor_ids]
-    return unary_logits[:, :, None] + torch.einsum("blpr,blcr->blpc", predecessors * hidden[:, :, None], successors)
+    # Match the fused dot: round the weighted predecessor to its input dtype,
+    # then accumulate and add unary logits in FP32 (vLLM #64916).
+    weighted = predecessors * hidden[:, :, None]
+    return unary_logits.float()[:, :, None] + torch.einsum("blpr,blcr->blpc", weighted.float(), successors.float())
 
 
 # Context-free calls bypass any internal ACLGraphWrapper's capture/replay.
