@@ -7,7 +7,8 @@
 # Model path: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
 # Dataset path: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k; test.jsonl contains the first 500 questions.
 # Mount the model path and dataset path inside the test runtime.
-# Dataset includes train.jsonl for 4-shot examples and first-500 test.jsonl.
+# Dataset includes train.jsonl and first-500 test.jsonl.
+# The stock 4-shot CoT preset embeds four fixed examples; ZeroRetriever does not select them from train.jsonl.
 # Mount the dataset at the same absolute path; keep basename gsm8k, no trailing slash.
 # Unset HCCL_OP_EXPANSION_MODE before launching the test harness.
 # Requires a vLLM build supporting Kimi-K3 and --default-chat-template-kwargs.

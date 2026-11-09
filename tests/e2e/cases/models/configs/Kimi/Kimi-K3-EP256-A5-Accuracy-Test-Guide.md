@@ -61,7 +61,7 @@ Weights and datasets were mounted read-only.
 | Model | Kimi-K3 W4A8 MXFP/QuaRot with 256 routed experts |
 | Model path | `/root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256` |
 | Dataset path | `/root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k` |
-| Dataset files | `test.jsonl`: first 500 test questions; `train.jsonl`: four-shot examples |
+| Dataset files | `test.jsonl`: first 500 test questions; `train.jsonl`: retained training split; the preset embeds its four examples |
 | Service port / runner | `SERVER_PORT=8080` / `VLLM_USE_V2_MODEL_RUNNER=1` |
 | Communication buffer / CPU threads | `HCCL_BUFFSIZE=800` / `OMP_NUM_THREADS=1` |
 | Memory allocation | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` |
@@ -73,10 +73,39 @@ In `releases/v0.30.0`, the shared single-node entry point does not pass `max_wai
 so `RemoteOpenAIServer` waits up to 2800 seconds for service readiness. Setting
 `VLLM_ENGINE_READY_TIMEOUT_S=7200` in the YAML does not extend that wait to 7200 seconds.
 
-
 Before execution, mount the weights and dataset at the paths specified in the YAML,
 configure the target host's communication IP, network interfaces, and eight NPU devices,
 and unset `HCCL_OP_EXPANSION_MODE`. Omit the trailing slash from the dataset directory path.
+
+### 2.4 Current CI Image and Writable Directories
+
+For `releases/v0.30.0`, the A5 nightly workflow selects:
+
+```text
+swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-releases-v0.30.0-a5
+```
+
+This CI image adds test dependencies and AISBench to the release-branch nightly
+base image. The historical image in Section 2.1 is not a record of the current CI
+image digest. In PR mode, the workflow checks out and installs the requested
+vllm-ascend commit while retaining the image's vLLM and core runtime components.
+Use the release base branch for image selection and the PR ref for the code under
+test; a task branch does not automatically map to the release image.
+Record the actual image digest and source commits from the CI logs.
+
+The shared runner uses `BENCHMARK_HOME`, defaulting to `./benchmark` relative to
+the project working directory. It writes a generated `*_custom.py` request
+configuration under
+`$BENCHMARK_HOME/ais_bench/benchmark/configs/models/vllm_api` and copies the
+dataset into `$BENCHMARK_HOME/ais_bench/datasets/gsm8k`.
+These destinations, the evaluation output directories and the test working
+directory must be writable. Model weights and the source dataset may remain
+read-only; do not mount the entire benchmark directory read-only.
+
+The `gsm8k/gsm8k_gen_4_shot_cot_str` preset embeds four fixed CoT examples in
+its prompt template and uses `ZeroRetriever`. It does not select examples from
+`train.jsonl`. The training split is retained as part of the prepared dataset;
+the evaluation questions come from the first-500 `test.jsonl`.
 
 ## 3. Test Parameters and Execution
 

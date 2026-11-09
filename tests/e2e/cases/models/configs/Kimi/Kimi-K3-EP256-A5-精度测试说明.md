@@ -61,7 +61,7 @@
 | 模型 | Kimi-K3 W4A8 MXFP/QuaRot，256 个路由专家 |
 | 模型路径 | `/root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256` |
 | 数据集路径 | `/root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k` |
-| 数据文件 | `test.jsonl`：前 500 题；`train.jsonl`：4-shot 示例 |
+| 数据文件 | `test.jsonl`：前 500 题；`train.jsonl`：保留的训练集；四个示例由预设内嵌 |
 | 服务端口 / Runner | `SERVER_PORT=8080` / `VLLM_USE_V2_MODEL_RUNNER=1` |
 | 通信缓冲 / CPU 线程 | `HCCL_BUFFSIZE=800` / `OMP_NUM_THREADS=1` |
 | 内存分配 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` |
@@ -73,9 +73,34 @@
 因此 `RemoteOpenAIServer` 最多等待 2800 秒检查服务就绪。
 YAML 中设置 `VLLM_ENGINE_READY_TIMEOUT_S=7200` 不会将该等待时间延长至 7200 秒。
 
-
 运行前将权重和数据集挂载到 YAML 指定路径，配置目标机器的通信 IP、网卡和 8 个 NPU 设备，
 并取消设置 `HCCL_OP_EXPANSION_MODE`。数据集目录末尾不加斜杠。
+
+### 2.4 当前 CI 镜像与可写目录
+
+当基础分支为 `releases/v0.30.0` 时，A5 nightly 工作流选择：
+
+```text
+swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-releases-v0.30.0-a5
+```
+
+CI 镜像在发布分支 nightly 基础镜像上增加测试依赖和 AISBench。
+第 2.1 节中的历史镜像不代表当前 CI 镜像的 digest。
+PR 模式会检出并安装指定的 vllm-ascend 提交，保留镜像中的 vLLM 和核心运行组件。
+镜像选择使用发布基础分支，被测代码使用 PR ref；任务分支不会自动映射到发布镜像。
+运行时应从 CI 日志记录实际镜像 digest 和源码提交。
+
+共享评测脚本使用 `BENCHMARK_HOME`，默认是相对项目工作目录的 `./benchmark`。
+脚本会在
+`$BENCHMARK_HOME/ais_bench/benchmark/configs/models/vllm_api`
+生成 `*_custom.py` 请求配置，并将数据集复制到
+`$BENCHMARK_HOME/ais_bench/datasets/gsm8k`。
+这些目标目录、评测输出目录和测试工作目录必须可写。
+模型权重和源数据集可保持只读，但不要将整个 benchmark 目录挂载为只读。
+
+`gsm8k/gsm8k_gen_4_shot_cot_str` 预设在提示模板中内嵌四个固定 CoT 示例，
+并使用 `ZeroRetriever`，不会从 `train.jsonl` 选取示例。
+训练集作为已准备数据的一部分保留；评测题目来自前 500 题的 `test.jsonl`。
 
 ## 3. 测试参数与执行方式
 
