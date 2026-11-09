@@ -1115,6 +1115,42 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_dynamic_quant.assert_not_called()
         self.assertIsNone(result.dynamic_scale)
 
+    def test_w8a8_lora_dispatch_keeps_shape_without_local_adapter_tokens(self):
+        """An idle DP peer must still issue the same AlltoAll exchanges.
+
+        ``has_moe_lora`` answers a local question and reports False for a rank
+        whose batch carries no adapter tokens, so gating the dispatch shape on
+        it made that rank skip the token-scale exchange while its peers issued
+        it and the collective hung.
+        """
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True),
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W8A8,
+        )
+
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+            result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        self.mock_npu_dynamic_quant.assert_not_called()
+        self.assertIsNone(result.dynamic_scale)
+        self.assertEqual(self.mock_async_all_to_all.call_count, 1)
+
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):
         hidden_states = torch.randn(16, 16)
