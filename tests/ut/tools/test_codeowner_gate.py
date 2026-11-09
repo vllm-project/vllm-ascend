@@ -148,14 +148,74 @@ class TestOwnerlessActiveRule:
         assert any("orphan_dir/f.py" in f and "no CODEOWNERS entry" in f for f in failures)
 
 
-class TestActiveOwnersFor:
-    def test_active_overrides_todo(self):
-        rules = gate.parse_codeowners("# TODO(owner): /a\n# /a @pending\n/a @real\n")
-        assert gate.active_owners_for(rules, "a/x.py") == ["@real"]
+class TestNestedOwners:
+    """Union semantics: parent owner covers submodules; a more specific
+    rule adds owners."""
 
-    def test_todo_fills_when_no_active(self):
-        rules = gate.parse_codeowners("# TODO(owner): /a\n# /a @pending\n")
-        assert gate.active_owners_for(rules, "a/x.py") == ["@pending"]
+    RULES_TEXT = "/model_loader @yilunh998\n/model_loader/rfork/ @yangsonglin13\n"
+
+    def rules(self):
+        return gate.parse_codeowners(self.RULES_TEXT)
+
+    def test_owner_pool_unions_parent_and_child(self):
+        owners, skipped = gate.resolve_owners(self.rules(), "model_loader/rfork/x.py")
+        assert owners == ["@yilunh998", "@yangsonglin13"] and not skipped
+
+    def test_either_owner_approve_passes(self):
+        for reviewer in ("yilunh998", "yangsonglin13"):
+            failures = gate.check_approvals(
+                1, "author", self.rules(), ["model_loader/rfork/x.py"], {reviewer: "APPROVED"}
+            )
+            assert failures == [], (reviewer, failures)
+
+    def test_parent_veto_blocks_submodule(self):
+        failures = gate.check_approvals(
+            1,
+            "author",
+            self.rules(),
+            ["model_loader/rfork/x.py"],
+            {"yangsonglin13": "APPROVED", "yilunh998": "CHANGES_REQUESTED"},
+        )
+        assert len(failures) == 1 and "yilunh998" in failures[0]
+
+    def test_child_veto_blocks_even_if_parent_approves(self):
+        failures = gate.check_approvals(
+            1,
+            "author",
+            self.rules(),
+            ["model_loader/rfork/x.py"],
+            {"yilunh998": "APPROVED", "yangsonglin13": "CHANGES_REQUESTED"},
+        )
+        assert len(failures) == 1 and "yangsonglin13" in failures[0]
+
+    def test_parent_owner_still_owns_uncovered_files(self):
+        failures = gate.check_approvals(
+            1, "author", self.rules(), ["model_loader/netloader/x.py"], {"yilunh998": "APPROVED"}
+        )
+        assert failures == []
+
+    def test_changes_requested_blocks_despite_approval(self, rules):
+        failures = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"}
+        )
+        assert any("changes requested by @alice" in f for f in failures)
+
+    def test_blocking_owner_re_review_clears_gate(self, rules):
+        failures = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED", "bob": "APPROVED"}
+        )
+        assert failures == []
+
+    def test_dismissed_review_does_not_block(self, rules):
+        failures = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
+        )
+        assert failures == []
+
+    def test_author_requested_changes_not_counted(self):
+        rules = gate.parse_codeowners("/a @solo\n")
+        failures = gate.check_approvals(1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"})
+        assert any("only owner is the PR author" in f for f in failures)
 
 
 class TestGhApi:
@@ -227,7 +287,7 @@ class TestSkipInApprovals:
         assert any("wenjun91" in f for f in failures)
 
     def test_skip_before_active_does_not_win(self):
-        # Last-match-wins: an active rule after the SKIP re-owns the subtree.
+        # An active rule after the SKIP re-owns the subtree.
         rules = gate.parse_codeowners("# SKIP(owner): /tests/ut/\n" "# /tests/ut/\n" "/tests @wenjun91\n")
         owners, skipped = gate.resolve_owners(rules, "tests/ut/foo.py")
         assert not skipped and owners == ["@wenjun91"]

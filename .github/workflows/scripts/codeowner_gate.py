@@ -128,16 +128,34 @@ def match_rule(rules: list[Rule], path: str) -> Rule | None:
     return result
 
 
-def active_owners_for(rules: list[Rule], path: str) -> list[str]:
-    """Owners required for a path, resolving TODO fallbacks to an active rule."""
+def resolve_owners(rules: list[Rule], path: str) -> tuple[list[str], bool]:
+    """Owners responsible for ``path``.
+
+    Returns ``(owners, skipped)``. Owners of EVERY matching active rule are
+    unioned: a parent module owner also covers its submodules, so a more
+    specific rule adds owners rather than replacing them.
+
+    - one approval from any owner satisfies the approval gate;
+    - a pending "changes requested" from any owner blocks the file;
+    - a matching ``SKIP(owner)`` rule is the last word on its subtree -
+      deliberately unowned, neither approval nor veto applies.
+      ``TODO(owner)`` fills owners only when no active rule with owners
+      matched and no SKIP overrode the subtree.
+    """
     owners: list[str] = []
+    skipped = False
     for rule in rules:
         if not pattern_matches(rule.pattern, path):
             continue
-        has_owners = bool(rule.owners)
-        if rule.status == "active" and has_owners or rule.status == "todo" and not owners:
+        if rule.status == "skip":
+            owners = []
+            skipped = True
+        elif rule.status == "active" and rule.owners:
+            owners.extend(o for o in rule.owners if o not in owners)
+            skipped = False
+        elif rule.status == "todo" and not owners and not skipped:
             owners = rule.owners
-    return owners
+    return owners, skipped
 
 
 def _token() -> str:
@@ -203,31 +221,6 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
     return latest
 
 
-def resolve_owners(rules: list[Rule], path: str) -> tuple[list[str], bool]:
-    """Owners whose approval is required for ``path``.
-
-    Returns ``(owners, skipped)``. A ``SKIP(owner)`` rule is the last word on
-    its subtree: when it matches after any owner rule (last-match-wins), the
-    path is deliberately unowned and ``skipped`` is True. A ``TODO(owner)``
-    rule fills in owners only when no active rule with owners matched before
-    it and no later SKIP overrides the whole subtree.
-    """
-    owners: list[str] = []
-    skipped = False
-    for rule in rules:
-        if not pattern_matches(rule.pattern, path):
-            continue
-        if rule.status == "skip":
-            owners = []
-            skipped = True
-        elif rule.status == "active" and rule.owners:
-            owners = rule.owners
-            skipped = False
-        elif rule.status == "todo" and not owners and not skipped:
-            owners = rule.owners
-    return owners, skipped
-
-
 def check_approvals(
     pr_number: int, pr_author: str, rules: list[Rule], files: list[str], reviews: dict[str, str]
 ) -> list[str]:
@@ -238,17 +231,21 @@ def check_approvals(
         if skipped:
             # Deliberately unowned path (SKIP(owner)): no approval required.
             continue
-        eligible = [o for o in owners if o.lstrip("@") != pr_author]
-        # A pending "changes requested" from any eligible owner blocks the
-        # file even when another owner has approved; the author must address
-        # the feedback and get the owner to re-review (approve or dismiss).
-        blocking = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"]
+        # A pending "changes requested" from any owner of the file (excluding
+        # the PR author) blocks it even when another owner approved; the
+        # author must address the feedback and get the owner to re-review.
+        blocking = [
+            o.lstrip("@")
+            for o in owners
+            if o.lstrip("@") != pr_author and reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"
+        ]
         if blocking:
             failures.append(
                 f"{path}: changes requested by {', '.join('@' + b for b in blocking)}; "
                 "address the feedback, then ask them to re-review (approve or dismiss)"
             )
             continue
+        eligible = [o for o in owners if o.lstrip("@") != pr_author]
         approved = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"]
         if not owners:
             failures.append(f"{path}: no CODEOWNERS owner matches this file")
