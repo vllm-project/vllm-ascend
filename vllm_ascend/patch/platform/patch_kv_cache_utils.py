@@ -48,7 +48,6 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
-    get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_max_memory_usage,
     get_qwen4_exp_pool_bytes_per_block,
 )
@@ -664,7 +663,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
-    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
     if qwen_bytes is not None:
         return qwen_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -682,6 +681,7 @@ def _has_ascend_multi_allocation_kv_cache_layout(
         tq_cache.uses_turboquant_groups(kv_cache_groups)
         or is_deepseek_v41_cache(kv_cache_groups)
         or _get_glm5_next_cache_layout(kv_cache_groups) is not None
+        or get_qwen4_exp_pool_bytes_per_block(kv_cache_groups) is not None
         or _is_deepseek_v4_groups(kv_cache_groups)
     )
 
@@ -793,9 +793,6 @@ def _get_ascend_kv_cache_groups(
 ) -> list[KVCacheGroupSpec]:
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
-    if groups is not None:
-        return groups
     return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 

@@ -315,11 +315,24 @@
 #    Future Plan:
 #       Move this override into an Ascend KVCacheConfigBuilder, or remove it
 #       once upstream provides a platform hook for multi-allocation accounting.
+#   3. Qwen4 layerwise placement in existing cache configuration hooks
+#    Why:
+#       Group spec simplification loses per-name reuse intent, and the connector
+#       must receive the same slots used for allocation and physical accounting.
+#    How:
+#       Retain per-layer specs in scheduler configuration, infer slots from the
+#       original backing and carry placement/dependencies through dataclass IPC.
+#       Existing Qwen4 cost and config hooks consume the same slot inference.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/20949
+#    Future Plan:
+#       Remove the bridge when upstream has equivalent plugin placement and
+#       serialized connector metadata hooks.
 #
 # ** Files: patch_layerwise_cache_fields.py and platform/patch_layerwise_cache_planning.py **
 #           patch_layerwise_connector_specs.py
 #   Targets: vLLM cache dataclasses, group merging and scheduler initialization.
-#   Why: Layerwise offload needs per-layer placement intent and explicit backing identity.
+#   Why: Qwen4Exp needs per-layer placement intent and explicit backing identity.
 #   How: Extend existing dataclass identities, preserve the named group dictionary,
 #       and give scalar-only consumers a separate view during initialization.
 #       Optional connector workers select scalar geometry at their type checks

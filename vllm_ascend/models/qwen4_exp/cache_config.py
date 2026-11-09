@@ -31,8 +31,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
+)
+from vllm_ascend.core.layerwise_cache_config import (
+    get_layerwise_layout,
+    kv_cache_allocation_bytes,
+    serialize_layerwise_config,
 )
 
 QSA_MAIN: Final = "qsa_main"
@@ -105,9 +111,12 @@ class Qwen4KVCacheLayout:
 
 
 def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
-    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-        return group.kv_cache_spec.kv_cache_specs
-    return {name: group.kv_cache_spec for name in group.layer_names}
+    members = (
+        group.kv_cache_spec.kv_cache_specs
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        else {name: group.kv_cache_spec for name in group.layer_names}
+    )
+    return members
 
 
 def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
@@ -594,29 +603,26 @@ def _private_page_bytes(owner: CacheOwner) -> int:
 
 
 def get_qwen4_exp_pool_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec], vllm_config: VllmConfig | None = None
 ) -> int | None:
-    """Charge shared slots once, plus one private bank per PLE/hidden owner."""
-    layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
+    layout = build_qwen4_kv_cache_layout(kv_cache_groups, 1)
     if layout is None:
         return None
-    private_bytes = sum(_private_page_bytes(owner) for owner in layout.owners if owner.role in (HIDDEN, PLE))
-    return layout.slot_count * layout.slot_backing_size + private_bytes
+    config = KVCacheConfig(1, make_qwen4_original_tensors(layout), kv_cache_groups)
+    if vllm_config is not None:
+        apply_qwen4_layerwise(config, vllm_config)
+    return kv_cache_allocation_bytes(config.kv_cache_tensors)
 
 
-def get_qwen4_exp_max_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    """Use the allocation divisor for admission across all group lifetimes."""
-    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
-    if bytes_per_block is None:
+def get_qwen4_exp_max_memory_usage(vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]) -> int | None:
+    cost = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
+    if cost is None:
         return None
     required_blocks = sum(
         cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
         for group in kv_cache_groups
     )
-    return required_blocks * bytes_per_block
+    return required_blocks * cost
 
 
 def get_qwen4_exp_kv_cache_groups(
@@ -640,59 +646,7 @@ def get_qwen4_exp_kv_cache_groups(
     return groups
 
 
-def get_qwen4_exp_kv_cache_config(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
-) -> KVCacheConfig | None:
-    """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.
-
-    The main descriptor API cannot express that one logical QSA/GDN owner has
-    two disjoint physical regions.  Descriptors therefore publish the anchor
-    region and shared backing geometry; the Ascend runner reconstructs every
-    role from the same capability-derived layout.  Different cache groups
-    deliberately alias the same allocation because a physical block ID is
-    owned by only one group at a time.
-    """
-    probe = build_qwen4_kv_cache_layout(
-        kv_cache_groups,
-        num_blocks=1,
-    )
-    if probe is None:
-        return None
-
-    private_owners = [owner for owner in probe.owners if owner.role in (HIDDEN, PLE)]
-    private_bytes_per_block = sum(_private_page_bytes(owner) for owner in private_owners)
-    slab_bytes_per_block = probe.slot_backing_size
-    bytes_per_block = probe.slot_count * slab_bytes_per_block + private_bytes_per_block
-    candidate = available_memory // bytes_per_block
-    while candidate > 0:
-        candidate_layout = build_qwen4_kv_cache_layout(
-            kv_cache_groups,
-            num_blocks=candidate,
-        )
-        assert candidate_layout is not None
-        required = (
-            candidate_layout.slot_count * candidate_layout.slot_backing_size + private_bytes_per_block * candidate
-        )
-        if required <= available_memory:
-            break
-        candidate -= 1
-    num_blocks = may_override_num_blocks(vllm_config, candidate)
-    layout = build_qwen4_kv_cache_layout(
-        kv_cache_groups,
-        num_blocks=num_blocks,
-    )
-    assert layout is not None
-    backing_size = layout.slot_count * layout.slot_backing_size
-    logger.info_once(
-        "Qwen4 cache pool: %d blocks, shared page %d bytes, pool block %d bytes, available %d bytes",
-        num_blocks,
-        layout.region("r0").page_size_bytes,
-        bytes_per_block,
-        available_memory,
-    )
-
+def make_qwen4_original_tensors(layout: Qwen4KVCacheLayout) -> list[KVCacheTensor]:
     region_by_role = {
         QSA_MAIN: "r0",
         QSA_RAW: "r4",
@@ -710,27 +664,94 @@ def get_qwen4_exp_kv_cache_config(
             owners = sorted(group_owners, key=lambda owner: owner.slot)
             tensors.append(
                 KVCacheTensor(
-                    size=backing_size,
+                    size=layout.slot_count * layout.slot_backing_size,
                     layers=[owner.layer_name for owner in owners],
                     layer_stride=layout.slot_backing_size,
                     block_stride=region.block_stride,
                     offset=region.offset + owners[0].slot * layout.slot_backing_size,
+                    backing_id="qwen4_shared_cache",
                 )
             )
     tensors.extend(
         KVCacheTensor(
-            size=_private_page_bytes(owner) * num_blocks,
+            size=_private_page_bytes(owner) * layout.num_blocks,
             layers=[owner.layer_name],
-            layer_stride=_private_page_bytes(owner) * num_blocks,
+            layer_stride=_private_page_bytes(owner) * layout.num_blocks,
             block_stride=_private_page_bytes(owner),
             offset=0,
         )
-        for owner in private_owners
+        for owner in layout.owners
+        if owner.role in (PLE, HIDDEN)
     )
 
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=tensors,
-        kv_cache_groups=kv_cache_groups,
-        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+    return tensors
+
+
+def apply_qwen4_layerwise(config, vllm_config):
+    # Load transfer planning lazily during cache configuration.
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+        apply_layerwise_kv_cache_plan,
+        get_layerwise_reuse_config,
     )
+
+    extra = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra is None:
+        return
+    apply_layerwise_kv_cache_plan(config, vllm_config)
+    reuse = get_layerwise_layout(config)
+    if reuse is None or not reuse.has_layer_reuse:
+        return
+    if not getattr(vllm_config, "use_v2_model_runner", False):
+        raise ValueError("Qwen4 layerwise cache reuse requires model runner V2")
+    if not getattr(vllm_config.model_config, "enforce_eager", False):
+        raise ValueError("Qwen4 layerwise cache reuse currently requires --enforce-eager")
+    if KVPPConfig.from_vllm_config(vllm_config).size > 1:
+        raise ValueError("Qwen4 layerwise cache reuse has not been validated with KVPP")
+    transfer = vllm_config.kv_transfer_config
+    role = transfer.kv_role
+    if transfer.kv_connector == "MultiConnector":
+        role = next(
+            (
+                connector.get("kv_role", role)
+                for connector in transfer.kv_connector_extra_config["connectors"]
+                if connector.get("kv_connector_extra_config") == extra
+            ),
+            role,
+        )
+    if role == "kv_consumer" and not extra.get("consumer_is_to_put", False):
+        raise ValueError("Qwen4 layerwise cache reuse requires saving every rotating cache")
+    if any(
+        getattr(vllm_config.parallel_config, key, 1) != 1
+        for key in (
+            "pipeline_parallel_size",
+            "decode_context_parallel_size",
+            "prefill_context_parallel_size",
+        )
+    ):
+        raise ValueError("Qwen4 layerwise cache reuse has not been validated with PP/DCP/PCP")
+    if getattr(vllm_config, "speculative_config", None) is not None:
+        raise ValueError("Qwen4 layerwise cache reuse has not been validated with speculative decoding")
+
+
+def get_qwen4_exp_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig | None:
+    cost = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
+    if cost is None:
+        return None
+    num_blocks = may_override_num_blocks(vllm_config, available_memory // cost)
+    if num_blocks < 1:
+        raise ValueError("Cache budget cannot hold one Qwen4 block")
+    original = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks)
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=make_qwen4_original_tensors(original),
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+    )
+    apply_qwen4_layerwise(config, vllm_config)
+    if kv_cache_allocation_bytes(config.kv_cache_tensors) > available_memory:
+        raise ValueError("Qwen4 cache block override exceeds the physical memory budget")
+    return serialize_layerwise_config(config)

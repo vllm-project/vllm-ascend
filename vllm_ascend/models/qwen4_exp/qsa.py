@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadat
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+import vllm_ascend.patch.patch_layerwise_cache_fields  # noqa: F401
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -182,6 +183,14 @@ def apply_qsa_rope(
             dim=-1,
         ).flatten(-2)
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
+
+
+class AscendQSACompressedKeyCache(upstream_indexer.QSACompressedKeyCache):
+    def get_kv_cache_spec(self, vllm_config):
+        return replace(super().get_kv_cache_spec(vllm_config), reuse=True)
+
+
+upstream_indexer.QSACompressedKeyCache = AscendQSACompressedKeyCache
 
 
 class AscendQSAIndexer(upstream_indexer.QSAIndexer):
@@ -737,6 +746,9 @@ qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
+
+    def get_kv_cache_spec(self, vllm_config):
+        return replace(super().get_kv_cache_spec(vllm_config), reuse=True)
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache

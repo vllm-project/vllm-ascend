@@ -1,0 +1,5 @@
+pr: 20949
+entries:
+  - category: feature
+    text: Added experimental Qwen4Exp layerwise KV cache reuse with descriptor-derived slot planning and generation-safe Memcache transfers on Model Runner V2. Active reuse requires eager execution. The layerwise_independent_layers setting selects which decoder layers stay resident.
+    model: qwen4-exp

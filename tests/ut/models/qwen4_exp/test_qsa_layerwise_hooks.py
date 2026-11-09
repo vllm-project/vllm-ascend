@@ -4,10 +4,55 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
 import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
+
+
+def test_qsa_components_declare_reuse_before_collection():
+    config = SimpleNamespace(cache_config=SimpleNamespace(block_size=768), num_speculative_tokens=0)
+    main = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(main)
+    main.num_kv_heads, main.head_dim = 1, 128
+    main.kv_cache_torch_dtype, main.kv_cache_dtype = torch.bfloat16, "auto"
+    compressed_cls = qsa.upstream_indexer.QSACompressedKeyCache
+    indexer = compressed_cls.__new__(compressed_cls)
+    torch.nn.Module.__init__(indexer)
+    indexer.cache_config = config.cache_config
+    indexer.head_size, indexer.dtype, indexer.compress_ratio = 128, torch.bfloat16, 4
+    spec = main.get_kv_cache_spec(config)
+    assert isinstance(spec, FullAttentionSpec)
+    assert spec.reuse
+    assert indexer.get_kv_cache_spec(config).reuse
+    raw_cls = (
+        qsa.upstream_indexer.QSAKeyStateCache if vllm_version_is("0.32.0") else qsa.upstream_indexer.QSARawKeyCache
+    )
+    assert not raw_cls.get_kv_cache_spec(indexer, config).reuse
+
+
+@pytest.mark.parametrize("layer", [0, 1, 2, 5])
+@pytest.mark.parametrize("model_type", ["qwen4_exp", "qwen3_next"])
+def test_gdn_declares_reuse_at_inherited_spec_boundary(monkeypatch, layer, model_type):
+    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+
+    from vllm_ascend.models.qwen4_exp.model import upstream_model
+
+    original = MambaSpec(block_size=16, shapes=((2, 4), (4, 4)), dtypes=(torch.float32, torch.float32))
+    monkeypatch.setattr(GatedDeltaNetAttention, "get_kv_cache_spec", lambda *_: original)
+    owner_cls = upstream_model.QwenGatedDeltaNetAttention if model_type == "qwen4_exp" else QwenGatedDeltaNetAttention
+    owner = owner_cls.__new__(owner_cls)
+    torch.nn.Module.__init__(owner)
+    owner.layer_idx = layer
+    owner._exports_checkpoints = False
+    config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)))
+    result = owner.get_kv_cache_spec(config)
+    assert result.reuse == (model_type == "qwen4_exp")
+    assert result == original
+    assert not original.reuse
 
 
 def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatch):
