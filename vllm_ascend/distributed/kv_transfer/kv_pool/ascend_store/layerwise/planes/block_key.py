@@ -42,7 +42,7 @@ def selected(mask, index: int) -> bool:
 class BlockKeyDataPlane(LayerwiseDataPlane):
     """Session bookkeeping for backends addressing one object per block."""
 
-    def __init__(self, worker: "LayerwiseKVPoolWorker"):
+    def __init__(self, worker: LayerwiseKVPoolWorker):
         self._worker = worker
 
     # --- step entry points -----------------------------------------------------

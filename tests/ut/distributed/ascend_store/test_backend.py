@@ -37,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
     MmcDirect,
@@ -44,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     _validate_device_ub_qos,
     make_full_key,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
     MooncakeBackend,
@@ -1441,9 +1441,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 # =========================================================================
 # Memcache layerwise backend capabilities
 # =========================================================================
-_LAYERWISE_KEY_FUNCTIONS = (
-    "make_full_key",
-)
+_LAYERWISE_KEY_FUNCTIONS = ("make_full_key",)
 
 _LAYERWISE_STORE_METHODS = (
     "batch_get_key_info",

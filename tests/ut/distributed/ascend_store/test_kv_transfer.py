@@ -235,9 +235,7 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestLayerStoreRequestTracking(unittest.TestCase):
     def test_multiple_pending_saves_finish_only_after_all_complete(self):
-        for thread_type, transfer_size in (
-            (KVCacheStoreLayerSendingThread, 16),
-        ):
+        for thread_type, transfer_size in ((KVCacheStoreLayerSendingThread, 16),):
             with self.subTest(thread_type=thread_type.__name__):
                 thread = thread_type(
                     FakeStore(),
