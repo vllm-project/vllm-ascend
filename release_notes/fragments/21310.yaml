@@ -1,0 +1,4 @@
+pr: 21310
+entries:
+  - category: breaking
+    text: Removed the dynamic chunk size Chunked Pipeline Parallelism (CPP) feature and its configuration `profiling_chunk_config`.
