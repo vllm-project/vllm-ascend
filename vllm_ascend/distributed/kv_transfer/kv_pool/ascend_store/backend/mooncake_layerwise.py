@@ -35,24 +35,6 @@ def make_block_key(
     return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
 
 
-def make_hit_check_keys(
-    model_name: str,
-    group_id: int,
-    block_hash_hex: str,
-    num_ranks: int,
-    num_groups: int,
-    pp_size: int = 1,
-    *,
-    namespace: str = "",
-) -> list[str]:
-    del group_id, num_groups
-    return [
-        make_block_key(model_name, block_hash_hex, rank, namespace=namespace, pp_rank=stage)
-        for stage in range(pp_size)
-        for rank in range(num_ranks)
-    ]
-
-
 def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) -> str:
     """Isolate stage-local objects by the actual partition and model/cache config.
 

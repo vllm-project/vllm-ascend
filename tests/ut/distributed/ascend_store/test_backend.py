@@ -43,8 +43,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     _inject_device_ub_qos,
     _validate_device_ub_qos,
     make_full_key,
-    make_hit_check_keys,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
     MooncakeBackend,
@@ -1443,7 +1443,6 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 # =========================================================================
 _LAYERWISE_KEY_FUNCTIONS = (
     "make_full_key",
-    "make_hit_check_keys",
 )
 
 _LAYERWISE_STORE_METHODS = (
@@ -1489,6 +1488,15 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
     pool_scheduler implementations.
     """
 
+    @staticmethod
+    def _bound_builder(num_groups: int, pp_size: int = 1) -> LayerwiseKeyBuilder:
+        """The builder MemcacheBackend.bind_layerwise_keys binds for this layout."""
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return make_full_key("model", group, block_hash, head, num_groups, stage, pp_size)
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
     def test_full_key_single_group_keeps_pr_11585_format(self):
         self.assertEqual(
             make_full_key("model", 0, "hash0", 3, 1),
@@ -1503,7 +1511,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_partial_key_format(self):
         self.assertEqual(
-            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3),
+            self._bound_builder(1).make_partial_key("model", "r1", 0, 1, 20, 3),
             "model@partial@r1@0@1@20@3",
         )
 
@@ -1513,11 +1521,11 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             "model@2@pp1@hash0@3",
         )
         self.assertEqual(
-            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
+            self._bound_builder(1, 2).make_partial_key("model", "r1", 0, 1, 20, 3, 1),
             "model@partial@r1@0@1@20@pp1@3",
         )
         self.assertEqual(
-            make_hit_check_keys("model", 0, "hash0", 2, 1, 2),
+            self._bound_builder(1, 2).make_hit_check_keys(0, "hash0", 2),
             [
                 "model@pp0@hash0@0",
                 "model@pp0@hash0@1",
@@ -1528,18 +1536,18 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_hit_check_keys_single_group_one_key_per_rank(self):
         self.assertEqual(
-            make_hit_check_keys("model", 0, "hash0", 4, 1),
+            self._bound_builder(1).make_hit_check_keys(0, "hash0", 4),
             ["model@hash0@0", "model@hash0@1", "model@hash0@2", "model@hash0@3"],
         )
 
     def test_hit_check_keys_multi_group_one_key_per_rank(self):
         self.assertEqual(
-            make_hit_check_keys("model", 1, "hash0", 2, 3),
+            self._bound_builder(3).make_hit_check_keys(1, "hash0", 2),
             ["model@1@hash0@0", "model@1@hash0@1"],
         )
 
     def test_hit_check_keys_empty_when_no_ranks(self):
-        self.assertEqual(make_hit_check_keys("model", 0, "hash0", 0, 1), [])
+        self.assertEqual(self._bound_builder(1).make_hit_check_keys(0, "hash0", 0), [])
 
     def test_full_key_and_hit_check_key_share_rank_format(self):
         """The hit-check key of rank r must equal that rank's full key."""
@@ -1547,7 +1555,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             for rank in range(3):
                 with self.subTest(num_groups=num_groups, rank=rank):
                     self.assertEqual(
-                        make_hit_check_keys("model", 0, "hash0", 3, num_groups)[rank],
+                        self._bound_builder(num_groups).make_hit_check_keys(0, "hash0", 3)[rank],
                         make_full_key("model", 0, "hash0", rank, num_groups),
                     )
 

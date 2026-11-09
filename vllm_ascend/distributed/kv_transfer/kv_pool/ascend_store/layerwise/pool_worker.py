@@ -777,8 +777,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         block_index: int,
         end_token: int,
     ) -> str:
-        assert self.layerwise_backend is not None
-        return self.layerwise_backend.make_partial_key(
+        """Use the backend-bound layout shared with full-key construction."""
+        assert self.layerwise_keys is not None
+        return self.layerwise_keys.make_partial_key(
             self.model_name,
             request.req_id,
             group_id,
@@ -786,7 +787,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             end_token,
             self.metadata[group_id].head_or_tp_rank,
             self.pp_rank,
-            self.pp_size,
         )
 
     def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:

@@ -106,20 +106,6 @@ class Backend(ABC):
         raise NotImplementedError(f"{cls.__name__} does not support layerwise keys")
 
     @classmethod
-    def make_partial_key(
-        cls,
-        model_name: str,
-        req_id: str,
-        group_id: int,
-        block_index: int,
-        end_token: int,
-        head_or_tp_rank: int,
-        pp_rank: int = 0,
-        pp_size: int = 1,
-    ) -> str:
-        raise NotImplementedError(f"{cls.__name__} does not support partial layerwise keys")
-
-    @classmethod
     def fence_drains_recv(cls) -> bool:
         return False
 
