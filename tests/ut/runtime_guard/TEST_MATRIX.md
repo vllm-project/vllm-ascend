@@ -58,7 +58,7 @@ Priorities: **P0** every PR / smoke; **P1** full suite; **P2** env-dependent.
 | **A3** Soft-fail bad JSON | **Yes** | `tests/ut/runtime_config/test_runtime_config_core.py` |
 | Hot-path gate / idle sync correctness | **Yes** | `test_hot_path_overhead.py` (no wall-clock) |
 | Guard decorator wiring (v1/v2 step sync, v2 sample-phase hooks, worker idle sync, inference-mode inner placement) | **Yes** | `test_hooks.py` |
-| Merged due-bus async (`DueBitsBusWorker`: TP0 `sync_due_bits_from_src` submit@wave-head, drain@end-of-wave, depth-1, rate-limited warn-if-wait, bounded shutdown drain, submit-fail/timeout refund, `wave_idx` misalignment) | **Yes** | `test_bus_worker.py`; `test_dist.py` (`sync_due_bits_from_src`); V18f/g + V28d in `test_review_regressions.py` |
+| Merged due-bus async (`DueBitsBusWorker`: TP0 `sync_due_bits_from_src` on **cpu_group**/Gloo submit@wave-head, drain@end-of-wave, depth-1, rate-limited warn-if-wait, bounded shutdown drain, submit-fail/timeout refund, `wave_idx` misalignment, no HCCL fallback) | **Yes** | `test_bus_worker.py`; `test_dist.py` (`sync_due_bits_from_src`, requires `cpu_group`); V18f/g + V28d in `test_review_regressions.py` |
 | Live NPU TPS / wall-clock microbench | **No** | Out of this product tree (manual Ascend runs) |
 
 CI proves **functional isolation** and detector/report/dump contracts.  
@@ -89,7 +89,7 @@ Throughput / µs budgets need Ascend hardware and are not gated here.
 | V18f | — | Merged bus idle | Submit+drain: one TP0 due `broadcast`, zero `broadcast_object` (`DueBitsBusWorker`) |
 | V18g | — | Merged bus both due | Submit+drain: due `broadcast` + config bcast + dump bcast; dump stashed deferred |
 | V28d | — | Merged bus collective fail | Submit+drain: due-bcast/payload error refunds handed-off dump jobs; no apply |
-| — | — | Due-broadcast `wave_idx` | Receiver mismatch → `RuntimeError` (misalignment); wraparound mod 2^24 matches (`test_dist.py`) |
+| — | — | Due-broadcast `wave_idx` / cpu_group | Receiver mismatch → `RuntimeError`; wraparound mod 2^24 matches; missing `cpu_group` raises (`test_dist.py`) |
 | V21* | — | default-path merge | Missing JSON keys fall back to `_DEFAULTS` |
 | V23* | — | dump_root / ReportWriter dump_dir | JSON / startup seed / provider |
 | V25* | — | rank gate TP0-only | last PP + TP0 detect; leftover exec_scope / detector_placement ignored |
