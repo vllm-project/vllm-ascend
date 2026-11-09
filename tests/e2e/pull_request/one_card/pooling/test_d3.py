@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import importlib.util
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import huggingface_hub
@@ -9,7 +11,7 @@ import pytest
 import requests
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
-from transformers import AutoModel
+from transformers import AutoModel, PreTrainedModel
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -50,6 +52,25 @@ QUESTIONS: dict[str, dict[str, Any]] = {
 }
 
 
+@contextlib.contextmanager
+def _without_cpu_device_map() -> Iterator[None]:
+    """Load the checkpoint's reference runtime on the CPU without `accelerate`.
+
+    The runtime always loads its backbone with `device_map={"": <device>}`, and transformers needs `accelerate`
+    for any `device_map`. On the CPU that map is only the default placement, so it is dropped there.
+    """
+    load = PreTrainedModel.from_pretrained.__func__
+
+    def from_pretrained(cls, *args, device_map=None, **kwargs):
+        if device_map != {"": "cpu"}:
+            kwargs["device_map"] = device_map
+        return load(cls, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(PreTrainedModel, "from_pretrained", classmethod(from_pretrained))
+        yield
+
+
 @pytest.fixture(scope="module")
 def model_name():
     yield snapshot_download(D3_REPO, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE)
@@ -76,7 +97,8 @@ def d3_server(model_name):
 
 
 def test_d3_pooling_matches_checkpoint_runtime(model_name, d3_server):
-    reference_model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+    with _without_cpu_device_map():
+        reference_model = AutoModel.from_pretrained(model_name, trust_remote_code=True, device="cpu")
     runtime = reference_model.runtime
     prepared = runtime.prepare(STATE, QUESTIONS)
     runnable_keys = prepared.runnable
