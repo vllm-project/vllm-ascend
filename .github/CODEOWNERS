@@ -59,7 +59,7 @@
 # /vllm_ascend/attention/
 /vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/attention/sfa_v1.py @lijiahang226
-/vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan
+/vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
 
@@ -88,7 +88,7 @@
 /vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
-/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 
@@ -130,8 +130,7 @@
 /vllm_ascend/batch_invariant.py @Ronald1995
 # TODO(owner): /vllm_ascend/config_utils.py
 # /vllm_ascend/config_utils.py
-# TODO(owner): /vllm_ascend/cpu_binding.py
-# /vllm_ascend/cpu_binding.py
+/vllm_ascend/cpu_binding.py @zouyida2052
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
 # TODO(owner): /vllm_ascend/logger.py
 # /vllm_ascend/logger.py
@@ -171,9 +170,9 @@
 
 # Models
 /vllm_ascend/models/minimax_m3 @realliujiaxu
-/vllm_ascend/models/deepseek_v4 @lcfenglinwan
-/vllm_ascend/models/deepseek_v41 @lcfenglinwan
-/vllm_ascend/models/deepseek_mtp.py @lcfenglinwan
+/vllm_ascend/models/deepseek_v4 @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/glm5next @lijiahang226
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
 
@@ -204,8 +203,7 @@
 /vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
 # Model loader
-# TODO(owner): /vllm_ascend/model_loader
-# /vllm_ascend/model_loader
+/vllm_ascend/model_loader @yilunh998
 /vllm_ascend/model_loader/rfork/ @yangsonglin13
 
 # vllm_ascend module directories (subdirs broken out one level)
