@@ -1,6 +1,5 @@
 # Scheduler metrics remain on generic Core handlers until their business logic
 # needs to follow a vLLM Ascend implementation.
-- symbol: vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler.schedule
   handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
 
 - symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule

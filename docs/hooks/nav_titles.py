@@ -42,10 +42,6 @@ TITLES = {
         "en": "Disaggregated Prefill",
         "zh": "分离式预填充",
     },
-    "developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md": {
-        "en": "Dynamic Chunked Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
@@ -198,12 +194,7 @@ TITLES = {
     "user_guide/feature_guide/Fine_grained_TP.md": {"en": "Fine-grained TP", "zh": "细粒度 TP"},
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
-    "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
-    "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
-        "en": "Dynamic Chunk Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
-    "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
+    "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},    "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
     "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
         "en": "Encoder Cache CPU Offload",
         "zh": "编码器缓存 CPU 卸载",
