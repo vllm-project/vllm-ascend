@@ -116,6 +116,14 @@ a3:
 
   double_node:
     test_config:
+      - name: GLM-5.3-Flash-W8A8-A3-PD-ReplaySSM
+        size: 2
+        config_file_path: GLM-5.3-Flash-W8A8-A3-PD-ReplaySSM.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+      - name: GLM-5.3-Flash-W8A8-A3-PD-Decode-Replay
+        size: 2
+        config_file_path: GLM-5.3-Flash-W8A8-A3-PD-Decode-Replay.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
       - name: GLM-5.3-Flash-W8A8-130k-PD
         config_file_path: GLM-5.3-Flash-W8A8-130k-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
