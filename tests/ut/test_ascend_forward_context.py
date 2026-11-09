@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -466,6 +467,80 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize(
+    ("num_tokens", "runtime_mode", "expected"),
+    [
+        (127, CUDAGraphMode.PIECEWISE, MoECommType.MC2),
+        (128, CUDAGraphMode.PIECEWISE, MoECommType.MC2),
+        (129, CUDAGraphMode.NONE, MoECommType.ALLTOALL),
+        (129, CUDAGraphMode.PIECEWISE, MoECommType.ALLGATHER),
+        (129, CUDAGraphMode.FULL, MoECommType.ALLGATHER),
+    ],
+)
+def test_graph_over_mc2_capacity_uses_allgather(monkeypatch, device_type, num_tokens, runtime_mode, expected):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=device_type, capacity=128)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config, cudagraph_runtime_mode=runtime_mode) == expected
+
+
+def test_graph_over_mc2_capacity_preserves_lora_alltoall(monkeypatch):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A5, capacity=128)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    vllm_config.lora_config = SimpleNamespace()
+
+    assert (
+        afc.select_moe_comm_method(129, vllm_config, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE)
+        == MoECommType.ALLTOALL
+    )
+
+
+def test_graph_over_mc2_capacity_preserves_fused_mc2(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+
+    assert (
+        afc.select_moe_comm_method(129, vllm_config, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE)
+        == MoECommType.FUSED_MC2
+    )
+
+
+@pytest.mark.parametrize(
+    ("draft_quant", "expected"),
+    [
+        (QuantType.NONE, MoECommType.ALLGATHER),
+        (QuantType.W8A8MXFP, MoECommType.FUSED_MC2),
+    ],
+)
+def test_graph_over_mc2_capacity_preserves_draft_quant_guard(monkeypatch, draft_quant, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+
+    assert (
+        afc.select_moe_comm_method(
+            129,
+            vllm_config,
+            is_draft_model=True,
+            draft_moe_quant_type=draft_quant,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        )
+        == expected
+    )
+
+
 @pytest.mark.parametrize("num_tokens", [128, 4096])
 def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_tokens):
     _patch_select_moe_comm_method_deps(
@@ -535,7 +610,13 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
     monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
-    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    selected_modes = []
+
+    def select_method(*_args, **kwargs):
+        selected_modes.append(kwargs["cudagraph_runtime_mode"])
+        return None
+
+    monkeypatch.setattr(afc, "select_moe_comm_method", select_method)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
     monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
 
@@ -550,13 +631,20 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
 
     for expected in (target_method, draft_method, target_method):
         model = SimpleNamespace(moe_comm_methods={None: expected}) if model_owned else None
-        with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, model_instance=model):
+        with afc.set_ascend_forward_context(
+            None,
+            vllm_config,
+            num_tokens=4,
+            aclgraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            model_instance=model,
+        ):
             assert seen["inside"] is True
             assert seen["config"] is vllm_config
             assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
             assert afc._USE_V2_EXTRA_KWARGS is True
 
     assert seen["inside"] is False
+    assert selected_modes == [CUDAGraphMode.PIECEWISE] * 3
 
 
 def test_sync_v2_extra_kwargs_caches_actual_bool(monkeypatch):
