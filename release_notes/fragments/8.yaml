@@ -1,0 +1,6 @@
+pr: 8
+entries:
+  - category: feature
+    text: Enabled Mistral Large 4 Model Runner V2 graph execution and DSpark speculative decoding on Ascend.
+    model: mistral-large-4
+    hardware: [Ascend 950]
