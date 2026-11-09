@@ -378,6 +378,7 @@ The matrix controls the allocation:
 
 - `double_node.test_config` and `multi_node.test_config` select the applicable reusable workflow and resource pool.
 - `size` is passed to the cluster resource as the requested node count.
+- A3 `double_node.test_config` entries may opt into `privileged: true` for pod-local mounts. This runs both test containers as privileged root; the default is `false` and cluster admission policy must permit it. The pod-local `/dev/shm` volume remains unchanged.
 
 The YAML controls serving behavior, including internal or external load balancing and any disaggregated prefill configuration required by the case.
 
