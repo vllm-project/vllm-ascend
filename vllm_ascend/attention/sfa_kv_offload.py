@@ -859,7 +859,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
         attn_metadata: AscendSFAMetadata,
+        *,
+        defer_wait: bool = False,
     ):
+        if defer_wait:
+            return lambda: self.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         if self._is_decode_only(attn_metadata):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
