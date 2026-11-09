@@ -310,7 +310,7 @@ class LayerwiseStepController:
                 cache_write_event.record()
             send_task = plan.send_task
             if send_task is None:
-                send_task = LayerwiseSendTaskUpdate([], [], [], [], [], [])
+                raise RuntimeError("Layerwise plan is missing send_task")
             layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             keys = None
             values = None

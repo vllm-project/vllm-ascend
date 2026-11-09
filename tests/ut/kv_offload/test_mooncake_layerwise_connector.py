@@ -72,6 +72,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     string_to_int64_hash,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.step import (  # noqa: E402
+    LayerwiseTransferPlan,
+)
 
 # Restore the mocked modules so other test files still work correctly.
 # For keys that our real import loaded, overwrite with the saved mock.
@@ -1291,6 +1294,35 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
 
         connector.connector_worker.on_kv_cache_written.assert_called_once_with("layer0")
 
+    def test_cache_written_hook_noops_without_bound_plan(self):
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector._is_kv_producer = True
+        connector._connector_metadata = MooncakeLayerwiseConnectorMetadata()
+        connector.connector_worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+        connector.connector_worker.on_kv_cache_written = MagicMock()
+
+        # Empty metadata keeps the legacy early return.
+        connector.on_kv_cache_written("layer0")
+        # Non-empty metadata still has no plan before bind/prepare.
+        connector._connector_metadata.requests["req"] = MagicMock()
+        connector.on_kv_cache_written("layer0")
+
+        connector.connector_worker.on_kv_cache_written.assert_not_called()
+
+    def test_cache_written_hook_noops_with_empty_plan(self):
+        worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+        worker._layerwise_step_plan = LayerwiseTransferPlan(producer=True, requests={}, aligned_remote_block_ids=[])
+        worker.on_kv_cache_written = MagicMock()
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector._is_kv_producer = True
+        connector._connector_metadata = MooncakeLayerwiseConnectorMetadata()
+        connector._connector_metadata.requests["req"] = MagicMock()
+        connector.connector_worker = worker
+
+        connector.on_kv_cache_written("layer0")
+
+        worker.on_kv_cache_written.assert_not_called()
+
 
 def test_layerwise_reuse_state_tracks_shared_physical_slots():
     worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
@@ -1410,6 +1442,18 @@ def test_sparse_sfa_c8_save_skips_legacy_quantization_and_preserves_reuse_gate()
     assert task.layer_names == ["layer0"]
     worker._mark_layer_reuse_pending.assert_called_once_with(0)
     assert worker.current_layer == 1
+
+
+def test_compat_layerwise_plan_copies_scheduler_requests():
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    metadata = MooncakeLayerwiseConnectorMetadata()
+    metadata.requests["req"] = SimpleNamespace(local_block_ids=[[1]])
+
+    plan = worker._compat_layerwise_plan(metadata)
+
+    assert plan.requests is not metadata.requests
+    plan.requests["req"].local_block_ids.append([99])
+    assert metadata.requests["req"].local_block_ids == [[1]]
 
 
 class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):

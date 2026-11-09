@@ -1,5 +1,6 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import logging
 import math
 import os
@@ -885,8 +886,10 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         if not self._is_kv_producer or not self.has_connector_metadata():
             return
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
+        if not self._connector_metadata.requests:
+            return
         assert self.connector_worker is not None
-        plan = self.connector_worker._layerwise_step_plan
+        plan = getattr(self.connector_worker, "_layerwise_step_plan", None)
         if plan is None or not plan.requests:
             return
         self.connector_worker.on_kv_cache_written(layer_name)
@@ -1262,6 +1265,7 @@ class MooncakeLayerwiseConnectorWorker:
         self._storage_send_errors: dict[int, str] = {}
         self._pending_reuse_layers: set[int] = set()
         self._cache_write_events: list[torch.npu.Event | None] = [None] * self.total_layers
+        self._layerwise_step_plan: LayerwiseTransferPlan | None = None
 
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
         self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
@@ -1909,7 +1913,7 @@ class MooncakeLayerwiseConnectorWorker:
         send_task = connector_metadata.send_task
         return LayerwiseTransferPlan(
             producer=True,
-            requests=connector_metadata.requests,
+            requests=copy.deepcopy(connector_metadata.requests),
             aligned_remote_block_ids=[],
             send_task_update=None,
             send_task=send_task,
