@@ -114,9 +114,7 @@ def _ranks_kernel(
                 block = i + tl.arange(0, BLOCK_SIZE)
                 logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
                 n_vec += (logits >= x).to(tl.int32)
-            # Subtract padding counted by >= when the selected logit is -inf.
-            padding = tl.cdiv(vocab_size, BLOCK_SIZE) * BLOCK_SIZE - vocab_size
-            n = tl.sum(n_vec) - tl.where(x == float("-inf"), padding, 0)
+            n = tl.sum(n_vec)
             tl.store(output_ptr + req_idx, n)
 
 
