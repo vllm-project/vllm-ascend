@@ -20,7 +20,12 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.triton_utils import triton
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    InputBuffers,
+    _combine_sampled_and_draft_tokens_kernel,
+)
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
@@ -67,6 +72,51 @@ class AscendInputBuffers(InputBuffers):
         # CPP latency profiling must model one real prefill request. The generic
         # MRV2 dummy path otherwise describes every dummy batch as decode-only.
         self.profile_cpp: bool = False
+        self.logits_indices_workspace: torch.Tensor | None = None
+
+    def bind_logits_indices_workspace(self) -> None:
+        """Give the target its own output storage before capture or execution."""
+        if self.logits_indices_workspace is not None:
+            raise RuntimeError("Logits indices workspace is already bound")
+        self.logits_indices_workspace = torch.empty(self.max_num_tokens, dtype=torch.int64, device=self.device)
+
+    def combine_sampled_and_draft_tokens(
+        self,
+        input_ids: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        last_sampled_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        prefill_len: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_logits: int,
+        num_new_sampled_tokens: int = 1,
+    ) -> torch.Tensor:
+        """Write current values with Core's kernel into this target-owned prefix."""
+        assert num_new_sampled_tokens in (0, 1), f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
+        workspace = self.logits_indices_workspace
+        assert workspace is not None, "Logits indices workspace must be bound before use"
+        if input_ids.device != workspace.device:
+            raise ValueError("Logits indices workspace must share the input device")
+        if not 0 <= num_logits <= workspace.numel():
+            raise ValueError("Logits indices exceed the target input capacity")
+        logits_indices = workspace[:num_logits]
+        _combine_sampled_and_draft_tokens_kernel[(idx_mapping.shape[0],)](
+            input_ids,
+            idx_mapping,
+            last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            prefill_len,
+            draft_tokens,
+            draft_tokens.stride(0),
+            cu_num_logits,
+            logits_indices,
+            NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
+            BLOCK_SIZE=triton.next_power_of_2(draft_tokens.shape[-1] + num_new_sampled_tokens),
+        )
+        return logits_indices
 
 
 @dataclass
