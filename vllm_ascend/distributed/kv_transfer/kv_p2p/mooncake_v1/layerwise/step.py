@@ -38,8 +38,27 @@ class LayerwiseSendTaskUpdate:
 class LayerwiseTransferPlan:
     producer: bool
     requests: dict[str, Any]
-    aligned_remote_block_ids: list[tuple[Any, dict[int, list[int]]]]
+    aligned_remote_block_ids: list[tuple[Any, dict[int, list[int]], list[bool]]]
     send_task_update: LayerwiseSendTaskUpdate | None = None
+
+
+class _ChunkFinishRecorder:
+    """Proxy that records chunk_finish writes performed by split helpers."""
+
+    def __init__(self, target: Any) -> None:
+        object.__setattr__(self, "_target", target)
+        object.__setattr__(self, "writes", [])
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        if name == "chunk_finish":
+            self.writes.append(value)
+        setattr(self._target, name, value)
 
 
 class LayerwiseStepController:
@@ -118,7 +137,7 @@ class LayerwiseStepController:
         self._cache_write_events = [None] * self.total_layers
         producer = bool(self.vllm_config.kv_transfer_config.is_kv_producer)
         request_plan: dict[str, Any] = {}
-        aligned_ops: list[tuple[Any, dict[int, list[int]]]] = []
+        aligned_ops: list[tuple[Any, dict[int, list[int]], list[bool]]] = []
         send_task_update = None
         if producer:
             update_metadata = {}
@@ -126,21 +145,19 @@ class LayerwiseStepController:
                 transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
                 aligned_req_meta = copy.deepcopy(req_meta)
                 self._align_remote_block_ids(aligned_req_meta)
+                recorder = _ChunkFinishRecorder(aligned_req_meta)
                 changed_remote_block_ids = {
                     i: aligned_req_meta.remote_block_ids[i]
                     for i in range(self.num_kv_cache_groups)
                     if aligned_req_meta.remote_block_ids[i] != req_meta.remote_block_ids[i]
                 }
-                aligned_ops.append((req_meta, changed_remote_block_ids))
                 for i, kv_cache_spec in enumerate(self.kv_cache_specs):
                     if isinstance(kv_cache_spec, MambaSpec):
                         single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
-                            aligned_req_meta, req_idx, req_id, i
+                            recorder, req_idx, req_id, i
                         )
                     else:
-                        single_group_transfer_mappings = self._get_kv_split_metadata(
-                            aligned_req_meta, req_idx, req_id, i
-                        )
+                        single_group_transfer_mappings = self._get_kv_split_metadata(recorder, req_idx, req_id, i)
                     for (host, port), block_dict in single_group_transfer_mappings.items():
                         if (host, port) not in transfer_mappings:
                             transfer_mappings[(host, port)] = {
@@ -157,6 +174,7 @@ class LayerwiseStepController:
                         transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[
                             (host, port)
                         ]["trans_count"]
+                aligned_ops.append((req_meta, changed_remote_block_ids, recorder.writes))
                 assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
                 update_req_meta = copy.deepcopy(aligned_req_meta)
                 for (host, port), block_dict in transfer_mappings.items():
@@ -169,7 +187,7 @@ class LayerwiseStepController:
             request_plan = update_metadata
 
             if self.attn_resharding_group_idx:
-                group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
+                group_rearrange_block_ids: list[list[int]] = [[] for _ in range(self.num_kv_cache_groups)]
                 group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
                 group_num_tokens = [0 for _ in range(self.num_kv_cache_groups)]
                 group_block_table = [None for _ in range(self.num_kv_cache_groups)]
@@ -212,9 +230,11 @@ class LayerwiseStepController:
         """Reproduce the legacy metadata write-back for a prepared plan."""
         if not plan.producer:
             return
-        for req_meta, changed_remote_block_ids in plan.aligned_remote_block_ids:
+        for req_meta, changed_remote_block_ids, chunk_finish_writes in plan.aligned_remote_block_ids:
             for group_idx, block_ids in changed_remote_block_ids.items():
                 req_meta.remote_block_ids[group_idx] = block_ids
+            for value in chunk_finish_writes:
+                req_meta.chunk_finish = value
         metadata.requests = {}
         for req_id, req_meta in plan.requests.items():
             metadata.requests[req_id] = req_meta
