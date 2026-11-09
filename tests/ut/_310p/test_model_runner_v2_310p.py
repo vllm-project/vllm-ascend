@@ -27,8 +27,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
-from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 
 pytestmark = pytest.mark.usefixtures("sampling_kernel_overrides")
 
