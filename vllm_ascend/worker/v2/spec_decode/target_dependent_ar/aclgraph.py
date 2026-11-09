@@ -227,11 +227,27 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        fia_params = self.speculator.build_fia_params(
-            desc.num_reqs,
-            draft_attn_metadatas[0],
-            self.is_draft_model_prefill,
-        )
+        if self.speculator.use_dcp and self.speculator.attn_architecture == "MLA":
+            from vllm_ascend.attention.context_parallel.mla_cp import build_mla_dcp_fia_params
+
+            fia_params = []
+            for per_step_metadata in draft_attn_metadatas:
+                for layer_name, metadata in per_step_metadata.items():
+                    fia_params.extend(
+                        build_mla_dcp_fia_params(
+                            layer_name,
+                            metadata,
+                            desc.num_tokens,
+                            is_draft_model=True,
+                            is_draft_model_prefill=self.is_draft_model_prefill,
+                        )
+                    )
+        else:
+            fia_params = self.speculator.build_fia_params(
+                desc.num_reqs,
+                draft_attn_metadatas[0],
+                self.is_draft_model_prefill,
+            )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)

@@ -371,7 +371,28 @@ class DCPFIAParamProvider:
         }
 
 
-  
+def build_dcp_fia_params(
+    layer_name: str,
+    metadata,
+    dcp_rank: int,
+    *,
+    is_draft_model: bool = False,
+    is_draft_model_prefill: bool = False,
+    use_spec_decode: bool = False,
+) -> list[dict[str, object]]:
+    """Publish parameters for the captured split or ordinary cache task."""
+    use_split = use_history_current_split_decode(
+        metadata,
+        is_draft_model=is_draft_model,
+        is_draft_model_prefill=is_draft_model_prefill,
+        use_spec_decode=use_spec_decode,
+    )
+    kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if use_split else (CPKVScope.FULL,)
+    params = []
+    for kind in kinds:
+        provider = DCPFIAParamProvider(layer_name, dcp_rank, kind)
+        params.append({"layer_name": provider.layer_name, **provider.resolve({layer_name: metadata})})
+    return params
 
 
 class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
