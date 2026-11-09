@@ -1241,3 +1241,19 @@ Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand
 - **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
 The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.
+
+## FLy verification on the NPU MRV2 sampler
+
+Requires vLLM with #53987. In speculative_config set
+`"rejection_sample_method": "fly", "fly_window_size": 2,
+"fly_entropy_threshold": 0.3, "fly_entropy_top_k": 3`.
+Use a supported MRV2 proposer such as MTP. The default standard verifier is
+unchanged. FLy is lossy: it does not preserve the target distribution and can
+change greedy outputs. It needs at least two draft tokens and a window smaller
+than K. NPU FLy cannot be combined with block verification, entropy verify,
+synthetic acceptance, watermarking or sharded draft logits. Greedy and
+probabilistic draft verification retain the existing NPU random number path.
+Only complete windows of native acceptances can commit a deferred rejection;
+failed windows resample at the original rejection using its saved statistics.
+
+Validate correctness, quality and performance on the deployment hardware before enabling in production.
