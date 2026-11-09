@@ -30,6 +30,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -1065,8 +1066,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
         # vLLM #64076 removed the deprecated cascade-attention contract.
+        # Remove this compatibility branch when v0.33.0 support is dropped.
         common_prefix_kwargs: dict[str, Any] = {}
-        if "num_common_prefix_blocks" in SchedulerOutput.__dataclass_fields__:
+        if vllm_version_is("0.33.0"):
             num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
             with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
                 if self.running:
