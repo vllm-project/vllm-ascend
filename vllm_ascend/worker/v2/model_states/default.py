@@ -414,9 +414,7 @@ class AscendModelState(DefaultModelState):
                     source = input_batch.positions[offset : offset + length].to(
                         device=positions.device, dtype=torch.int64
                     )
-                    positions[:, offset : offset + length] = (
-                        source.unsqueeze(0).repeat(num_dims, 1) + delta
-                    )
+                    positions[:, offset : offset + length] = source.unsqueeze(0) + delta
                 offset += length
             if offset < num_tokens:
                 positions[:, offset:] = 0
