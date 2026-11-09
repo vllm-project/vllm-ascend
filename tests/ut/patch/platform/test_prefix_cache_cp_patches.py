@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
     AscendIndexerKPoolTailSpec,
@@ -1737,10 +1738,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     config.cache_config.kv_cache_layout = layout
     bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
-    if not vllm_version_is("0.32.0"):
-        from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-
-        assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(config, groups) == bytes_per_block
+    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(config, groups) == bytes_per_block
     budget = 11 * bytes_per_block + bytes_per_block // 2
     planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
     expected_blocks = 11 if num_blocks_override is None else num_blocks_override
