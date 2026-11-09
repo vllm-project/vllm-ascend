@@ -437,6 +437,87 @@ class TestBlockTableComputeSlotMapping(TestBase):
         self._test_slot_mapping_for_ranks(dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs)
 
 
+class TestBlockTableStaleRows(TestBase):
+    """Row updates must not leave stale block ids behind.
+
+    Consumers (FIA, compute_slot_mapping, mamba/GDN state paths) index
+    rows by request-derived lengths rather than num_blocks_per_row, so a
+    block id left beyond the live region of a row can still be
+    dereferenced after the underlying blocks were freed and reallocated
+    to other block-table groups.
+    """
+
+    def setUp(self):
+        self.block_size = 128
+        self.max_num_reqs = 4
+        self.max_num_blocks_per_req = 16
+        self.max_num_batched_tokens = 512
+        self.pin_memory = False
+        self.device = torch.device("cpu")
+        self.kernel_sizes = [128]
+
+    def create_block_table(self):
+        with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
+            mock_dcp_group = MagicMock(spec=GroupCoordinator)
+            mock_dcp_group.world_size = 1
+            mock_dcp_group.rank_in_group = 0
+            mock_get_dcp_group.return_value = mock_dcp_group
+
+            from vllm_ascend.worker.block_table import BlockTable
+
+            return BlockTable(
+                block_size=self.block_size,
+                max_num_reqs=self.max_num_reqs,
+                max_num_blocks_per_req=self.max_num_blocks_per_req,
+                max_num_batched_tokens=self.max_num_batched_tokens,
+                pin_memory=self.pin_memory,
+                device=self.device,
+                kernel_sizes=self.kernel_sizes,
+                cp_kv_cache_interleave_size=1,
+            )
+
+    def test_move_row_self_move_is_noop(self):
+        block_table = self.create_block_table()
+        block_table.add_row([10, 11, 12], 0)
+
+        block_table.move_row(0, 0)
+
+        self.assertEqual(block_table.num_blocks_per_row[0], 3)
+        np.testing.assert_array_equal(block_table.block_table.np[0, :3], [10, 11, 12])
+
+    def test_move_row_clears_vacated_source_row(self):
+        block_table = self.create_block_table()
+        block_table.add_row([10, 11, 12], 0)
+        block_table.add_row([20, 21], 1)
+
+        block_table.move_row(1, 0)
+
+        self.assertEqual(block_table.num_blocks_per_row[0], 2)
+        np.testing.assert_array_equal(block_table.block_table.np[0, :2], [20, 21])
+        # The vacated source row is fully cleared.
+        self.assertEqual(block_table.num_blocks_per_row[1], 0)
+        self.assertTrue((block_table.block_table.np[1] == 0).all())
+
+    def test_move_row_clears_target_row_tail(self):
+        block_table = self.create_block_table()
+        block_table.add_row([10, 11, 12], 0)
+        block_table.add_row([20, 21], 1)
+
+        block_table.move_row(1, 0)
+
+        self.assertEqual(block_table.num_blocks_per_row[0], 2)
+        np.testing.assert_array_equal(block_table.block_table.np[0, 2:], np.zeros(14, dtype=np.int32))
+
+    def test_add_row_clears_tail_of_shrunk_row(self):
+        block_table = self.create_block_table()
+        block_table.add_row(list(range(10)), 0)
+
+        block_table.add_row([7, 8], 0)
+
+        self.assertEqual(block_table.num_blocks_per_row[0], 2)
+        np.testing.assert_array_equal(block_table.block_table.np[0, 2:], np.zeros(14, dtype=np.int32))
+
+
 class TestMultiGroupBlockTable(unittest.TestCase):
     @staticmethod
     def _create(*, kernel_sizes, max_num_blocks=None, block_sizes=None):
