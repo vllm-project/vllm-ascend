@@ -1,0 +1,15 @@
+pr: 21302
+entries:
+  - category: feature
+    text: >-
+      Added packaged CANNBot quantized MLA Prolog support for eligible GLM-5.3-Flash
+      NoPE MXFP8 layers on A5, including native Query-norm recomputation for BF16
+      KPool Indexers. Matching Linux aarch64/Python 3.12 operator and DSL artifacts
+      are required.
+    model: glm-5.3-flash
+    hardware: [A5]
+  - category: config
+    text: >-
+      CANNBot Prolog is selected for metadata-classified decode batches while
+      prefill and mixed batches retain native preprocessing. One-token
+      prefix-cache-hit prefill classified as decode can still use Prolog.

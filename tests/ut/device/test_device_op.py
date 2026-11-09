@@ -62,6 +62,14 @@ def test_host_registration_flags_follow_runtime_abi():
     assert A5DeviceAdaptor.host_register_flags() == 0x2
 
 
+@pytest.mark.parametrize(
+    "adaptor,backend",
+    [(BaseDeviceAdaptor, "torch_npu"), (Ascend310PDeviceAdaptor, "torch_npu"), (A5DeviceAdaptor, "cannbot")],
+)
+def test_mla_prolog_backend_is_device_routed(adaptor, backend):
+    assert adaptor.get_mla_prolog_backend() == backend
+
+
 def test_deepseek_v41_backend_is_device_routed():
     assert BaseDeviceAdaptor.get_dsv41_packed_cache_ops() is None
     with mock.patch.dict("sys.modules", {"vllm_ascend.vllm_ascend_C": mock.Mock()}):

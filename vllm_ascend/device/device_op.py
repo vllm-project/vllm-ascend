@@ -49,6 +49,11 @@ else:
 
 class BaseDeviceAdaptor:
     @staticmethod
+    def get_mla_prolog_backend() -> str:
+        """Return the MLA Prolog provider; SFA owns model eligibility."""
+        return "torch_npu"
+
+    @staticmethod
     def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
         """Return the packed-cache ABI implementation, or use standard caches."""
         return None
@@ -997,6 +1002,11 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def get_mla_prolog_backend() -> str:
+        """Use the packaged provider for eligible NoPE MXFP8 layers."""
+        return "cannbot"
+
     @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
         operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
