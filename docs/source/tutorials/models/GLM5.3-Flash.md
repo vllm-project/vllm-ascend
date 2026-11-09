@@ -632,22 +632,13 @@ For DP>1, the launcher executes the role script without filtering.
                 "multistream_overlap_shared_expert": false
               }' \
               --kv-transfer-config '{
-                "kv_connector": "MultiConnector",
+                "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "engine_id": "0",
-                "kv_load_failure_policy": "fail",
+                "kv_port": "30000",
                 "kv_connector_extra_config": {
-                  "connectors": [
-                    {
-                      "kv_connector": "MooncakeConnectorV2",
-                      "kv_role": "kv_producer",
-                      "kv_port": "30000",
-                      "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
-                        "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
-                      }
-                    }
-                  ]
+                  "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
+                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
                 }
               }'
             ```
@@ -714,23 +705,14 @@ For DP>1, the launcher executes the role script without filtering.
                 }
               }' \
               --kv-transfer-config '{
-                "kv_connector": "MultiConnector",
+                "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_consumer",
                 "engine_id": "1",
-                "kv_load_failure_policy": "fail",
+                "kv_port": "30800",
                 "kv_connector_extra_config": {
-                  "connectors": [
-                    {
-                      "kv_connector": "MooncakeConnectorV2",
-                      "kv_role": "kv_consumer",
-                      "kv_port": "30800",
-                      "kv_connector_extra_config": {
-                        "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
-                        "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1},
-                        "use_ascend_direct": true
-                      }
-                    }
-                  ]
+                  "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
+                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1},
+                  "use_ascend_direct": true
                 }
               }'
             ```
@@ -804,8 +786,7 @@ For DP>1, the launcher executes the role script without filtering.
     - Both roles enable prefix caching and disable video input through
       `--limit-mm-per-prompt`. Images retain the runtime default limit.
       `--allowed-local-media-path /` permits local media under the container root.
-    - `MultiConnector` wraps one `MooncakeConnectorV2`; this ordinary PD
-      example does not attach a KV pool. The child connector uses
+    - `MooncakeConnectorV2` transfers KV cache directly between the roles. It uses
       `kv_producer` on Prefill and `kv_consumer` on Decode, with base KV ports
       `30000` and `30800`. Both roles declare Prefill TP1/PCP8/DP1 and
       Decode TP1/PCP1/DP8; Decode enables `use_ascend_direct`.
