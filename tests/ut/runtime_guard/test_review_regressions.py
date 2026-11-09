@@ -1311,7 +1311,7 @@ def test_v18g_merged_bus_both_lanes_two_bcasts():
 
 
 class _ConsumeRecorder:
-    """runtime_config stand-in recording consume_manual_trigger calls."""
+    """runtime_config stand-in recording consume_manual_dump calls."""
 
     def __init__(self, remaining: int = 2) -> None:
         self.remaining = remaining
@@ -1319,7 +1319,7 @@ class _ConsumeRecorder:
         self.target = remaining
         self.consume_calls = 0
 
-    def consume_manual_trigger(self) -> bool:
+    def consume_manual_dump(self) -> bool:
         self.consume_calls += 1
         if self.remaining > 0:
             self.remaining -= 1
@@ -1327,7 +1327,7 @@ class _ConsumeRecorder:
             return True
         return False
 
-    def manual_trigger_count(self) -> int:
+    def manual_dump_remaining(self) -> int:
         return self.remaining
 
     def manual_dumps_done(self) -> int:
@@ -1336,7 +1336,7 @@ class _ConsumeRecorder:
     def manual_dump_target(self) -> int:
         return self.target
 
-    def manual_trigger_continuous(self) -> bool:
+    def manual_dump_continuous(self) -> bool:
         return False
 
     def dump_root(self):
@@ -1450,7 +1450,7 @@ def test_v19a_manual_dump_forces_all_requests_no_consume_in_prepare(monkeypatch)
         "vllm_ascend.observability.runtime_guard.dump.block_ids_for_request",
         lambda _runner, req_id, req_idx=None, **kw: [0] if req_id == "r1" else [1],
     )
-    DumpKvAction().run(ctx)  # arm only; D2H is end_of_wave_sync at sample end
+    DumpKvAction().run(ctx)  # arm only; D2H is end_of_wave at sample end
     assert rc.consume_calls == 0  # consume moved to _handle_manual_trigger
     assert ctx.runner.runtime_guard.queue_kv_dump.call_count == 2
     queued = [c.args[0]["req_id"] for c in ctx.runner.runtime_guard.queue_kv_dump.call_args_list]
@@ -1704,7 +1704,7 @@ def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, mo
 
     rc = cfg.RuntimeConfig(config_path=None)
     assert rc.detector_get("token_repeat", "enabled", True) is False
-    assert rc.ensure_persisted() is True
+    assert rc.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
     assert rc.detector_get("token_repeat", "window", 0) == int(cfg._DEFAULTS["detector"]["token_repeat"]["window"])
@@ -1723,7 +1723,7 @@ def test_v21b_default_path_missing_file_pure_defaults(tmp_path: Path, monkeypatc
 def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     """A JSON written before this process's bootstrap must not leak in via the
     first hot-reload (the race where the background reloader reads the stale
-    file before ``ensure_persisted`` overwrites it)."""
+    file before ``persist_bootstrap_config`` overwrites it)."""
     import vllm_ascend.observability.runtime_config.config as cfg
 
     cfg_file = tmp_path / "runtime_config.json"
@@ -1735,7 +1735,7 @@ def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     rc = cfg.RuntimeConfig(
         config_path=str(cfg_file),
         report_dir=tmp_path / "report",
-        ensure_file=False,  # production: persist deferred to ensure_persisted
+        ensure_file=False,  # production: persist deferred to persist_bootstrap_config
         hot_reload=True,
     )
     # Bootstrap ignores the stale file: detector stays at its default (off).
@@ -1745,7 +1745,7 @@ def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     assert rc.detector_get("token_repeat", "enabled", True) is False
 
     # Writer persists the effective startup config (defaults), overwriting stale.
-    assert rc.ensure_persisted() is True
+    assert rc.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
 
@@ -2196,7 +2196,7 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
                 return_value=True,
             ),
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 side_effect=RuntimeError("bus down"),
             ),
         ):
@@ -2232,16 +2232,16 @@ def test_v28e_dump_inactive_skip_wave_head_drops_pending(monkeypatch):
     p.quota = MagicMock()
     p._kv_dump_jobs = [{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}]
     p._deferred_kv_dump_jobs = []
-    p._end_of_wave_sync_if_no_sample = MagicMock()
+    p._end_of_wave_if_no_sample = MagicMock()
 
-    RuntimeGuardProcessor.sync_for_step(p, has_scheduled_tokens=True)
+    RuntimeGuardProcessor.begin_wave(p, has_scheduled_tokens=True)
     p.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
 
 
 def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):
-    """Early PP: sync_for_step / end_of_wave_sync return at the entrance gate."""
+    """Early PP: begin_wave / end_of_wave return at the entrance gate."""
     from vllm_ascend.observability.runtime_guard import processor as processor_mod
     from vllm_ascend.observability.runtime_guard import processor_dump
 
@@ -2251,17 +2251,17 @@ def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):
     p = _bare_processor()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
-    p.refresh_config = MagicMock()  # type: ignore[method-assign]
+    p.wave_head_sync = MagicMock()  # type: ignore[method-assign]
     p._drain_merged_bus = MagicMock()  # type: ignore[method-assign]
     p._maybe_fire_manual_local = MagicMock()  # type: ignore[method-assign]
-    # Restore real end_of_wave_sync (bare_processor stubs it).
-    p.end_of_wave_sync = RuntimeGuardProcessor.end_of_wave_sync.__get__(p)  # type: ignore[method-assign]
+    # Restore real end_of_wave (bare_processor stubs it).
+    p.end_of_wave = RuntimeGuardProcessor.end_of_wave.__get__(p)  # type: ignore[method-assign]
 
-    RuntimeGuardProcessor.sync_for_step(p, has_scheduled_tokens=True)
+    RuntimeGuardProcessor.begin_wave(p, has_scheduled_tokens=True)
     p.wave_tracker.advance.assert_not_called()
-    p.refresh_config.assert_not_called()
+    p.wave_head_sync.assert_not_called()
 
-    RuntimeGuardProcessor.end_of_wave_sync(p, has_scheduled_tokens=True)
+    RuntimeGuardProcessor.end_of_wave(p, has_scheduled_tokens=True)
     p._drain_merged_bus.assert_not_called()
     p._maybe_fire_manual_local.assert_not_called()
 

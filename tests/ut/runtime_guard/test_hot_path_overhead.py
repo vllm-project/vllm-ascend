@@ -62,7 +62,7 @@ def _bind(cfg: RuntimeConfig, *, runner: MagicMock | None = None) -> RuntimeGuar
         self.kv_reader = MagicMock()
         self.quota = MagicMock()
         self.wave_tracker = MagicMock()
-        # Fields that end_of_wave_sync / drain read directly (no getattr defense).
+        # Fields that end_of_wave / drain read directly (no getattr defense).
         self._bus_worker = MagicMock()
         self._bus_worker.started = True
         self._bus_worker.poll_ready.return_value = True
@@ -150,8 +150,8 @@ def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
     assert cfg.needs_sample_phase_hooks() is False
     assert cfg.dump_enabled() is True
     with (
-        patch.object(RuntimeGuardProcessor, "refresh_config"),
-        patch.object(RuntimeGuardProcessor, "end_of_wave_sync") as eow,
+        patch.object(RuntimeGuardProcessor, "wave_head_sync"),
+        patch.object(RuntimeGuardProcessor, "end_of_wave") as eow,
         patch.object(RuntimeGuardProcessor, "_stash_local_dump_jobs_to_deferred"),
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
@@ -159,7 +159,7 @@ def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
+        proc.begin_wave(has_scheduled_tokens=True, scheduler_output=None)
         eow.assert_not_called()
 
         def sample_fn():
@@ -211,7 +211,7 @@ def test_sample_tokens_decorator_fully_off_bypasses_wrap(tmp_path: Path):
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
+def test_begin_wave_dump_only_uses_wave_head(tmp_path: Path):
     """Detectors off and dump on: wave-head bus via refresh; not fully off.
 
     Hot-reload off still delivers dump jobs through refresh → merged due bus
@@ -224,7 +224,7 @@ def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
     assert cfg.needs_sample_phase_hooks() is False
     assert cfg.is_fully_off() is False
     with (
-        patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
+        patch.object(RuntimeGuardProcessor, "wave_head_sync") as refresh,
         patch.object(RuntimeGuardProcessor, "_stash_local_dump_jobs_to_deferred") as stash,
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
@@ -232,7 +232,7 @@ def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
+        proc.begin_wave(has_scheduled_tokens=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
         refresh.assert_called_once()
         # stash lives inside refresh/wave_head; refresh is mocked so stash stays idle.
@@ -240,26 +240,26 @@ def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_refreshes_when_reload_on_without_detectors(tmp_path: Path):
+def test_begin_wave_refreshes_when_reload_on_without_detectors(tmp_path: Path):
     """Hot-reload on (never fully off): refresh even with detectors off."""
     cfg = _cfg(tmp_path, reload=5.0)
     cfg._last_reload_ts = time.time()
     cfg._initial_broadcast_done = True
     with (
-        patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
+        patch.object(RuntimeGuardProcessor, "wave_head_sync") as refresh,
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
+        proc.begin_wave(has_scheduled_tokens=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
         refresh.assert_called_once()
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_caches_prompt_while_hooks_off_under_hot_reload(tmp_path: Path):
+def test_begin_wave_caches_prompt_while_hooks_off_under_hot_reload(tmp_path: Path):
     """Prefill ``scheduled_new_reqs`` must be cached before detectors turn on.
 
     Hot-reload can leave ``needs_sample_phase_hooks`` false on the only wave
@@ -285,7 +285,7 @@ def test_sync_for_step_caches_prompt_while_hooks_off_under_hot_reload(tmp_path: 
     RequestGuardStore.reset_for_tests()
     try:
         with (
-            patch.object(RuntimeGuardProcessor, "refresh_config"),
+            patch.object(RuntimeGuardProcessor, "wave_head_sync"),
             patch.object(RuntimeGuardProcessor, "mark_finished") as mark,
             patch.object(RuntimeGuardProcessor, "_reap_finished_requests") as reap,
             patch(
@@ -294,7 +294,7 @@ def test_sync_for_step_caches_prompt_while_hooks_off_under_hot_reload(tmp_path: 
             ),
         ):
             proc = _bind(cfg)
-            proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=so)
+            proc.begin_wave(has_scheduled_tokens=True, scheduler_output=so)
             # Busy wave: finish is stamped in run_sample_phase, not here.
             # Reap still runs so prompts cached on earlier waves can be cleared.
             mark.assert_not_called()
@@ -307,12 +307,12 @@ def test_sync_for_step_caches_prompt_while_hooks_off_under_hot_reload(tmp_path: 
         RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
+def test_begin_wave_marks_finished_on_empty_batch(tmp_path: Path):
     """Final-request-before-idle: empty batch still marks+reaps finished reqs.
 
     Async scheduling returns EMPTY_MODEL_RUNNER_OUTPUT for the trailing empty
     batch, so ``run_sample_phase`` (and its ``mark_finished`` hook) never fires.
-    ``sync_for_step`` must mark ``scheduler_output.finished_req_ids`` itself so
+    ``begin_wave`` must mark ``scheduler_output.finished_req_ids`` itself so
     reap still runs for the last request.
     """
     cfg = _cfg(tmp_path, reload=0.0)
@@ -338,7 +338,7 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
     )
 
     with (
-        patch.object(RuntimeGuardProcessor, "refresh_config"),
+        patch.object(RuntimeGuardProcessor, "wave_head_sync"),
         patch.object(RuntimeGuardProcessor, "mark_finished", _mark),
         patch.object(RuntimeGuardProcessor, "_reap_finished_requests", _reap),
         patch(
@@ -347,18 +347,18 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=so_empty)
+        proc.begin_wave(has_scheduled_tokens=True, scheduler_output=so_empty)
         mark_calls = [c for c in calls if c[0] == "mark"]
         assert mark_calls, "mark_finished must fire on the empty final batch"
         # bound method: _mark(self, finished_req_ids) → args[1] is the id set.
         assert mark_calls[0][1][1] == {"r_final"}
         calls.clear()
-        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=so_busy)
+        proc.begin_wave(has_scheduled_tokens=True, scheduler_output=so_busy)
         assert not [c for c in calls if c[0] == "mark"]
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_reaps_while_hooks_off_under_hot_reload(tmp_path: Path):
+def test_begin_wave_reaps_while_hooks_off_under_hot_reload(tmp_path: Path):
     """Prompts cached before detectors turn on must still be reaped."""
     cfg = _cfg(tmp_path, reload=5.0)
     cfg._last_reload_ts = time.time()
@@ -379,7 +379,7 @@ def test_sync_for_step_reaps_while_hooks_off_under_hot_reload(tmp_path: Path):
         calls.append("reap")
 
     with (
-        patch.object(RuntimeGuardProcessor, "refresh_config"),
+        patch.object(RuntimeGuardProcessor, "wave_head_sync"),
         patch.object(RuntimeGuardProcessor, "mark_finished", _mark),
         patch.object(RuntimeGuardProcessor, "_reap_finished_requests", _reap),
         patch(
@@ -388,23 +388,23 @@ def test_sync_for_step_reaps_while_hooks_off_under_hot_reload(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(has_scheduled_tokens=False, scheduler_output=so_empty)
+        proc.begin_wave(has_scheduled_tokens=False, scheduler_output=so_empty)
     assert calls == ["mark", "reap"]
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_refresh_config_skips_clear_wave_cache_when_idle(tmp_path: Path):
+def test_wave_head_sync_skips_clear_wave_cache_when_idle(tmp_path: Path):
     cfg = _cfg(tmp_path, reload=0.0)
     with patch("vllm_ascend.observability.runtime_guard.processor.RequestIoSnapshotManager") as io_mgr:
         io = MagicMock()
         io_mgr.get.return_value = io
         proc = _bind(cfg)
-        proc.refresh_config()
+        proc.wave_head_sync()
         io.clear_wave_cache.assert_not_called()
 
         cfg._data["detector"]["token_repeat"]["enabled"] = True
         cfg._invalidate_hot_path_gates()
-        proc.refresh_config()
+        proc.wave_head_sync()
         io.clear_wave_cache.assert_called_once()
     RuntimeGuardProcessor.reset_for_tests()
 
@@ -443,7 +443,7 @@ def test_run_sample_phase_idle_skips_hooks(tmp_path: Path):
 def test_run_sample_phase_marks_finished_before_eow_when_hooks_off(tmp_path: Path):
     """Hot-reload with detectors off must stamp finish before manual-dump eow.
 
-    Reap stays on the next sync_for_step so this wave's report can still read
+    Reap stays on the next begin_wave so this wave's report can still read
     the prompt cache.
     """
     cfg = _cfg(tmp_path, reload=5.0)
@@ -466,7 +466,7 @@ def test_run_sample_phase_marks_finished_before_eow_when_hooks_off(tmp_path: Pat
 
     proc = _bind(cfg)
     proc.mark_finished = lambda ids: order.append(f"mark:{list(ids)}")  # type: ignore[method-assign]
-    proc.end_of_wave_sync = lambda **k: order.append("eow")  # type: ignore[method-assign]
+    proc.end_of_wave = lambda **k: order.append("eow")  # type: ignore[method-assign]
     proc._reap_finished_requests = lambda: order.append("reap")  # type: ignore[method-assign]
     proc.run_sample_phase(
         sample_fn=sample_fn,
@@ -477,9 +477,9 @@ def test_run_sample_phase_marks_finished_before_eow_when_hooks_off(tmp_path: Pat
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_due_bits_from_src_broadcast_even_when_not_due():
+def test_broadcast_due_bits_from_src_broadcast_even_when_not_due():
     """Merged due-bus always pays the source broadcast (idle bits included)."""
-    from vllm_ascend.observability.runtime_config.dist import sync_due_bits_from_src
+    from vllm_ascend.observability.runtime_config.dist import broadcast_due_bits_from_src
 
     group = MagicMock()
     group.world_size = 2
@@ -489,14 +489,14 @@ def test_sync_due_bits_from_src_broadcast_even_when_not_due():
         patch("torch.distributed.broadcast") as bcast,
         patch("torch.distributed.get_process_group_ranks", return_value=[0, 1]),
     ):
-        assert sync_due_bits_from_src(group, [False, False], wave_idx=1) == [False, False]
+        assert broadcast_due_bits_from_src(group, [False, False], wave_idx=1) == [False, False]
         bcast.assert_called_once()
 
 
-def test_refresh_config_skips_detector_apply_when_unchanged(tmp_path: Path):
+def test_wave_head_sync_skips_detector_apply_when_unchanged(tmp_path: Path):
     cfg = _cfg(tmp_path, reload=0.05)
     with patch.object(cfg, "sync_runtime_config", return_value=False):
         proc = _bind(cfg)
-        proc.refresh_config()
+        proc.wave_head_sync()
     proc.detectors.apply_runtime_config.assert_not_called()
     RuntimeGuardProcessor.reset_for_tests()

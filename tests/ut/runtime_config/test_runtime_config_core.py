@@ -357,23 +357,23 @@ def test_manual_dump_watermark_never_rewrites_json(tmp_path: Path):
     assert cfg.reload(force=True) is True
     assert cfg.manual_dump_target() == 3
     assert cfg.manual_dumps_done() == 0
-    assert cfg.manual_trigger_count() == 3
+    assert cfg.manual_dump_remaining() == 3
 
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
-    assert cfg.manual_trigger_count() == 2
+    assert cfg.manual_dump_remaining() == 2
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 3
 
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 2
-    assert cfg.manual_trigger_count() == 1
+    assert cfg.manual_dump_remaining() == 1
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 3
 
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 3
-    assert cfg.manual_trigger_count() == 0
+    assert cfg.manual_dump_remaining() == 0
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 3
-    assert cfg.consume_manual_trigger() is False
+    assert cfg.consume_manual_dump() is False
 
 
 def test_manual_dump_skip_when_target_leq_done(tmp_path: Path):
@@ -388,25 +388,25 @@ def test_manual_dump_skip_when_target_leq_done(tmp_path: Path):
     )
     _write(cfg_path, {"dump": {"manual_dump": 1, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
-    assert cfg.manual_trigger_count() == 0
+    assert cfg.manual_dump_remaining() == 0
 
     # Same or lower target: skip.
     _write(cfg_path, {"dump": {"manual_dump": 1, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.manual_trigger_count() == 0
-    assert cfg.consume_manual_trigger() is False
+    assert cfg.manual_dump_remaining() == 0
+    assert cfg.consume_manual_dump() is False
 
     _write(cfg_path, {"dump": {"manual_dump": 0, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.manual_trigger_count() == 0
+    assert cfg.manual_dump_remaining() == 0
 
     # Bump above done → one more dump.
     _write(cfg_path, {"dump": {"manual_dump": 2, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.manual_trigger_count() == 1
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.manual_dump_remaining() == 1
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 2
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 2
 
@@ -422,16 +422,16 @@ def test_manual_dump_hand_edit_raises_target_while_catching_up(tmp_path: Path):
     )
     _write(cfg_path, {"dump": {"manual_dump": 3, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
-    assert cfg.manual_trigger_count() == 2
+    assert cfg.manual_dump_remaining() == 2
 
     # Hand-edit raises target; done stays — remaining grows.
     _write(cfg_path, {"dump": {"manual_dump": 5, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
     assert cfg.manual_dumps_done() == 1
     assert cfg.manual_dump_target() == 5
-    assert cfg.manual_trigger_count() == 4
+    assert cfg.manual_dump_remaining() == 4
 
 
 def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
@@ -444,13 +444,13 @@ def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
     cfg = RuntimeConfig(
         config_path=cfg_path,
         report_dir=tmp_path / "report",
-        ensure_file=False,  # production: persist deferred to ensure_persisted
+        ensure_file=False,  # production: persist deferred to persist_bootstrap_config
         hot_reload=True,
     )
     # Bootstrap ignores the pre-start file → default false.
     assert cfg.manual_dump_target() == 0
-    assert cfg.manual_trigger_count() == 0
-    assert cfg.ensure_persisted() is True
+    assert cfg.manual_dump_remaining() == 0
+    assert cfg.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert on_disk["dump"]["manual_dump"] is False
 
@@ -458,8 +458,8 @@ def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
     _write(cfg_path, {"dump": {"manual_dump": 1, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
     assert cfg.manual_dump_target() == 1
-    assert cfg.manual_trigger_count() == 1
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.manual_dump_remaining() == 1
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 1
 

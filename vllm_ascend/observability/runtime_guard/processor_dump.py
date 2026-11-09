@@ -127,13 +127,13 @@ class RuntimeGuardDumpMixin:
         self._kv_dump_jobs.clear()
         self._refund_dropped_dump_arms(jobs)
 
-    def end_of_wave_sync(self, *, has_scheduled_tokens: bool = True) -> None:
+    def end_of_wave(self, *, has_scheduled_tokens: bool = True) -> None:
         """End-of-wave: drain async merged bus, then deferred D2H + manual dump.
 
         Async last-PP TP path: wave-head only submitted the due broadcast;
         collectives finish here (ideally already done during forward). Sync /
         file paths have nothing inflight — drain is a no-op. Non-last PP
-        returns immediately (same gate as ``sync_for_step``).
+        returns immediately (same gate as ``begin_wave``).
         ``has_scheduled_tokens``: False on dummy / no-sample (do not burn manual_dump).
         """
         if not should_run_wave_sync_on_rank():
@@ -159,7 +159,7 @@ class RuntimeGuardDumpMixin:
 
         last-PP × TP>1 delivers jobs on the merged due bus dump lane. This
         path is only for ``tp_size<=1`` / missing TP group wave-heads: take
-        the local queue and stash it for ``end_of_wave_sync``. When dump is
+        the local queue and stash it for ``end_of_wave``. When dump is
         inactive, stray local jobs are dropped with a per-arm refund.
         """
         if not should_dump_kv_on_rank() or not self.runtime_config.dump_enabled():

@@ -182,7 +182,7 @@ class DumpKvAction(Action):
             )
             return DumpKvPrepared(skip=_dump_skip_kwargs(ctx, reason="no_dump_targets", detail={"scope": scope}))
         if all(not bids for _req, bids in targets):
-            # Manual arm runs in sync_for_step *before* prepare_inputs, so the
+            # Manual arm runs in begin_wave *before* prepare_inputs, so the
             # first prefill wave often has req ids but empty block tables.
             # Still queue; drain at sample-end flush resolves block_ids. Auto
             # paths usually arm after sample with known blocks — keep the hard skip.
@@ -521,7 +521,7 @@ class ActionExecutor:
     def stop(self) -> None:
         self._queue.stop()
 
-    def can_run_detection(self) -> bool:
+    def is_action_leader(self) -> bool:
         return should_run_anomaly_check_on_rank(self._runner)
 
     def anomaly_check_skip_reason(self) -> str | None:
@@ -567,7 +567,7 @@ class ActionExecutor:
         write_report: bool = True,
         inject_manual_dump_kv: bool = True,
     ) -> None:
-        if not self.can_run_detection():
+        if not self.is_action_leader():
             return
         names, det_cfg = self.resolve_actions(incident.incident_type, override=action_override)
         if not write_report:

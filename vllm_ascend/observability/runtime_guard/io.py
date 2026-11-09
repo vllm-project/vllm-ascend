@@ -201,7 +201,7 @@ class RequestIoSnapshotManager:
     def clear_wave_cache(self) -> None:
         """Drop the same-wave snapshot cache.
 
-        Called at the start of each ``sync_for_step`` / ``refresh_config`` wave.
+        Called at the start of each ``begin_wave`` / ``wave_head_sync`` wave.
         """
         self._cache.clear()
 

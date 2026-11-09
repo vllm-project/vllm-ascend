@@ -61,7 +61,7 @@ See [Additional Configuration](../configuration/additional_config.md#runtime_gua
 
 ```text
 RuntimeGuardProcessor.bind(runner)
-  → sync_for_step()        # config + wave + manual triggers
+  → begin_wave()        # config + wave + manual triggers
   → detector hooks         # before/after sample (and after spec)
   → ActionExecutor         # report | dump_kv (async queue)
 ```
@@ -100,7 +100,7 @@ Online KV / position meta detectors are **not** in this release; use `dump_kv` f
 | Action | Effect |
 |--------|--------|
 | `report` | Write JSON incident report (+ metric counter) |
-| `dump_kv` | D2H paged KV for the request. **Last PP × all TP** (not other PP stages): TP0 records dump jobs this step and writes `request_info.json` (report-like metadata); the next wave-head delivers the list on the merged due-bus dump lane (`config_due` may be false when hot-reload is off; `tp_size<=1` stashes locally with no TP collective), then each last-PP TP rank (including TP0) does local D2H in `end_of_wave_sync`. Same arm wave: each `req_id` at most once (`queue_kv_dump` dedupes by `(wave, req_id)`; duplicate enqueue logs INFO). Files: `{dump_root}/{type}/{req_id}/wave_<N>/request_info.json` and `{dump_root}/{type}/{req_id}/wave_<N>/dp*_tp*_pp*_cp*/*.pt` |
+| `dump_kv` | D2H paged KV for the request. **Last PP × all TP** (not other PP stages): TP0 records dump jobs this step and writes `request_info.json` (report-like metadata); the next wave-head delivers the list on the merged due-bus dump lane (`config_due` may be false when hot-reload is off; `tp_size<=1` stashes locally with no TP collective), then each last-PP TP rank (including TP0) does local D2H in `end_of_wave`. Same arm wave: each `req_id` at most once (`queue_kv_dump` dedupes by `(wave, req_id)`; duplicate enqueue logs INFO). Files: `{dump_root}/{type}/{req_id}/wave_<N>/request_info.json` and `{dump_root}/{type}/{req_id}/wave_<N>/dp*_tp*_pp*_cp*/*.pt` |
 
 Default `on_trigger` is `["report"]`. Per-detector overrides:
 
@@ -119,7 +119,7 @@ Default `on_trigger` is `["report"]`. Per-detector overrides:
 - **No additional-config / defaults**: bind-only path; intended to be noise-free.
 - **Hot-reload only** (`runtime_config_hot_reload=true`, all detectors off, dump off): on last-PP TP, the TP0 due-broadcast runs on the bus worker so the inference thread can overlap it with forward (C2); end-of-wave rate-limits a warning if the collective was not hidden. Other processes poll the config file.
 - **Detectors on**: cost depends on enabled checks (light: `token_repeat`; heavier: `logits_finite` — default async gate overlaps sample; `item_sync: true` pays sync `.item()` each step).
-- **dump_kv on hit**: detector arms queue for the **next** wave-head dump lane, then D2H at that wave's `end_of_wave_sync` (after bus drain / prepare). Manual dump D2H's locally at end-of-wave (no dump-job bcast). Idle/broadcast steps submit a cheap due-vector broadcast at wave-head; per-lane `broadcast_object` runs only when that lane is due. Finish-wave hits set `request_finished_at_dump` on the artifacts.
+- **dump_kv on hit**: detector arms queue for the **next** wave-head dump lane, then D2H at that wave's `end_of_wave` (after bus drain / prepare). Manual dump D2H's locally at end-of-wave (no dump-job bcast). Idle/broadcast steps submit a cheap due-vector broadcast at wave-head; per-lane `broadcast_object` runs only when that lane is due. Finish-wave hits set `request_finished_at_dump` on the artifacts.
 
 Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hardware; it is not gated by default CI.
 

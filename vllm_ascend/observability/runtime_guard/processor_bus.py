@@ -65,7 +65,7 @@ class RuntimeGuardBusMixin:
     _refund_dropped_dump_arms: Any
     needs_sample_phase_hooks: Any
 
-    def _refresh_config_body(self) -> bool:
+    def _run_wave_head_bus(self) -> bool:
         # Wave-head: 1×due-broadcast([config_due, dump_due]) + per-lane bcasts.
         # Async path defers apply/stash to end-of-wave (overlap with forward).
         # Auto dump jobs from *previous* wave are bcast into deferred D2H;

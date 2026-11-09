@@ -138,8 +138,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
         self.runner = runner
         self.runtime_config = runtime_config
-        # Leader materializes JSON once. Non-leaders no-op inside ensure_persisted.
-        runtime_config.ensure_persisted()
+        # Leader materializes JSON once. Non-leaders no-op inside persist_bootstrap_config.
+        runtime_config.persist_bootstrap_config()
         # Runtime config is solely ``runtime_config`` (JSON).
         self.wave_tracker = WaveTracker()
         # B1: reap must wait for the last async output of a finished request;
@@ -186,7 +186,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self.detectors = DetectorManager(
             runtime_config=runtime_config,
             runner=runner,
-            detection_gate=self.action_executor.can_run_detection,
+            detection_gate=self.action_executor.is_action_leader,
             detection_skip_reason=self.action_executor.anomaly_check_skip_reason,
         )
 
@@ -225,22 +225,24 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
     # ---- step entry (all ranks) --------------------------------------------
 
-    def refresh_config(
+    def wave_head_sync(
         self,
         *,
         scheduler_output: Any | None = None,
     ) -> bool:
-        """All-rank runtime_config sync. Must not be skipped on early PP.
+        """Wave-head config+dump bus (merged due bus or local poll/stash).
 
-        Manual-dump arming is gated by ``sync_for_step`` /
-        ``end_of_wave_sync(has_scheduled_tokens=…)``, not by this method.
+        Not config-only: dump job delivery also rides this path. Async TP>1
+        returns ``False`` immediately; apply/stash happens in ``end_of_wave``.
+        Manual-dump arming is gated by ``begin_wave`` /
+        ``end_of_wave(has_scheduled_tokens=…)``, not by this method.
         """
-        logger.debug("[runtime_guard sync] enter stage=refresh_config")
+        logger.debug("[runtime_guard sync] enter stage=wave_head_sync")
         prev_so = self._scheduler_output_for_step
         so = scheduler_output if scheduler_output is not None else prev_so
         self._scheduler_output_for_step = so
         try:
-            changed = self._refresh_config_body()
+            changed = self._run_wave_head_bus()
             # Clear IO wave cache only when something may append this step.
             # Runs *after* sync so a hot-reload that turns IO consumers on
             # still clears before sample/detect. Idle A (detectors off) skips.
@@ -250,7 +252,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         finally:
             self._scheduler_output_for_step = prev_so
 
-    def sync_for_step(
+    def begin_wave(
         self,
         *,
         has_scheduled_tokens: bool = True,
@@ -286,7 +288,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             except Exception:
                 pp = "?"
             logger.debug(
-                "[runtime_guard sync] enter sync_for_step has_scheduled_tokens=%s dp=%s tp=%s pp=%s",
+                "[runtime_guard sync] enter begin_wave has_scheduled_tokens=%s dp=%s tp=%s pp=%s",
                 has_scheduled_tokens,
                 dp,
                 tp,
@@ -302,7 +304,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             # reach end-of-wave D2H; config_due stays false when hot-reload is off.
             skip_wave_head_bus = (
                 not cfg.hot_reload_enabled
-                and not cfg.manual_trigger()
+                and not cfg.manual_dump_armed()
                 and not cfg.needs_sample_phase_hooks()
                 and not cfg.dump_enabled()
             )
@@ -311,9 +313,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                     # Dump inactive: drop with per-arm refund (quota was
                     # consumed at arm time; no D2H will happen).
                     self._drop_pending_dump_jobs()
-                self._end_of_wave_sync_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
+                self._end_of_wave_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
                 return
-            self.refresh_config(scheduler_output=scheduler_output)
+            self.wave_head_sync(scheduler_output=scheduler_output)
             # Prompt cache must not wait for sample-phase hooks. With hot-reload,
             # the only prefill wave that carries ``scheduled_new_reqs`` can land
             # while detectors are still off; bus may enable hooks at end-of-wave,
@@ -329,23 +331,23 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             if finished and int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) == 0:
                 self.mark_finished(finished)
             self._reap_finished_requests()
-            self._end_of_wave_sync_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
+            self._end_of_wave_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
         finally:
             self._scheduler_output_for_step = None
             if debug_on:
                 logger.debug(
-                    "[runtime_guard sync] leave sync_for_step has_scheduled_tokens=%s dp=%s tp=%s pp=%s",
+                    "[runtime_guard sync] leave begin_wave has_scheduled_tokens=%s dp=%s tp=%s pp=%s",
                     has_scheduled_tokens,
                     dp,
                     tp,
                     pp,
                 )
 
-    def _end_of_wave_sync_if_no_sample(self, *, has_scheduled_tokens: bool) -> None:
+    def _end_of_wave_if_no_sample(self, *, has_scheduled_tokens: bool) -> None:
         """Safety-net end-of-wave when this wave will not ``run_sample_phase``."""
         if has_scheduled_tokens:
             return
-        self.end_of_wave_sync(has_scheduled_tokens=False)
+        self.end_of_wave(has_scheduled_tokens=False)
 
     def _cache_prompt_token_ids_from_scheduler_output(
         self,
@@ -360,7 +362,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         ids here on the first prefill wave so later snapshots (crash or
         finish) read the real prompt. Idempotent per request.
 
-        Called from ``sync_for_step`` even when ``needs_sample_phase_hooks`` is
+        Called from ``begin_wave`` even when ``needs_sample_phase_hooks`` is
         false (hot-reload path): the sole ``scheduled_new_reqs`` wave must not
         be skipped while detectors are still off.
         """
@@ -408,7 +410,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self.wave_tracker.discard_many(reapable)
 
     def should_check_after_spec(self) -> bool:
-        if not self.action_executor.can_run_detection():
+        if not self.action_executor.is_action_leader():
             return False
         return self.detectors.spec_acceptance_enabled()
 
@@ -488,7 +490,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             4. ``check_after_spec`` (spec only; ``accepted_token_nums_fn`` for branch)
             5. ``record_sample_waves``
             6. ``check_after_sample`` (host-ready ids only; see defer note below)
-            7. ``end_of_wave_sync`` (config+dump gate; after sync auto arm when possible)
+            7. ``end_of_wave`` (config+dump gate; after sync auto arm when possible)
 
         Native KV capture uses ``dump_kv`` actions only (fully decoupled from
         Ascend/msprobe PrecisionDebugger dump).
@@ -502,13 +504,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """
         # sample and mark_finished are shared. Detectors off still stamps
         # finish before end-of-wave so a same-wave manual report can read the
-        # prompt cache; reap waits until the next ``sync_for_step``.
+        # prompt cache; reap waits until the next ``begin_wave``.
         result = sample_fn()
         # Hook 3: mark_finished
         self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         if not self.needs_sample_phase_hooks():
             # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
-            self.end_of_wave_sync(has_scheduled_tokens=True)
+            self.end_of_wave(has_scheduled_tokens=True)
             return result
 
         # Retain wave batch for block_ids after MRV2 clears execute_model_state.
@@ -548,7 +550,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 ),
             )
         # Hook 7: end-of-wave config+dump gate (collectives — no soft-fail).
-        self.end_of_wave_sync(has_scheduled_tokens=True)
+        self.end_of_wave(has_scheduled_tokens=True)
         return result
 
     def check_before_sample(
