@@ -303,6 +303,11 @@ class FusedMC2CommImpl(MoECommMethod):
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
+            # TODO(ZT-AIA): Different CANN versions accept a different set of
+            # shared-expert kwargs, so snapshot the installed signature and drop
+            # the unsupported ones at call time. Remove this ABI filter (and
+            # _mega_moe_supported_kwargs) once every supported CANN build
+            # exposes these knobs (expected by end of November 2026).
             # Newer CANN adds shared-expert ABI knobs (shared_expert_quant_out_dtype,
             # shared_weight1_type/shared_weight2_type) that older operator builds
             # reject outright. Snapshot the accepted kwarg names once so the
@@ -591,6 +596,9 @@ class FusedMC2CommImpl(MoECommMethod):
         # shared-weight-type knobs; dropping them is safe on such builds
         # because the operator infers the shared GMM mode from the shared
         # weight dtypes themselves.
+        # TODO(ZT-AIA): This ABI filter is retired together with
+        # _mega_moe_supported_kwargs once all CANN builds accept the knobs
+        # (expected by end of November 2026).
         dropped = [k for k in shared_kwargs if k not in self._mega_moe_supported_kwargs]
         if dropped:
             # warning_once caches on *args (must be hashable); format up front.
