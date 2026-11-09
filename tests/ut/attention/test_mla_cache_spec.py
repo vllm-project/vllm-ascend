@@ -134,7 +134,6 @@ def test_worker_collects_mla_spec_without_reading_impl(monkeypatch):
     layer = Owner.__new__(Owner)
     torch.nn.Module.__init__(layer)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {"main": layer})
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _: False)
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
