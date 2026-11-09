@@ -211,8 +211,12 @@ def test_sample_tokens_decorator_fully_off_bypasses_wrap(tmp_path: Path):
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_dump_only_claims(tmp_path: Path):
-    """Detectors off and dump on: advance + claim; not fully off."""
+def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
+    """Detectors off and dump on: wave-head bus via refresh; not fully off.
+
+    Hot-reload off still delivers dump jobs through refresh → merged due bus
+    (or local claim when tp<=1). skip_wave_head_bus is only for fully idle.
+    """
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
     cfg._invalidate_hot_path_gates()
@@ -230,8 +234,9 @@ def test_sync_for_step_dump_only_claims(tmp_path: Path):
         proc = _bind(cfg)
         proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
-        refresh.assert_not_called()
-        claim.assert_called_once()
+        refresh.assert_called_once()
+        # claim lives inside refresh/wave_head; refresh is mocked so claim stays idle.
+        claim.assert_not_called()
     RuntimeGuardProcessor.reset_for_tests()
 
 

@@ -158,14 +158,12 @@ class RuntimeGuardDumpMixin:
         self._maybe_fire_manual_local(has_scheduled_tokens=has_scheduled_tokens)
 
     def _claim_dump_jobs_to_deferred_via_tp(self) -> None:
-        """File/PP>1: move pending auto jobs through TP bus into deferred D2H.
+        """Fallback dump handoff when the merged due bus is not used.
 
-        When dump is inactive, all dump ranks observe the same
-        ``dump_enabled()`` gate and skip the TP due-vector all_reduce (stray
-        local jobs are dropped — refunding their arms: quota was consumed at
-        arm time). While dump is active, an empty local queue on non-TP0 must
-        still join the bus — only TP0 enqueues — so an empty due-AR remains
-        required for lockstep.
+        last-PP × TP>1 delivers jobs on the merged due bus dump lane. This
+        path covers ``tp_size<=1`` / missing TP group (local move into
+        deferred) and the rare non-merged wave-head. When dump is inactive,
+        stray local jobs are dropped with a per-arm refund.
         """
         if not should_dump_kv_on_rank():
             self._drop_pending_dump_jobs()

@@ -1198,6 +1198,31 @@ def test_v18h_apply_config_payload_bumps_follower_reload_ts(tmp_path: Path):
     assert cfg.config_due_local() is False
 
 
+def test_v18e_wave_head_uses_merged_bus_when_hot_reload_off():
+    """last-PP TP>1 uses merged due bus even with hot-reload off (config_due stays false)."""
+    from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
+
+    cfg = MagicMock()
+    cfg.hot_reload_enabled = False
+    group = MagicMock()
+    group.world_size = 2
+    proc = SimpleNamespace(
+        runtime_config=cfg,
+        _wave_head_merged_bus=MagicMock(return_value=False),
+        _claim_dump_jobs_to_deferred_via_tp=MagicMock(),
+        _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
+    )
+    with patch(
+        "vllm_ascend.observability.runtime_guard.processor_bus._runtime_config_sync_group_or_none",
+        return_value=group,
+    ):
+        assert RuntimeGuardBusMixin._wave_head_task_bus(proc) is False
+    proc._wave_head_merged_bus.assert_called_once_with(group)
+    proc._claim_dump_jobs_to_deferred_via_tp.assert_not_called()
+    cfg.sync_runtime_config.assert_not_called()
+
+
 def test_v18f_merged_bus_idle_one_bcast_zero_obj():
     """Wave-head submit + drain: neither lane due → one due broadcast, no broadcast_object."""
     import time
@@ -2225,8 +2250,8 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
         worker.stop()
 
 
-def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
-    """skip_config_bus path with dump inactive refunds unclaimed arms (not fully off)."""
+def test_v28e_dump_inactive_skip_wave_head_drops_pending(monkeypatch):
+    """skip_wave_head_bus (dump off) refunds unclaimed arms."""
     from vllm_ascend.observability.runtime_guard import processor_dump
 
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
@@ -2235,7 +2260,7 @@ def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
-    # Sync enters skip_config_bus (no detectors, no manual, hot-reload off).
+    # Sync enters skip_wave_head_bus (no detectors, no manual, no dump, hot-reload off).
     p.runtime_config.manual_trigger.return_value = False
     p.runtime_config.needs_sample_phase_hooks.return_value = False
     p.runtime_config.hot_reload_enabled = False

@@ -35,10 +35,11 @@ _BUS_WARN_INTERVAL_S = 30.0
 class RuntimeGuardBusMixin:
     """Wave-head config sync + dump-job delivery (broadcast / file / TP).
 
-    Broadcast path (last-PP × TP only): submit merged due-broadcast(+due bcasts) to
-    :class:`DueBitsBusWorker` at wave head; apply results in
-    :meth:`_drain_merged_bus` at end-of-wave so the collective overlaps
-    forward. Non-last PP and ``tp_size<=1`` poll JSON locally.
+    last-PP × TP>1 always submits the merged due-broadcast(+due bcasts) to
+    :class:`DueBitsBusWorker` at wave head (``config_due`` is false when
+    hot-reload is off); apply/stash in :meth:`_drain_merged_bus` at
+    end-of-wave so the collective overlaps forward. Non-last PP and
+    ``tp_size<=1`` poll JSON locally and claim dump jobs without a TP bus.
     """
 
     # Attributes provided by RuntimeGuardProcessor (mixin composition).
@@ -108,13 +109,18 @@ class RuntimeGuardBusMixin:
         )
 
     def _wave_head_task_bus(self) -> bool:
-        """Wave-head config+dump gate. Returns whether config content changed."""
+        """Wave-head config+dump gate. Returns whether config content changed.
+
+        last-PP × TP>1 always uses the merged due bus so dump job delivery and
+        (optional) config share one due-vector. ``config_due`` is false when
+        hot-reload is off; dump still rides the dump lane. Non-last PP /
+        ``tp_size<=1`` fall back to local file poll + local dump claim.
+        """
         cfg = self.runtime_config
-        # Hot-reload on last-PP TP → merged due bus; else local file poll + TP dump claim.
-        group = _runtime_config_sync_group_or_none() if cfg.hot_reload_enabled else None
+        group = _runtime_config_sync_group_or_none()
         if group is not None and int(getattr(group, "world_size", 1) or 1) > 1:
             return self._wave_head_merged_bus(group)
-        # Non-last-PP / tp_size<=1 / reload off: local config; auto dump via TP claim.
+        # Non-last-PP / tp_size<=1: local config (if reload); dump is local claim.
         changed = False
         if cfg.hot_reload_enabled:
             prev_hooks = bool(self.needs_sample_phase_hooks())
@@ -128,8 +134,7 @@ class RuntimeGuardBusMixin:
                 changed = False
             if changed:
                 self._apply_config_cascade(prev_needs_sample_hooks=prev_hooks)
-        # Previous-wave auto jobs: claim via TP bus into deferred; D2H at
-        # end-of-wave (same path as broadcast merged bus).
+        # tp<=1 / no TP group: no dump collective — move local jobs to deferred.
         self._claim_dump_jobs_to_deferred_via_tp()
         logger.debug(
             "[runtime_guard sync] leave stage=wave_head_task_bus changed=%s file_or_non_last_pp",
