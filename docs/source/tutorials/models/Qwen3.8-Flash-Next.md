@@ -556,6 +556,8 @@ The response should list the configured model name. After startup, use [Section 
 
 Prepare the runtime from Section 4 and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Run P/D commands in separate terminals, then start the proxy after their APIs are ready.
 
+For 950DT products, basic PD, the image-and-text 10K case, and the long-context case use the same Docker container setup from [Section 4.1](#41-docker-image-installation), under the `950DT products` tab.
+
 !!! note
 
     Set the IP and interface variables in each terminal; `nic_name` must own `local_ip`. The communication exports use these values, and `no_proxy`/`NO_PROXY` bypass HTTP proxies for the service addresses.
