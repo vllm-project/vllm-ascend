@@ -62,7 +62,14 @@
 | 服务端口 / Runner | `SERVER_PORT=8080` / `VLLM_USE_V2_MODEL_RUNNER=1` |
 | 通信缓冲 / CPU 线程 | `HCCL_BUFFSIZE=800` / `OMP_NUM_THREADS=1` |
 | 内存分配 | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` |
-| 就绪 / 执行超时 | `VLLM_ENGINE_READY_TIMEOUT_S=7200` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` |
+| 引擎超时环境变量 | `VLLM_ENGINE_READY_TIMEOUT_S=7200` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` |
+| 测试框架服务就绪等待 | `RemoteOpenAIServer` 默认 2800 秒 |
+
+引擎超时环境变量不会覆盖测试框架的健康检查超时。
+在 `releases/v0.30.0` 中，共享单节点入口未传入 `max_wait_seconds`，
+因此 `RemoteOpenAIServer` 最多等待 2800 秒检查服务就绪。
+YAML 中设置 `VLLM_ENGINE_READY_TIMEOUT_S=7200` 不会将该等待时间延长至 7200 秒。
+
 
 运行前将权重和数据集挂载到 YAML 指定路径，配置目标机器的通信 IP、网卡和 8 个 NPU 设备，
 并取消设置 `HCCL_OP_EXPANSION_MODE`。数据集目录末尾不加斜杠。

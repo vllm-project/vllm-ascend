@@ -63,7 +63,14 @@ Weights and datasets were mounted read-only.
 | Service port / runner | `SERVER_PORT=8080` / `VLLM_USE_V2_MODEL_RUNNER=1` |
 | Communication buffer / CPU threads | `HCCL_BUFFSIZE=800` / `OMP_NUM_THREADS=1` |
 | Memory allocation | `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` |
-| Readiness / execution timeout | `VLLM_ENGINE_READY_TIMEOUT_S=7200` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` |
+| Engine timeout environment variables | `VLLM_ENGINE_READY_TIMEOUT_S=7200` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` |
+| Test harness service readiness wait | Default 2800 seconds in `RemoteOpenAIServer` |
+
+The engine timeout environment variables do not override the test harness health-check timeout.
+In `releases/v0.30.0`, the shared single-node entry point does not pass `max_wait_seconds`,
+so `RemoteOpenAIServer` waits up to 2800 seconds for service readiness. Setting
+`VLLM_ENGINE_READY_TIMEOUT_S=7200` in the YAML does not extend that wait to 7200 seconds.
+
 
 Before execution, mount the weights and dataset at the paths specified in the YAML,
 configure the target host's communication IP, network interfaces, and eight NPU devices,
