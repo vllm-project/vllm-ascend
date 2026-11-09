@@ -23,7 +23,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 
 
 @pytest.mark.parametrize("defer_wait", [False, True])
-def test_exec_kv_offload_completion_controls_compute_and_cache_write(defer_wait):
+def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait):
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     k_nope, k_pe = torch.ones(2, 4), torch.ones(2, 2)
     impl._is_decode_only = MagicMock(return_value=True)
@@ -36,11 +36,7 @@ def test_exec_kv_offload_completion_controls_compute_and_cache_write(defer_wait)
     with patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager:
         manager = get_manager.return_value
         result = impl.exec_kv(k_nope, k_pe, k_pe, (), slots, metadata, defer_wait=defer_wait)
-        if defer_wait:
-            assert callable(result)
-            impl._compute_kv_only.assert_not_called()
-            manager.offload_new_kv.assert_not_called()
-            result = result()
+        assert isinstance(result, tuple)
         assert result[0] is k_pe and result[1] is k_nope
         impl._compute_kv_only.assert_called_once_with(k_nope, k_pe, k_pe)
         manager.offload_new_kv.assert_called_once()
