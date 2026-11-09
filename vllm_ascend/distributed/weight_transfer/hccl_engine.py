@@ -4,8 +4,8 @@
 
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
 init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
-legacy per-update packed wire parameters are local. The packed producer/consumer
-and the layerwise cross-chunk behaviour are unchanged.
+legacy per-update packed wire parameters are local. Packed sending delegates
+tensor packing to upstream while retaining HCCL stream and buffer management.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +20,6 @@ from vllm.distributed.weight_transfer.base import (
     VLLMWeightSyncClient,
     WeightSource,
 )
-from vllm.distributed.weight_transfer.nccl_common import worker_init_payload
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -226,8 +225,8 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         self.model_update_group = None
         self._state = "ready"
 
-    # Mirror NCCLTrainerWeightTransferEngine.trainer_init orchestration until
-    # upstream exposes a hook for the endpoint opener and worker init-info type.
+    # Keep the HCCL rendezvous here: upstream main joins the RPC thread even
+    # when opening the local endpoint raises and the worker is still waiting.
     @classmethod
     def trainer_init(  # type: ignore[override]
         cls,
@@ -253,22 +252,14 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         # collectives in `_broadcast`.
         if not engine.is_sender:
             return engine
-        # Upstream's `NCCLTrainerInitInfo` has no `rank_offset`: the single
-        # trainer sender is rank 0, so the workers start at rank 1.
-        worker_init_info = HCCLWeightTransferInitInfo(
-            master_address=init_info.master_address,
-            master_port=init_info.master_port,
-            rank_offset=1,
-            world_size=init_info.world_size,
-            packed=init_info.packed,
-            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
-            packed_num_buffers=init_info.packed_num_buffers,
-        )
+        # The upstream builder's default rank_offset=1 matches HCCL's
+        # single sender. Workers parse the payload as HCCL init info.
+        payload = cls._build_worker_init_payload(init_info)
         # The worker-side init blocks inside the HCCL rendezvous, so drive the
         # RPC on a side thread while this rank opens rank 0.
         executor = ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(client.init_weight_transfer_engine, worker_init_payload(worker_init_info))
+            future = executor.submit(client.init_weight_transfer_engine, payload)
             engine.model_update_group = hccl_common.trainer_init(init_info, rank=init_info.rank)
             future.result()
         except BaseException:
@@ -295,6 +286,28 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 self._release_group()
             raise
 
+    def _broadcast_from_source(self, source: WeightSource, meta: list[ParamMeta]) -> None:
+        group = self.model_update_group
+        if group is None:
+            raise RuntimeError("HCCL trainer communicator is not initialized")
+        pairs = self._checked_iter(source, meta)
+        if self.packed:
+            packed_broadcast_producer(
+                iterator=pairs,
+                group=group,
+                src=0,
+                post_iter_func=lambda item: item[1].detach().to(self.device).contiguous(),
+                buffer_size_bytes=self.packed_buffer_size_bytes,
+                num_buffers=self.packed_num_buffers,
+            )
+        else:
+            stream = torch.npu.current_stream()
+            for _name, tensor in pairs:
+                send = tensor.detach().to(self.device).contiguous()
+                group.broadcast(send, src=0, stream=stream)
+                # Keep the staging storage alive until HCCL has read it.
+                stream.synchronize()
+
     if vllm_version_is("0.33.0"):
 
         def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
@@ -304,25 +317,7 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                     # trainer-side collective (an FSDP `full_tensor()` gather, say).
                     super()._broadcast(source, meta)  # type: ignore[arg-type, call-arg, misc]
                     return
-                if self.model_update_group is None:
-                    raise RuntimeError("HCCL trainer communicator is not initialized")
-                pairs = self._checked_iter(source, meta)
-                if self.packed:
-                    packed_broadcast_producer(
-                        iterator=pairs,
-                        group=self.model_update_group,
-                        src=0,
-                        post_iter_func=lambda item: item[1].detach().to(self.device).contiguous(),
-                        buffer_size_bytes=self.packed_buffer_size_bytes,
-                        num_buffers=self.packed_num_buffers,
-                    )
-                else:
-                    stream = torch.npu.current_stream()
-                    for _name, tensor in pairs:
-                        send = tensor.detach().to(self.device).contiguous()
-                        self.model_update_group.broadcast(send, src=0, stream=stream)
-                        # Keep the staging storage alive until HCCL has read it.
-                        stream.synchronize()
+                self._broadcast_from_source(source, meta)
 
     else:
 
@@ -344,28 +339,10 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                         for _ in source.iter_full():
                             pass
                     return
-                if self.model_update_group is None:
-                    raise RuntimeError("HCCL trainer communicator is not initialized")
                 if src != 0:
                     raise RuntimeError(f"HCCL weight transfer has a single trainer sender at group rank 0, got {src}.")
                 assert self.source is not None
-                pairs = self._checked_iter(self.source, meta)
-                if self.packed:
-                    packed_broadcast_producer(
-                        iterator=pairs,
-                        group=self.model_update_group,
-                        src=0,
-                        post_iter_func=lambda item: item[1].detach().to(self.device).contiguous(),
-                        buffer_size_bytes=self.packed_buffer_size_bytes,
-                        num_buffers=self.packed_num_buffers,
-                    )
-                else:
-                    stream = torch.npu.current_stream()
-                    for _name, tensor in pairs:
-                        send = tensor.detach().to(self.device).contiguous()
-                        self.model_update_group.broadcast(send, src=0, stream=stream)
-                        # Keep the staging storage alive until HCCL has read it.
-                        stream.synchronize()
+                self._broadcast_from_source(self.source, meta)
 
     def _post_send_sync(self) -> None:
         """Wait for this rank's transfer work to land before returning."""

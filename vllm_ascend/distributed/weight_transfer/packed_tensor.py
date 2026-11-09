@@ -9,12 +9,16 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES as DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+)
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_NUM_BUFFERS as DEFAULT_PACKED_NUM_BUFFERS,
+)
+from vllm.distributed.weight_transfer.packed_tensor import (
+    pack_tensors,
+)
 from vllm.logger import logger
-
-# Default values for packed tensor configuration.
-# These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
-DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
-DEFAULT_PACKED_NUM_BUFFERS = 2
 
 # On a failed stream drain, keep storage alive until process exit. Its async
 # users may still be running, so returning it to the allocator is unsafe.
@@ -66,7 +70,7 @@ def packed_broadcast_producer(
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
-    """Broadcast tensors in a packed manner from trainer to workers.
+    """Broadcast tensors packed by vLLM over HCCL on NPU streams.
 
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
@@ -89,68 +93,50 @@ def packed_broadcast_producer(
             f"buffer_size_bytes and num_buffers must be positive, got "
             f"buffer_size_bytes={buffer_size_bytes}, num_buffers={num_buffers}"
         )
-    target_packed_tensor_size = buffer_size_bytes
-
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
     previous_broadcast_stream = None
 
-    packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
-    packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
+    staging_tensors: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
+
+    def checked_post_iter(item: tuple[str, torch.Tensor]) -> torch.Tensor:
+        tensor = post_iter_func(item)
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"post_iter_func for tensor {item[0]!r} must return a torch.Tensor")
+        name, original = item
+        if tensor.dtype != original.dtype or tensor.numel() != original.numel():
+            raise ValueError(
+                f"post_iter_func returned tensor {name!r} with dtype={tensor.dtype}, "
+                f"numel={tensor.numel()}; expected dtype={original.dtype}, numel={original.numel()}"
+            )
+        return tensor
 
     body_error: BaseException | None = None
     try:
-        done = False
-        while not done:
-            # Synchronize the current stream (waits for previous
-            # iteration's work on this buffer to finish)
-            streams[buffer_idx].synchronize()
-            # Start tasks for the new buffer in a new stream
-            with torch.npu.stream(streams[buffer_idx]):
-                # Initialize the packing tensor list and sizes
-                packing_tensor_list[buffer_idx] = []
-                packing_tensor_sizes[buffer_idx] = 0
-                # Pack the tensors
-                while True:
-                    try:
-                        item = next(iterator)
-                    except StopIteration:
-                        done = True
-                        break
-                    # Apply post processing and convert to linearized uint8 tensor
-                    tensor = post_iter_func(item)
-                    if not isinstance(tensor, torch.Tensor):
-                        raise ValueError(f"post_iter_func for tensor {item[0]!r} must return a torch.Tensor")
-                    tensor = tensor.contiguous()
-                    original = item[1]
-                    if tensor.dtype != original.dtype or tensor.numel() != original.numel():
-                        raise ValueError(
-                            f"post_iter_func returned tensor {item[0]!r} with dtype={tensor.dtype}, "
-                            f"numel={tensor.numel()}; expected dtype={original.dtype}, numel={original.numel()}"
-                        )
-                    tensor = tensor.reshape(-1).view(torch.uint8)
-                    packing_tensor_list[buffer_idx].append(tensor)
-                    packing_tensor_sizes[buffer_idx] += tensor.numel()
-                    if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
-                        break
-                if len(packing_tensor_list[buffer_idx]) > 0:
-                    # Pack the tensors
-                    packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
-                    # Packing can overlap the previous transfer, but collectives
-                    # on this communicator must not overlap across streams.
-                    if previous_broadcast_stream is not None and previous_broadcast_stream is not streams[buffer_idx]:
-                        previous_broadcast_stream.synchronize()
-                    # Match the active packing stream and the explicit native
-                    # HCCL stream; wait for both before reusing this slot.
-                    group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
-                    previous_broadcast_stream = streams[buffer_idx]
+        while True:
+            stream = streams[buffer_idx]
+            stream.synchronize()
+            staging_tensors[buffer_idx].clear()
+            with torch.npu.stream(stream):
+                # Keep packing inputs alive until their slot is drained.
+                chunk = pack_tensors(
+                    iterator, checked_post_iter, buffer_size_bytes, tensor_list=staging_tensors[buffer_idx]
+                )
+                if chunk is None:
+                    break
+                packed_tensors[buffer_idx] = chunk.packed_tensor
+                # Packing can overlap the previous transfer, but collectives
+                # on this communicator must not overlap across streams.
+                if previous_broadcast_stream is not None and previous_broadcast_stream is not stream:
+                    previous_broadcast_stream.synchronize()
+                group.broadcast(chunk.packed_tensor, src=src, stream=stream)
+                previous_broadcast_stream = stream
 
-            if len(packing_tensor_list[buffer_idx]) == 0:
-                # No more tensors — nothing left to broadcast
+            # Upstream stops packing once the byte limit is exceeded or the
+            # iterator is exhausted. A chunk within the limit is the last one.
+            if chunk.packed_tensor.numel() <= buffer_size_bytes:
                 break
-
-            # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
     except BaseException as exc:
         body_error = exc
