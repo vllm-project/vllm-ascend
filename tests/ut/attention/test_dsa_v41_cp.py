@@ -41,9 +41,7 @@ def test_short_context_indexer_selects_visible_positions(monkeypatch):
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
     monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
     metadata = SimpleNamespace(max_cache_seq_len=4)
-    assert DeepseekV41Indexer.can_select_all(
-        indexer, metadata, is_candidate_source=False, uses_candidate_filter=False
-    )
+    assert DeepseekV41Indexer.can_select_all(indexer, metadata, is_candidate_source=False, uses_candidate_filter=False)
     for candidate_source, candidate_filter in ((True, False), (False, True)):
         assert not DeepseekV41Indexer.can_select_all(
             indexer,
