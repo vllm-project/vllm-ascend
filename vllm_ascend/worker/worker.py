@@ -1324,6 +1324,14 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        # The upstream Mamba checkpoint builders use the engine's resolved
+        # hash and hit granularity to reproduce the cache manager's boundary.
+        hash_block_size = getattr(kv_cache_config, "hash_block_size", None)
+        cache_hit_alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
+        if hash_block_size is not None and cache_hit_alignment is not None:
+            self.vllm_config.cache_config.hash_block_size = hash_block_size
+            self.vllm_config.cache_config.cache_hit_alignment_tokens = cache_hit_alignment
+
         speculator = getattr(self.model_runner, "speculator", None)
         speculative = self.vllm_config.speculative_config
         if (

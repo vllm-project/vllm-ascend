@@ -27,7 +27,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from .ple import patch_upstream_ple_short_conv
+from .ple import AscendQwen4ExpPLELayer, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -48,6 +48,7 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+upstream_model.Qwen4ExpPLELayer = AscendQwen4ExpPLELayer
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
