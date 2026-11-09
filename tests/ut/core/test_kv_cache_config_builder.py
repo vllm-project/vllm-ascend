@@ -10,7 +10,8 @@ release-lane monkey patches.
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+import unittest
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -111,3 +112,128 @@ def test_turboquant_groups_use_packed_pool_bytes():
     pool_bytes = builder._get_pool_bytes_per_block(make_runtime(), groups)
     assert pool_bytes == tq_cache.pool_bytes_per_block(groups)
     assert pool_bytes >= sum(spec.page_size_bytes for spec in uniform.kv_cache_specs.values())
+
+
+def _builder() -> AscendKVCacheConfigBuilder:
+    # Skip __init__: the override under test does not read instance state,
+    # and the parent constructor requires a populated VllmConfig.
+    return AscendKVCacheConfigBuilder.__new__(AscendKVCacheConfigBuilder)
+
+
+class TestPoolBytesDispatch(unittest.TestCase):
+    """The three-branch dispatch of ``_get_pool_bytes_per_block``."""
+
+    def _groups(self):
+        return [MagicMock(), MagicMock()]
+
+    def test_glm_layout_wins_and_short_circuits(self):
+        builder = _builder()
+        groups = self._groups()
+        with (
+            patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=object()) as layout,
+            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=4096) as glm_bytes,
+            patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=8192) as qwen_bytes,
+            patch.object(
+                builder_module.DefaultKVCacheConfigBuilder, "_get_pool_bytes_per_block", return_value=1024
+            ) as default,
+        ):
+            self.assertEqual(builder._get_pool_bytes_per_block(MagicMock(), groups), 4096)
+        layout.assert_called_once_with(groups)
+        glm_bytes.assert_called_once_with(groups)
+        qwen_bytes.assert_not_called()
+        default.assert_not_called()
+
+    def test_glm_byte_count_result_is_returned_verbatim(self):
+        # When a GLM layout is detected, the GLM helper's return value is
+        # forwarded without further filtering (including None).
+        builder = _builder()
+        groups = self._groups()
+        with (
+            patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=object()),
+            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=None),
+            patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=8192) as qwen_bytes,
+            patch.object(builder_module.DefaultKVCacheConfigBuilder, "_get_pool_bytes_per_block", return_value=1024),
+        ):
+            self.assertIsNone(builder._get_pool_bytes_per_block(MagicMock(), groups))
+        qwen_bytes.assert_not_called()
+
+    def test_qwen_layout_used_when_glm_layout_absent(self):
+        builder = _builder()
+        groups = self._groups()
+        with (
+            patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=None),
+            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=4096) as glm_bytes,
+            patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=1234) as qwen_bytes,
+            patch.object(
+                builder_module.DefaultKVCacheConfigBuilder, "_get_pool_bytes_per_block", return_value=1024
+            ) as default,
+        ):
+            self.assertEqual(builder._get_pool_bytes_per_block(MagicMock(), groups), 1234)
+        glm_bytes.assert_not_called()
+        qwen_bytes.assert_called_once_with(groups)
+        default.assert_not_called()
+
+    def test_default_fallback_when_no_model_layout_matches(self):
+        builder = _builder()
+        groups = self._groups()
+        vllm_config = MagicMock()
+        with (
+            patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=None),
+            patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=None),
+            patch.object(
+                builder_module.DefaultKVCacheConfigBuilder, "_get_pool_bytes_per_block", return_value=777
+            ) as default,
+        ):
+            self.assertEqual(builder._get_pool_bytes_per_block(vllm_config, groups), 777)
+        default.assert_called_once_with(vllm_config, groups)
+
+    def test_empty_groups_still_dispatch_through_glm_check_first(self):
+        # Even with no groups the GLM layout probe runs first.
+        builder = _builder()
+        with (
+            patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=object()) as layout,
+            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=2048),
+            patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=4096) as qwen_bytes,
+        ):
+            self.assertEqual(builder._get_pool_bytes_per_block(MagicMock(), []), 2048)
+        layout.assert_called_once_with([])
+        qwen_bytes.assert_not_called()
+
+    def test_subclass_relationship(self):
+        self.assertTrue(issubclass(AscendKVCacheConfigBuilder, builder_module.DefaultKVCacheConfigBuilder))
+
+
+class TestDispatchPrecedenceMatrix(unittest.TestCase):
+    """Exhaustive (glm_layout, qwen_bytes) -> source matrix."""
+
+    def _run(self, glm_layout, qwen_bytes):
+        builder = _builder()
+        with (
+            patch.object(builder_module, "_get_glm5_next_cache_layout", return_value=glm_layout),
+            patch.object(builder_module, "get_glm5_next_pool_bytes_per_block", return_value=111),
+            patch.object(builder_module, "get_qwen4_exp_pool_bytes_per_block", return_value=qwen_bytes),
+            patch.object(builder_module.DefaultKVCacheConfigBuilder, "_get_pool_bytes_per_block", return_value=222),
+        ):
+            result = builder._get_pool_bytes_per_block(MagicMock(), [MagicMock()])
+        # Distinct sentinel values make the source observable: the qwen helper
+        # is probed in the default-fallback branch as well, so "was it called"
+        # is not a reliable branch marker.
+        if result == 111:
+            source = "glm"
+        elif result == 222:
+            source = "default"
+        else:
+            source = "qwen"
+        return result, source
+
+    def test_glm_layout_present(self):
+        result, source = self._run(object(), 333)
+        self.assertEqual((result, source), (111, "glm"))
+
+    def test_only_qwen_layout(self):
+        result, source = self._run(None, 333)
+        self.assertEqual((result, source), (333, "qwen"))
+
+    def test_qwen_returns_none_falls_to_default(self):
+        result, source = self._run(None, None)
+        self.assertEqual((result, source), (222, "default"))
