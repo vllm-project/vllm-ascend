@@ -1,4 +1,4 @@
-pr: 8
+pr: 21014
 entries:
   - category: feature
     text: Enabled Mistral Large 4 Model Runner V2 graph execution and DSpark speculative decoding on Ascend.
