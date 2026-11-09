@@ -219,9 +219,6 @@
 # Benchmark
 /benchmarks @wangxiyuan
 
-# Model executor
-# TODO(owner): /vllm_ascend/model_executor
-# /vllm_ascend/model_executor
 
 # Model loader
 /vllm_ascend/model_loader @yilunh998
