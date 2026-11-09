@@ -382,6 +382,8 @@ jobs:
 
           # Refresh the heartbeat every minute. The loop dies with the runner,
           # which is exactly the signal the reaper uses to reclaim the LWS.
+          # $(date +%s) must be evaluated by the child shell, not by this one.
+          # shellcheck disable=SC2016
           nohup bash -c '
             while true; do
               kubectl annotate leaderworkerset "$1" -n "$2" \
