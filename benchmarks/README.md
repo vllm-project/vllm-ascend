@@ -183,3 +183,7 @@ Similarly, let's take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
   --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 \
   --load-format dummy --num-iters-warmup 5 --num-iters 15
   ```
+
+## HCCL AllReduce modes
+
+See [AI_CPU / AIV AllReduce benchmark](benchmark_all_reduce_modes.md) for a standalone comparison across message sizes.
