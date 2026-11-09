@@ -593,7 +593,6 @@ For DP>1, the launcher executes the role script without filtering.
             export HCCL_OP_EXPANSION_MODE="AIV"
             export ASCEND_RT_VISIBLE_DEVICES="$1"
             export PYTHONHASHSEED=0
-            export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.16/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
@@ -673,7 +672,6 @@ For DP>1, the launcher executes the role script without filtering.
             export HCCL_OP_EXPANSION_MODE="AIV"
             export ASCEND_RT_VISIBLE_DEVICES="$1"
             export PYTHONHASHSEED=0
-            export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.16/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
