@@ -359,6 +359,14 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
+    @classmethod
+    def supported_kv_cache_layouts(cls):
+        if getattr(get_ascend_config().sparse_kv_offload_config, "selective_offload", False):
+            from vllm.v1.kv_cache_layout import KVCacheLayout
+
+            return (KVCacheLayout.BLHNC,)
+        return super().supported_kv_cache_layouts()
+
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA"

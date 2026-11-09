@@ -99,6 +99,27 @@ def _sparse_kv_ops():
     return _SPARSE_KV_OFFLOAD_OPS
 
 
+def plan_selective_hot_slots(keys, previous_request, request, source_slots, valid):
+    """Keep selected resident rows and assign misses to unselected slots."""
+    capacity = keys.numel() - 1  # Last entry absorbs invalid/padded selections.
+    if capacity < source_slots.numel():
+        raise ValueError("Selective hot capacity must cover every TopK entry")
+    resident = torch.where(previous_request == request, keys[:capacity], -1)
+    sorted_keys, order = torch.sort(resident)
+    positions = torch.searchsorted(sorted_keys, source_slots).clamp_max(capacity - 1)
+    hits = valid & (sorted_keys[positions] == source_slots)
+    hit_slots = order[positions]
+    used = torch.zeros(capacity + 1, dtype=torch.int64, device=keys.device)
+    used.scatter_(0, torch.where(hits, hit_slots, capacity), 1)
+    free = torch.argsort((used[:capacity] * 2 + (resident >= 0).to(torch.int64)).float())
+    misses = valid & ~hits
+    miss_positions = (misses.to(torch.int64).cumsum(0) - 1).clamp_min(0)
+    slots = torch.where(hits, hit_slots, free[miss_positions])
+    updated = torch.cat((resident, keys[-1:])).clone()
+    updated.scatter_(0, torch.where(valid, slots, capacity), torch.where(valid, source_slots, -1))
+    return slots, misses, updated
+
+
 def allocate_kv_offload_topk_buffer_pair(
     vllm_config: VllmConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
@@ -242,6 +263,7 @@ def plan_sparse_kv_offload_memory(
     available_device_memory_bytes: int,
     dram_limit_bytes: int,
     keep_device_kv_cache: bool,
+    selective_offload: bool = False,
 ) -> SparseKVOffloadMemoryBudget:
     """Bound sparse KV offload blocks by NPU, DRAM, and active demand."""
     host_specs, device_specs = _split_host_device_kv_specs(kv_cache_spec)
@@ -264,6 +286,24 @@ def plan_sparse_kv_offload_memory(
         for spec in host_specs + device_specs
     )
     workload_limit_blocks = max_blocks_per_request * vllm_config.scheduler_config.max_num_seqs + _VLLM_NULL_BLOCK_COUNT
+    planner_page_bytes = total_page_size_bytes
+    if selective_offload:
+        from vllm_ascend.utils import vllm_version_is
+
+        if vllm_version_is("0.32.0"):
+            from vllm.v1.core import kv_cache_utils as planning
+        else:
+            from vllm.v1.core import kv_cache_planning as planning
+        groups = planning.get_kv_cache_groups(vllm_config, kv_cache_spec)
+        # Groups claim distinct block IDs from one pool, including Host groups.
+        pages = sum(
+            group.kv_cache_spec.max_memory_usage_pages(vllm_config)
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
+            for group in groups
+        )
+        workload_limit_blocks = pages * vllm_config.scheduler_config.max_num_seqs + _VLLM_NULL_BLOCK_COUNT
+        planner_page_bytes = planning._pool_bytes_per_block(vllm_config, groups)
 
     limits = {
         "npu": npu_limit_blocks,
@@ -283,7 +323,7 @@ def plan_sparse_kv_offload_memory(
         )
     limiting_factor = min(limits, key=lambda name: limits[name])
     final_num_blocks = limits[limiting_factor]
-    final_planner_bytes = final_num_blocks * total_page_size_bytes
+    final_planner_bytes = final_num_blocks * planner_page_bytes
     planned_host_bytes = final_num_blocks * host_page_size_bytes
     planned_device_bytes = final_num_blocks * npu_page_size_bytes
     return SparseKVOffloadMemoryBudget(
@@ -520,7 +560,8 @@ class SparseKVOffloadManager:
         self.fused_overlap_plan_topk: int | None = None
         self.fused_overlap_plan_num_tokens = 0
         self.fused_overlap_plan_membership_map: torch.Tensor | None = None
-        _sparse_kv_ops()
+        if not getattr(sparse_kv_offload_config, "selective_offload", False):
+            _sparse_kv_ops()
 
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
         planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
@@ -579,13 +620,27 @@ class SparseKVOffloadManager:
 
     def _register_offload_layers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         host_layer_names = set()
+        main_layer_names = set()
         for group in self.kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
+                if "indexer" not in layer_name.lower():
+                    main_layer_names.add(layer_name)
                 spec = group.kv_cache_spec
                 if isinstance(spec, UniformTypeKVCacheSpecs):
                     spec = spec.kv_cache_specs[layer_name]
                 if getattr(spec, "store_on_host", False):
                     host_layer_names.add(layer_name)
+        if getattr(self.sparse_kv_offload_config, "selective_offload", False):
+            expected = {name for name in main_layer_names if self.sparse_kv_offload_config.is_host_layer(name)}
+            if host_layer_names != expected:
+                raise ValueError(
+                    "Selective KV offload cache placement disagrees with shared layer roles: "
+                    f"missing_host={sorted(expected - host_layer_names)}, "
+                    f"unexpected_host={sorted(host_layer_names - expected)}"
+                )
+            missing = expected - kv_caches.keys()
+            if missing:
+                raise ValueError(f"Selective KV offload shared cache tensors are missing: {sorted(missing)}")
         self.offload_layer_names = [layer_name for layer_name in kv_caches if layer_name in host_layer_names]
         if not self.offload_layer_names:
             raise ValueError("Sparse KV offload did not find SFA KV cache layers.")
@@ -600,7 +655,13 @@ class SparseKVOffloadManager:
             self.num_layers,
             self.num_target_layers,
         )
-        self.mtp_layer_id = self.num_layers - 1 if self.num_layers != self.num_target_layers else -1
+        self.mtp_layer_id = (
+            -1
+            if getattr(self.sparse_kv_offload_config, "selective_offload", False)
+            else self.num_layers - 1
+            if self.num_layers != self.num_target_layers
+            else -1
+        )
         if self.tp_rank == 0:
             preview_layer_names = self.offload_layer_names[:4]
             if len(self.offload_layer_names) > 4:
@@ -767,6 +828,24 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
+        if getattr(getattr(self, "sparse_kv_offload_config", None), "selective_offload", False):
+            device = self.topk_buffers_k[0].device
+            # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
+            self.selective_copy_src = torch.empty(2 * self.topk, dtype=torch.int64, device=device)
+            self.selective_copy_dst = torch.empty_like(self.selective_copy_src)
+            self.selective_copy_lengths = torch.empty(2 * self.topk, dtype=torch.int32, device=device)
+            self.selective_copy_count = torch.full((), 2 * self.topk, dtype=torch.int32, device=device)
+            hot_blocks = cdiv(self.topk_buffer_size, self.block_size)
+            self.selective_hot_block_table = torch.arange(hot_blocks, dtype=torch.int32, device=device).view(1, -1)
+            self.selective_query_len = torch.ones(1, dtype=torch.int32, device=device)
+            self.selective_hot_len = torch.full((1,), hot_blocks * self.block_size, dtype=torch.int32, device=device)
+            self.selective_hot_keys = [
+                torch.full((self.topk_buffer_size + 1,), -1, dtype=torch.int64, device=device)
+                for _ in self.offload_layer_names
+            ]
+            self.selective_hot_requests = [
+                torch.full((1,), -1, dtype=torch.int64, device=device) for _ in self.offload_layer_names
+            ]
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
                 "Sparse KV offload topk_buffer_size must be divisible by "
@@ -1109,6 +1188,13 @@ class SparseKVOffloadManager:
         if result not in (None, 0):
             raise RuntimeError(f"memfabric fused_copy_sfa tail H2D failed with result={result}")
 
+    def reset_selective_hot_cache(self) -> None:
+        if not getattr(self.sparse_kv_offload_config, "selective_offload", False):
+            return
+        for keys, request in zip(self.selective_hot_keys, self.selective_hot_requests):
+            keys.fill_(-1)
+            request.fill_(-1)
+
     def offload_new_kv(
         self,
         layer_name: str,
@@ -1122,6 +1208,8 @@ class SparseKVOffloadManager:
         has_prefill: bool = False,
         capturing: bool = False,
     ) -> None:
+        if getattr(self.sparse_kv_offload_config, "selective_offload", False):
+            self._get_offload_layer_id(layer_name)
         if not has_prefill and k is not None and v is not None and self.use_fused_overlap:
             layer_id = self._get_offload_layer_id(layer_name)
             self.current_kv_by_layer[layer_id] = (k, v)
@@ -1481,7 +1569,11 @@ def init_sparse_kv_offload_manager(
 ):
     global _SPARSE_KV_OFFLOAD_MANAGER
     if _SPARSE_KV_OFFLOAD_MANAGER is None:
-        if get_ascend_device_type() != AscendDeviceType.A3:
+        device_type = get_ascend_device_type()
+        if getattr(sparse_kv_offload_config, "selective_offload", False):
+            if device_type != AscendDeviceType.A5:
+                raise RuntimeError("Selective KV offload is only validated on A5")
+        elif device_type != AscendDeviceType.A3:
             raise RuntimeError("Sparse KV offload is only support on A3")
         _SPARSE_KV_OFFLOAD_MANAGER = SparseKVOffloadManager(
             vllm_config,

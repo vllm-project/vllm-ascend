@@ -5675,7 +5675,7 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
-                    if self.sparse_kv_offload_enabled:
+                    if getattr(current_kv_cache_spec, "store_on_host", False):
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_packed_sfa_main_cache, (
                             "Sparse KV offload do not support a packed SFA main cache."
@@ -5993,7 +5993,7 @@ class NPUModelRunner(GPUModelRunner):
                     # unpack them as a K/V tuple.
                     current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
                     current_packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec)
-                    if self.sparse_kv_offload_enabled:
+                    if getattr(current_kv_cache_spec, "store_on_host", False):
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_packed_sfa_main_cache, (
                             "Sparse KV offload do not support a packed SFA main cache."
@@ -6731,7 +6731,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                         cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
-                        store_on_host=self.sparse_kv_offload_enabled,
+                        store_on_host=self.sparse_kv_offload_config.is_host_layer(layer_name),
                         model_version=model_version,
                         indexes_kv_by_block_stride=indexes_kv_by_block_stride,
                     )

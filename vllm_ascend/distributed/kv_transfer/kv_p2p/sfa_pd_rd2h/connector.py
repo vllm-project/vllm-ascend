@@ -3,9 +3,9 @@
 """PD-disaggregated SFA Remote D2H KV-transfer connector.
 
 This connector is dedicated to decode offload. On the Decode node
-(``kv_consumer``), remote Prefill exposes its KV and Decode pulls the bulk MLA
-KV directly into a CPU pinned offload pool; the indexer KV lands in HBM. The
-CPU pool and sparse resident-cache load path are owned by
+(``kv_consumer``), remote Prefill exposes its KV and Decode pulls shared MLA
+KV into a CPU pinned offload pool, while full MLA and Indexer KV land in HBM.
+The CPU pool and sparse resident-cache load path are owned by
 :class:`SparseKVOffloadManager`.
 """
 
@@ -51,8 +51,8 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     * SCHEDULER + producer : P-side metadata for memfabric pull notifications.
     * SCHEDULER + consumer : D-side vLLM block-id / advertisement tracking.
     * WORKER + producer    : P-side layer-wise READ_READY notifications.
-    * WORKER + consumer    : D-side manager CPU-pool + memfabric pull read +
-      indexer/main split registration.
+    * WORKER + consumer    : D-side manager CPU pool and MemFabric pull into
+      shared Host / full device / Indexer device destinations.
     """
 
     supports_layerwise_buffer_reuse = True

@@ -57,6 +57,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
     get_sparse_kv_offload_manager,
+    plan_selective_hot_slots,
 )
 
 # LIM bounds mirror both BF16 and quantized kernel constants headers;
@@ -860,6 +861,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: AscendSFAMetadata,
     ):
+        offload_cfg = get_ascend_config().sparse_kv_offload_config
+        if offload_cfg.selective_offload and not offload_cfg.is_host_layer(self._offload_layer_name()):
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         if self._is_decode_only(attn_metadata):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
@@ -1567,6 +1571,88 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager.wait_for_current_kv_writeback(bool(_EXTRA_CTX.capturing))
         return attn_output
 
+    def _execute_selective_host_attention(
+        self,
+        query: torch.Tensor,
+        query_rope: torch.Tensor,
+        topk_indices: torch.Tensor,
+        metadata: AscendSFAOffloadMetadata,
+        seq_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        if metadata.num_decodes != 1 or metadata.num_decode_tokens != 1 or metadata.num_prefills:
+            raise RuntimeError("Selective Host KV attention requires one decode request and no prefill")
+
+        manager = get_sparse_kv_offload_manager()
+        layer_id = manager._get_offload_layer_id(self._offload_layer_name())
+        block_size = manager.block_size
+        logical = topk_indices.reshape(-1).to(torch.int64)
+        topk = logical.numel()
+        if topk != manager.topk:
+            raise ValueError(f"Selective Host KV expected {manager.topk} TopK indices, got {topk}")
+        table = metadata.block_table[0].to(torch.int64)
+        valid = (logical >= 0) & (logical < seq_lengths.reshape(-1)[0])
+        valid &= logical < table.numel() * block_size
+        block_indices = (logical.clamp_min(0) // block_size).clamp_max(table.numel() - 1)
+        physical_blocks = table[block_indices]
+        host_k = manager.k_caches_cpu[layer_id]
+        host_blocks = host_k.numel() * host_k.element_size() // (manager.token_size_bytes_k * block_size)
+        valid &= (physical_blocks >= 0) & (physical_blocks < host_blocks)
+        source_slots = physical_blocks.clamp(0, host_blocks - 1) * block_size + logical.clamp_min(0) % block_size
+
+        hot_blocks = cdiv(manager.topk_buffer_size, block_size)
+        hot_tokens = hot_blocks * block_size
+        k_hot = manager.topk_buffers_k[layer_id][0, :hot_tokens].view(hot_blocks, block_size, 1, self.kv_lora_rank)
+        v_hot = manager.topk_buffers_v[layer_id][0, :hot_tokens].view(hot_blocks, block_size, 1, self.qk_rope_head_dim)
+        if metadata.req_ids_tensor is None:
+            raise RuntimeError("Selective Host KV requires request identity metadata")
+        request = metadata.req_ids_tensor[:1]
+        destinations, misses, updated_keys = plan_selective_hot_slots(
+            manager.selective_hot_keys[layer_id],
+            manager.selective_hot_requests[layer_id],
+            request,
+            source_slots,
+            valid,
+        )
+        for i, (host, hot, row_bytes) in enumerate(
+            (
+                (host_k, k_hot, manager.token_size_bytes_k),
+                (manager.v_caches_cpu[layer_id], v_hot, manager.token_size_bytes_v),
+            )
+        ):
+            rows = slice(i * topk, (i + 1) * topk)
+            manager.selective_copy_src[rows].copy_(host.data_ptr() + source_slots * row_bytes)
+            manager.selective_copy_dst[rows].copy_(hot.data_ptr() + destinations * row_bytes)
+            manager.selective_copy_lengths[rows].copy_(misses.to(torch.int32) * row_bytes)
+        manager.copy_sfa_kv(
+            manager.selective_copy_src,
+            manager.selective_copy_dst,
+            manager.selective_copy_lengths,
+            manager.selective_copy_count,
+        )
+        manager.selective_hot_keys[layer_id].copy_(updated_keys)
+        manager.selective_hot_requests[layer_id].copy_(request)
+
+        physical = torch.where(valid, destinations, -1).to(torch.int32).view(1, 1, topk)
+        output = torch_npu.npu_sparse_flash_attention(
+            query=query.contiguous(),
+            key=k_hot,
+            value=k_hot,
+            sparse_indices=physical,
+            scale_value=self.scale,
+            sparse_block_size=1,
+            block_table=manager.selective_hot_block_table,
+            actual_seq_lengths_query=manager.selective_query_len,
+            actual_seq_lengths_kv=manager.selective_hot_len,
+            query_rope=query_rope.contiguous(),
+            key_rope=v_hot,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=0,
+            attention_mode=2,
+            return_softmax_lse=False,
+        )
+        return output[0]
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -1578,6 +1664,26 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
+        offload_cfg = get_ascend_config().sparse_kv_offload_config
+        if offload_cfg.selective_offload:
+            if not offload_cfg.is_host_layer(self._offload_layer_name()):
+                return super()._execute_sparse_flash_attention_process(
+                    ql_nope,
+                    q_pe,
+                    kv_cache,
+                    topk_indices,
+                    attn_metadata,
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                    block_table=block_table,
+                )
+            return self._execute_selective_host_attention(
+                ql_nope,
+                q_pe,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_key,
+            )
         num_decodes = int(getattr(attn_metadata, "num_decodes", 0) or 0)
         num_decode_tokens = int(getattr(attn_metadata, "num_decode_tokens", 0) or 0)
         num_prefills = int(getattr(attn_metadata, "num_prefills", 0) or 0)

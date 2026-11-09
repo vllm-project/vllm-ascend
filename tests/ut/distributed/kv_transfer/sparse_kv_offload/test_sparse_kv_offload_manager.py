@@ -13,7 +13,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+
+if vllm_version_is("0.32.0"):
+    from vllm.v1.core import kv_cache_utils as planning
+else:
+    from vllm.v1.core import kv_cache_planning as planning
 
 
 class _FakeKVCacheSpec:
@@ -60,6 +65,26 @@ def _make_memory_plan_inputs(max_num_seqs=2):
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
+    @patch.object(planning, "_pool_bytes_per_block", return_value=2048)
+    @patch.object(planning, "get_kv_cache_groups")
+    def test_selective_layout_counts_all_groups_in_the_shared_block_pool(self, groups, pool_bytes):
+        specs, vllm_config, alignment_reserve = _make_memory_plan_inputs()
+        groups.return_value = [SimpleNamespace(kv_cache_spec=specs[name]) for name in ("host.0", "device.0")]
+
+        budget = plan_sparse_kv_offload_memory(
+            kv_cache_spec=specs,
+            vllm_config=vllm_config,
+            available_device_memory_bytes=1000 * 512,
+            dram_limit_bytes=alignment_reserve + 1000 * 2048,
+            keep_device_kv_cache=False,
+            selective_offload=True,
+        )
+
+        self.assertEqual(budget.final_num_blocks, 401)
+        self.assertEqual(budget.final_planner_bytes, 401 * 2048)
+        self.assertEqual(budget.planned_device_bytes, 401 * 512)
+        self.assertEqual(budget.planned_host_bytes, 401 * 2048)
+
     def test_non_a3_is_rejected(self):
         with (
             patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
@@ -282,13 +307,15 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
     def test_manager_initializes_offload_with_planned_pool_size(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
-        for rank, expected_alloc_size, dp_index in (
-            (0, planned_pool_size, 0),
-            (1, 0, 0),
-            (0, planned_pool_size, 1),
-            (1, 0, 1),
+        for rank, expected_alloc_size, dp_index, selective in (
+            (0, planned_pool_size, 0, False),
+            (1, 0, 0, False),
+            (0, planned_pool_size, 1, False),
+            (1, 0, 1, False),
+            (0, planned_pool_size, 0, True),
         ):
             with self.subTest(rank=rank, dp_index=dp_index):
+                offload_config.selective_offload = selective
                 vllm_config.parallel_config.data_parallel_index = dp_index
                 offload_backend = SimpleNamespace(
                     OffloadConfig=lambda: SimpleNamespace(),
@@ -334,13 +361,14 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                         "empty",
                         return_value=MagicMock(),
                     ),
-                    patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
+                    patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()) as sparse_ops,
                 ):
                     SparseKVOffloadManager(
                         vllm_config,
                         kv_cache_config,
                         offload_config,
                     )
+                    self.assertEqual(sparse_ops.call_count, 0 if selective else 1)
 
                 initialized_config = offload_backend.initialize.call_args.args[0]
                 self.assertEqual(
@@ -409,6 +437,90 @@ if __name__ == "__main__":
 
 
 class TestHostKVRegistration(unittest.TestCase):
+    def test_selective_hot_slots_reuse_and_request_isolation(self):
+        torch = manager_module.torch
+        keys = torch.full((5,), -1, dtype=torch.int64)
+        previous = torch.tensor([-1])
+        request = torch.tensor([10])
+        cache = torch.full((4,), -1, dtype=torch.int64)
+        for selection, expected_misses in (([2, 4, 6], 3), ([6, 2, 8], 1), ([8, 8, -1], 0)):
+            sources = torch.tensor(selection)
+            valid = sources >= 0
+            slots, misses, updated = manager_module.plan_selective_hot_slots(
+                keys,
+                previous,
+                request,
+                sources,
+                valid,
+            )
+            self.assertEqual(int(misses.sum()), expected_misses)
+            cache[slots[misses]] = sources[misses]
+            torch.testing.assert_close(cache[slots[valid]], sources[valid])
+            keys.copy_(updated)
+            previous.copy_(request)
+        _, misses, _ = manager_module.plan_selective_hot_slots(
+            keys,
+            previous,
+            torch.tensor([11]),
+            torch.tensor([8, 2, 6]),
+            torch.ones(3, dtype=torch.bool),
+        )
+        self.assertEqual(int(misses.sum()), 3)
+
+    def test_selective_registration_keeps_only_shared_main_kv(self):
+        names = [f"model.layers.{i}.self_attn" for i in range(7)]
+        shared = set(names[3:6])
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.num_target_layers = 7
+        manager.tp_rank = 0
+        manager.sparse_kv_offload_config = SimpleNamespace(
+            selective_offload=True,
+            is_host_layer=lambda name: name in shared,
+        )
+        manager.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=[name], kv_cache_spec=SimpleNamespace(store_on_host=name in shared))
+                for name in names
+            ]
+        )
+        caches = dict.fromkeys(names, object())
+        caches[names[0] + ".indexer"] = object()
+
+        manager._register_offload_layers(caches)
+
+        self.assertEqual(manager.offload_layer_names, names[3:6])
+        self.assertEqual(manager.num_layers, 3)
+        self.assertEqual(manager.mtp_layer_id, -1)
+        self.assertEqual(manager._get_offload_layer_id(names[5]), 2)
+        with self.assertRaises(KeyError):
+            manager._get_offload_layer_id(names[0])
+        with self.assertRaises(KeyError):
+            manager.offload_new_kv(names[0], None, None, None, None, None, None, None)
+        del caches[names[4]]
+        with self.assertRaisesRegex(ValueError, "tensors are missing"):
+            manager._register_offload_layers(caches)
+        caches[names[4]] = object()
+        manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.store_on_host = True
+        with self.assertRaisesRegex(ValueError, "placement disagrees"):
+            manager._register_offload_layers(caches)
+
+    def test_legacy_registration_keeps_all_host_main_layers(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.num_target_layers = 2
+        manager.tp_rank = 0
+        manager.sparse_kv_offload_config = SimpleNamespace(selective_offload=False)
+        manager.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["model.layers.0.attn", "model.layers.1.attn"],
+                    kv_cache_spec=SimpleNamespace(store_on_host=True),
+                )
+            ]
+        )
+        manager._register_offload_layers(dict.fromkeys(["model.layers.0.attn", "model.layers.1.attn"], object()))
+        self.assertEqual(manager.num_layers, 2)
+        self.assertEqual(manager.mtp_layer_id, -1)
+
     def test_copy_sfa_exports_block_byte_strides_on_all_tp_ranks(self):
         torch = manager_module.torch
         original_zeros = torch.zeros

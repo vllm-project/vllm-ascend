@@ -162,6 +162,21 @@ starting from `kv_port`.
 
 Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
+### Selective offload for full/shared SFA layers
+
+On Ascend A5, set `"selective_offload": true` inside the Decode server's
+`sparse_kv_offload_config` for a model with full/shared `indexer_types`.
+Shared layers store their main KV in host memory. Full layers and the indexer
+keep their KV on the device. Use `SfaRemoteD2HConnector` for P/D transfer.
+
+This mode requires TP=1 and DP=1 without speculative decoding. Use
+`--max-num-seqs 1` and either `--enforce-eager` or the following Decode graph
+configuration:
+
+```bash
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'
+```
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are

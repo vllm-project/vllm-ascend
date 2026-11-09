@@ -67,6 +67,34 @@ def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
     return main_group_id, indexer_group_id
 
 
+def infer_selective_sfa_group_ids(kv_cache_config: Any) -> tuple[int, int, int]:
+    """Return the shared Host, full device, and Indexer device groups."""
+    host = full = indexer = None
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        names = tuple(group.layer_names)
+        main_names = [name for name in names if "indexer" not in name.lower()]
+        members = getattr(group.kv_cache_spec, "kv_cache_specs", None)
+        is_host = (
+            all(getattr(spec, "store_on_host", False) for spec in members.values())
+            if members is not None
+            else getattr(group.kv_cache_spec, "store_on_host", False)
+        )
+        if any("indexer" in name.lower() for name in names):
+            indexer = group_id if indexer is None else indexer
+        if main_names:
+            if is_host:
+                if host is not None:
+                    raise ValueError("Selective SFA PD has more than one shared Host group")
+                host = group_id
+            else:
+                if full is not None:
+                    raise ValueError("Selective SFA PD has more than one full device group")
+                full = group_id
+    if host is None or full is None or indexer is None or host == full:
+        raise ValueError("Selective SFA PD requires shared Host, full device, and Indexer cache groups")
+    return host, full, indexer
+
+
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -156,15 +184,16 @@ class SfaPDProducerMetadata(KVConnectorMetadata):
 class SfaPDConsumerReqMeta:
     """D-side destinations owned by vLLM's normal KV block manager.
 
-    Main MLA block ids index the CPU cache owned by
-    :class:`SparseKVOffloadManager`; indexer block ids index the rank-local
-    HBM cache.  Keeping the two components explicit avoids depending on a
-    model-runner tuple layout.
+    Shared MLA block ids index the CPU cache owned by
+    :class:`SparseKVOffloadManager`; full MLA and Indexer block ids index
+    rank-local HBM caches. Keeping the components explicit avoids depending
+    on a model-runner tuple layout.
     """
 
     req_id: str
     main_block_ids: list[int]
     indexer_block_ids: list[int]
+    full_block_ids: list[int] | None = None
     # Early-bound fused_copy_sfa top-k row. The pull thread writes the prefill tail into
     # this row's circular slots so decode does not H2D the same tokens again,
     # or (dense) the whole prompt into the row's hot region so short requests
@@ -199,6 +228,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
         request_id: str,
         main_block_ids: list[int],
         indexer_block_ids: list[int],
+        full_block_ids: list[int] | None = None,
         pool_slot: int | None = None,
         tail_tokens: int = 0,
         tail_block_index: int = 0,
@@ -213,6 +243,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
                 req_id=request_id,
                 main_block_ids=list(main_block_ids),
                 indexer_block_ids=list(indexer_block_ids),
+                full_block_ids=list(full_block_ids) if full_block_ids is not None else None,
                 pool_slot=pool_slot,
                 tail_tokens=tail_tokens,
                 tail_block_index=tail_block_index,

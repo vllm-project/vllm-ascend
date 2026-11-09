@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     SendTask,
     SfaPDProducerReqMeta,
     get_external_request_id,
+    infer_selective_sfa_group_ids,
     infer_sfa_component_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
@@ -137,6 +138,126 @@ def test_infer_uniform_group_uses_same_block_ids():
     )
 
     assert infer_sfa_component_group_ids(config) == (0, 0)
+
+
+def test_infer_selective_groups_from_cache_storage():
+    def group(names, host=False):
+        spec = SimpleNamespace(store_on_host=host)
+        return SimpleNamespace(
+            layer_names=names, kv_cache_spec=SimpleNamespace(kv_cache_specs={name: spec for name in names})
+        )
+
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            group(["model.layers.3.self_attn"], host=True),
+            group(["model.layers.0.self_attn.indexer"]),
+            group(["model.layers.0.self_attn"]),
+        ]
+    )
+    assert infer_selective_sfa_group_ids(config) == (0, 2, 1)
+
+
+def test_selective_full_layer_reads_into_device_group():
+    thread = _make_read_thread()
+    name = "model.layers.0.self_attn"
+    thread._state.full_layer_names = (name,)
+    thread._state.main_name_to_idx = {name: 0}
+    thread._state.main_gva_bases = [(3000, 4000)]
+    thread._state.main_block_lens = [(10, 20)]
+    thread._state.indexer_tensors = [None]
+    thread._state.indexer_scale_tensors = [None]
+    thread._state.dest_blocks_by_req["req-0"] = ([3, 4], [], [5, 6])
+    thread._state.get_offload_layer_id = MagicMock(side_effect=AssertionError("full is not Host"))
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = 0
+
+    thread._do_read_batch(
+        name,
+        [("req-0", [1, 2], [], 0, 0)],
+        p_session="p-session",
+        p_layer_meta={
+            name: {
+                "base_addrs": [1000, 2000],
+                "block_len": [10, 20],
+                "block_size_scale": [1, 1],
+                "main_tensor_count": 2,
+                "has_indexer": False,
+            }
+        },
+    )
+    thread.engine.batch_transfer_sync_read.assert_called_once_with("p-session", [3050, 4100], [1010, 2020], [20, 40])
+    thread._state.get_offload_layer_id.assert_not_called()
+
+
+def test_selective_consumer_registers_full_device_and_shared_host_destinations():
+    def tensor(ptr):
+        return SimpleNamespace(shape=(8, 2), data_ptr=lambda: ptr, element_size=lambda: 2)
+
+    shared = "model.layers.3.self_attn"
+    full = "model.layers.0.self_attn"
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.vllm_config = SimpleNamespace(
+        additional_config={"sparse_kv_offload_config": {"selective_offload": True}},
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=(shared,), kv_cache_spec=SimpleNamespace(store_on_host=True)),
+            SimpleNamespace(layer_names=(full,), kv_cache_spec=SimpleNamespace(store_on_host=False)),
+            SimpleNamespace(layer_names=(full + ".indexer",), kv_cache_spec=SimpleNamespace(store_on_host=False)),
+        ],
+    )
+    worker.tp_rank = 0
+    worker.side_channel_port = 1234
+    worker.layer_metadata = {}
+    worker.dspark_draft_layer_names = ()
+    worker.offload_manager = SimpleNamespace(
+        offload_layer_names=[shared],
+        k_caches_cpu=[tensor(1000)],
+        v_caches_cpu=[tensor(2000)],
+        gvas_k_bases=[1000],
+        gvas_v_bases=[2000],
+        cpu_block_lens=[(4, 4)],
+        _get_offload_layer_id=lambda _: 0,
+        use_fused_copy_sfa=False,
+    )
+    worker._dest_blocks_by_req = {}
+    worker._copy_sfa_tail_by_req = {}
+    worker._topk_k_bases = worker._topk_v_bases = []
+    worker._topk_row_tokens = worker._topk_hot_tokens = 0
+    worker._copy_sfa_block_size = 128
+    worker.dspark_draft_kv_metadata = {}
+    worker._dspark_draft_blocks_by_req = {}
+    worker._ensure_engine = MagicMock()  # type: ignore[method-assign]
+    worker.engine = MagicMock()
+    with (
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker.MembPullReadThread") as read_thread,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker.collect_storage_merged_register_regions"
+        ) as regions,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker.global_memfabric_te.register_buffer"
+        ) as register,
+    ):
+        regions.return_value = SimpleNamespace(ptrs=[1000, 3000, 5000], lengths=[32, 32, 16])
+        read_thread.return_value.ready_event.wait.return_value = True
+        read_thread.return_value.startup_error = None
+        worker._register_memfabric_pull(
+            {
+                full: (tensor(3000), tensor(4000)),
+                full + ".indexer": tensor(5000),
+                shared: (tensor(6000), tensor(7000)),
+            }
+        )
+
+    assert worker.layer_metadata[full].kv_caches_base_addr == [3000, 4000, 5000]
+    assert worker.layer_metadata[shared].kv_caches_base_addr == [1000, 2000]
+    state = read_thread.call_args.kwargs["state"]
+    assert state.full_layer_names == (full,)
+    assert state.main_gva_bases == [(3000, 4000), (1000, 2000)]
+    assert set(regions.call_args.args[0]) == {full, full + ".indexer", shared}
+    register.assert_called_once_with([1000, 3000, 5000], [32, 32, 16])
 
 
 def test_completion_prompt_list_registers_each_vllm_child_request_id():
@@ -1780,6 +1901,56 @@ def test_consumer_scheduler_reports_every_pulled_group_as_loaded():
     # without it restores no remote blocks.
     for params in ({"do_remote_prefill": False}, {}):
         assert scheduler.get_loaded_kv_cache_group_ids(SimpleNamespace(kv_transfer_params=params)) == ()
+
+
+def test_selective_consumer_scheduler_reports_three_destination_groups():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler.main_group_idx = 0
+    scheduler.full_group_idx = 2
+    scheduler.indexer_group_idx = 1
+    scheduler._dspark_context_groups = ()
+
+    request = SimpleNamespace(kv_transfer_params={"do_remote_prefill": True})
+    assert scheduler.get_loaded_kv_cache_group_ids(request) == (0, 1, 2)
+
+
+def test_selective_consumer_metadata_preserves_three_block_tables():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler.main_group_idx = 0
+    scheduler.indexer_group_idx = 1
+    scheduler.full_group_idx = 2
+    scheduler.engine_id = "decode-engine"
+    scheduler.side_channel_host = "decode-host"
+    scheduler.side_channel_port = 1234
+    scheduler.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+    )
+    scheduler._request_trackers = {}
+    scheduler._reqs_need_recv = set()
+    scheduler._dspark_context_groups = ()
+    scheduler._copy_sfa_slot_allocator = None
+    scheduler._copy_sfa_bindings = {}
+    request = SimpleNamespace(
+        request_id="req-0",
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "do_virtual": True,
+        },
+        num_computed_tokens=0,
+    )
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([3], [8], [5])
+
+    scheduler.update_state_after_alloc(request, blocks, 128)
+    metadata = scheduler.build_connector_meta(MagicMock())
+
+    assert metadata.requests[0].main_block_ids == [3]
+    assert metadata.requests[0].indexer_block_ids == [8]
+    assert metadata.requests[0].full_block_ids == [5]
 
 
 def test_consumer_scheduler_without_dspark_reports_only_main_and_indexer():

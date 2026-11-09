@@ -1705,13 +1705,25 @@ class SparseKVOffloadConfig:
     topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
+    selective_offload: bool = False
     topk: int = dataclasses.field(default=0, init=False)
+    indexer_types: tuple[str, ...] = dataclasses.field(default=(), init=False)
     use_fused_overlap: bool = False
 
     @property
     def use_fused_copy_sfa(self) -> bool:
         """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
-        return self.enabled and not self.use_fused_overlap
+        return self.enabled and not self.use_fused_overlap and not self.selective_offload
+
+    def is_host_layer(self, layer_name: str) -> bool:
+        if not self.enabled:
+            return False
+        if not self.selective_offload:
+            return True
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        layer_id = extract_layer_index(layer_name)
+        return layer_id < len(self.indexer_types) and self.indexer_types[layer_id] == "shared"
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1739,8 +1751,28 @@ class SparseKVOffloadConfig:
         if not self.enabled:
             return
 
-        if is_950():
+        if is_950() and not self.selective_offload:
             raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
+
+        if self.selective_offload:
+            if self.use_fused_overlap or self.keep_device_kv_cache:
+                raise ValueError(
+                    "selective_offload requires its own Host-to-hot path without fused overlap or full device copies"
+                )
+            indexer_types = getattr(vllm_config.model_config.hf_text_config, "indexer_types", None)
+            num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
+            if (
+                not isinstance(indexer_types, (list, tuple))
+                or len(indexer_types) != num_layers
+                or not indexer_types
+                or indexer_types[0] != "full"
+                or any(role not in ("full", "shared") for role in indexer_types)
+                or "shared" not in indexer_types
+            ):
+                raise ValueError("selective_offload requires a complete indexer_types sequence starting with full")
+            self.indexer_types = tuple(indexer_types)
+            if vllm_config.speculative_config is not None:
+                raise ValueError("selective_offload has not validated MTP rollback")
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
@@ -1751,6 +1783,22 @@ class SparseKVOffloadConfig:
         if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):
             raise ValueError("Sparse KV offload only support sparse attention model.")
         parallel_config = vllm_config.parallel_config
+        if self.selective_offload and (
+            parallel_config.tensor_parallel_size != 1 or parallel_config.data_parallel_size != 1
+        ):
+            raise ValueError("selective_offload currently requires TP=1 and DP=1")
+        if self.selective_offload and not vllm_config.model_config.enforce_eager:
+            from vllm.config import CUDAGraphMode
+
+            # shortcut: one decode row per graph, until hot slots are isolated per request.
+            if (
+                vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+                or vllm_config.scheduler_config.max_num_seqs != 1
+                or vllm_config.compilation_config.cudagraph_capture_sizes != [1]
+            ):
+                raise ValueError(
+                    "selective_offload graph requires FULL_DECODE_ONLY, max_num_seqs=1, and cudagraph_capture_sizes=[1]"
+                )
         if parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size > 1:
             raise ValueError("Sparse KV offload don't support context parallel now.")
         if parallel_config.pipeline_parallel_size > 1:

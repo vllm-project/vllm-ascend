@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -33,6 +33,32 @@ def _mla_spec(*, host=True, non_causal=False, block_size=128):
         store_on_host=host,
         non_causal_multi_token_decode=non_causal,
     )
+
+
+def test_selective_offload_splits_host_and_device_groups_without_changing_legacy_grouping():
+    from vllm_ascend.patch.platform import patch_kv_cache_utils
+
+    specs = {
+        "layers.0.attn": _mla_spec(host=False),
+        "layers.1.attn": _mla_spec(host=True),
+        "layers.2.attn": _mla_spec(host=True),
+    }
+    config = SimpleNamespace(
+        additional_config={},
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        cache_config=CacheConfig(),
+        speculative_config=None,
+    )
+    assert len(patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)) == 1
+
+    config.additional_config = {"sparse_kv_offload_config": {"selective_offload": True}}
+    with patch("vllm_ascend.ascend_config.get_ascend_config") as get_config:
+        get_config.return_value.sparse_kv_offload_config.selective_offload = True
+        groups = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
+    assert {frozenset(group.layer_names) for group in groups} == {
+        frozenset({"layers.0.attn"}),
+        frozenset({"layers.1.attn", "layers.2.attn"}),
+    }
 
 
 def _runner(*, method="dspark", sparse=True, last_rank=True, names=None):
@@ -383,6 +409,7 @@ def test_offload_registry_follows_placement_not_name(method):
     }
     manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
     manager.kv_cache_config = _cache_config(specs)
+    manager.sparse_kv_offload_config = SimpleNamespace(selective_offload=False)
     manager.num_target_layers = 2
     manager.tp_rank = 0
     manager._register_offload_layers(dict.fromkeys(specs, object()))

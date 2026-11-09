@@ -57,6 +57,28 @@ _REPRO_CASES = [
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("swiglu_mode", [0, 1])
+def test_default_unclipped_swiglu_accepts_zero_clamp(swiglu_mode):
+    import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+    torch.manual_seed(723)
+    x = torch.randint(-100, 100, (4, 256), dtype=torch.int32, device="npu")
+    weight_scale = torch.rand(256, dtype=torch.float32, device="npu") * 0.1
+    activation_scale = torch.rand((4, 1), dtype=torch.float32, device="npu") * 0.5
+    expected, expected_scale = _shared_dequant_swiglu_quant(x, weight_scale, activation_scale, 0, torch.bfloat16)
+    output, scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+        x=x,
+        weight_scale=weight_scale,
+        activation_scale=activation_scale,
+        activate_left=True,
+        quant_mode=1,
+        swiglu_mode=swiglu_mode,
+    )
+    torch.testing.assert_close(output.cpu(), expected.cpu(), atol=1, rtol=0.1)
+    torch.testing.assert_close(scale.cpu(), expected_scale.cpu(), atol=1e-4, rtol=5e-3)
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("x_shape,clamp_limit,desc", _REPRO_CASES, ids=[c[2] for c in _REPRO_CASES])
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),

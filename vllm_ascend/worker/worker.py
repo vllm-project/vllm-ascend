@@ -630,6 +630,7 @@ class NPUWorker(WorkerBase):
             available_device_memory_bytes=available_device_memory_bytes,
             dram_limit_bytes=dram_limit_bytes,
             keep_device_kv_cache=sparse_kv_offload_config.keep_device_kv_cache,
+            selective_offload=sparse_kv_offload_config.selective_offload,
         )
         logger.info_once(
             "Sparse KV offload memory plan: npu_limit=%d blocks, "

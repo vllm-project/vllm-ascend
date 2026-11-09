@@ -67,6 +67,14 @@ class TestAscendSFABackend(TestBase):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_selective_offload_requires_block_outermost_layout(self, config):
+        from vllm.v1.kv_cache_layout import KVCacheLayout
+
+        for selective, expected in ((False, None), (True, (KVCacheLayout.BLHNC,))):
+            config.return_value = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(selective_offload=selective))
+            self.assertEqual(AscendSFABackend.supported_kv_cache_layouts(), expected)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_builder_cls(self, mock_get_ascend_config):
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         self.assertEqual(AscendSFABackend.get_builder_cls(), AscendSFAMetadataBuilder)

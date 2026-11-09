@@ -42,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     LayerMetadata,
     SendTask,
     get_external_request_id,
+    infer_selective_sfa_group_ids,
     infer_sfa_component_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (
@@ -150,7 +151,7 @@ class SFAPDRD2HConsumerWorker:
         # to the vLLM-internal id that the scheduler expects.
         self.request_map: dict[str, str] = {}
         # external_req_id -> (main CPU block ids, indexer HBM block ids).
-        self._dest_blocks_by_req: dict[str, tuple[list[int], list[int]]] = {}
+        self._dest_blocks_by_req: dict[str, tuple[list[int], ...]] = {}
         # Internal req_id -> early-bound fused_copy_sfa top-k row used by the runner.
         self.copy_sfa_slots_by_req: dict[str, int] = {}
         # external_req_id -> circular-tail destination. Shared with the read thread.
@@ -239,11 +240,17 @@ class SFAPDRD2HConsumerWorker:
         for req in getattr(metadata, "requests", []):
             req_id = getattr(req, "req_id", None)
             if req_id is not None:
+                manager = getattr(self, "offload_manager", None)
+                if getattr(getattr(manager, "sparse_kv_offload_config", None), "selective_offload", False):
+                    self.offload_manager.reset_selective_hot_cache()
                 ext_id = get_external_request_id(req_id)
                 self.request_map[ext_id] = req_id
                 main_ids = list(getattr(req, "main_block_ids", []) or [])
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
-                self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
+                full_ids = getattr(req, "full_block_ids", None)
+                self._dest_blocks_by_req[ext_id] = (
+                    (main_ids, indexer_ids, list(full_ids)) if full_ids is not None else (main_ids, indexer_ids)
+                )
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
                 descriptor = getattr(req, "dspark_context_descriptor", None)
                 if descriptor is not None:
@@ -377,9 +384,8 @@ class SFAPDRD2HConsumerWorker:
             dest = self._dest_blocks_by_req.get(ext_id)
             if dest is None:
                 continue
-            main_block_ids, indexer_block_ids = dest
-            self._invalid_block_ids.update(main_block_ids)
-            self._invalid_block_ids.update(indexer_block_ids)
+            for block_ids in dest:
+                self._invalid_block_ids.update(block_ids)
 
         if finished_on_all or self._pending_done:
             still_pending: set[str] = set()
@@ -443,6 +449,7 @@ class SFAPDRD2HConsumerWorker:
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
+            full_layer_names=getattr(self, "_full_names", ()),
             copy_sfa_tail_by_req=self._copy_sfa_tail_by_req,
             topk_k_bases=self._topk_k_bases,
             topk_v_bases=self._topk_v_bases,
@@ -461,8 +468,22 @@ class SFAPDRD2HConsumerWorker:
         assert self.offload_manager is not None
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
-        main_names = list(self.offload_manager.offload_layer_names)
+        host_names = list(self.offload_manager.offload_layer_names)
         draft_names = set(self.dspark_draft_layer_names)
+        offload_options = (getattr(self.vllm_config, "additional_config", None) or {}).get(
+            "sparse_kv_offload_config", {}
+        )
+        selective = bool(offload_options.get("selective_offload", False))
+        self._full_names = (
+            tuple(
+                name
+                for name in kv_caches
+                if "indexer" not in name.lower() and name not in draft_names and name not in host_names
+            )
+            if selective
+            else ()
+        )
+        main_names = sorted([*host_names, *self._full_names], key=_layer_idx)
         indexer_by_layer = {
             _layer_idx(name): name for name in kv_caches if "indexer" in name.lower() and name not in draft_names
         }
@@ -476,18 +497,21 @@ class SFAPDRD2HConsumerWorker:
         v_caches_cpu = self.offload_manager.v_caches_cpu
         gvas_k = self.offload_manager.gvas_k_bases
         gvas_v = self.offload_manager.gvas_v_bases
-        if len(gvas_k) != len(main_names) or len(gvas_v) != len(main_names):
+        if len(gvas_k) != len(host_names) or len(gvas_v) != len(host_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU GVA/layer count mismatch")
-        self._main_gva_bases = list(zip(gvas_k, gvas_v))
-        self._main_block_lens = self.offload_manager.cpu_block_lens
-        if len(self._main_block_lens) != len(main_names):
+        host_gvas = dict(zip(host_names, zip(gvas_k, gvas_v)))
+        host_lens = dict(zip(host_names, self.offload_manager.cpu_block_lens))
+        if len(host_lens) != len(host_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU block-size/layer count mismatch")
+        self._main_gva_bases = []
+        self._main_block_lens = []
         if self.tp_rank == 0:
-            if len(k_caches_cpu) != len(main_names) or len(v_caches_cpu) != len(main_names):
+            if len(k_caches_cpu) != len(host_names) or len(v_caches_cpu) != len(host_names):
                 raise RuntimeError("SparseKVOffloadManager CPU pool/layer count mismatch")
-            self._cpu_pools = list(zip(k_caches_cpu, v_caches_cpu))
+            host_pools = dict(zip(host_names, zip(k_caches_cpu, v_caches_cpu)))
         else:
-            self._cpu_pools = [None] * len(main_names)
+            host_pools = {}
+        self._cpu_pools = [host_pools.get(name) for name in main_names]
         self._indexer_tensors = []
         self._indexer_scale_tensors: list[torch.Tensor | None] = []
         for main_name in main_names:
@@ -502,11 +526,30 @@ class SFAPDRD2HConsumerWorker:
             self._indexer_tensors.append(indexer_tuple[0])
             self._indexer_scale_tensors.append(indexer_tuple[1] if len(indexer_tuple) > 1 else None)
 
-        main_group_idx, indexer_group_idx = infer_sfa_component_group_ids(self.kv_cache_config)
+        if selective:
+            main_group_idx, full_group_idx, indexer_group_idx = infer_selective_sfa_group_ids(self.kv_cache_config)
+        else:
+            main_group_idx, indexer_group_idx = infer_sfa_component_group_ids(self.kv_cache_config)
+            full_group_idx = None
         for pool_idx, mname in enumerate(main_names):
             indexer_t = self._indexer_tensors[pool_idx]
             indexer_scale_t = self._indexer_scale_tensors[pool_idx]
             cpu_pool = self._cpu_pools[pool_idx]
+            if mname in self._full_names:
+                device_pair = kv_caches[mname]
+                if not isinstance(device_pair, (list, tuple)) or len(device_pair) != 2:
+                    raise RuntimeError(f"Selective full layer {mname} requires device K/V tensors")
+                k_device, v_device = device_pair
+                if any(t.shape[0] != num_blocks for t in device_pair):
+                    raise RuntimeError(f"Selective full layer {mname} has an unsupported block layout")
+                addrs = [k_device.data_ptr(), v_device.data_ptr()]
+                block_lens = [t.element_size() * math.prod(t.shape[1:]) for t in device_pair]
+                scales = [1, 1]
+                self._main_gva_bases.append(tuple(addrs))
+                self._main_block_lens.append(tuple(block_lens))
+            else:
+                self._main_gva_bases.append(host_gvas[mname])
+                self._main_block_lens.append(host_lens[mname])
             if cpu_pool is not None:
                 k_cpu, v_cpu = cpu_pool
                 addrs = [k_cpu.data_ptr(), v_cpu.data_ptr()]
@@ -515,9 +558,9 @@ class SFAPDRD2HConsumerWorker:
                     v_cpu.element_size() * math.prod(v_cpu.shape[1:]),
                 ]
                 scales = [k_cpu.shape[0] // num_blocks, v_cpu.shape[0] // num_blocks]
-            else:
+            elif mname not in self._full_names:
                 addrs, block_lens, scales = [], [], []
-            groups = [main_group_idx] * len(addrs)
+            groups = [full_group_idx if mname in self._full_names else main_group_idx] * len(addrs)
             if indexer_t is not None:
                 addrs.append(indexer_t.data_ptr())
                 block_lens.append(indexer_t.element_size() * math.prod(indexer_t.shape[1:]))
@@ -533,12 +576,25 @@ class SFAPDRD2HConsumerWorker:
                 kv_caches_base_addr=addrs,
                 block_len=block_lens,
                 block_size_scale=scales,
-                main_tensor_count=2 if cpu_pool is not None else 0,
+                main_tensor_count=2 if cpu_pool is not None or mname in self._full_names else 0,
                 has_indexer=indexer_t is not None,
             )
 
-        # Create memfabric engine (no registration)
+        # Device-URMA reads require the D-side destination memory to be registered.
         self._ensure_engine()
+        if selective:
+            destinations = {
+                name: cache
+                for name, cache in kv_caches.items()
+                if name in self._full_names or ("indexer" in name.lower() and name not in draft_names)
+            }
+            if self.tp_rank == 0:
+                destinations.update({name: pool for name, pool in zip(main_names, self._cpu_pools) if pool is not None})
+            regions = collect_storage_merged_register_regions(destinations)
+            if not regions.ptrs:
+                raise RuntimeError("Selective SFA PD found no D-side KV destinations to register")
+            validate_register_region_count(regions)
+            global_memfabric_te.register_buffer(regions.ptrs, regions.lengths)
         self._bind_copy_sfa_tail_destinations()
         read_state = self._build_consumer_read_state()
         # Start MembPullReadThread (ZMQ ROUTER + memfabric read)
@@ -557,9 +613,10 @@ class SFAPDRD2HConsumerWorker:
             self._mf_read_thread.stop()
             raise RuntimeError("SFAPD D-side read thread failed during startup") from error
         logger.info(
-            "SFAPDRD2H D-side registered (memfabric pull): %d indexer + %d TP-shared main layers",
+            "SFAPDRD2H D-side registered (memfabric pull): %d Indexer device + %d full device + %d shared Host layers",
             sum(t is not None for t in self._indexer_tensors),
-            len(main_names),
+            len(self._full_names),
+            len(host_names),
         )
 
     def _bind_copy_sfa_tail_destinations(self) -> None:
