@@ -241,14 +241,13 @@ constexpr int32_t MAX_RESIDENT_AGE = std::numeric_limits<int32_t>::max() - 1;
 // Uniform saturated ageing preserves the survivors' order, allowing an O(C+K)
 // merge of survivors, age=P refills and age=0 hits without sorting or allocation.
 FORCE_INLINE void process_one_reuse_prioritized_lru_resident_row(
-    const int row, const int32_t topk, const int32_t capacity, const int32_t max_token,
-    const int64_t* RESTRICT req_ids, int64_t* RESTRICT last_req_ids,
-    const int32_t* RESTRICT topk_indices, const int32_t* RESTRICT stable_prefix_lens,
+    const int row, const int32_t topk, const int32_t capacity, const int32_t max_token, const int64_t* RESTRICT req_ids,
+    int64_t* RESTRICT last_req_ids, const int32_t* RESTRICT topk_indices, const int32_t* RESTRICT stable_prefix_lens,
     int32_t* RESTRICT slot_to_token, int32_t* RESTRICT lru_slots, int32_t* RESTRICT lru_stamps,
     int32_t* RESTRICT current_slots, int32_t* RESTRICT miss_count, int32_t* RESTRICT miss_tokens_out,
     int32_t* RESTRICT miss_slots_out, int32_t* RESTRICT token_mark, int32_t* RESTRICT token_pos,
-    int32_t* RESTRICT slot_workspace, int32_t* RESTRICT survivor_ages,
-    int32_t* RESTRICT miss_positions, int32_t* RESTRICT epoch, const int32_t probation_age) {
+    int32_t* RESTRICT slot_workspace, int32_t* RESTRICT survivor_ages, int32_t* RESTRICT miss_positions,
+    int32_t* RESTRICT epoch, const int32_t probation_age) {
   const int64_t row_offset = static_cast<int64_t>(row) * capacity;
   auto* tokens = slot_to_token + row_offset;
   auto* slots = lru_slots + row_offset;
@@ -364,16 +363,15 @@ FORCE_INLINE void process_one_reuse_prioritized_lru_resident_row(
 }
 
 HOT_FUNCTION inline void reuse_prioritized_lru_resident_compact(
-    uintptr_t req_ids_ptr, uintptr_t last_req_ids_ptr, uintptr_t topk_indices_ptr,
-    uintptr_t stable_prefix_lens_ptr, uintptr_t slot_to_token_ptr, uintptr_t lru_slots_ptr,
-    uintptr_t current_slots_ptr, uintptr_t miss_count_ptr, uintptr_t miss_tokens_ptr,
-    uintptr_t miss_slots_ptr, uintptr_t token_mark_workspace_ptr, uintptr_t token_pos_workspace_ptr,
-    uintptr_t slot_workspace_ptr, uintptr_t miss_position_workspace_ptr, uintptr_t epochs_ptr,
-    int64_t num_reqs, int64_t topk, int64_t capacity, int64_t max_token,
-    int64_t workspace_threads, int64_t requested_threads, uintptr_t lru_stamps_ptr,
-    uintptr_t age_workspace_ptr, int64_t probation_age) {
-  if (capacity < topk || topk <= 0 || max_token <= 0 || workspace_threads <= 0 ||
-      probation_age < 0 || probation_age > MAX_RESIDENT_AGE) {
+    uintptr_t req_ids_ptr, uintptr_t last_req_ids_ptr, uintptr_t topk_indices_ptr, uintptr_t stable_prefix_lens_ptr,
+    uintptr_t slot_to_token_ptr, uintptr_t lru_slots_ptr, uintptr_t current_slots_ptr, uintptr_t miss_count_ptr,
+    uintptr_t miss_tokens_ptr, uintptr_t miss_slots_ptr, uintptr_t token_mark_workspace_ptr,
+    uintptr_t token_pos_workspace_ptr, uintptr_t slot_workspace_ptr, uintptr_t miss_position_workspace_ptr,
+    uintptr_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity, int64_t max_token,
+    int64_t workspace_threads, int64_t requested_threads, uintptr_t lru_stamps_ptr, uintptr_t age_workspace_ptr,
+    int64_t probation_age) {
+  if (capacity < topk || topk <= 0 || max_token <= 0 || workspace_threads <= 0 || probation_age < 0 ||
+      probation_age > MAX_RESIDENT_AGE) {
     throw std::invalid_argument("Invalid reuse-prioritized LRU dimensions or probation_age");
   }
   if (num_reqs <= 0) {
@@ -385,13 +383,12 @@ HOT_FUNCTION inline void reuse_prioritized_lru_resident_compact(
   const auto process_rows = [&](const int thread_id, const int team_size) {
     for (int row = thread_id; row < num_reqs; row += team_size) {
       process_one_reuse_prioritized_lru_resident_row(
-          row, topk, capacity, max_token,
-          reinterpret_cast<int64_t*>(req_ids_ptr), reinterpret_cast<int64_t*>(last_req_ids_ptr),
-          reinterpret_cast<int32_t*>(topk_indices_ptr), reinterpret_cast<int32_t*>(stable_prefix_lens_ptr),
-          reinterpret_cast<int32_t*>(slot_to_token_ptr), reinterpret_cast<int32_t*>(lru_slots_ptr),
-          reinterpret_cast<int32_t*>(lru_stamps_ptr), reinterpret_cast<int32_t*>(current_slots_ptr),
-          reinterpret_cast<int32_t*>(miss_count_ptr), reinterpret_cast<int32_t*>(miss_tokens_ptr),
-          reinterpret_cast<int32_t*>(miss_slots_ptr),
+          row, topk, capacity, max_token, reinterpret_cast<int64_t*>(req_ids_ptr),
+          reinterpret_cast<int64_t*>(last_req_ids_ptr), reinterpret_cast<int32_t*>(topk_indices_ptr),
+          reinterpret_cast<int32_t*>(stable_prefix_lens_ptr), reinterpret_cast<int32_t*>(slot_to_token_ptr),
+          reinterpret_cast<int32_t*>(lru_slots_ptr), reinterpret_cast<int32_t*>(lru_stamps_ptr),
+          reinterpret_cast<int32_t*>(current_slots_ptr), reinterpret_cast<int32_t*>(miss_count_ptr),
+          reinterpret_cast<int32_t*>(miss_tokens_ptr), reinterpret_cast<int32_t*>(miss_slots_ptr),
           reinterpret_cast<int32_t*>(token_mark_workspace_ptr) + static_cast<int64_t>(thread_id) * max_token,
           reinterpret_cast<int32_t*>(token_pos_workspace_ptr) + static_cast<int64_t>(thread_id) * max_token,
           reinterpret_cast<int32_t*>(slot_workspace_ptr) + static_cast<int64_t>(thread_id) * capacity * 3,

@@ -26,7 +26,15 @@ MAX_TOKEN = 128
 
 class PlannerState:
     def __init__(
-        self, library, capacity, topk, rows=1, threads=1, reuse=True, probation_age=4, max_token=MAX_TOKEN,
+        self,
+        library,
+        capacity,
+        topk,
+        rows=1,
+        threads=1,
+        reuse=True,
+        probation_age=4,
+        max_token=MAX_TOKEN,
     ):
         self.library = library
         self.capacity, self.topk, self.rows = capacity, topk, rows
@@ -49,9 +57,23 @@ class PlannerState:
         self.ages = (ctypes.c_int32 * (rows * capacity))()
         self.age_scratch = (ctypes.c_int32 * (threads * capacity))()
         buffers = (
-            self.req_ids, self.last_req_ids, self.selected, self.stable, self.tokens, self.slots,
-            self.current, self.counts, self.miss_tokens, self.miss_slots, self.marks, self.positions,
-            self.scratch, self.miss_positions, self.epochs, self.ages, self.age_scratch,
+            self.req_ids,
+            self.last_req_ids,
+            self.selected,
+            self.stable,
+            self.tokens,
+            self.slots,
+            self.current,
+            self.counts,
+            self.miss_tokens,
+            self.miss_slots,
+            self.marks,
+            self.positions,
+            self.scratch,
+            self.miss_positions,
+            self.epochs,
+            self.ages,
+            self.age_scratch,
         )
         self.pointers = (ctypes.c_size_t * len(buffers))(*(ctypes.addressof(b) for b in buffers))
         self.dimensions = (ctypes.c_int64 * 6)(rows, topk, capacity, max_token, threads, threads)
@@ -130,11 +152,10 @@ class TestLRUResident(unittest.TestCase):
             "#pragma once\n#include <algorithm>\n#include <cstdint>\n"
             "#include <limits>\n#include <stdexcept>\n"
             "#ifdef _OPENMP\n#include <omp.h>\n#else\n"
-            "inline int omp_get_thread_num() { return 0; }\n#endif\n"
-            + native[begin:end]
+            "inline int omp_get_thread_num() { return 0; }\n#endif\n" + native[begin:end]
         )
         source = Path(cls.build_dir.name) / "wrapper.cpp"
-        source.write_text('''
+        source.write_text("""
 #include "lru_resident.h"
 extern "C" int run_planner(bool reuse, const uintptr_t* p, const int64_t* d, int32_t age) {
   try {
@@ -157,11 +178,19 @@ extern "C" bool has_openmp() {
   return false;
 #endif
 }
-''')
+""")
         output = Path(cls.build_dir.name) / "planner.so"
         command = compiler + [
-            "-std=c++17", "-O2", "-shared", "-fPIC", "-Wno-unknown-pragmas",
-            "-I", cls.build_dir.name, str(source), "-o", str(output),
+            "-std=c++17",
+            "-O2",
+            "-shared",
+            "-fPIC",
+            "-Wno-unknown-pragmas",
+            "-I",
+            cls.build_dir.name,
+            str(source),
+            "-o",
+            str(output),
         ]
         # Probe the toolchain separately: an actual planner compilation error
         # must fail, rather than silently disabling the OpenMP test path.
@@ -176,7 +205,10 @@ extern "C" bool has_openmp() {
         subprocess.run(command + flags, capture_output=True, text=True, check=True)
         cls.library = ctypes.CDLL(str(output))
         cls.library.run_planner.argtypes = [
-            ctypes.c_bool, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_int64), ctypes.c_int32,
+            ctypes.c_bool,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_int64),
+            ctypes.c_int32,
         ]
         cls.library.run_planner.restype = ctypes.c_int
         cls.library.has_openmp.restype = ctypes.c_bool
@@ -224,7 +256,7 @@ extern "C" bool has_openmp() {
             samples = {False: [], True: []}
             for trial in range(rounds):
                 # Alternate policy order to reduce systematic timing bias.
-                for reuse in ((False, True) if trial % 2 == 0 else (True, False)):
+                for reuse in (False, True) if trial % 2 == 0 else (True, False):
                     state = self.state(capacity=4096, topk=topk, reuse=reuse, max_token=16384)
                     elapsed = 0.0
                     misses = 0
@@ -251,8 +283,7 @@ extern "C" bool has_openmp() {
 
     def test_original_lru_batch_order_is_unchanged(self):
         state = self.state(capacity=4, topk=2, reuse=False)
-        expected = [([2, 5], [2, 3, 0, 1]), ([5, 7], [3, 0, 2, 1]),
-                    ([2, 8], [2, 1, 3, 0]), ([9, 10], [3, 0, 2, 1])]
+        expected = [([2, 5], [2, 3, 0, 1]), ([5, 7], [3, 0, 2, 1]), ([2, 8], [2, 1, 3, 0]), ([9, 10], [3, 0, 2, 1])]
         for selected, slots in expected:
             state.step([selected])
             self.assertEqual(list(state.slots), slots)
@@ -276,7 +307,13 @@ extern "C" bool has_openmp() {
                     selected = [t if rng.random() > 0.2 else rng.choice((-1, MAX_TOKEN)) for t in selected]
                     reset = state.last_req_ids[0] != req_id
                     tokens, order, ages, current, misses = reference_step(
-                        tokens, order, ages, selected, reset, stable, probation_age,
+                        tokens,
+                        order,
+                        ages,
+                        selected,
+                        reset,
+                        stable,
+                        probation_age,
                     )
                     actual_current, actual_misses = state.step([selected], [req_id], [stable])[0]
                     self.assertEqual(state.snapshot(), (tokens, order, ages, [req_id]))
@@ -426,7 +463,13 @@ extern "C" bool has_openmp() {
             with self.subTest(selected=selected, req_id=req_id, stable=stable):
                 reset = state.last_req_ids[0] != req_id
                 tokens, order, ages, current, misses = reference_step(
-                    tokens, order, ages, selected, reset, stable, state.probation_age,
+                    tokens,
+                    order,
+                    ages,
+                    selected,
+                    reset,
+                    stable,
+                    state.probation_age,
                 )
                 actual = state.step([selected], [req_id], [stable])[0]
                 self.assertEqual(actual, (current, misses))
