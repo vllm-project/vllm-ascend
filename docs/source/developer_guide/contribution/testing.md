@@ -458,8 +458,10 @@ owners before the PR can merge. Key points:
   cases.
 
 The check logic lives in
-`.github/workflows/scripts/codeowner_gate.py` (unit tests in
-`tests/ut/tools/test_codeowner_gate.py`).
+`.github/workflows/scripts/codeowner_gate.py` (colocated unit tests in
+`.github/workflows/scripts/test_codeowner_gate.py`; run them manually with
+`pytest .github/workflows/scripts/test_codeowner_gate.py` - the cpu-ut CI
+partition only covers `tests/ut`).
 
 ### Choose coverage for the change
 
