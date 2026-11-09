@@ -131,9 +131,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         )
 
     def _init_dcp(self) -> None:
-        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1 and getattr(
-            self.draft_model_config, "use_mla", False
-        )
+        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
         self.dcp_manager: DCPManager | None = None
         if not self.use_dcp:
             return
@@ -153,17 +151,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         target-derived config, then swap in the draft model config without
         re-validating it."""
         source_parallel_config = self.vllm_config.parallel_config
-        # GQA draft models maintain native TP head sharding without DCP.
-        # Only MLA draft models inherit target DCP.
-        decode_context_parallel_size = (
-            source_parallel_config.decode_context_parallel_size
-            if getattr(self.draft_model_config, "use_mla", False)
-            else 1
-        )
         parallel_config = replace(
             source_parallel_config,
             pipeline_parallel_size=1,
-            decode_context_parallel_size=decode_context_parallel_size,
         )
         with disable_profiling_chunk_for_draft(self.vllm_config):
             draft_config = replace(

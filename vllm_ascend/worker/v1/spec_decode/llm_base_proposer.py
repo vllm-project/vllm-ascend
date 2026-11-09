@@ -208,8 +208,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
 
-        draft_model_config = getattr(self.vllm_config.speculative_config, "draft_model_config", None)
-        self.dcp_size = self.runner.dcp_size if getattr(draft_model_config, "use_mla", False) else 1
+        self.dcp_size = self.runner.dcp_size
         self.dcp_rank = self.runner.dcp_rank
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
