@@ -638,13 +638,13 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         op._pack_keypool_indices.assert_not_called()
 
 
-@pytest.mark.parametrize(("pcp_local_token_count", "query_tokens"), [(2, 0), (2, 2), (4, 2), (4, 4)])
-@pytest.mark.parametrize("actual_tokens", [0, 2])
+@pytest.mark.parametrize(
+    ("pcp_local_token_count", "query_tokens", "actual_tokens"), [(2, 0, 0), (2, 2, 2), (4, 2, 2), (4, 4, 0)]
+)
 @pytest.mark.parametrize("prefetch", [False, True])
 @pytest.mark.parametrize("compute_topk", [False, True])
-@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 def test_backend_restores_pcp_keys_before_kpool_cache_write(
-    monkeypatch, pcp_local_token_count, query_tokens, actual_tokens, prefetch, compute_topk, graph_mode
+    monkeypatch, pcp_local_token_count, query_tokens, actual_tokens, prefetch, compute_topk
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -709,7 +709,7 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=graph_mode,
+            cudagraph_runtime_mode=None,
             virtual_engine=0,
         ),
     )

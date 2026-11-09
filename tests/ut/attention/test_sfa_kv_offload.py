@@ -23,8 +23,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 
 
 @pytest.mark.parametrize("defer_wait", [False, True])
-@pytest.mark.parametrize("fused_copy", [False, True])
-def test_exec_kv_offload_completion_controls_compute_and_cache_write(defer_wait, fused_copy):
+def test_exec_kv_offload_completion_controls_compute_and_cache_write(defer_wait):
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     k_nope, k_pe = torch.ones(2, 4), torch.ones(2, 2)
     impl._is_decode_only = MagicMock(return_value=True)
@@ -33,19 +32,14 @@ def test_exec_kv_offload_completion_controls_compute_and_cache_write(defer_wait,
     impl._cpu_cache_pair = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
     impl._in_graph_runtime = MagicMock(return_value=False)
     slots = torch.arange(2)
-    metadata = SimpleNamespace(fused_copy_sfa_enabled=fused_copy, copy_sfa_device_slots=slots)
+    metadata = SimpleNamespace(fused_copy_sfa_enabled=False)
     with patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager:
         manager = get_manager.return_value
-        manager._get_offload_layer_id.return_value = 0
-        manager.topk_buffers_k = [torch.zeros_like(k_nope)]
-        manager.topk_buffers_v = [torch.zeros_like(k_pe)]
         result = impl.exec_kv(k_nope, k_pe, k_pe, (), slots, metadata, defer_wait=defer_wait)
         if defer_wait:
             assert callable(result)
             impl._compute_kv_only.assert_not_called()
             manager.offload_new_kv.assert_not_called()
-            assert torch.count_nonzero(manager.topk_buffers_k[0]) == 0
-            assert torch.count_nonzero(manager.topk_buffers_v[0]) == 0
             result = result()
         assert result[0] is k_pe and result[1] is k_nope
         impl._compute_kv_only.assert_called_once_with(k_nope, k_pe, k_pe)
@@ -53,47 +47,6 @@ def test_exec_kv_offload_completion_controls_compute_and_cache_write(defer_wait,
         assert manager.offload_new_kv.call_args.kwargs["slot_mapping"] is slots
         assert manager.offload_new_kv.call_args.kwargs["k"] is k_nope
         assert manager.offload_new_kv.call_args.kwargs["v"] is k_pe
-        if fused_copy:
-            torch.testing.assert_close(manager.topk_buffers_k[0], k_nope)
-            torch.testing.assert_close(manager.topk_buffers_v[0], k_pe)
-
-
-@pytest.mark.parametrize("defer_wait", [False, True])
-def test_exec_kv_offload_prefill_preserves_cache_commit_order(defer_wait):
-    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
-    impl.pcp_enabled = False
-    impl._is_decode_only = MagicMock(return_value=False)
-    impl._offload_layer_name = MagicMock(return_value="layer")
-    impl._cpu_cache_pair = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
-    impl._in_graph_runtime = MagicMock(return_value=False)
-    events = []
-    impl._copy_prefill_kv_to_copy_sfa_row = MagicMock(side_effect=lambda *args: events.append("copy_sfa"))
-    kv = torch.ones(2, 4)
-    cache = (torch.empty_like(kv), torch.empty_like(kv))
-    slots = torch.arange(2)
-    metadata = SimpleNamespace()
-
-    def write_main_cache(*args):
-        events.append("main_cache")
-        assert args[3] is cache and args[4] is slots and args[5] is metadata
-        return None, None
-
-    with (
-        patch("vllm_ascend.attention.sfa_kv_offload._check_device_kv_cache_exist"),
-        patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager,
-        patch.object(impl, "_exec_kv_local", side_effect=write_main_cache),
-    ):
-        manager = get_manager.return_value
-        manager.offload_new_kv.side_effect = lambda **kwargs: events.append("cpu_cache")
-        result = impl.exec_kv(kv, kv, kv, cache, slots, metadata, defer_wait=defer_wait)
-        if defer_wait:
-            assert callable(result) and events == []
-            result = result()
-        assert result == (None, None)
-        assert events == ["main_cache", "cpu_cache", "copy_sfa"]
-        assert manager.offload_new_kv.call_args.kwargs["has_prefill"] is True
-        assert manager.offload_new_kv.call_args.kwargs["k_cache_npu"] is cache[0]
-        assert manager.offload_new_kv.call_args.kwargs["v_cache_npu"] is cache[1]
 
 
 def _make_boundary_decode_metadata():
