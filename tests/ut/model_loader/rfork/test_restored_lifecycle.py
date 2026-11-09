@@ -5,7 +5,6 @@ import json
 import weakref
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -170,42 +169,6 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
     assert discarded_hook_id not in rfork_helpers.dynamo_hooks
 
 
-@pytest.fixture
-def checkpoint_loader(monkeypatch, rfork_helpers):
-    @dataclass
-    class CheckpointSource:
-        model_or_path: str
-        revision: str | None
-        subfolder: str | None = None
-        prefix: str = ""
-        fall_back_to_pt: bool = True
-        allow_patterns_overrides: list[str] | None = None
-
-    calls = []
-    folders: dict[str, str] = {}
-    selections: dict[str, tuple[list[str], bool]] = {}
-    configs = []
-
-    class DefaultModelLoader:
-        Source = CheckpointSource
-
-        def __init__(self, load_config):
-            configs.append(load_config)
-
-        def _prepare_weights(self, *args):
-            calls.append(args)
-            return folders.get(args[0], "unused"), *selections[args[0]], "model.safetensors.index.json"
-
-    _stub(monkeypatch, "vllm.model_executor.model_loader.default_loader", DefaultModelLoader=DefaultModelLoader)
-    return SimpleNamespace(
-        Source=CheckpointSource,
-        calls=calls,
-        folders=folders,
-        selections=selections,
-        configs=configs,
-    )
-
-
 def test_checkpoint_names_follow_selected_sources_and_prefixes(rfork_helpers, checkpoint_loader, tmp_path):
     primary = tmp_path / "selected.safetensors"
     secondary = tmp_path / "secondary.safetensors"
@@ -259,6 +222,26 @@ def test_checkpoint_names_use_index_without_opening_shards(rfork_helpers, checkp
     )
 
     assert names == set(weight_map)
+
+
+@pytest.mark.parametrize(
+    "index_text",
+    ["{", "[]", "{}", '{"weight_map": null}', '{"weight_map": ["a.weight"]}', '{"weight_map": "a.weight"}'],
+)
+def test_checkpoint_names_reject_malformed_index_as_fallback_error(
+    rfork_helpers, checkpoint_loader, tmp_path, index_text
+):
+    (tmp_path / "model.safetensors.index.json").write_text(index_text, encoding="utf-8")
+    checkpoint_loader.folders["model"] = str(tmp_path)
+    checkpoint_loader.selections["model"] = ([str(tmp_path / "shard-a.safetensors")], True)
+
+    with pytest.raises(ValueError) as error:
+        rfork_helpers.loader._get_checkpoint_weight_names(
+            Module(),
+            SimpleNamespace(model="model", revision=None),
+            SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
+        )
+    assert isinstance(error.value, rfork_helpers.loader.RFORK_FALLBACK_EXCEPTIONS)
 
 
 @pytest.mark.parametrize("processed_layout", [False, True])
