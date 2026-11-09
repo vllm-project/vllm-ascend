@@ -53,6 +53,46 @@ class ArrayBuffer:
 
 
 class TestMain2MainContracts(unittest.TestCase):
+    def test_mamba_precopy_temporal_bias_preserves_conv_and_legacy_calls(self):
+        path = ROOT / "vllm_ascend/ops/triton/mamba/precopy.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        kernel = next(
+            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "precopy_mamba_align_fused_kernel"
+        )
+        kernel.decorator_list = []
+        module = ast.Module(
+            body=[ast.ImportFrom(module="__future__", names=[ast.alias("annotations")], level=0), kernel],
+            type_ignores=[],
+        )
+        for zero_temporal in (None, False, True):
+            for conv_width in (0, 4):
+                for mapped in (False, True):
+                    with self.subTest(zero_temporal=zero_temporal, conv_width=conv_width, mapped=mapped):
+                        req_idx = 2 if mapped else 0
+                        memory = {100 + req_idx: 5, 200 + req_idx: 3, 300 + req_idx: 2, 900: conv_width, 1300: 2}
+                        copy = MagicMock()
+                        namespace = dict(
+                            tl=SimpleNamespace(
+                                program_id=lambda _axis: np.int64(0),
+                                load=lambda address, memory=memory: np.int64(memory[int(address)]),
+                                where=np.where,
+                            ),
+                            _copy_mamba_state_block=copy,
+                        )
+                        exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
+                        kwargs = dict(COPY_BLOCK_SIZE=1024, CONV_STATE_DIM_FIRST=True, HAS_IDX_MAPPING=mapped)
+                        if zero_temporal is not None:
+                            kwargs["ZERO_TEMPORAL_TOKEN_BIAS"] = zero_temporal
+                        namespace["precopy_mamba_align_fused_kernel"](
+                            100, 200, 300, 400, 32, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1, **kwargs
+                        )
+                        copy.assert_called_once()
+                        args = copy.call_args.args
+                        self.assertEqual(args[:4], (0, 0, 3, 5))
+                        self.assertEqual(args[4], 0 if zero_temporal and conv_width == 0 else 2)
+                        self.assertEqual(args[5:15], (400, 32, 500, 600, 700, 800, 900, 1000, 1100, 1200))
+                        self.assertEqual(args[16:], (1024, True, 1))
+
     def test_replayssm_temporal_guard_retains_conv_copy_and_count_normalization(self):
         path = ROOT / "vllm_ascend/ops/triton/v1/mamba/postprocess.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
