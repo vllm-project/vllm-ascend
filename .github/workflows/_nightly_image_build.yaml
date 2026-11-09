@@ -506,3 +506,55 @@ jobs:
           path: ${{ runner.temp }}/build-info-image/*.json
           if-no-files-found: error
           retention-days: 30
+
+  # 香港弹性节点只从 HK SWR 就近拉取；这里在镜像发布完成后触发 sync-tools 复制，
+  # 并等待复制结束，保证后续依赖 build-image 的香港测试任务开跑时 HK tag 已存在。
+  sync-hk:
+    name: Mirror nightly-${{ inputs.target }} to HK SWR
+    needs: [generate-matrix, build, merge-image]
+    if: >-
+      always() &&
+      inputs.should_push &&
+      inputs.target == 'a2' &&
+      needs.build.result == 'success' &&
+      (needs.merge-image.result == 'success' || needs.merge-image.result == 'skipped')
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Dispatch HK sync and wait for it
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ inputs.vllm_ascend_branch }}
+          TARGET: ${{ inputs.target }}
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            const owner = 'ascend-gha-runners';
+            const repo = 'sync-tools';
+            const workflow_id = 'sync-vllm-ascend-hk.yml';
+            const tag = `nightly-ci-${process.env.BRANCH.replace(/\//g, '-')}-${process.env.TARGET}`;
+            console.log(`dispatching HK sync for ${tag}`);
+            const startedAt = Date.now();
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id, ref: 'main', inputs: { tag },
+            });
+            const deadline = startedAt + 20 * 60 * 1000;
+            let run;
+            while (Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 15000));
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 20,
+              });
+              run = data.workflow_runs.find(
+                (r) => new Date(r.created_at).getTime() >= startedAt - 60 * 1000,
+              );
+              if (run && run.status === 'completed') break;
+            }
+            if (!run) {
+              core.setFailed(`HK sync run not found within timeout for ${tag}`);
+            } else if (run.status !== 'completed') {
+              core.setFailed(`HK sync still running after timeout: ${run.html_url}`);
+            } else if (run.conclusion !== 'success') {
+              core.setFailed(`HK sync ${run.conclusion}: ${run.html_url}`);
+            } else {
+              console.log(`HK sync ok: ${run.html_url}`);
+            }
