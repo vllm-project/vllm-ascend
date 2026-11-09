@@ -1,0 +1,4 @@
+pr: 16292
+entries:
+  - category: bugfix
+    text: Routed speculative GDN verify windows wider than the AscendC recurrent operator's per-sequence token cap through the uncapped FLA Triton recurrent kernel, avoiding uninitialised output and garbled generations.
