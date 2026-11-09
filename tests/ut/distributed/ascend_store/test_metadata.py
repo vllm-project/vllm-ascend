@@ -428,6 +428,54 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertIn("@pp_rank:0", new_keys[0])
         self.assertIn("@pp_rank:1", new_keys[1])
 
+    def test_decode_adaptor_prefill_pp_nonzero_local_pp_rank(self):
+        # The decode instance itself runs PP > 1, so this worker builds keys
+        # with pp_rank=2 rather than 0.
+        meta = KeyMetadata("llama", 0, 0, 2)
+        db = ChunkedTokenDatabase([meta], [16], partitions=[2, 2])
+        db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]})
+        keys = ["llama@dcp:0@head_or_tp_rank:0@pp_rank:2@group:0@cache_role:kv@cache_family:default@hash1"]
+        addrs = [[1, 2, 3, 4, 5, 6, 7, 8]]
+        sizes = [[10, 20, 30, 40, 50, 60, 70, 80]]
+
+        new_keys, new_addrs, new_sizes = db.decode_adaptor_prefill_pp(keys, addrs, sizes)
+
+        # Must expand into Prefill PP ranks 0..N-1, not duplicate the local rank.
+        self.assertEqual(len(new_keys), 2)
+        self.assertEqual(
+            [ChunkedTokenDatabase._read_key_field(k, "pp_rank") for k in new_keys],
+            [0, 1],
+        )
+        self.assertEqual(len(set(new_keys)), 2)
+        self.assertEqual(new_addrs, [[1, 2, 3, 4], [5, 6, 7, 8]])
+        self.assertEqual(new_sizes, [[10, 20, 30, 40], [50, 60, 70, 80]])
+
+    def test_decode_adaptor_prefill_pp_uses_group_metadata(self):
+        meta0 = KeyMetadata("llama", 0, 0, 0)
+        meta1 = KeyMetadata("llama", 0, 0, 3)
+        db = ChunkedTokenDatabase([meta0, meta1], [16], partitions=[2, 2])
+        db.set_group_buffers({1: [1000, 2000]}, {1: [160, 320]})
+        keys = ["llama@dcp:0@head_or_tp_rank:0@pp_rank:3@group:1@cache_role:kv@cache_family:default@hash1"]
+
+        new_keys, _, _ = db.decode_adaptor_prefill_pp(keys, [[1, 2, 3, 4]], [[10, 20, 30, 40]], kv_cache_group_id=1)
+
+        self.assertEqual(
+            [ChunkedTokenDatabase._read_key_field(k, "pp_rank") for k in new_keys],
+            [0, 1],
+        )
+
+    def test_decode_adaptor_prefill_pp_rejects_rank_mismatch(self):
+        meta = KeyMetadata("llama", 0, 0, 2)
+        db = ChunkedTokenDatabase([meta], [16], partitions=[2, 2])
+        db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]})
+
+        with self.assertRaises(ValueError):
+            db.decode_adaptor_prefill_pp(
+                ["llama@dcp:0@head_or_tp_rank:0@pp_rank:1@group:0@cache_family:default@hash1"],
+                [[1, 2, 3, 4]],
+                [[10, 20, 30, 40]],
+            )
+
 
 class TestLoadSpec(unittest.TestCase):
     def test_fields(self):

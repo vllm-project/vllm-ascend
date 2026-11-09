@@ -677,6 +677,32 @@ class ChunkedTokenDatabase:
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
 
+    @staticmethod
+    def _read_key_field(key: str, field: str) -> int | None:
+        """Read an integer field embedded as '@field:value@' in a cache key."""
+        marker = f"@{field}:"
+        start = key.find(marker)
+        if start < 0:
+            return None
+        value_start = start + len(marker)
+        value_end = key.find("@", value_start)
+        if value_end < 0:
+            value_end = len(key)
+        return int(key[value_start:value_end])
+
+    @staticmethod
+    def _replace_key_field(key: str, field: str, value: int) -> str:
+        """Replace an integer field embedded as '@field:value@' in a cache key."""
+        marker = f"@{field}:"
+        start = key.find(marker)
+        if start < 0:
+            raise ValueError(f"Missing {marker!r} in cache key {key!r}")
+        value_start = start + len(marker)
+        value_end = key.find("@", value_start)
+        if value_end < 0:
+            value_end = len(key)
+        return f"{key[:value_start]}{value}{key[value_end:]}"
+
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:
             return key, addr, size
@@ -685,20 +711,41 @@ class ChunkedTokenDatabase:
         new_addr = []
         new_size = []
 
+        # The key prefix is built from this worker's own PP rank, which is not
+        # necessarily 0 when the decode instance itself runs PP > 1. Expand
+        # from that actual rank instead of assuming "@pp_rank:0".
+        expected_pp_rank = self.metadata[kv_cache_group_id].pp_rank
         group_num_layers = self.group_num_layers.get(cache_role, {}).get(kv_cache_group_id, 0)
         for i, (addr_list, size_list) in enumerate(zip(addr, size)):
+            actual_pp_rank = self._read_key_field(key[i], "pp_rank")
+            if actual_pp_rank != expected_pp_rank:
+                raise ValueError(
+                    "Prefill-PP key expansion rank mismatch: "
+                    f"expected local pp_rank={expected_pp_rank}, got {actual_pp_rank} "
+                    f"in key {key[i]!r} (kv_cache_group_id={kv_cache_group_id})"
+                )
+
             caches_per_layer = len(addr_list) // group_num_layers if group_num_layers else 2
             caches_per_layer = max(caches_per_layer, 1)
             start = 0
+            expanded_keys = []
             for j, part in enumerate(self.partitions):
                 end = len(addr_list) if j == len(self.partitions) - 1 else start + part * caches_per_layer
-                new_str = key[i].replace(  # type: ignore[attr-defined]
-                    "@pp_rank:0", f"@pp_rank:{j}", 1
-                )
+                new_str = self._replace_key_field(key[i], "pp_rank", j)
+                expanded_keys.append(new_str)
                 new_key.append(new_str)
                 new_addr.append(addr_list[start:end])
                 new_size.append(size_list[start:end])
                 start = end
+
+            # A partial PUT must never be mistaken for a complete block: every
+            # expanded key has to be distinct even if the key prefix changes.
+            if len(set(expanded_keys)) != len(self.partitions):
+                raise RuntimeError(
+                    "Prefill-PP key expansion produced duplicate keys: "
+                    f"logical_key={key[i]!r}, source_pp_rank={expected_pp_rank}, "
+                    f"partitions={self.partitions}, expanded={expanded_keys}"
+                )
         return new_key, new_addr, new_size
 
 
