@@ -5,6 +5,7 @@
 
 import json
 from contextlib import ExitStack
+from typing import Any
 
 import pytest
 
@@ -45,7 +46,7 @@ def preload_model(request):
 @pytest.fixture(scope="module")
 def preload_baseline(preload_environment, preload_model, tmp_path_factory):
     output_dir = tmp_path_factory.mktemp("preload-baselines")
-    baselines = {}
+    baselines: dict[tuple[str, bool, str], dict[str, Any]] = {}
 
     def load(*, dtype="bfloat16", graph=False, hf_overrides=None):
         key = (dtype, graph, json.dumps(hf_overrides, sort_keys=True))
