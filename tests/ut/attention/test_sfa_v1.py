@@ -1293,13 +1293,8 @@ class TestAscendSFAImpl(TestBase):
     ):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
-        only while shape, dtype and device still match. The hand-rolled
-        ``copy_`` it replaced was unconditional, so a re-derived value that
-        stopped being compatible aborted the whole weight-update transaction
-        with a ``RuntimeError``. That failure mode is the only behaviour this
-        change alters, so it is the part of the contract the unit tests have to
-        pin down.
+        v0.33.0 rebinds an incompatible value; main can copy a smaller value
+        into the parameter's existing storage. Both must accept the new shape.
         """
         layer = self._setup_kv_b_proj()
         mock_format_cast.return_value = layer.weight
@@ -1320,7 +1315,7 @@ class TestAscendSFAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             # A re-derived value that no longer fits rebinds the parameter.
             self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         else:
