@@ -188,7 +188,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 ),
                 torch.arange(self.topk, dtype=torch.int32, device=device).view(1, 1, self.topk),
                 torch.arange(1, _ATTENTION_CHUNK_ROWS + 1, dtype=torch.int32, device=device),
-                torch.full((_ATTENTION_CHUNK_ROWS,), self.topk, dtype=torch.int32, device=device),
             )
 
         return current_workspace_manager().get_persistent_resource(key, allocate)
@@ -484,7 +483,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             )
         from vllm_ascend.hisparse.cache_ops import pack_attention_rows
 
-        latent, rope, block_table, indices, query_ends, seq_lens = self._workspace(query.dtype)
+        latent, rope, block_table, indices, query_ends = self._workspace(query.dtype)
         positions = indices.view(1, -1).to(torch.float32)
         outputs = []
         for start in range(0, query.shape[0], _ATTENTION_CHUNK_ROWS):

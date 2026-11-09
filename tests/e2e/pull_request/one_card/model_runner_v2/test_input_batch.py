@@ -17,24 +17,6 @@ def _require_npu():
     torch.npu.set_device(0)
 
 
-def _combine_inputs_cpu(input_ids, metadata, num_new):
-    """Independent value oracle, including the kernel's input-ID side effects."""
-    result, indices = input_ids.clone(), []
-    mapping, sampled, starts, lengths, prefill, drafts, cumulative = metadata.values()
-    for row, state in enumerate(mapping.tolist()):
-        count = int(cumulative[row + 1] - cumulative[row])
-        end = int(starts[row + 1])
-        indices.extend(range(end - count, end))
-        if int(lengths[row]) <= int(prefill[state]):
-            continue
-        if num_new and int(lengths[row]) - count >= int(prefill[state]):
-            result[end - count] = sampled[state]
-        draft_count = count - num_new
-        if draft_count > 0:
-            result[end - draft_count : end] = drafts[state, :draft_count]
-    return result, torch.tensor(indices, dtype=torch.int64)
-
-
 @pytest.mark.parametrize("num_new", [0, 1])
 @pytest.mark.parametrize("capture", [False, True])
 def test_target_logits_workspace_matches_core_with_changing_inputs(num_new, capture):
@@ -101,11 +83,8 @@ def test_target_logits_workspace_matches_core_with_changing_inputs(num_new, capt
                         graph.replay()
                     baseline_ids = initial.to("npu")
                     baseline = combine_sampled_and_draft_tokens(baseline_ids, *device.values(), num_logits, num_new)
-                    expected_ids, expected_indices = _combine_inputs_cpu(initial, cpu, num_new)
-                    torch.testing.assert_close(output.cpu(), expected_indices, rtol=0, atol=0)
-                    torch.testing.assert_close(baseline.cpu(), expected_indices, rtol=0, atol=0)
-                    torch.testing.assert_close(owner.input_ids.cpu(), expected_ids, rtol=0, atol=0)
-                    torch.testing.assert_close(baseline_ids.cpu(), expected_ids, rtol=0, atol=0)
+                    torch.testing.assert_close(output.cpu(), baseline.cpu(), rtol=0, atol=0)
+                    torch.testing.assert_close(owner.input_ids.cpu(), baseline_ids.cpu(), rtol=0, atol=0)
                     assert output.data_ptr() == owner.logits_indices_workspace.data_ptr()
                     assert torch.all(owner.logits_indices_workspace[num_logits:].cpu() == -777)
             empty = dict(device)

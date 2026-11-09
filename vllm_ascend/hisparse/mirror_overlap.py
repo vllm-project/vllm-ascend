@@ -10,21 +10,15 @@ import torch
 class SamplingMirrorOverlapConnector:
     """Let Target logits and sampling run before joining the Host mirror."""
 
-    def __init__(self, connector, worker, output_copy_stream, logger, rank, snapshot=None):
+    def __init__(self, connector, worker, output_copy_stream, snapshot=None):
         self._connector = connector
         self._worker = worker
         self._output_copy_stream = output_copy_stream
-        self._logger = logger
-        self._rank = rank
         self._snapshot = snapshot
         self._overlap_draft = False
         self._pending_event = None
         self._allow_step = False
         self._eligible_forward = False
-        self._batch_size = 0
-        self._logged_batch_sizes: set[int] = set()
-        self._logged_snapshot_sizes: set[int] = set()
-        self._logged_direct_sizes: set[int] = set()
 
     def __getattr__(self, name):
         return getattr(self._connector, name)
@@ -50,8 +44,6 @@ class SamplingMirrorOverlapConnector:
             and not input_batch.has_prefill
             and 0 < input_batch.num_tokens == input_batch.num_tokens_after_padding
         )
-        if self._eligible_forward:
-            self._batch_size = input_batch.num_reqs
         return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
 
     def finish_forward(self) -> None:
@@ -92,19 +84,6 @@ class SamplingMirrorOverlapConnector:
                 self._overlap_draft = (
                     len(pending) == pending_before + 1 and pending[-1][0] is snapshot.submitted_completion
                 )
-                if self._overlap_draft and self._batch_size not in self._logged_snapshot_sizes:
-                    self._logged_snapshot_sizes.add(self._batch_size)
-                    self._logger.info(
-                        "HiSparse Target snapshot used: rank=%d requests=%d", self._rank, self._batch_size
-                    )
-            if snapshot is not None and not self._overlap_draft and self._batch_size not in self._logged_direct_sizes:
-                self._logged_direct_sizes.add(self._batch_size)
-                self._logger.info(
-                    "HiSparse Target snapshot fallback: rank=%d requests=%d", self._rank, self._batch_size
-                )
-            if self._batch_size not in self._logged_batch_sizes:
-                self._logged_batch_sizes.add(self._batch_size)
-                self._logger.info("HiSparse MTP mirror overlap used: rank=%d requests=%d", self._rank, self._batch_size)
         else:
             worker.host_write_event.record(compute_stream)
         worker._release_completed_dma_descriptors()
@@ -182,4 +161,4 @@ def overlap_mtp_host_mirror(runner):
     logger.info("HiSparse MTP mirror overlap enabled: rank=%d", rank)
     if snapshot is not None:
         logger.info("HiSparse Target snapshot enabled: rank=%d", rank)
-    return SamplingMirrorOverlapConnector(connector, worker, output_stream, logger, rank, snapshot)
+    return SamplingMirrorOverlapConnector(connector, worker, output_stream, snapshot)

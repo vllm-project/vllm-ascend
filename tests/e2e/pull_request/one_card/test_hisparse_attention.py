@@ -47,7 +47,6 @@ def test_sparse_attention_reference(num_queries, strided, capture):
         torch.arange(capacity * topk // block_size, dtype=torch.int32, device=device).view(capacity, -1),
         torch.arange(topk, dtype=torch.int32, device=device).view(1, 1, topk),
         torch.arange(1, capacity + 1, dtype=torch.int32, device=device),
-        torch.full((capacity,), topk, dtype=torch.int32, device=device),
     )
     impl = SimpleNamespace(kv_lora_rank=latent_dim, qk_rope_head_dim=rope_dim, scale=scale, enable_sparse_sfa_c8=False)
     impl._workspace = lambda dtype: workspace

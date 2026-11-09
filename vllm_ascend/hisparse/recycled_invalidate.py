@@ -75,7 +75,6 @@ class RecycledGroupInvalidator:
         self._block_size = block_size
         self._stream = torch.accelerator.current_stream()
         self._pointer_table = async_tensor_h2d(list(self._addresses), self._device, torch.int64)
-        self._logged_rows: set[int] = set()
 
     @classmethod
     def bind(cls, worker):
@@ -167,13 +166,4 @@ class RecycledGroupInvalidator:
             # Repeating the last ID preserves membership without a sentinel.
             chunk.extend([chunk[-1]] * (_BLOCK_BUCKET - len(chunk)))
             self._launch(chunk, indices)
-        rows = indices.numel()
-        if rows not in self._logged_rows:
-            logger.info(
-                "HiSparse grouped recycled invalidation: rank=%d groups=%d active_rows=%d bucket=8",
-                self._rank,
-                len(self._tables),
-                rows,
-            )
-            self._logged_rows.add(rows)
         return True
