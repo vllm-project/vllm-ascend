@@ -160,6 +160,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
         num_prefills=1,
         num_decodes=1,
         num_decode_tokens=1,
+        prefill_query_start_loc=torch.tensor([0, 3]),
         prefill_state_indices=torch.tensor([5]),
         prefill_has_initial_state=torch.tensor([False]),
         non_spec_prefill_metadata=SimpleNamespace(chunk=object()),
@@ -291,7 +292,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
         state.index_fill_(0, state_slots, 2.0)
         return q * 2
 
-    def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
+    def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args, query_start_loc):
+        assert query_start_loc is metadata.prefill_query_start_loc
         events.append("state_write")
         calls.append("prefill")
         assert q.shape[1] == 3
