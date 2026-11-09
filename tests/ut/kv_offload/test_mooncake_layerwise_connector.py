@@ -1466,8 +1466,12 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
                 with KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output, defer_finalize=True):
                     self.assertEqual(self.worker.current_layer, 0)
                     self.assertEqual(self.worker._cache_write_events, [None, None])
-                    self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
-                    self.assertEqual(metadata.requests["req"].remote_block_ids, [[10, 11]])
+                    plan = self.worker._layerwise_step_plan
+                    self.assertIsNotNone(plan)
+                    self.assertEqual(plan.requests["req"].local_block_ids, [[6, 7]])
+                    self.assertEqual(plan.requests["req"].remote_block_ids, [[10, 11]])
+                    self.assertEqual(metadata.requests["req"].local_block_ids, [[3]])
+                    self.assertEqual(metadata.requests["req"].remote_block_ids, [[5]])
                     self.connector.on_kv_cache_written("layer0")
                     event = self.worker._cache_write_events[0]
                     self.connector.save_kv_layer("layer0", [], MagicMock())
@@ -1477,7 +1481,8 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
                 # The deferred start_load_kv must not reset the MTP position or
                 # expand the scheduler block IDs a second time.
                 self.assertEqual(self.worker.current_layer, 1)
-                self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
+                self.assertEqual(self.worker._layerwise_step_plan.requests["req"].local_block_ids, [[6, 7]])
+                self.assertEqual(metadata.requests["req"].local_block_ids, [[3]])
                 self.connector.on_kv_cache_written("mtp.layer1")
                 self.connector.save_kv_layer("mtp.layer1", [], MagicMock())
                 task = self.worker.kv_send_layer_thread.send_queue.put.call_args.args[0]

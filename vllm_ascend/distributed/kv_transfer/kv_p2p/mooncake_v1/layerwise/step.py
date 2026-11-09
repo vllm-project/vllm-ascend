@@ -40,6 +40,7 @@ class LayerwiseTransferPlan:
     requests: dict[str, Any]
     aligned_remote_block_ids: list[tuple[Any, dict[int, list[int]], list[bool]]]
     send_task_update: LayerwiseSendTaskUpdate | None = None
+    send_task: Any = None
 
 
 class _ChunkFinishRecorder:
@@ -139,6 +140,7 @@ class LayerwiseStepController:
         request_plan: dict[str, Any] = {}
         aligned_ops: list[tuple[Any, dict[int, list[int]], list[bool]]] = []
         send_task_update = None
+        plan_send_task = metadata.send_task
         if producer:
             update_metadata = {}
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
@@ -219,11 +221,15 @@ class LayerwiseStepController:
                     group_block_len_tensor=group_block_len_tensor,
                     group_seq_start_tensor=group_seq_start_tensor,
                 )
+                plan_send_task = send_task_update
+        if not producer:
+            request_plan = metadata.requests
         return LayerwiseTransferPlan(
             producer=producer,
             requests=request_plan,
             aligned_remote_block_ids=aligned_ops,
             send_task_update=send_task_update,
+            send_task=plan_send_task,
         )
 
     def apply(self, plan: LayerwiseTransferPlan, metadata: Any) -> None:
@@ -276,11 +282,11 @@ class LayerwiseStepController:
         layer_name: str,
         kv_layer: list[Any],
         attn_metadata: Any,
-        connector_metadata: Any,
+        plan: LayerwiseTransferPlan,
         **kwargs,
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
-        if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
+        if self.vllm_config.kv_transfer_config.is_kv_producer and plan.requests.keys():
             if self.current_layer >= self.total_layers:
                 self.current_layer += 1
                 return
@@ -302,7 +308,9 @@ class LayerwiseStepController:
             if cache_write_event is None:
                 cache_write_event = torch.npu.Event()
                 cache_write_event.record()
-            send_task = connector_metadata.send_task
+            send_task = plan.send_task
+            if send_task is None:
+                send_task = LayerwiseSendTaskUpdate([], [], [], [], [], [])
             layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             keys = None
             values = None
@@ -401,7 +409,7 @@ class LayerwiseStepController:
                 layer_names=layer_names,
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
-            for req_id, req_meta in connector_metadata.requests.items():
+            for req_id, req_meta in plan.requests.items():
                 if len(req_meta.local_block_ids) <= layer_group_idx or not req_meta.local_block_ids[layer_group_idx]:
                     continue
                 try:
@@ -420,7 +428,7 @@ class LayerwiseStepController:
 
             needs_reuse_gate = any(
                 len(req_meta.local_block_ids) > layer_group_idx and bool(req_meta.local_block_ids[layer_group_idx])
-                for req_meta in connector_metadata.requests.values()
+                for req_meta in plan.requests.values()
             )
             if needs_reuse_gate:
                 # This must happen before AscendStore publishes StoreSaveDone.

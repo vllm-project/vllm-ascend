@@ -75,7 +75,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport imp
     zmq_ctx,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.metaserver import MetaserverClient
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.step import LayerwiseStepController
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.step import (
+    LayerwiseStepController,
+    LayerwiseTransferPlan,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -882,9 +885,10 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         if not self._is_kv_producer or not self.has_connector_metadata():
             return
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
-        if not self._connector_metadata.requests:
-            return
         assert self.connector_worker is not None
+        plan = self.connector_worker._layerwise_step_plan
+        if plan is None or not plan.requests:
+            return
         self.connector_worker.on_kv_cache_written(layer_name)
 
     def save_kv_layer(
@@ -1823,7 +1827,9 @@ class MooncakeLayerwiseConnectorWorker:
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Track D-side receives without resetting forward/MTP send state."""
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
-            for req_id, meta in metadata.requests.items():
+            plan = getattr(self, "_layerwise_step_plan", None)
+            requests = plan.requests if plan is not None else metadata.requests
+            for req_id, meta in requests.items():
                 if meta.do_virtual:
                     self.virtual_request.add(req_id)
                     continue
@@ -1872,7 +1878,6 @@ class MooncakeLayerwiseConnectorWorker:
         """Prepare layerwise hooks once, when metadata is bound before forward."""
         controller = self._new_layerwise_step_controller()
         plan = controller.prepare(metadata)
-        controller.apply(plan, metadata)
         self.current_layer = controller.current_layer
         self._cache_write_events = controller._cache_write_events
         self._layerwise_step_plan = plan
@@ -1892,9 +1897,23 @@ class MooncakeLayerwiseConnectorWorker:
         **kwargs,
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
+        plan = getattr(self, "_layerwise_step_plan", None)
+        if plan is None:
+            plan = self._compat_layerwise_plan(connector_metadata)
         controller = self._new_layerwise_step_controller()
-        controller.save_layer(layer_name, kv_layer, attn_metadata, connector_metadata, **kwargs)
+        controller.save_layer(layer_name, kv_layer, attn_metadata, plan, **kwargs)
         self.current_layer = controller.current_layer
+
+    def _compat_layerwise_plan(self, connector_metadata: MooncakeLayerwiseConnectorMetadata) -> LayerwiseTransferPlan:
+        """Build a read-only plan for direct worker calls that skipped prepare."""
+        send_task = connector_metadata.send_task
+        return LayerwiseTransferPlan(
+            producer=True,
+            requests=connector_metadata.requests,
+            aligned_remote_block_ids=[],
+            send_task_update=None,
+            send_task=send_task,
+        )
 
     # NOTE: Due to the FIA operator constraints, the expected kv cache is ND format, NZ shape,
     # while the npu_format_cast method only modifies the memory layout, we manually convert it to NZ shape here
