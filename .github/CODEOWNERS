@@ -104,6 +104,8 @@
 /vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
 
 # scheduler
+# TODO(owner): /vllm_ascend/core/__init__.py
+# /vllm_ascend/core/__init__.py
 # TODO(owner): /vllm_ascend/core/batch_job_aware_scheduler.py
 # /vllm_ascend/core/batch_job_aware_scheduler.py
 # TODO(owner): /vllm_ascend/core/dyntra_lb_scheduler.py
@@ -219,6 +221,8 @@
 # /benchmarks/
 
 # worker root files pending owners (uncomment + set owner to activate)
+# TODO(owner): /vllm_ascend/worker/__init__.py
+# /vllm_ascend/worker/__init__.py
 # TODO(owner): /vllm_ascend/worker/device_metadata.py
 # /vllm_ascend/worker/device_metadata.py
 # TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
