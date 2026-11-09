@@ -787,13 +787,12 @@ def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    offload_options = (getattr(vllm_config, "additional_config", None) or {}).get("sparse_kv_offload_config", {})
-    if isinstance(offload_options, dict) and offload_options.get("selective_offload"):
-        from vllm_ascend.ascend_config import get_ascend_config
+    from vllm_ascend.ascend_config import uses_selective_kv_offload
 
-        if not get_ascend_config().sparse_kv_offload_config.selective_offload:
+    if uses_selective_kv_offload(vllm_config):
+        # Equal-lifetime specs can share block IDs while retaining per-layer placement.
+        if UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
             return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
-        # Remove this split when upstream KV grouping distinguishes host and device placement.
         host_specs = {name: spec for name, spec in kv_cache_spec.items() if getattr(spec, "store_on_host", False)}
         device_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in host_specs}
         if not host_specs or not device_specs:

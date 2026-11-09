@@ -470,10 +470,7 @@ class SFAPDRD2HConsumerWorker:
         num_blocks = self.kv_cache_config.num_blocks
         host_names = list(self.offload_manager.offload_layer_names)
         draft_names = set(self.dspark_draft_layer_names)
-        offload_options = (getattr(self.vllm_config, "additional_config", None) or {}).get(
-            "sparse_kv_offload_config", {}
-        )
-        selective = bool(offload_options.get("selective_offload", False))
+        selective = getattr(getattr(self.offload_manager, "sparse_kv_offload_config", None), "selective_offload", False)
         self._full_names = (
             tuple(
                 name

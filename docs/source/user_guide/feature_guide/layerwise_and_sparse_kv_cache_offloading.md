@@ -164,10 +164,12 @@ Note that users might encounter an error like "Sparse KV offload offload.initial
 
 ### Selective offload for full/shared SFA layers
 
-On Ascend A5, set `"selective_offload": true` inside the Decode server's
-`sparse_kv_offload_config` for a model with full/shared `indexer_types`.
+On Ascend A5, enable `sparse_kv_offload_config` on Decode as above. Models
+with full/shared `indexer_types` automatically select this path.
 Shared layers store their main KV in host memory. Full layers and the indexer
 keep their KV on the device. Use `SfaRemoteD2HConnector` for P/D transfer.
+Layers with compatible block geometry share block IDs across the host and
+device allocations, so each allocation is sized for one block per token range.
 
 When a full layer produces its TopK indices, a separate stream prefetches the
 missing historical KV rows for the shared layers in its group. Each shared

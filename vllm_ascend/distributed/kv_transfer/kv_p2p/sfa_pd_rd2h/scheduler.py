@@ -26,6 +26,7 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.ascend_config import uses_selective_kv_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     resident_mla_context_group_ids,
@@ -251,10 +252,12 @@ class SFAPDRD2HScheduler:
         if kv_cache_config is None:
             raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
-        offload_options = (getattr(vllm_config, "additional_config", None) or {}).get("sparse_kv_offload_config", {})
-        self.selective_offload = bool(offload_options.get("selective_offload", False))
+        self.selective_offload = uses_selective_kv_offload(vllm_config)
         self.full_group_idx = None
-        if self.selective_offload:
+        if self.selective_offload and len(kv_cache_config.kv_cache_groups) == 1:
+            # The scheduler sees only the representative spec of a uniform group.
+            self.main_group_idx = self.full_group_idx = self.indexer_group_idx = 0
+        elif self.selective_offload:
             self.main_group_idx, self.full_group_idx, self.indexer_group_idx = infer_selective_sfa_group_ids(
                 kv_cache_config
             )

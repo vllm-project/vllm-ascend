@@ -69,21 +69,21 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
     @patch.object(planning, "get_kv_cache_groups")
     def test_selective_layout_counts_all_groups_in_the_shared_block_pool(self, groups, pool_bytes):
         specs, vllm_config, alignment_reserve = _make_memory_plan_inputs()
-        groups.return_value = [SimpleNamespace(kv_cache_spec=specs[name]) for name in ("host.0", "device.0")]
-
-        budget = plan_sparse_kv_offload_memory(
-            kv_cache_spec=specs,
-            vllm_config=vllm_config,
-            available_device_memory_bytes=1000 * 512,
-            dram_limit_bytes=alignment_reserve + 1000 * 2048,
-            keep_device_kv_cache=False,
-            selective_offload=True,
-        )
-
-        self.assertEqual(budget.final_num_blocks, 401)
-        self.assertEqual(budget.final_planner_bytes, 401 * 2048)
-        self.assertEqual(budget.planned_device_bytes, 401 * 512)
-        self.assertEqual(budget.planned_host_bytes, 401 * 2048)
+        for names, expected in ((("host.0", "device.0"), 401), (("device.0",), 201)):
+            with self.subTest(groups=len(names)):
+                groups.return_value = [SimpleNamespace(kv_cache_spec=specs[name]) for name in names]
+                budget = plan_sparse_kv_offload_memory(
+                    kv_cache_spec=specs,
+                    vllm_config=vllm_config,
+                    available_device_memory_bytes=1000 * 512,
+                    dram_limit_bytes=alignment_reserve + 1000 * 2048,
+                    keep_device_kv_cache=False,
+                    selective_offload=True,
+                )
+                self.assertEqual(budget.final_num_blocks, expected)
+                self.assertEqual(budget.final_planner_bytes, expected * 2048)
+                self.assertEqual(budget.planned_device_bytes, expected * 512)
+                self.assertEqual(budget.planned_host_bytes, expected * 2048)
 
     def test_non_a3_is_rejected(self):
         with (

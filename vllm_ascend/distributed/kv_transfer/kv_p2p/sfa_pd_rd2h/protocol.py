@@ -69,30 +69,22 @@ def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
 
 def infer_selective_sfa_group_ids(kv_cache_config: Any) -> tuple[int, int, int]:
     """Return the shared Host, full device, and Indexer device groups."""
-    host = full = indexer = None
+    groups = {"shared Host": set(), "full device": set(), "Indexer": set()}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        names = tuple(group.layer_names)
-        main_names = [name for name in names if "indexer" not in name.lower()]
         members = getattr(group.kv_cache_spec, "kv_cache_specs", None)
-        is_host = (
-            all(getattr(spec, "store_on_host", False) for spec in members.values())
-            if members is not None
-            else getattr(group.kv_cache_spec, "store_on_host", False)
-        )
-        if any("indexer" in name.lower() for name in names):
-            indexer = group_id if indexer is None else indexer
-        if main_names:
-            if is_host:
-                if host is not None:
-                    raise ValueError("Selective SFA PD has more than one shared Host group")
-                host = group_id
+        for name in group.layer_names:
+            spec = members[name] if members is not None else group.kv_cache_spec
+            if "indexer" in name.lower():
+                role = "Indexer"
+            elif getattr(spec, "store_on_host", False):
+                role = "shared Host"
             else:
-                if full is not None:
-                    raise ValueError("Selective SFA PD has more than one full device group")
-                full = group_id
-    if host is None or full is None or indexer is None or host == full:
-        raise ValueError("Selective SFA PD requires shared Host, full device, and Indexer cache groups")
-    return host, full, indexer
+                role = "full device"
+            groups[role].add(group_id)
+    for role, ids in groups.items():
+        if len(ids) != 1:
+            raise ValueError(f"Selective SFA PD requires one {role} group, got {sorted(ids)}")
+    return next(iter(groups["shared Host"])), next(iter(groups["full device"])), next(iter(groups["Indexer"]))
 
 
 @dataclass

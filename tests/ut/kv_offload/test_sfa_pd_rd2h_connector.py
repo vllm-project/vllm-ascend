@@ -155,6 +155,13 @@ def test_infer_selective_groups_from_cache_storage():
         ]
     )
     assert infer_selective_sfa_group_ids(config) == (0, 2, 1)
+    members = {
+        name: spec for group in config.kv_cache_groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+    }
+    config.kv_cache_groups = [
+        SimpleNamespace(layer_names=list(members), kv_cache_spec=SimpleNamespace(kv_cache_specs=members))
+    ]
+    assert infer_selective_sfa_group_ids(config) == (0, 0, 0)
 
 
 def test_selective_full_layer_reads_into_device_group():
@@ -197,7 +204,6 @@ def test_selective_consumer_registers_full_device_and_shared_host_destinations()
     full = "model.layers.0.self_attn"
     worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
     worker.vllm_config = SimpleNamespace(
-        additional_config={"sparse_kv_offload_config": {"selective_offload": True}},
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
     )
     worker.kv_cache_config = SimpleNamespace(
@@ -213,6 +219,7 @@ def test_selective_consumer_registers_full_device_and_shared_host_destinations()
     worker.layer_metadata = {}
     worker.dspark_draft_layer_names = ()
     worker.offload_manager = SimpleNamespace(
+        sparse_kv_offload_config=SimpleNamespace(selective_offload=True),
         offload_layer_names=[shared],
         k_caches_cpu=[tensor(1000)],
         v_caches_cpu=[tensor(2000)],

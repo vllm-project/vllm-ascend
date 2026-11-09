@@ -32,7 +32,6 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -1694,6 +1693,17 @@ class SchedulerConfig:
         return cls(**resolved)  # type: ignore[arg-type]
 
 
+def _shared_indexer_types(vllm_config: VllmConfig) -> tuple[str, ...]:
+    hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
+    roles = getattr(hf_config, "indexer_types", None)
+    return tuple(roles) if isinstance(roles, (list, tuple)) and "shared" in roles else ()
+
+
+def uses_selective_kv_offload(vllm_config: VllmConfig) -> bool:
+    options = (getattr(vllm_config, "additional_config", None) or {}).get("sparse_kv_offload_config")
+    return isinstance(options, dict) and bool(options.get("enabled") and _shared_indexer_types(vllm_config))
+
+
 @config
 class SparseKVOffloadConfig:
     """
@@ -1705,10 +1715,13 @@ class SparseKVOffloadConfig:
     topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
-    selective_offload: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     indexer_types: tuple[str, ...] = dataclasses.field(default=(), init=False)
     use_fused_overlap: bool = False
+
+    @property
+    def selective_offload(self) -> bool:
+        return bool(self.indexer_types)
 
     @property
     def use_fused_copy_sfa(self) -> bool:
@@ -1751,26 +1764,20 @@ class SparseKVOffloadConfig:
         if not self.enabled:
             return
 
-        if is_950() and not self.selective_offload:
-            raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
-
-        if self.selective_offload:
+        indexer_types = _shared_indexer_types(vllm_config)
+        if indexer_types:
             if self.use_fused_overlap or self.keep_device_kv_cache:
                 raise ValueError(
                     "selective_offload requires its own Host-to-hot path without fused overlap or full device copies"
                 )
-            indexer_types = getattr(vllm_config.model_config.hf_text_config, "indexer_types", None)
             num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
             if (
-                not isinstance(indexer_types, (list, tuple))
-                or len(indexer_types) != num_layers
-                or not indexer_types
+                len(indexer_types) != num_layers
                 or indexer_types[0] != "full"
                 or any(role not in ("full", "shared") for role in indexer_types)
-                or "shared" not in indexer_types
             ):
                 raise ValueError("selective_offload requires a complete indexer_types sequence starting with full")
-            self.indexer_types = tuple(indexer_types)
+            self.indexer_types = indexer_types
             if vllm_config.speculative_config is not None:
                 raise ValueError("selective_offload has not validated MTP rollback")
 

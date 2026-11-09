@@ -35,7 +35,7 @@ def _mla_spec(*, host=True, non_causal=False, block_size=128):
     )
 
 
-def test_selective_offload_splits_host_and_device_groups_without_changing_legacy_grouping():
+def test_selective_offload_shares_block_ids_and_keeps_layer_placement():
     from vllm_ascend.patch.platform import patch_kv_cache_utils
 
     specs = {
@@ -45,20 +45,17 @@ def test_selective_offload_splits_host_and_device_groups_without_changing_legacy
     }
     config = SimpleNamespace(
         additional_config={},
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(indexer_types=["full", "shared", "shared"])),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         cache_config=CacheConfig(),
         speculative_config=None,
     )
     assert len(patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)) == 1
 
-    config.additional_config = {"sparse_kv_offload_config": {"selective_offload": True}}
-    with patch("vllm_ascend.ascend_config.get_ascend_config") as get_config:
-        get_config.return_value.sparse_kv_offload_config.selective_offload = True
-        groups = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
-    assert {frozenset(group.layer_names) for group in groups} == {
-        frozenset({"layers.0.attn"}),
-        frozenset({"layers.1.attn", "layers.2.attn"}),
-    }
+    config.additional_config = {"sparse_kv_offload_config": {"enabled": True}}
+    groups = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
+    assert len(groups) == 1
+    assert groups[0].kv_cache_spec.kv_cache_specs == specs
 
 
 def _runner(*, method="dspark", sparse=True, last_rank=True, names=None):
