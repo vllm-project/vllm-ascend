@@ -1669,6 +1669,8 @@
 #       before device filtering. Preserve the original dictionary and container
 #       types for model bindings and connector registration; remove the old
 #       first-tensor wrapper in patch_attn_utils.py.
+#       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
+#       block copies when the supported upstream exports that collector.
 #    Related PR (if no, explain why):
 #       No upstream PR linked; this adapts Ascend multi-tensor allocations.
 #    Future Plan:
