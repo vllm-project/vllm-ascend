@@ -105,10 +105,12 @@ variants:
     supported_hardware:
       - ascend_910c
     tp: 16
-    min_vllm_version: 0.32.0
+    min_vllm_version: 0.30.0
     default_modes:
       spec_decoding: qwen3_5_mtp
     extra_args:
+      - '--distributed-executor-backend'
+      - mp
       - '--data-parallel-size'
       - '1'
       - '--enable-expert-parallel'
@@ -116,8 +118,6 @@ variants:
       - '1024'
       - '--quantization'
       - ascend
-      - '--served-model-name'
-      - qwen3.5
       - '--max-num-seqs'
       - '128'
       - '--max-model-len'
@@ -141,7 +141,10 @@ variants:
       VLLM_USE_V2_MODEL_RUNNER: '0'
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:nightly-main-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
 meta:
   hardware:
     ascend_950dt: verified
