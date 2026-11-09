@@ -1,10 +1,12 @@
 # Kimi-K3 EP256 A5 Accuracy Test Guide
 
-PR: [#21117](https://github.com/vllm-project/vllm-ascend/pull/21117).
+Historical reference PR: [#21117](https://github.com/vllm-project/vllm-ascend/pull/21117).
+This document now tracks `Task2_2_tcase_0.30.0_Kimi-K3_Experts256_A5_TCase`, based on
+`releases/v0.30.0`. Historical results do not validate this release-branch case.
 Objective: evaluate Kimi-K3 W4A8 MXFP/QuaRot pruned to 256 routed experts on a single A5 node
 with eight NPUs, using the first 500 GSM8K test questions to measure answer accuracy.
 
-## 1. Files Changed in This PR
+## 1. Files Changed in This Branch
 
 | File | Change |
 | --- | --- |
@@ -118,21 +120,37 @@ Accuracy ranged from 57.8% to 62.6%, a spread of 4.8 percentage points.
 Runs 1 and 2 shared a service instance; run 3 restarted the service.
 Each run was checked for complete question IDs, correspondence to the original questions, and independent scoring.
 
-### 4.2 Validation Status for the Current PR
+### 4.2 Historical Validation Reference
 
-| Check | Result |
+The original test notes recorded successful static and lint checks and verified the
+500-question subset with 7,473 training records. These checks belong to the earlier
+change and have not been rerun as a complete validation suite for this release branch.
+
+Historical nightly run: [42462410488](https://github.com/vllm-project/vllm-ascend/actions/runs/42462410488).
+It failed during model path resolution before inference or evaluation. The YAML paths
+were subsequently changed to container-visible `/root/.cache` paths.
+
+Separate main-branch PR [#21284](https://github.com/vllm-project/vllm-ascend/pull/21284)
+also has historical CI results. Its last two November 9 runs,
+[42607268695](https://github.com/vllm-project/vllm-ascend/actions/runs/42607268695) and
+[42613156488](https://github.com/vllm-project/vllm-ascend/actions/runs/42613156488),
+reached model initialization but failed HCCL initialization with an invalid topology
+path, `/home/wkf68687/server_8p_nomem.json`. They did not reach accuracy evaluation
+and are not runs of this release branch.
+
+### 4.3 Current Release-Branch Validation Status
+
+| Check | Status |
 | --- | --- |
-| YAML parsing, launch argument types, and embedded JSON | Passed |
-| Nightly job registration and configuration paths | Passed |
-| Git whitespace checks | Passed |
-| Markdownlint, Codespell, Typos, Gitleaks, and filename checks | Passed |
-| Nightly name dispatch, parameters, and document value consistency | Passed |
-| Dataset preparation | First 500 test questions verified; 7,473 training records |
-| Full formatting check, `bash format.sh ci` | Pending; GitHub hook downloads timed out and no usable Bash is available locally |
-| A5 service startup, inference, and 500-question evaluation using the current YAML | First run failed during model path resolution; inference and evaluation did not start. Cache paths updated; rerun pending |
-| Nightly CI execution | First run completed on 2026-11-08: vllm-ascend build/install passed; YAML test failed during model path resolution. Rerun pending |
-| Native-scoring acceptance calibration | Pending; currently uses the user-selected baseline of 60.0% ±3.0 percentage points |
+| Test-file transfer | Four files synchronized from the source task branch |
+| Nightly registration scope | Verified: only four Kimi registration lines added relative to the release baseline |
+| Evaluation-field compatibility | Inspected the release AISBench implementation; configured fields are supported |
+| Readiness timeout documentation | Clarified the harness default of 2800 seconds separately from engine environment variables |
+| Model and dataset paths | Updated container paths retained; visibility on the target A5 CI runner remains to be confirmed |
+| YAML loading, full lint and formatting checks | Pending rerun on this branch; historical passes are not carried forward |
+| Target A5 image launch-argument validation | Pending |
+| A5 model loading, generation and 500-question evaluation | Pending |
+| Release-branch nightly CI | Not run for this branch as part of this update |
+| Native-scoring acceptance calibration | Pending; current configuration remains 60.0% ±3.0 percentage points |
 
-First nightly run: [42462410488](https://github.com/vllm-project/vllm-ascend/actions/runs/42462410488).
-ModelScope reported missing cached files with network downloads disabled.
-The YAML now uses `/root/.cache` paths; validation of the updated paths awaits a rerun.
+Record the tested commit, image digest and CI run link when completing these checks.

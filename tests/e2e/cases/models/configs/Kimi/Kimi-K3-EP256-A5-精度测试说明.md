@@ -1,10 +1,13 @@
 # Kimi-K3 EP256 A5 精度测试说明
 
-对应 PR：[#21117](https://github.com/vllm-project/vllm-ascend/pull/21117)。
+历史参考 PR：[#21117](https://github.com/vllm-project/vllm-ascend/pull/21117)。
+本文当前对应基于 `releases/v0.30.0` 的分支
+`Task2_2_tcase_0.30.0_Kimi-K3_Experts256_A5_TCase`。
+历史结果不代表该发布分支用例已完成验证。
 测试目标：在单节点 A5 8 卡环境中，评测裁剪至 256 个路由专家的 Kimi-K3 W4A8 MXFP/QuaRot 模型，
 使用 GSM8K 测试集前 500 题统计答案准确率。
 
-## 1. PR 改动文件
+## 1. 本分支改动文件
 
 | 文件 | 改动内容 |
 | --- | --- |
@@ -115,21 +118,36 @@ python -m pytest -sv tests/e2e/common/single_node/test_single_node.py
 准确率范围为 57.8%～62.6%，极差为 4.8 个百分点。
 第 1、2 轮共用服务，第 3 轮重启服务；每轮均核对了完整题号、原始问题和独立评分。
 
-### 4.2 当前 PR 验证进度
+### 4.2 历史验证参考
 
-| 检查项 | 结果 |
+原测试记录中，静态及 lint 检查通过，500 题子集和 7473 条训练记录已核对。
+这些检查属于此前改动，尚未作为完整验证套件在当前发布分支重新执行。
+
+历史 nightly：[42462410488](https://github.com/vllm-project/vllm-ascend/actions/runs/42462410488)。
+该次在模型路径解析阶段失败，推理和评测未开始。
+之后 YAML 路径已改为容器内可见的 `/root/.cache` 路径。
+
+另一个 main 分支 PR [#21284](https://github.com/vllm-project/vllm-ascend/pull/21284)
+也有历史 CI 记录。11 月 9 日后两轮
+[42607268695](https://github.com/vllm-project/vllm-ascend/actions/runs/42607268695) 和
+[42613156488](https://github.com/vllm-project/vllm-ascend/actions/runs/42613156488)
+已进入模型初始化，但因拓扑文件路径
+`/home/wkf68687/server_8p_nomem.json` 无效而在 HCCL 初始化时失败。
+两轮均未进入精度评测，也不是当前发布分支的运行结果。
+
+### 4.3 当前发布分支验证状态
+
+| 检查项 | 状态 |
 | --- | --- |
-| YAML 解析、启动参数类型和内嵌 JSON 检查 | 通过 |
-| nightly 任务注册及配置路径检查 | 通过 |
-| Git 空白检查 | 通过 |
-| Markdownlint、Codespell、Typos、Gitleaks、文件名检查 | 通过 |
-| nightly 名称调度解析、参数与文档数值一致性 | 通过 |
-| 数据准备 | 测试集前 500 题比对通过，训练集 7473 条 |
-| 完整格式检查 `bash format.sh ci` | 待完成；钩子环境下载遇到 GitHub 连接超时，本机缺少可用 Bash |
-| 当前 YAML 的 A5 服务启动、推理及 500 题评测 | 首次运行在模型路径解析阶段失败，推理和评测未开始；已更新缓存路径，待重跑 |
-| nightly CI 运行 | 2026-11-08 首次运行结束：vllm-ascend 编译安装通过，YAML 测试在模型路径解析阶段失败；待重跑 |
-| 原生评分验收值校准 | 待执行；当前采用用户选定的 60.0% ±3.0 个百分点 |
+| 测试文件同步 | 已从源任务分支同步 4 个文件 |
+| nightly 注册范围 | 已核对：相对发布分支基线仅新增 Kimi 注册的 4 行 |
+| 评测字段兼容性 | 已检查发布分支 AISBench 实现，支持当前配置字段 |
+| 就绪超时说明 | 已区分框架默认 2800 秒与引擎环境变量 |
+| 模型及数据路径 | 保留修正后的容器路径，目标 A5 CI runner 中的可见性待确认 |
+| YAML 加载、完整 lint 和格式检查 | 待在本分支重跑，不沿用历史通过状态 |
+| 目标 A5 镜像启动参数验证 | 待执行 |
+| A5 模型加载、生成及 500 题评测 | 待执行 |
+| 发布分支 nightly CI | 本次更新尚未为该分支运行 |
+| 原生评分验收值校准 | 待执行；当前配置仍为 60.0% ±3.0 个百分点 |
 
-首次 nightly：[42462410488](https://github.com/vllm-project/vllm-ascend/actions/runs/42462410488)。
-ModelScope 报告缓存文件查找失败，且禁止联网下载。
-YAML 已改用 `/root/.cache` 路径，更新后的路径待重跑验证。
+完成验证时，记录被测提交、镜像 digest 和 CI 运行链接。
