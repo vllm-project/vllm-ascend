@@ -38,7 +38,6 @@ class AttentionMaskBuilder:
         self.device = device
         self.chunked_prefill_attn_mask = None
         # Persistent device attention mask, key=(shape, dtype, device).
-        self.attn_mask_device_cache_enabled = _get_attn_mask_device_cache_enabled()
         self.attn_mask_device_cache = {}
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
