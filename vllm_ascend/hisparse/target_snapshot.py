@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Private Target snapshot experiment for the frozen HiSparse worker."""
+"""Own Target row snapshots until asynchronous Host mirroring completes."""
 
 from dataclasses import dataclass
 

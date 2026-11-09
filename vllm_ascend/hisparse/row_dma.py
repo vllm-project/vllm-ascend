@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Private experiment for the frozen Core HiSparse row-mirror worker."""
+"""Prepare HiSparse row-mirror DMA through Core's descriptor ownership."""
 
 from dataclasses import dataclass
 from functools import wraps
@@ -161,7 +161,7 @@ def _install_worker(worker_type, backend_type, bind_recycled=None) -> None:
 
 
 def install(backend_type) -> None:
-    """Only adapt the exact Core implementation reviewed for this experiment."""
+    """Only adapt the exact Core worker implementation reviewed for this backend."""
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import worker
     from vllm.v1.hisparse import runtime
 

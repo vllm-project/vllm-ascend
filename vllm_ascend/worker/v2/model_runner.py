@@ -558,7 +558,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.vllm_config.attention_config.hisparse_config is not None:
             self._bind_hisparse_direct_prolog()
 
-        # Private candidate only: bind after Core seals all cache/stream owners.
+        # Bind after Core seals all cache and stream owners.
         from vllm_ascend.hisparse.mirror_overlap import overlap_mtp_host_mirror
 
         overlap_connector = overlap_mtp_host_mirror(self)

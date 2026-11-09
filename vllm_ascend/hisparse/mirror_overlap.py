@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Private decode experiment for Core 24420b7's sampling and draft boundaries."""
+"""Overlap HiSparse Host mirroring with Target sampling and guarded MTP."""
 
 from __future__ import annotations
 

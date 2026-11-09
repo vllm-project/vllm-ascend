@@ -28,12 +28,9 @@ the kernel into `vllm_ascend_C` and registers
 `torch.ops._C_ascend.hisparse_resolve_residency` with the other Ascend operators;
 there is no separate resolver build or library-loading step.
 
-The architecture and usable per-AIV UB budget are selected for the build target
-in `csrc/hisparse/CMakeLists.txt`; these are hardware/compiler parameters.
-The kernel sizes its hash table from the request union and available UB. An
-unsupported capacity or missing extension raises an error before execution;
-there is no Triton resolver fallback. Builds for other targets retain their
-existing operators without registering this resolver.
+An unsupported capacity or missing extension raises an error before execution;
+there is no Triton resolver fallback. Other build targets retain their existing
+operators without registering this resolver.
 
 ## Enable HiSparse
 
@@ -69,41 +66,32 @@ victims, and produces the refill plan on device. Hot capacity must fit both the
 int16 LRU representation (at most 32768 rows) and the compiled target's UB budget.
 These checks do not change the configured TopK or discard selected tokens.
 
-Native C8 main rows contain 512 E4M3FN bytes, 64 BF16 RoPE values and four FP32
-scales (656 bytes total). Indexer rows contain 128 E4M3FN keys and one FP32 scale.
-Views preserve the shared-slab page strides and layer offsets. The existing
-quantizer and Attention operations are reused; payloads are copied as bytes.
-With MXFP8 projection weights, C8 reuses SFA's existing Prolog V3 preprocessing
-and publishes its staged rows through the HiSparse Resident mapping. Other
-supported projection schemes retain the native preprocessing path.
+Native C8 uses the existing Ascend E4M3FN values, BF16 RoPE and FP32 scales.
+Weight quantization and KV-cache quantization remain separate choices. HiSparse
+preserves the shared-slab strides and uses the existing quantizer and Attention
+operations. No upstream vLLM source change or unmerged Core PR is required.
 
-C8 Decode consumes the resolver's mapped, stably compacted indices directly.
-The refill plan retains separate virtual page-row IDs. Prefill keeps its existing
-layout bridge, including stable ordering and duplicate selections.
-Decode's padded query-shape lengths and physical KV extent are prepared before
-capture and owned by the current binding. Per-round request mappings and valid
-rows remain current. Native C8 Attention already clears empty query outputs;
-the adapter returns that output without another index scan and output mask.
-
-Request-row mapping reuses Core's device implementation, with separate storage
-for each captured MTP graph owner and Ascend's padded input extent. Indexer
-writes reuse the existing SFA store with independent page strides for keys and
-scales, preserving the original payload bits. Small Host-mirror submissions use
-PTA's ordered queue with immutable scalar descriptors; full-layer batches keep
-the batch-copy API and Core's completion and payload-ownership boundaries.
-
-Keep completion-before-unregister and graph allocation ownership intact.
-Overwriting KV still invalidates any old Hot copy. Equal batch shapes do not
-permit reusing stale request mappings or lengths. No upstream vLLM source change
-or unmerged Core PR is required.
+Zero misses remove cold-row refills; eager Host mirroring and residency
+bookkeeping still run. Size Host memory per rank and compare matched workloads
+when assessing performance. Prefill, mixed batches and Decode retain current
+request mappings, padding and completion-before-reuse rules.
 
 ## Validation and performance
 
-Ascend 950 eager/Graph component and TP8/MTP3 full-model checks cover the
-supported foundation. Performance depends on the workload, residency and model
-configuration. See [PR #20926](https://github.com/vllm-project/vllm-ascend/pull/20926)
-for exact source pins, commands, measured ON/OFF results and remaining
-qualification limits.
+Ascend 950 eager/Graph components and TP8/MTP3 full-model checks cover the
+supported paths. A matched C8 test with two rounds per arm, fixed inputs and
+8K outputs measured these mean SSE TPOT increases:
+
+| Input / concurrency | Reported residency | ON versus OFF |
+| --- | --- | --- |
+| 16K / C8 | Zero misses | +1.03% |
+| 32K / C8 | Misses present | +10.01% |
+
+These measurements used merged Core `39dbf518` (including #63801), Ascend
+`5a02c50`, Python 3.12 and CANN 9.2.1 on the same machine. Inputs, outputs and
+MTP counters matched. N2 does not establish statistical significance or dataset
+accuracy. See [PR #20926](https://github.com/vllm-project/vllm-ascend/pull/20926)
+for exact configuration, commands and separate capacity qualifications.
 
 Formal performance runs exclude profiling. Reported miss and H2D counters are
 asynchronous software observations, not physical DMA measurements. Qualification

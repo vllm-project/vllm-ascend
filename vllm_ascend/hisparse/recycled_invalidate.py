@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Grouped invalidation for recycled Host blocks in the pinned HiSparse worker."""
+"""Batch recycled Host-slot invalidation within Core's worker lifecycle."""
 
 import operator
 
@@ -67,8 +67,8 @@ def _invalidate_recycled_groups(
 class RecycledGroupInvalidator:
     def __init__(self, tables, block_size):
         self._rank = get_tensor_model_parallel_rank()
+        # Retain the bound tensors and their storage through queued invalidations.
         self._tables = tables
-        self._storages = tuple(table.untyped_storage() for table in tables)
         self._addresses = tuple(table.data_ptr() for table in tables)
         self._device = tables[0].device
         self._states, self._hot = tables[0].shape

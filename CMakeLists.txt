@@ -26,8 +26,6 @@ if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
   message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")
 endif()
 
-
-
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
 set(SOC_VERSION ${SOC_VERSION})
 message(STATUS "Detected SOC version: ${SOC_VERSION}")

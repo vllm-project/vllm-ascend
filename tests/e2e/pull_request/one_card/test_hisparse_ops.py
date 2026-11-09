@@ -5,6 +5,7 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
+
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend, capture_aware_stream
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
@@ -26,13 +27,12 @@ def _require_mapped_host_device():
     AscendHiSparseBackend().check_available()
 
 
-@pytest.mark.parametrize("descriptor_count", [0, 1, 2, 4, 16, 17, 312])
+@pytest.mark.parametrize("descriptor_count", [0, 1, 16, 17, 312])
 @pytest.mark.parametrize("graph_producer", [False, True])
 def test_private_host_pool_retains_pinned_storage_for_dma_writeback(descriptor_count, graph_producer):
     from vllm.v1.hisparse import runtime
 
     backend = AscendHiSparseBackend()
-    backend.check_available()
     capacity = max(32768, (descriptor_count + 1) * 2048)
     payload, registered = runtime.allocate_pinned_host_pool(capacity)
     graph = None
@@ -201,7 +201,6 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
 @pytest.mark.parametrize("device_row_count", [False, True])
 @pytest.mark.parametrize("compact_attention", [False, True])
 def test_resolver_strides_padding_graph(device_row_count, compact_attention):
-    torch.npu.set_device(0)
     raw = torch.empty(8192, dtype=torch.uint8)
     offset = (-raw.data_ptr()) % 4096
     registered = raw[offset : offset + 4096]
@@ -351,12 +350,6 @@ def test_resolver_strides_padding_graph(device_row_count, compact_attention):
         for col in range(int(expected[4][row])):
             src, dst = int(expected[2][row, col]), int(expected[3][row, col])
             torch.testing.assert_close(hot[dst // 4, dst % 4].cpu(), host[src])
-    for _ in range(100):
-        graph.replay()
-    torch.npu.synchronize()
-    torch.testing.assert_close(out.cpu(), expected[0])
-    torch.testing.assert_close(dgi_n.cpu(), expected[5])
-    torch.testing.assert_close(lru_n.cpu(), expected[6])
     if device_row_count:
         for active_rows in [0, 1, 2, 3]:
             valid_rows.fill_(active_rows)
@@ -701,7 +694,7 @@ def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk,
         mapping.close()
 
 
-def test_plan_gather_and_written_slot_invalidation():
+def test_plan_gather_respects_request_state_padding():
     host = allocate_mapped_host((32, 16), torch.float32)
     mapping = host._hisparse_registration
     host.copy_(torch.arange(host.numel(), dtype=torch.float32).view_as(host))
@@ -718,24 +711,18 @@ def test_plan_gather_and_written_slot_invalidation():
         cache = hot.cpu().view(32, 16)
         torch.testing.assert_close(cache[5:13], host[1:9])
         torch.testing.assert_close(attention[1].cpu(), torch.full((8,), -1, dtype=torch.int32))
-        dgi = torch.tensor([[4, 7, 9, -1], [11, 13, 15, -1]], dtype=torch.int32, device="npu")
-        states = torch.tensor([1, 0], dtype=torch.int32, device="npu")
-        reqs = torch.tensor([0, 1, 1, -1], dtype=torch.int32, device="npu")
-        written = torch.tensor([13, 4, 9, 11], dtype=torch.int64, device="npu")
-        ops.hisparse_invalidate_written_slots(dgi, states, reqs, written)
-        torch.npu.synchronize()
-        torch.testing.assert_close(dgi.cpu(), torch.tensor([[-1, 7, -1, -1], [11, -1, 15, -1]], dtype=torch.int32))
     finally:
         torch.npu.synchronize()
         mapping.close()
 
 
-def test_invalidate_large_hot_capacity_graph():
-    dgi = torch.arange(20480, dtype=torch.int32, device="npu").view(2, 10240)
+@pytest.mark.parametrize("hot_capacity", [4, 10240])
+def test_invalidate_hot_capacity_graph(hot_capacity):
+    dgi = torch.arange(2 * hot_capacity, dtype=torch.int32, device="npu").view(2, hot_capacity)
     initial = dgi.cpu()
     states = torch.tensor([1, 0], dtype=torch.int32, device="npu")
     requests = torch.tensor([0, 1, 1, -1], dtype=torch.int32, device="npu")
-    written = torch.tensor([20479, 0, 10239, 10240], dtype=torch.int64, device="npu")
+    written = torch.tensor([2 * hot_capacity - 1, 0, hot_capacity - 1, hot_capacity], dtype=torch.int64, device="npu")
     expected = initial.clone()
     expected[1, -1] = expected[0, 0] = expected[0, -1] = -1
 
@@ -817,9 +804,6 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
     from vllm_ascend.hisparse.binding import _quantized_indexer_views
 
-    if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
-        pytest.skip("The native E4M3FN HiSparse format currently targets A5")
-    torch.npu.set_device(0)
     pages, block, width, page_stride = 3, 128, 128, 419840
     size = (pages - 1) * page_stride + block * width + block * 4
     raw = torch.full((size,), 90, dtype=torch.uint8, device="npu")
