@@ -162,6 +162,8 @@
 /vllm_ascend/worker/v2/utils.py @zzzzwwjj
 
 # Models
+# TODO(owner): /vllm_ascend/models
+# /vllm_ascend/models
 /vllm_ascend/models/minimax_m3 @realliujiaxu
 /vllm_ascend/models/deepseek_v4 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
@@ -227,8 +229,6 @@
 # /vllm_ascend/worker/spec_decode_utils.py
 # TODO(owner): /vllm_ascend/worker/utils.py
 # /vllm_ascend/worker/utils.py
-
-# ---- gaps found by coverage check on 2026-11-05 ----
 # TODO(owner): /vllm_ascend/*.py
 # /vllm_ascend/*.py
 # TODO(owner): /vllm_ascend/worker/v2/*.py
@@ -237,23 +237,7 @@
 # /vllm_ascend/worker/v2/README.md
 # (covers worker/v2/__init__.py & README.md; specific owned files take
 #  precedence via last-match-wins — keep this line ABOVE them when activated)
-# TODO(owner): /vllm_ascend/models
-# /vllm_ascend/models
 
 # ==================== Deliberately unowned (no entry needed) ====================
-# Paths below are intentionally left without a CODEOWNERS entry:
-# - vllm_ascend/worker/v1/ is scheduled for removal; assigning an owner is wasted effort.
-# - vllm_ascend/worker/block_table.py is scheduled for removal.
-# - tests/ut/ is touched by virtually every PR; a single owner would create a review
-#   bottleneck, so ownership stays with the PR author and reviewers.
-# Do NOT add TODO(owner) entries for these paths; remove them from this list only
-# when the situation changes (e.g. worker/v1 deletion is reverted).
-
-# Deliberately unowned: scheduled for removal
-# SKIP(owner): /vllm_ascend/worker/v1/
-# SKIP(owner): /vllm_ascend/worker/block_table.py
-
-# Deliberately unowned: touched by every PR, ownership stays with PR author
 # SKIP(owner): /tests/ut/
-# (includes non-.py files under tests/ut/, e.g. _fake_weight/config.json,
-#  eplb/core/expert_map.json, runtime_guard/TEST_MATRIX.md)
+# SKIP(owner): /tests/e2e/pull_request/
