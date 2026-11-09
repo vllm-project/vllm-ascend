@@ -43,6 +43,7 @@ from vllm_ascend.attention.dsa_v41 import (
     pad_sparse_indices,
     scatter_cache_sk,
 )
+from vllm_ascend.core import kv_cache_config_builder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -65,7 +66,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 def _pool_bytes_per_block(runtime, groups):
     """vLLM #57169 added a leading ``vllm_config`` argument on main."""
-    return kv_cache_planning._pool_bytes_per_block(runtime, groups)
+    return kv_cache_config_builder.AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(runtime, groups)
 
 
 def _max_memory_usage_bytes_from_groups(runtime, groups):
@@ -210,12 +211,12 @@ def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, ru
     groups = (
         make_cache_groups(group_cache_specs(specs))
         if packed_groups
-        else kv_cache_planning.get_kv_cache_groups(runtime, specs)
+        else kv_cache_config_builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
     )
     assert is_deepseek_v41_cache(groups)
     page_bytes = sum(spec.page_size_bytes for spec in specs.values())
     assert _pool_bytes_per_block(runtime, groups) == page_bytes
-    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
+    cache_config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
     assert cache_config.num_blocks == 10
     assert len(cache_config.kv_cache_tensors) == 2
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
@@ -432,7 +433,7 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     runtime.max_in_flight_tokens = 128
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
-    config = kv_cache_planning.get_kv_cache_config_from_groups(runtime, groups, 100 * page)
+    config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, 100 * page)
     assert config.num_blocks == 100 and len(config.kv_cache_tensors) == 4
     assert sum(t.size for t in config.kv_cache_tensors) == 100 * page
     demand = _max_memory_usage_bytes_from_groups(runtime, groups) // page

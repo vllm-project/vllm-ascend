@@ -80,25 +80,27 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning` (both supported versions, vLLM #61183)
+#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
+#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
+#   2. `vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups`
+#      `..._annotate_eagle_groups`, `vllm.v1.kv_cache_interface.KVCacheConfig.has_mamba_layers`
 #    Why:
-#       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
-#       topology, where MLA and compressed indexer caches share block IDs while
-#       indexer-state and Mamba caches use independent groups.
+#       vLLM PR #40860 restricts hybrid KV cache groups with multiple block
+#       sizes under decode context parallelism, which Ascend implements per
+#       MLA/SWA-MLA layer. The Ascend cache layouts also keep their own
+#       admission accounting, EAGLE draft group marking, and nested-Mamba
+#       detection, none of which has a builder or platform hook upstream.
 #    How:
-#       Use GLM-Next-specific grouping, tensor layout, and memory accounting.
-#       Other models continue to use the original vLLM implementation.
+#       Monkey-patch only the module-level helpers the builder cannot express.
+#       Grouping, pool accounting, and materialization live in
+#       AscendKVCacheConfigBuilder, which the platform selects through
+#       NPUPlatform.get_kv_cache_config_builder_cls.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/53906
-#       https://github.com/vllm-project/vllm/pull/55219
+#       https://github.com/vllm-project/vllm/pull/40860
+#       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Remove this patch when upstream's generic KV-cache layout supports the
-#       Ascend GLM-Next cache topology.
-#
-#       On both supported versions, Ascend grouping and pool accounting live
-#       in AscendKVCacheConfigBuilder, which the platform selects through
-#       NPUPlatform.get_kv_cache_config_builder_cls. Its default materialization
-#       delegates to the patched planning functions in this file.
+#       Remove this patch once upstream supports hybrid KV cache + CP for
+#       non-CUDA backends and exposes hooks for the remaining helpers.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
