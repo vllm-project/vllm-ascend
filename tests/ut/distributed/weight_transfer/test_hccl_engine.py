@@ -221,7 +221,7 @@ def test_trainer_normalizes_source_for_both_modes(packed):
         patch.object(engine, "_checked_iter", return_value=iter(pairs)),
         patch(f"{namespace}.packed_broadcast_producer", side_effect=pack),
     ):
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             engine._broadcast(pairs, [])
         else:
             # Main passes the metadata slice and the broadcasting group rank.
@@ -267,7 +267,7 @@ def test_non_sender_drains_source_without_validating_placeholder_tensors():
     iter_source = MagicMock()
     iter_source.iter_full.return_value = source()
     iter_source.__iter__.return_value = source()
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         with patch.object(torch, "npu", SimpleNamespace(device=lambda _: nullcontext()), create=True):
             engine._broadcast(iter_source, [])
     else:
@@ -322,15 +322,15 @@ def test_worker_update_binds_assigned_device_for_base_sync():
 def test_send_reuses_real_upstream_round_trip(sender):
     engine = _trainer(sender)
     param = ParamMeta(name="w", dtype=torch.float32, shape=(1,))
-    if vllm_version_is("0.32.0"):
-        engine.source.metadata.return_value = []
+    if vllm_version_is("0.33.0"):
+        engine.source.metadata = []
     else:
         # vLLM main exposes WeightSource.metadata as a property and sends one
         # slice per broadcasting rank.
         engine.source.metadata = [param]
     with patch.object(engine, "_broadcast") as broadcast, patch.object(engine, "_post_send_sync") as sync:
         engine.send_weights()
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         broadcast.assert_called_once_with(engine.source, [])
     else:
         broadcast.assert_called_once_with([param], 0)

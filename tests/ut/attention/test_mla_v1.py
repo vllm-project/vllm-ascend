@@ -1947,9 +1947,8 @@ class TestAscendMLAImpl(TestBase):
         """Kimi-K3 fuses its gate as a third QKV-A shard; MLAPO cannot carry it."""
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
-        # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.32.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.32.0")
+        # Both supported Kimi AMD implementations use the three-shard layout.
+        gate_fused = True
 
         impl = self._rebuild_impl()
 
@@ -2807,13 +2806,8 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
-        only while shape, dtype and device still match. The hand-rolled
-        ``copy_`` it replaced was unconditional, so a re-derived value that
-        stopped being compatible aborted the whole weight-update transaction
-        with a ``RuntimeError``. That failure mode is the only behaviour this
-        change alters, so it is the part of the contract the unit tests have to
-        pin down.
+        v0.33.0 rebinds an incompatible value; main can copy a smaller value
+        into the parameter's existing storage. Both must accept the new shape.
         """
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -2843,7 +2837,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             # A re-derived value that no longer fits rebinds the parameter.
             self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         else:
@@ -3695,10 +3689,6 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
     torch.testing.assert_close(kv_no_split, qkv_lora[:, 4:])
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="gate-fused QKV-A layout is vLLM main only",
-)
 def test_split_fused_qkv_lora_peels_kimi_output_gate():
     """A gate-fused layout returns the trailing shard separately from q/kv."""
     qkv_lora = torch.arange(15, dtype=torch.float32).reshape(1, 15)
