@@ -40,7 +40,6 @@ once per item no matter how many sub-batches or capture paths consume it.
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from PIL import Image
 from transformers.image_processing_utils import BatchFeature
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
@@ -48,7 +47,6 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm, build_mm_input_norm
-from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
@@ -62,46 +60,12 @@ from vllm.model_executor.models.qwen3_vl import (
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import direct_register_custom_op
-
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 # Marker stored in the mm_kwargs dicts produced by select_encoder_cudagraph_items
 # once device-side preprocessing has been applied. The graph manager re-packs
 # sub-batches (and the DP path re-selects rank-local subsets), so without this
 # marker a nested selection would normalize the patches a second time.
 _DEVICE_PREPROCESS_DONE = "_ascend_device_preprocess_done"
-
-
-def _evs_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-    # Load the NPU kernel only in the worker's EVS execution path.
-    from vllm_ascend.ops.triton.batch_invariant.matmul import linear_batch_invariant
-
-    return linear_batch_invariant(x, weight, bias)
-
-
-def _evs_linear_fake(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-    return x.new_empty((*x.shape[:-1], weight.shape[0]))
-
-
-direct_register_custom_op(
-    op_name="qwen35_evs_linear",
-    op_func=_evs_linear,
-    fake_impl=_evs_linear_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-
-class _EVSUnquantizedLinearMethod(AscendUnquantizedLinearMethod):
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        return torch.ops.vllm.qwen35_evs_linear(x, layer.weight, bias)
-
-
-class _EVSUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        return torch.ops.vllm.qwen35_evs_linear(x, layer.weight, bias)
 
 
 def _all_uint8(images) -> bool:
@@ -315,27 +279,6 @@ class _AscendVLPreprocessMixin:
             "image_embeds": image_embeds,
             "image_grid_thw": image_grid_thw,
         }
-
-    def process_weights_after_loading(self) -> None:
-        parent_hook = getattr(super(), "process_weights_after_loading", None)
-        if parent_hook is not None:
-            parent_hook()
-        if self.video_pruning_method != "evs" or not HAS_TRITON:
-            return
-        # Keep native checkpoint loading and deferred attention initialization.
-        # Stabilize encoder, decoder and LM-head GEMMs only after finalization.
-        for module in self.modules():
-            method = getattr(module, "quant_method", None)
-            if type(method) in (AscendUnquantizedLinearMethod, _EVSUnquantizedLinearMethod):
-                if module.weight.device.type == "npu":
-                    module.weight.data = torch_npu.npu_format_cast(module.weight.data, 2)
-                if type(method) is AscendUnquantizedLinearMethod:
-                    module.quant_method = _EVSUnquantizedLinearMethod()
-            elif type(method) in (UnquantizedEmbeddingMethod, _EVSUnquantizedEmbeddingMethod):
-                if module.weight.device.type == "npu":
-                    module.weight.data = torch_npu.npu_format_cast(module.weight.data, 2)
-                if type(method) is UnquantizedEmbeddingMethod:
-                    module.quant_method = _EVSUnquantizedEmbeddingMethod()
 
     def _run_visual(self, pixel_values, grid_thw):
         """Shared tail: optional DP sharding, then ViT forward, then split."""
