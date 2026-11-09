@@ -83,10 +83,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--output-dir", type=Path, help="Default: all_reduce_results/<timestamp>.")
     parser.add_argument(
+        "--profile", action="store_true", help="Capture separate torch_npu profiler traces after timing."
+    )
+    parser.add_argument("--profile-steps", type=int, default=5, help="Profiled AllReduce calls per size (default: 5).")
+    parser.add_argument(
+        "--profile-with-stack", action="store_true", help="Collect Python/module call stacks in traces."
+    )
+    parser.add_argument("--profile-memory", action="store_true", help="Collect memory information in traces.")
+    parser.add_argument(
         "--dry-run", action="store_true", help="Print launch commands without importing torch or running."
     )
     args = parser.parse_args(argv)
-    for name in ("iterations", "rounds", "timeout_seconds"):
+    for name in ("iterations", "rounds", "timeout_seconds", "profile_steps"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.nproc_per_node < 2:
@@ -196,6 +204,12 @@ def _launch_command(args: argparse.Namespace, mode: str, output_dir: Path) -> tu
     ]
     if args.hccl_buffsize_mib is not None:
         command.extend(("--hccl-buffsize-mib", str(args.hccl_buffsize_mib)))
+    if args.profile:
+        command.extend(("--profile", "--profile-steps", str(args.profile_steps)))
+        if args.profile_with_stack:
+            command.append("--profile-with-stack")
+        if args.profile_memory:
+            command.append("--profile-memory")
     return command, env
 
 
@@ -207,6 +221,10 @@ def _launch(args: argparse.Namespace) -> None:
         for name in (*(f"{mode}.json" for mode in modes), "comparison.json", "comparison.csv"):
             if (output_dir / name).exists():
                 raise FileExistsError(f"Refusing to replace {output_dir / name}; choose another --output-dir.")
+        if args.profile:
+            for mode in modes:
+                if (output_dir / "profiles" / mode).exists():
+                    raise FileExistsError(f"Profiling output already exists for {mode}; choose another --output-dir.")
     reports = {}
     for mode in modes:
         command, env = _launch_command(args, mode, output_dir)
@@ -300,6 +318,70 @@ def _check_result(working, expected: float, world_size: int, dtype: str) -> None
         raise AssertionError(f"AllReduce SUM check failed on ranks {failures}; expected {expected}.")
 
 
+def _create_profiler(trace_dir: Path, worker_name: str, args: argparse.Namespace):
+    import torch_npu
+
+    # Match vllm_ascend/profiler/torch_npu_profiler.py without importing vLLM.
+    # Stack/memory collection are opt-in, as they add substantial overhead.
+    profiler = torch_npu.profiler
+    experimental_config = profiler._ExperimentalConfig(
+        export_type=profiler.ExportType.Text,
+        profiler_level=profiler.ProfilerLevel.Level1,
+        msprof_tx=False,
+        aic_metrics=profiler.AiCMetrics.PipeUtilization,
+        l2_cache=False,
+        op_attr=False,
+        data_simplification=True,
+        record_op_args=False,
+        gc_detect_threshold=None,
+    )
+    return profiler.profile(
+        activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
+        with_stack=False,
+        with_modules=args.profile_with_stack,
+        profile_memory=args.profile_memory,
+        experimental_config=experimental_config,
+        on_trace_ready=profiler.tensorboard_trace_handler(
+            str(trace_dir), worker_name=worker_name, analyse_flag=True, async_mode=False
+        ),
+    )
+
+
+def _capture_profiles(args: argparse.Namespace, hccl_group, rank: int, world_size: int, output_dir: Path) -> str:
+    import torch
+    import torch.distributed as dist
+
+    profile_dir = output_dir / "profiles" / args.mode / f"rank_{rank}"
+    profile_dir.mkdir(parents=True, exist_ok=False)
+    worker_name = f"{socket.gethostname()}_rank{rank}"
+    for size in args.sizes:
+        numel = size // _DTYPE_BYTES[args.dtype]
+        source = torch.full(
+            (numel,), float(rank + 1), dtype=getattr(torch, args.dtype), device=f"npu:{torch.npu.current_device()}"
+        )
+        working = torch.empty_like(source)
+        for _ in range(max(1, args.warmup)):
+            working.copy_(source)
+            dist.all_reduce(working, op=dist.ReduceOp.SUM, group=hccl_group)
+        torch.npu.synchronize()
+        dist.barrier()  # Coordinate capture over Gloo, outside the trace.
+        trace_dir = profile_dir / f"{size}B"
+        with _create_profiler(trace_dir, worker_name, args) as profiler:
+            for _ in range(args.profile_steps):
+                with torch.profiler.record_function("benchmark_input_reset"):
+                    working.copy_(source)
+                with torch.profiler.record_function(f"all_reduce/{args.mode}/{size}B"):
+                    dist.all_reduce(working, op=dist.ReduceOp.SUM, group=hccl_group, async_op=False)
+                profiler.step()
+            # Drain the NPU before stopping/exporting the capture.
+            torch.npu.synchronize()
+        _check_result(working, world_size * (world_size + 1) / 2, world_size, args.dtype)
+        if rank == 0:
+            print(f"Profiled {args.mode} {size} B: {args.profile_steps} calls per rank", flush=True)
+        del working, source
+    return str(profile_dir)
+
+
 def _worker(args: argparse.Namespace) -> None:
     if args.mode == "both":
         raise ValueError("Under torchrun use --mode AI_CPU or --mode AIV; plain python launches both automatically.")
@@ -338,6 +420,14 @@ def _worker(args: argparse.Namespace) -> None:
     }
     metadata = [None] * world_size
     dist.all_gather_object(metadata, local_metadata)
+    # Rank 0 chooses one timestamp/path for externally launched workers too.
+    output_paths = [
+        str(args.output_dir or Path("all_reduce_results") / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        if rank == 0
+        else None
+    ]
+    dist.broadcast_object_list(output_paths, src=0)
+    output_dir = Path(output_paths[0])
     for item in metadata:
         if item["environment"] != metadata[0]["environment"]:
             # Visibility masks can legitimately differ across nodes, but HCCL
@@ -355,6 +445,7 @@ def _worker(args: argparse.Namespace) -> None:
         "iterations": args.iterations,
         "rounds": args.rounds,
         "rank_metadata": metadata,
+        "profiling": None,
         "results": [],
     }
     if rank == 0:
@@ -398,8 +489,19 @@ def _worker(args: argparse.Namespace) -> None:
                 flush=True,
             )
         del working, source
+    if args.profile:
+        # All timing samples have already been collected. Do not feed profiler
+        # calls into the benchmark statistics or include export/analysis time.
+        local_profile_dir = _capture_profiles(args, hccl_group, rank, world_size, output_dir)
+        profile_directories = [None] * world_size
+        dist.all_gather_object(profile_directories, local_profile_dir)
+        report["profiling"] = {
+            "steps_per_size": args.profile_steps,
+            "rank_directories": profile_directories,
+            "with_stack": args.profile_with_stack,
+            "profile_memory": args.profile_memory,
+        }
     if rank == 0:
-        output_dir = args.output_dir or Path("all_reduce_results") / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{args.mode}.json"
         if output_path.exists():

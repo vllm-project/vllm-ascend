@@ -67,6 +67,39 @@ python3 benchmarks/benchmark_all_reduce_modes.py \
 
 **结果标记的是请求的模式，并非确认过的执行引擎。** CANN 在部分消息规模、资源不足或确定性约束下可能回退到 AI CPU；不支持的配置也可能报错或使用默认模式。脚本不将回退数据伪装成“纯 AIV kernel”数据，也不改写继承的确定性配置。需要确认执行引擎时，应结合目标版本的 HCCL 日志/Profiling；检查 JSON 中的 `HCCL_DETERMINISTIC`、`HCCL_ALGO`、`HCCL_BUFFSIZE` 等记录。参考 [HCCL 展开模式文档](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/commlib/hcclug/docs/en/user_guide/hccl_env/HCCL_OP_EXPANSION_MODE.md)。
 
+## 采集与 vllm-ascend 同类的 Profiling 文件
+
+增加 `--profile`，在该模式所有正常计时完成后，额外采集每种消息大小的少量 AllReduce：
+
+```bash
+python3 benchmarks/benchmark_all_reduce_modes.py \
+    --nproc-per-node 4 --dtype bfloat16 --sizes 4K 1M \
+    --profile --profile-steps 5 --output-dir all_reduce_profile
+```
+
+使用与 `vllm_ascend/profiler/torch_npu_profiler.py` 相同的 CPU/NPU 活动、`ProfilerLevel.Level1`、`ExportType.Text` 和 `PipeUtilization` 配置。默认不采集调用栈和内存；可加 `--profile-with-stack`、`--profile-memory`，分别对应 vLLM 的 `torch_profiler_with_stack`、`torch_profiler_with_memory`。调用栈与 vLLM 一样通过 torch_npu 的 `with_modules` 配置，`with_stack` 保持关闭。
+
+每个 rank 都采集，目录按请求模式、全局 rank、输入字节数组织：
+
+```text
+all_reduce_profile/
+  AI_CPU.json
+  AIV.json
+  comparison.csv
+  comparison.json
+  profiles/
+    AI_CPU/rank_0/4096B/<worker>_ascend_pt/ASCEND_PROFILER_OUTPUT/
+    AI_CPU/rank_1/4096B/<worker>_ascend_pt/ASCEND_PROFILER_OUTPUT/
+    AIV/rank_0/1048576B/<worker>_ascend_pt/ASCEND_PROFILER_OUTPUT/
+    ...
+```
+
+通过 `tensorboard_trace_handler(..., analyse_flag=True, async_mode=False)` 在停止采集时同步导出、解析。通常可得到 `trace_view.json`、`kernel_details.csv`、`operator_details.csv`、`op_statistic.csv` 等，与 vllm-ascend 使用同类工具打开；具体文件集、数据库输出和字段随 torch_npu/CANN 版本变化。可以用 MindStudio Insight 查看 trace，结合通信任务名称、耗时和对应 HCCL 日志判断实际执行路径。
+
+Trace 中 `all_reduce/AI_CPU/<bytes>B` 或 `all_reduce/AIV/<bytes>B` 范围标记目标通信，`benchmark_input_reset` 标记输入恢复；这些标记中的模式是请求值，不是对实际引擎的验证。单独采集的调用、Profiler 开销和导出时间均不进入 AVG/median/p95 统计。这里采集的是微基准工作负载，包含 AllReduce 和输入恢复，不包含 vLLM 调度器或完整模型的执行内容。
+
+`--profile-steps` 默认 5，必须大于 0；每个消息大小采集一次，文件数量随消息大小数和 rank 数增长。建议先用少量 `--sizes` 采集。各模式 JSON 的 `profiling.rank_directories` 记录每个 rank 的目录；多机时文件保存在各 rank 所在主机，需自行汇总到共享位置。若自动解析耗时较长，可增加 `--timeout-seconds`。
+
 ## 单模式与多机
 
 只运行一个模式，适合反转实验顺序或附加 profiler：
