@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY: validate A3 800I FED runner smoke test (linux-aarch64-a3-800i-fed-16), retake 3. Do not merge.
+# TEMPORARY: validate A3 800I FED runner smoke test (linux-aarch64-a3-800i-fed-16), retake 5. Do not merge.
 name: E2E
 
 on:
