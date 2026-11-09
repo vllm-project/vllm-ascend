@@ -10,6 +10,23 @@ feature handler modules stay free of framework imports.
 Recording is gated by the process-local level in :mod:`vllm_ascend.observability.ms_metrics.level`.
 A spec is recorded when ``spec.level`` is less than or equal to that integer.
 Runtime config sets it from ``metrics.level``.
+
+Yaml entry convention for custom handlers
+-----------------------------------------
+
+``ms_service_metric`` treats a yaml entry that declares both ``handler`` and
+``metrics`` as a factory: it calls ``handler(metrics_config, ...)`` expecting
+the returned callable to be the hook. The handlers owned by this repository
+have runtime signatures ``(original_func, obj, *args)`` and are NOT factories,
+so their yaml entries must declare only ``symbol`` and ``handler`` — never a
+``metrics`` block. A stray ``metrics`` block makes the framework attempt the
+factory call, fail with ``TypeError``, and silently fall back to a pass-through
+hook, so the metric is never recorded while "Hooked symbol" logs still claim
+success. Metric declaration stays solely in code via :class:`MetricSpec`
+(``label_names`` and ``level`` cannot be expressed in the yaml block anyway).
+Entries that point at provider built-ins (e.g.
+``ms_service_metric.provider_handlers:phase_all_handler``) do follow the
+factory convention and keep their ``metrics`` blocks.
 """
 
 import contextlib
