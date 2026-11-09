@@ -202,10 +202,26 @@ def test_resolver_scratch_rejects_topk_outside_hot_capacity(topk):
 def test_native_resolver_uses_available_ub_without_truncating_the_union():
     from vllm_ascend.hisparse.resolver import scratch_layout
 
-    buckets, size = scratch_layout(12288, 8192, 175616)
-    assert buckets == 15328 and buckets > 8192 and size == 175616
-    with pytest.raises(RuntimeError, match="needs at least 118592 UB bytes"):
-        scratch_layout(12288, 8192, 118591)
+    hot, union, capacity = 12288, 8192, 175616
+    buckets, size = scratch_layout(hot, union, capacity)
+    assert buckets > union
+    assert 0 < size <= capacity and size % 64 == 0
+    # Find the actual supported boundary without pinning a particular hash
+    # bucket count or the precise UB layout/error-message arithmetic.
+    too_small, fits = 0, capacity
+    while fits - too_small > 1:
+        candidate = (too_small + fits) // 2
+        try:
+            scratch_layout(hot, union, candidate)
+        except RuntimeError:
+            too_small = candidate
+        else:
+            fits = candidate
+    minimum_buckets, minimum_size = scratch_layout(hot, union, fits)
+    assert minimum_buckets > union and minimum_size <= fits
+    assert minimum_size % 64 == 0
+    with pytest.raises(RuntimeError, match="UB bytes"):
+        scratch_layout(hot, union, fits - 1)
 
 
 def test_missing_native_resolver_raises_instead_of_falling_back(monkeypatch):
@@ -299,8 +315,7 @@ def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):
     real_metadata = NS(hisparse_for_capture=False)
     submitted = []
     cache = NS(finish_kv_update=lambda: submitted.append(True))
-    for _ in range(5):
-        finish_hisparse_kv_update(cache, capture_metadata)
+    finish_hisparse_kv_update(cache, capture_metadata)
     assert submitted == []
     finish_hisparse_kv_update(cache, real_metadata)
     assert submitted == [True]

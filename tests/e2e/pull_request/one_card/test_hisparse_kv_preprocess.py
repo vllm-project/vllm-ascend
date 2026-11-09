@@ -134,6 +134,9 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
     impl.is_kv_consumer, impl.rl_weight_update_enabled = False, False
     impl.sfa_qsfa_tile_size = block
     impl._kv_staging_capacity = block
+    # This case exercises the staged destination, not the separately bound
+    # direct-Resident capture path installed by the model runner.
+    impl._direct_prolog_slots = None
 
     def mx_layer(inputs, outputs):
         weight, scale = torch_npu.npu_dynamic_mx_quant(
