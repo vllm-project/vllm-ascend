@@ -239,6 +239,35 @@ jobs:
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
           install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
 
+      - name: Reclaim stale LeaderWorkerSets
+        run: |
+          set -euo pipefail
+          # Reclaim LWS left behind by interrupted runs. New LWS carry a
+          # ci.vllm-ascend/heartbeat annotation refreshed every minute; a stale
+          # heartbeat means the owning runner is gone.
+          STALE_SECONDS=1200
+          NOW=$(date +%s)
+          LWS_HEARTBEAT_TEMPLATE='{{range .items}}{{.metadata.name}}{{"|"}}'
+          LWS_HEARTBEAT_TEMPLATE="${LWS_HEARTBEAT_TEMPLATE}"'{{index .metadata.annotations "ci.vllm-ascend/heartbeat"}}{{"\n"}}{{end}}'
+          STALE_LIST=$(kubectl get leaderworkerset -n "$NAMESPACE" \
+            -l app.kubernetes.io/managed-by=vllm-ascend-ci \
+            -o go-template="$LWS_HEARTBEAT_TEMPLATE" \
+            2>/dev/null || true)
+
+          printf '%s\n' "$STALE_LIST" | while IFS='|' read -r stale_name heartbeat; do
+            [ -z "$stale_name" ] && continue
+            case "$heartbeat" in
+              ''|*[!0-9]*) continue ;;
+            esac
+            if [ $((NOW - heartbeat)) -gt "$STALE_SECONDS" ]; then
+              echo "Deleting stale LeaderWorkerSet [$stale_name] (heartbeat=${heartbeat})..."
+              kubectl delete leaderworkerset "$stale_name" -n "$NAMESPACE" --ignore-not-found --wait=false || true
+              kubectl delete service "${stale_name}-leader" -n "$NAMESPACE" --ignore-not-found --wait=false || true
+            fi
+          done
+
+          echo "Stale LeaderWorkerSet check completed."
+
       - name: Launch cluster
         env:
           BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
@@ -328,6 +357,39 @@ jobs:
 
           python3 -m tools.profiling.capture initialize --root "$LOG_PREFIX/profile_artifact"
           kubectl apply -f ./lws.yaml
+
+          # Tag the LWS so the cluster-side reaper can tell CI resources apart
+          # from anything else in the namespace.
+          kubectl label leaderworkerset "$LWS_NAME" -n "$NAMESPACE" --overwrite \
+            app.kubernetes.io/managed-by=vllm-ascend-ci \
+            ci.vllm-ascend/run-id="$GITHUB_RUN_ID"
+
+          TIMEOUT_MINUTES="${{ inputs.testcase_timeout }}"
+          if [ "$is_pr_test" = "true" ]; then
+            if [ "${{ inputs.aop_multi_enabled }}" = "true" ]; then
+              TIMEOUT_MINUTES=1440
+            else
+              TIMEOUT_MINUTES=240
+            fi
+          fi
+          NOW_EPOCH=$(date +%s)
+          kubectl annotate leaderworkerset "$LWS_NAME" -n "$NAMESPACE" --overwrite \
+            ci.vllm-ascend/config="$config_file_path" \
+            ci.vllm-ascend/job-id="$GITHUB_JOB" \
+            ci.vllm-ascend/created-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            ci.vllm-ascend/expires-at="$(date -u -d "+$((TIMEOUT_MINUTES + 30)) minutes" +%Y-%m-%dT%H:%M:%SZ)" \
+            ci.vllm-ascend/heartbeat="$NOW_EPOCH"
+
+          # Refresh the heartbeat every minute. The loop dies with the runner,
+          # which is exactly the signal the reaper uses to reclaim the LWS.
+          nohup bash -c '
+            while true; do
+              kubectl annotate leaderworkerset "$1" -n "$2" \
+                ci.vllm-ascend/heartbeat="$(date +%s)" --overwrite >/dev/null 2>&1
+              sleep 60
+            done
+          ' _ "$LWS_NAME" "$NAMESPACE" >/tmp/lws-heartbeat.log 2>&1 &
+          disown || true
 
       - name: Wait for pods ready
         run: |
