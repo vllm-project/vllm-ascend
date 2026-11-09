@@ -860,15 +860,19 @@ class MembPullReadThread(threading.Thread):
         n_main = 0
         n_indexer = 0
 
-        # Main MLA is replicated across P ranks and already split across D TP; only the
-        # group's first contributor pulls it, so it is neither duplicated nor fine-split.
-        pull_main = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None and group_member_idx == 0
+        # The selective Host pool is registered by rank 0. Full KV is local to each D rank.
+        pull_main = (
+            layer["k_cpu_ptr"] is not None
+            and layer["v_cpu_ptr"] is not None
+            and group_member_idx == 0
+            and (not state.full_layer_names or layer.get("full_layer") or self.tp_rank == 0)
+        )
         if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
                 f"MembPull main block count mismatch for req {ext_req_id}: "
                 f"P={len(p_main_block_ids)}, D={len(d_main_ids)}"
             )
-        if pull_main:
+        if pull_main and not state.full_layer_names:
             owned_start, owned_end = _tp_block_range(
                 len(d_main_ids),
                 self.tp_rank,
@@ -1089,7 +1093,11 @@ class MembPullReadThread(threading.Thread):
                     group_member_idx == 0
                     and layer["k_cpu_ptr"] is not None
                     and layer["v_cpu_ptr"] is not None
-                    and owned_main_end > owned_main_start
+                    and (
+                        (owned_main_end > owned_main_start)
+                        if not self._state.full_layer_names
+                        else bool(p_main_block_ids) and (layer.get("full_layer") or self.tp_rank == 0)
+                    )
                 )
                 owns_requested_indexer = (
                     layer["indexer"] is not None and read_info is not None and bool(read_info["d_indexer_ids"])

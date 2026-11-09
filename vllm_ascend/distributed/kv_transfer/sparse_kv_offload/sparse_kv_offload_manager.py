@@ -797,6 +797,7 @@ class SparseKVOffloadManager:
         kv_caches: dict[str, torch.Tensor],
     ):
         self._register_offload_layers(kv_caches)
+        selective = getattr(getattr(self, "sparse_kv_offload_config", None), "selective_offload", False)
 
         # register topk_buffer and cpu kv_cache
         self.topk_buffers_k: list[torch.Tensor] = []
@@ -829,11 +830,13 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
-        if getattr(getattr(self, "sparse_kv_offload_config", None), "selective_offload", False):
+        if selective:
             device = self.topk_buffers_k[0].device
             rows = self.topk_buffers_k[0].shape[0]
             # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
             descriptor_shape = (self.num_layers, 2 * rows * self.topk)
+            if self.tp_size > 1:
+                self.selective_writeback_sync = torch.zeros(1, dtype=torch.int32, device=device)
             self.selective_copy_src = torch.empty(descriptor_shape, dtype=torch.int64, device=device)
             self.selective_copy_dst = torch.empty_like(self.selective_copy_src)
             self.selective_copy_lengths = torch.empty(descriptor_shape, dtype=torch.int32, device=device)
@@ -936,7 +939,7 @@ class SparseKVOffloadManager:
                 )
             )
 
-        if self.tp_rank != 0:
+        if self.tp_rank != 0 and not selective:
             cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
             cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
             self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
@@ -1247,6 +1250,9 @@ class SparseKVOffloadManager:
                 v,
                 has_prefill,
             )
+            if self.sparse_kv_offload_config.selective_offload and self.tp_size > 1:
+                # Rank 0 writes the shared row before any rank reloads the current token.
+                self.tp_group.all_reduce(self.selective_writeback_sync)
             return
 
         current_kv_ready = torch_npu.npu.current_stream().record_event()

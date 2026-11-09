@@ -46,8 +46,9 @@ def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
     manager = SimpleNamespace(
         block_size=2,
         topk=3,
-        k_caches_cpu=host,
-        v_caches_cpu=host,
+        kv_cache_config=SimpleNamespace(num_blocks=2),
+        gvas_k_bases=[tensor.data_ptr() for tensor in host],
+        gvas_v_bases=[tensor.data_ptr() for tensor in host],
         topk_buffers_k=hot,
         topk_buffers_v=hot,
         token_size_bytes_k=4,

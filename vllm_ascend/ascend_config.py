@@ -1790,10 +1790,6 @@ class SparseKVOffloadConfig:
         if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):
             raise ValueError("Sparse KV offload only support sparse attention model.")
         parallel_config = vllm_config.parallel_config
-        if self.selective_offload and (
-            parallel_config.tensor_parallel_size != 1 or parallel_config.data_parallel_size != 1
-        ):
-            raise ValueError("selective_offload currently requires TP=1 and DP=1")
         if self.selective_offload and not vllm_config.model_config.enforce_eager:
             from vllm.config import CUDAGraphMode
 

@@ -168,6 +168,8 @@ def test_selective_full_layer_reads_into_device_group():
     thread = _make_read_thread()
     name = "model.layers.0.self_attn"
     thread._state.full_layer_names = (name,)
+    thread._state.tp_size = 2
+    thread.tp_rank = 1
     thread._state.main_name_to_idx = {name: 0}
     thread._state.main_gva_bases = [(3000, 4000)]
     thread._state.main_block_lens = [(10, 20)]

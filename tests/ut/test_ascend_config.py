@@ -970,9 +970,8 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertTrue(config.is_host_layer("model.layers.3.attn"))
         self.assertFalse(config.is_host_layer("model.layers.6.attn"))
         vllm_config.parallel_config.tensor_parallel_size = 2
-        with self.assertRaisesRegex(ValueError, "TP=1"):
-            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
-        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_size = 2
+        self.assertTrue(SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True}).selective_offload)
 
         vllm_config.model_config.enforce_eager = False
         vllm_config.compilation_config = SimpleNamespace(

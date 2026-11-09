@@ -1594,8 +1594,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         valid &= logical < table.shape[1] * block_size
         block_indices = (logical.clamp_min(0) // block_size).clamp_max(table.shape[1] - 1)
         physical_blocks = table.gather(-1, block_indices)
-        host_k = manager.k_caches_cpu[layer_id]
-        host_blocks = host_k.numel() * host_k.element_size() // (manager.token_size_bytes_k * block_size)
+        host_blocks = manager.kv_cache_config.num_blocks
         valid &= (physical_blocks >= 0) & (physical_blocks < host_blocks)
         source_slots = physical_blocks.clamp(0, host_blocks - 1) * block_size + logical.clamp_min(0) % block_size
 
@@ -1618,12 +1617,12 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         device_slots = destinations + manager.selective_hot_offsets[:rows]
         for i, (host, hot, row_bytes) in enumerate(
             (
-                (host_k, manager.topk_buffers_k[layer_id], manager.token_size_bytes_k),
-                (manager.v_caches_cpu[layer_id], manager.topk_buffers_v[layer_id], manager.token_size_bytes_v),
+                (manager.gvas_k_bases[layer_id], manager.topk_buffers_k[layer_id], manager.token_size_bytes_k),
+                (manager.gvas_v_bases[layer_id], manager.topk_buffers_v[layer_id], manager.token_size_bytes_v),
             )
         ):
             segment = slice(i * entries, (i + 1) * entries)
-            src[segment].copy_((host.data_ptr() + source_slots * row_bytes).flatten())
+            src[segment].copy_((host + source_slots * row_bytes).flatten())
             dst[segment].copy_((hot.data_ptr() + device_slots * row_bytes).flatten())
             lengths[segment].copy_((misses.to(torch.int32) * row_bytes).flatten())
         manager.copy_sfa_kv(src, dst, lengths, manager.selective_copy_counts[rows - 1])

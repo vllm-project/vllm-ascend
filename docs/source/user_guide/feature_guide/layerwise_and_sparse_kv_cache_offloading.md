@@ -176,7 +176,7 @@ missing historical KV rows for the shared layers in its group. Each shared
 layer waits for its own prefetch before attention and loads the current
 token's KV after that layer writes it.
 
-This mode uses Model Runner V2 with TP=1 and DP=1 and supports one token per
+This mode uses Model Runner V2 and supports one token per
 request in a Decode batch. Set `--max-num-seqs` to the concurrency limit.
 Each batch row has its own hot slots and the row is invalidated when its
 request changes. For example, to capture one- and two-request Decode graphs:
