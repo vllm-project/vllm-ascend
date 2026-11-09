@@ -249,10 +249,18 @@ def test_w4a8_lora_injects_at_float_boundaries() -> None:
     assert gmm1["bias"] is weights.w1_scale_bias
     assert gmm1["x"][0] is quantized_input
     assert gmm1["per_token_scale"][0] is input_scale
+    # The A8W4 gmm needs the per-channel w13 scale in [E, 1, N] layout. The
+    # loader hands over [E, N]; without the unsqueeze the kernel tiling reads
+    # the flattened scale as the quant group count and aborts.
+    gmm1_scale = gmm1["scale"][0]
+    assert gmm1_scale.shape == (1, 1, 6)
+    assert gmm1_scale.dtype == weights.w2_scale[0].dtype
     gmm2 = grouped_matmul.call_args_list[1].kwargs
     assert gmm2["weight"] is weights.w2
     assert gmm2["bias"] is weights.w2_scale_bias
     assert gmm2["x"][0] is quantized_activated
+    # The w2 scale already carries the [E, 1, N] layout from the loader.
+    assert gmm2["scale"][0].shape == (1, 4)
     apply_w13.assert_called_once_with(
         mlp_input.lora_context,
         gate_up_out=gate_up_out,
