@@ -1,0 +1,321 @@
+# One fixed deployment for P, PD, decode replay and GPQA. See the adjacent Combined README.
+test_name: GLM-5.3-Flash-W8A8-MXFP8-A5-PD-Combined
+model: Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller:
+    - 0
+    decoder:
+    - 1
+config:
+- node_index: 0
+  port_start: 8000
+  dp_rpc_port: 12325
+  dp_size: 1
+  dp_size_local: 1
+  dp_rank_start: 0
+  tp_size: 1
+  cp_size: 8
+  dp_address: ${NODE_0_IP}
+- node_index: 1
+  port_start: 8000
+  dp_rpc_port: 12325
+  dp_size: 8
+  dp_size_local: 8
+  dp_rank_start: 0
+  tp_size: 1
+  dp_address: ${NODE_1_IP}
+templates:
+- node_index: 0
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    HCCL_OP_EXPANSION_MODE: AIV
+    SERVER_PORT: ${PORT}
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    HCCL_IF_IP: ${LOCAL_IP}
+    GLOO_SOCKET_IFNAME: eth0
+    TP_SOCKET_IFNAME: eth0
+    HCCL_SOCKET_IFNAME: eth0
+    HCCL_BUFFSIZE: '3072'
+  server_cmd_template:
+  - --device-ids
+  - ${VISIBLE_DEVICES}
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --data-parallel-rank
+  - ${DP_RANK}
+  - --data-parallel-address
+  - ${DP_ADDRESS}
+  - --data-parallel-rpc-port
+  - ${DP_RPC_PORT}
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --prefill-context-parallel-size
+  - ${CP_SIZE}
+  - --enable-expert-parallel
+  - --seed
+  - '1024'
+  - --safetensors-load-strategy
+  - prefetch
+  - --kv-cache-dtype
+  - fp8
+  - --attention-config.indexer_kv_dtype
+  - fp8
+  - --max-num-seqs
+  - '256'
+  - --max-model-len
+  - '133120'
+  - --max-num-batched-tokens
+  - '24576'
+  - --trust-remote-code
+  - --quantization
+  - ascend
+  - --tool-call-parser
+  - glm47
+  - --enable-auto-tool-choice
+  - --reasoning-parser
+  - glm47
+  - --enable-prefix-caching
+  - --enable-chunked-prefill
+  - --limit-mm-per-prompt
+  - '{"image": 1, "video": 0}'
+  - --gpu-memory-utilization
+  - '0.9'
+  - --enforce-eager
+  - --speculative-config
+  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  - --additional-config
+  - "{\n                \"enable_cpu_binding\": true,\n                \"enable_fused_mc2\": 0,\n                \"multistream_overlap_shared_expert\": true\n   \
+    \           }"
+  - --kv-transfer-config
+  - "{\n                \"kv_connector\": \"MooncakeConnectorV2\",\n                \"kv_role\": \"kv_producer\",\n                \"engine_id\": \"0\",\n       \
+    \         \"kv_port\": \"30100\",\n                \"kv_connector_extra_config\": {\n                  \"prefill\": {\"dp_size\": 1, \"tp_size\": 1, \"pcp_size\"\
+    : 8},\n                  \"decode\": {\"dp_size\": 8, \"tp_size\": 1, \"pcp_size\": 1}\n                }\n              }"
+- node_index: 1
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    HCCL_OP_EXPANSION_MODE: AIV
+    SERVER_PORT: ${PORT}
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    HCCL_IF_IP: ${LOCAL_IP}
+    GLOO_SOCKET_IFNAME: eth0
+    TP_SOCKET_IFNAME: eth0
+    HCCL_SOCKET_IFNAME: eth0
+    HCCL_BUFFSIZE: '1024'
+  server_cmd_template:
+  - --device-ids
+  - ${VISIBLE_DEVICES}
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --data-parallel-rank
+  - ${DP_RANK}
+  - --data-parallel-address
+  - ${DP_ADDRESS}
+  - --data-parallel-rpc-port
+  - ${DP_RPC_PORT}
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --prefill-context-parallel-size
+  - ${CP_SIZE}
+  - --enable-expert-parallel
+  - --seed
+  - '1024'
+  - --safetensors-load-strategy
+  - prefetch
+  - --kv-cache-dtype
+  - fp8
+  - --attention-config.indexer_kv_dtype
+  - fp8
+  - --max-num-seqs
+  - '30'
+  - --max-model-len
+  - '133120'
+  - --max-num-batched-tokens
+  - '120'
+  - --trust-remote-code
+  - --quantization
+  - ascend
+  - --tool-call-parser
+  - glm47
+  - --enable-auto-tool-choice
+  - --reasoning-parser
+  - glm47
+  - --no-enable-prefix-caching
+  - --enable-chunked-prefill
+  - --limit-mm-per-prompt
+  - '{"image": 1, "video": 0}'
+  - --gpu-memory-utilization
+  - '0.95'
+  - --compilation-config
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - --speculative-config
+  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+  - --additional-config
+  - "{\n                \"multistream_overlap_shared_expert\": true,\n                \"scheduler_config\": {\"recompute_scheduler_enable\": true}\n             \
+    \ }"
+  - --kv-transfer-config
+  - "{\n                \"kv_connector\": \"MooncakeConnectorV2\",\n                \"kv_role\": \"kv_consumer\",\n                \"engine_id\": \"1\",\n       \
+    \         \"kv_port\": \"30800\",\n                \"kv_connector_extra_config\": {\n                  \"prefill\": {\"dp_size\": 1, \"tp_size\": 1, \"pcp_size\"\
+    : 8},\n                  \"decode\": {\"dp_size\": 8, \"tp_size\": 1, \"pcp_size\": 1}\n                }\n              }"
+benchmarks:
+  prefill_16k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1
+    batch_size: 16
+    request_rate: 0
+  reset_before_prefill_16k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  prefill_16k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1
+    batch_size: 16
+    request_rate: 0
+  pd_16k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  reset_before_pd_16k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  pd_16k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  reset_before_decode_16k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  decode_16k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  decode_16k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  prefill_128k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1
+    batch_size: 4
+    request_rate: 0
+  reset_before_prefill_128k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  prefill_128k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1
+    batch_size: 4
+    request_rate: 0
+  pd_128k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+  reset_before_pd_128k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  pd_128k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+  reset_before_decode_128k:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  decode_128k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+  decode_128k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+  reset_before_gpqa:
+    case_type: curl_cmd
+    cmds:
+    - curl --fail --show-error --silent --max-time 120 -X POST http://127.0.0.1:8000/reset_prefix_cache
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 131072
+    temperature: 1.0
+    top_p: 0.95
+    batch_size: 32
+    baseline: 86.2
+    verify_mode: ge
