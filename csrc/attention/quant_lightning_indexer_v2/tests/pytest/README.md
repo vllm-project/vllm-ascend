@@ -66,6 +66,7 @@
 
 - test_quant_lightning_indexer_v2_single.py    # pytest测试单用例运行主程序
 - test_quant_lightning_indexer_v2_paramset.py  # 单用例入参配置，按芯片型号自动选择用例
+- test_quant_lightning_indexer_v2_dcp.py       # DCP（Decode Context Parallel，解码上下文并行）专项测试
 
 批量测试：
 
@@ -257,3 +258,33 @@ bash batch_isolated_run.sh ./pt_path 1 graph   # graph模式 + 性能采集
 | `batch_summary.log` | 批量执行详细日志 |
 | `batch_fail_list.log` | 失败用例清单 |
 | `PROF_*/` | msprof性能原始数据目录 |
+
+## DCP 专项测试（Decode Context Parallel，解码上下文并行）
+
+`test_quant_lightning_indexer_v2_dcp.py` 与上面的 single/paramset 链路独立，原因：DCP 需要**同一全局序列在多个 rank 上各跑一次**，再离线合并验证，不适合单进程参数集。
+
+覆盖内容：
+- 单 rank：本地 index 集合与 BF16 score 对齐 CPU golden；
+- 多 rank：按 `global = (local // S * P + r) * S + local % S` 转全局并稳定 TopK，结果与同一全局序列按 `P=1` 跑一致；
+- 边界：`C` 落在 `P*S` 边界、末 rank 截断、`L_r=0`、`Q_len>1`、`B>1`、`mask_mode=0/3`、`S=1/16/64/128`；
+- 非 DCP 回归：`enable_dcp=false` 与 `P=1` 的 DCP 结果逐位一致；`return_value=0/1` 行为正确。
+- **DCP + LD 的极端分片**（`test_qliv2_dcp_ld_invisible_segments`）：把 `seqused_k` padding 到 16384
+  （超过 FD 阈值），全局 `C=1152/128` 使可见长度只有 256/128/0，覆盖“某核整段不可见”“零可见行”
+  以及归约缺 partial 的场景；断言有效 index 数等于可见长度、不越出可见前缀、padding 为 `-1/-inf`。
+- FD/LD 门禁回归（`test_qliv2_ld_gate_non_dcp_vs_dcp`）：非 DCP 长 S2 QLD 使能核数为 0，DCP 为 1。
+- 互斥校验：DCP 下传 `output_idx_offset`、或 `cmp_ratio>1`，必须在 tiling 层被拒绝。
+
+运行（自动优先使用 `_C_ascend`，否则回退到 `cann_ops_transformer`）：
+
+```bash
+# 已安装 vllm_ascend 或 cann_ops_transformer 时直接跑
+python -m pytest -q test_quant_lightning_indexer_v2_dcp.py
+
+# 仅编译了最小扩展时: 显式加载 .so, 并指定算子包 vendor
+QLI_DCP_EXT=/path/to/qli_min_ext.so \
+ASCEND_CUSTOM_OPP_PATH=/path/to/vendors/custom_transformer \
+LD_LIBRARY_PATH=/path/to/vendors/custom_transformer/op_api/lib:$LD_LIBRARY_PATH \
+python -m pytest -q test_quant_lightning_indexer_v2_dcp.py
+```
+
+> 该测试会占用 1 张 NPU（默认 device 0），不涉及多卡通信；多 rank 通过同一进程内顺序调用模拟。
