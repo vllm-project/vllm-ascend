@@ -295,8 +295,8 @@
 #       planning functions.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
-#   3. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`
-#      `vllm.v1.core.kv_cache_utils.pool_bytes_per_block`
+#   3. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
+#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
 #    Why:
 #       Ascend dense GQA attention requires contiguous K/V pools. Replicated
 #       draft pages cannot alias block-strided target/Mamba pages with different
