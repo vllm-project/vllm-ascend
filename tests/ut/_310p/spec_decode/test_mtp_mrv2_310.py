@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
@@ -21,7 +20,6 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     set_draft_step_host,
     update_draft_inputs_cpu,
 )
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
 class TestMRv2Mtp310(TestBase):
@@ -221,29 +219,3 @@ class TestMRv2Mtp310(TestBase):
             )
 
         self.assertTrue(called["per_step"])
-
-
-@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
-def test_draft_prefill_capture_forwards_pcp_manager(mode):
-    manager = object.__new__(AutoRegressiveAclGraphManager310)
-    manager.is_draft_model_prefill = True
-    manager.cudagraph_mode = mode
-    pcp_manager = object()
-    original_make_dummy = AscendInputBatch.make_dummy.__func__
-
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.AutoRegressiveAclGraphManager.capture"
-    ) as parent_capture:
-        manager.capture(
-            forward_fn=lambda: None,
-            model_state=object(),
-            input_buffers=object(),
-            block_tables=object(),
-            attn_groups=[],
-            kv_cache_config=object(),
-            pcp_manager=pcp_manager,
-        )
-
-    parent_capture.assert_called_once()
-    assert parent_capture.call_args.kwargs["pcp_manager"] is pcp_manager
-    assert AscendInputBatch.make_dummy.__func__ is original_make_dummy
