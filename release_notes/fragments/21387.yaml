@@ -1,0 +1,4 @@
+pr: 21387
+entries:
+  - category: bugfix
+    text: Fixed mixed-precision Kimi MLA output-gate loading with vLLM 0.33, preserving floating-point gates alongside quantized Q/KV projections.
