@@ -221,8 +221,7 @@
 # /vllm_ascend/weight_switch
 
 # EC manager
-# TODO(owner): /vllm_ascend/ec_manager
-# /vllm_ascend/ec_manager
+/vllm_ascend/ec_manager @wangxiyuan
 
 # Model executor
 # TODO(owner): /vllm_ascend/model_executor
