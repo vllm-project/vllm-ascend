@@ -23,6 +23,19 @@
 #
 set -euo pipefail
 
+# The vLLM server of the configuration currently being measured. A global EXIT trap (not a RETURN trap, which
+# is not inherited by called functions and does not run when the script is interrupted) guarantees that the
+# background server is stopped on every exit path: normal end, failure under `set -e`, SIGINT or SIGTERM.
+server_pid=""
+stop_server() {
+    if [[ -n "$server_pid" ]]; then
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+        server_pid=""
+    fi
+}
+trap stop_server EXIT
+
 MODEL="${MODEL:?set MODEL to the target checkpoint}"
 DRAFT_MODEL="${DRAFT_MODEL:?set DRAFT_MODEL to the DSpark draft checkpoint}"
 OUT_DIR="${OUT_DIR:-./perf_results}"
@@ -112,14 +125,11 @@ run_one() {
     [[ -n "$QUANTIZATION" ]] && server_cmd+=(--quantization "$QUANTIZATION")
 
     VLLM_USE_V2_MODEL_RUNNER="$runner" "${server_cmd[@]}" > "$server_log" 2>&1 &
-    local server_pid=$!
-    # shellcheck disable=SC2064
-    trap "kill $server_pid 2>/dev/null || true" RETURN
+    server_pid=$!
 
     if ! wait_for_server; then
         echo "  !! server failed to start; see ${server_log}" >&2
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+        stop_server
         return 1
     fi
 
@@ -146,14 +156,12 @@ run_one() {
 
     if (( bench_rc != 0 )); then
         echo "  !! benchmark failed with rc=${bench_rc}; see ${OUT_DIR}/${tag}.bench.log" >&2
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+        stop_server
         return "$bench_rc"
     fi
     if [[ ! -s "$result_file" ]]; then
         echo "  !! benchmark exited successfully but wrote no result: ${result_file}" >&2
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+        stop_server
         return 1
     fi
 
@@ -182,13 +190,11 @@ PY
     if (( metadata_rc != 0 )); then
         echo "  !! failed to add metadata to ${result_file}" >&2
         rm -f "$result_file"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+        stop_server
         return "$metadata_rc"
     fi
 
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+    stop_server
     sleep 10  # let HBM drain before the next server starts
 }
 

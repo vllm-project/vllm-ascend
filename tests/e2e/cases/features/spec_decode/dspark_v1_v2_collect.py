@@ -641,6 +641,43 @@ def _run_remote(args: argparse.Namespace, prompts: list[tuple[str, str]]) -> dic
     }
 
 
+def _speculative_config_literal(raw_args: str) -> str | None:
+    """Return the balanced ``{...}`` text of the ``'speculative_config'`` value, without evaluating the rest.
+
+    The server's ``non-default args`` line is a Python repr that can contain non-literal objects elsewhere
+    (for example dtypes), which makes a whole-line ``ast.literal_eval`` fail even though the speculative
+    configuration itself is a plain dict.
+    """
+    key = "'speculative_config':"
+    start = raw_args.find(key)
+    if start < 0:
+        return None
+    brace = raw_args.find("{", start + len(key))
+    if brace < 0 or raw_args[start + len(key) : brace].strip():
+        return None  # the value is not a dict literal (for example None)
+    depth = 0
+    quote: str | None = None
+    i = brace
+    while i < len(raw_args):
+        char = raw_args[i]
+        if quote:
+            if char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return raw_args[brace : i + 1]
+        i += 1
+    return None
+
+
 def _server_speculative_config(text: str) -> dict[str, Any] | None:
     """Extract speculative_config from a rank-0 ``non-default args`` line."""
     for line in text.splitlines():
@@ -650,9 +687,17 @@ def _server_speculative_config(text: str) -> dict[str, Any] | None:
         try:
             parsed_args = ast.literal_eval(raw_args)
         except (ValueError, SyntaxError) as exc:
-            if "speculative_config" in raw_args:
+            if "speculative_config" not in raw_args:
+                continue
+            literal = _speculative_config_literal(raw_args)
+            if literal is None:
+                if re.search(r"'speculative_config':\s*None", raw_args):
+                    return None
                 raise SystemExit("runner evidence contains an unparsable speculative_config") from exc
-            continue
+            try:
+                parsed_args = {"speculative_config": ast.literal_eval(literal)}
+            except (ValueError, SyntaxError) as inner:
+                raise SystemExit("runner evidence contains an unparsable speculative_config") from inner
         if not isinstance(parsed_args, dict):
             continue
         parsed = parsed_args.get("speculative_config")

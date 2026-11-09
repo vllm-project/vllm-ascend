@@ -366,6 +366,31 @@ def test_server_config_parser_handles_nested_values():
     }
 
 
+def test_server_config_parser_survives_non_literal_values_elsewhere_in_the_line():
+    # Other arguments can be non-literal objects (for example dtypes); that must not hide a plain-dict config.
+    log = (
+        "non-default args: {'dtype': torch.bfloat16, 'speculative_config': {'num_speculative_tokens': 3, "
+        "'draft_sample_method': 'greedy', 'enforce_eager': False, 'note': 'a } brace in a string'}, "
+        "'device': device(type='npu')}\n"
+    )
+    assert _server_speculative_config(log) == {
+        "num_speculative_tokens": 3,
+        "draft_sample_method": "greedy",
+        "enforce_eager": False,
+    }
+
+
+def test_server_config_parser_rejects_unparsable_speculative_config_itself():
+    log = "non-default args: {'speculative_config': {'num_speculative_tokens': 7, 'dtype': torch.bfloat16}}\n"
+    with pytest.raises(SystemExit, match="unparsable speculative_config"):
+        _server_speculative_config(log)
+
+
+def test_server_config_parser_accepts_explicit_none_when_line_is_not_a_literal():
+    log = "non-default args: {'dtype': torch.bfloat16, 'speculative_config': None}\n"
+    assert _server_speculative_config(log) is None
+
+
 def test_remote_runner_evidence_rejects_client_default_masquerading_as_server_config(tmp_path: Path):
     # A client-side default must never override the configuration recorded by the server.
     evidence = tmp_path / "startup.log"
