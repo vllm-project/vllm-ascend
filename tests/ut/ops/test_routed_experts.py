@@ -318,7 +318,7 @@ def test_init_eplb_allocates_load_on_npu_with_meta_default(monkeypatch, default_
         lambda: SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=1)),
     )
     monkeypatch.setattr(routed_experts_module, "init_eplb_config", lambda *args, **kwargs: (None, None, None, 0))
-    registered = []
+    registered: list[SimpleNamespace] = []
     monkeypatch.setattr(routed_experts_module.VllmEplbAdaptor, "register_layer", registered.append)
     zeros = torch.zeros
 
