@@ -85,6 +85,7 @@ class TestMain2MainContracts(unittest.TestCase):
                     namespace: dict[str, Any] = dict(
                         torch=SimpleNamespace(nn=SimpleNamespace(Module=object)),
                         gemma4_mm=upstream,
+                        vllm_version_is=lambda _, native_norm=native_norm: not native_norm,
                         AutoModel=SimpleNamespace(from_config=MagicMock(return_value=tower)),
                         Gemma4MultimodalEmbedder=MagicMock(),
                         recursive_replace_linear=replace_linear,
@@ -118,6 +119,47 @@ class TestMain2MainContracts(unittest.TestCase):
                     self.assertIsNone(model.per_layer_embeddings)
                     self.assertFalse(model._enable_mm_lora)
                     self.assertEqual(model._suppress_token_ids, [7])
+
+    def test_split_graph_explicit_values_preserve_default_cap_semantics(self):
+        fields = (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+            "max_decode_cudagraph_capture_tokens",
+        )
+        for release in (False, True):
+            namespace = {"vllm_version_is": lambda _, release=release: release}
+            tree = ast.parse((ROOT / "vllm_ascend/platform.py").read_text(encoding="utf-8"))
+            fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_get_reduced_cg_cap")
+            module = ast.Module(
+                body=[ast.ImportFrom(module="__future__", names=[ast.alias("annotations")], level=0), fn],
+                type_ignores=[],
+            )
+            exec(compile(ast.fix_missing_locations(module), "<actual-default-cap>", "exec"), namespace)
+            compilation = SimpleNamespace(max_cudagraph_capture_size=None, cudagraph_capture_sizes=None)
+            if not release:
+                for name in fields:
+                    setattr(compilation, name, None)
+            config = SimpleNamespace(
+                compilation_config=compilation,
+                scheduler_config=SimpleNamespace(max_num_seqs=7),
+                speculative_config=SimpleNamespace(num_speculative_tokens=1),
+            )
+            cap = namespace[fn.name]
+            self.assertEqual(cap(config), 14)
+            if not release:
+                for name in fields:
+                    # Empty lists and zero caps are explicit settings, not None.
+                    values = ([], [1, 3, 7]) if name.endswith("sizes") else (0, 7)
+                    for value in values:
+                        with self.subTest(name=name, value=value):
+                            setattr(compilation, name, value)
+                            self.assertIsNone(cap(config))
+                            self.assertEqual(getattr(compilation, name), value)
+                            setattr(compilation, name, None)
+            compilation.cudagraph_capture_sizes = []
+            self.assertIsNone(cap(config))
 
     def test_mamba_precopy_temporal_bias_preserves_conv_and_legacy_calls(self):
         path = ROOT / "vllm_ascend/ops/triton/mamba/precopy.py"

@@ -122,7 +122,7 @@ def test_init_info_preserves_upstream_payload_contract():
     assert isinstance(init_info, NCCLWeightTransferInitInfo)
     assert HCCLWeightTransferEngine.init_info_cls is HCCLWeightTransferInitInfo
     expected = dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
-    if "use_load_plan" in NCCLWeightTransferInitInfo.__dataclass_fields__:
+    if not vllm_version_is("0.33.0"):
         expected["use_load_plan"] = False
     assert worker_init_payload(init_info) == expected
     restored = HCCLWeightTransferInitInfo(**worker_init_payload(init_info))

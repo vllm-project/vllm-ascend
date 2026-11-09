@@ -31,6 +31,7 @@ from vllm_ascend.quantization.methods import (
     AscendW4A4MXFP4DynamicLinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # NOTE: The upstream Gemma4 vision patch embedder may cast pixel_values to the
 # projection weight dtype. For Ascend MXFP4/MXFP8 dynamic quantization, the
@@ -92,8 +93,8 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
-            # Older vLLM versions do not use device-side input normalization.
-            if hasattr(gemma4_mm, "build_mm_input_norm"):
+            # v0.33.0 predates the device-side normalization added in #65577.
+            if not vllm_version_is("0.33.0"):
                 self.vision_input_norm = gemma4_mm.build_mm_input_norm(vllm_config.model_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,

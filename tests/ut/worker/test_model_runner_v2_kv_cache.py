@@ -42,7 +42,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         registration_order.append("connector")
 
     tracker_context: AbstractContextManager[MagicMock | None]
-    if hasattr(upstream, "get_replayssm_block_copy_tensors"):
+    if not vllm_version_is("0.33.0"):
         tracker_context = patch.object(upstream, "get_replayssm_block_copy_tensors", return_value=trackers)
     else:
         tracker_context = nullcontext(None)

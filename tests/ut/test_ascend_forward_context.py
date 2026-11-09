@@ -11,6 +11,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +64,8 @@ def _make_vllm_config(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
+    if not vllm_version_is("0.33.0"):
+        compilation_config.decode_cudagraph_capture_request_sizes = None
     kv_transfer_config = (
         SimpleNamespace(kv_connector=kv_connector, kv_role=kv_role)
         if kv_connector is not None or kv_role is not None
@@ -209,8 +212,6 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
 def test_mc2_capacity_excludes_independent_draft_capture_grid(
     monkeypatch, prefill_tokens, decode_sizes, query_lens, token_cap, tp_size, expected
 ):
-    from vllm_ascend.utils import vllm_version_is
-
     if vllm_version_is("0.33.0"):
         pytest.skip("Separate target/draft graph grids are a main-only API")
 
