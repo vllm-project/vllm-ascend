@@ -3,7 +3,10 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """DeepSeek checkpoint-name conversion."""
 
+from typing import Any
+
 import regex as re
+import torch
 
 _DSV4_SELF_ATTN_RENAMES = (
     # Descriptive HF names -> the compact names the checkpoint/loader expect.
@@ -78,3 +81,65 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
         if name.endswith(old):
             return name[: -len(old)] + new
     return name
+
+
+def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
+    """Checkpoint-facing parameter set of the DeepSeek-V4 vision tower.
+
+    ``transformers``' ``DeepseekV4ForCausalLM`` builds the text backbone only,
+    while vLLM and vLLM-Ascend serve the multimodal wrapper
+    (``DeepseekV4ForConditionalGeneration`` /
+    ``AscendDeepseekV4ForConditionalGeneration``) whose ``vision`` ViT, ``aligner``
+    and four ``image_*`` vectors are not part of any HF meta model. The names are
+    the ones the published checkpoint ships and the wrapper resolves
+    (``vision.*`` / ``aligner.*`` / ``image_*``, see ``_vision_parameter_name``),
+    and every shape was verified against the real safetensors header of
+    ``deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`` (``vision_n_layers=32`` -> 267
+    tensors, e.g. ``vision.blocks.0.mlp.w1.weight`` == [5632, 1024] and
+    ``aligner.w1.weight`` == [4096, 9216]).
+    """
+    dim = int(config.vision_dim)
+    inter = int(config.vision_inter_dim)
+    patch = int(config.vision_patch_size)
+    ratio = int(config.vision_downsample_ratio)
+    hidden = int(config.hidden_size)
+    params: list[tuple[str, tuple[int, ...], torch.dtype]] = [
+        ("vision.patch_embed.proj.weight", (dim, 3 * patch * patch), torch.bfloat16),
+        ("vision.patch_embed.proj.bias", (dim,), torch.bfloat16),
+        ("vision.norm.weight", (dim,), torch.bfloat16),
+    ]
+    for layer in range(int(config.vision_n_layers)):
+        prefix = f"vision.blocks.{layer}"
+        params += [
+            (f"{prefix}.norm1.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.weight", (3 * dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.bias", (3 * dim,), torch.bfloat16),
+            (f"{prefix}.attn.wo.weight", (dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wo.bias", (dim,), torch.bfloat16),
+            (f"{prefix}.norm2.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.mlp.w1.weight", (2 * inter, dim), torch.bfloat16),
+            (f"{prefix}.mlp.w2.weight", (dim, inter), torch.bfloat16),
+        ]
+    params += [
+        ("aligner.w1.weight", (hidden, dim * ratio * ratio), torch.bfloat16),
+        ("aligner.w1.bias", (hidden,), torch.bfloat16),
+        ("aligner.w2.weight", (hidden, hidden), torch.bfloat16),
+        ("aligner.w2.bias", (hidden,), torch.bfloat16),
+    ]
+    # The wrapper allocates these four vectors in float32, but the checkpoint -
+    # and therefore the payload - ships them in BF16, and ``default_weight_loader``
+    # casts on copy, so the payload stays faithful to the checkpoint.
+    params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
+    # HF's text meta model omits these real router parameters. A full update
+    # must carry them rather than relying on the previous device allocation.
+    for layer in range(int(config.num_hidden_layers)):
+        params.append((f"model.layers.{layer}.mlp.gate.bias_vl", (int(config.n_routed_experts),), torch.float32))
+        if config.mlp_layer_types[layer] != "hash_moe":
+            params.append(
+                (
+                    f"model.layers.{layer}.mlp.gate.e_score_correction_bias",
+                    (int(config.n_routed_experts),),
+                    torch.float32,
+                )
+            )
+    return params

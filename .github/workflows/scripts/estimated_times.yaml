@@ -83,6 +83,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_pause_device_idle.py: 300
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py: 1200
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 300
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_deepseek_vision_retention.py: 600
+  tests/e2e/pull_request/one_card/rlhf/weight_transfer/ipc/test_deepseek_vision_ipc.py: 450
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 170
   tests/e2e/pull_request/one_card/test_turboquant_finalize.py: 30

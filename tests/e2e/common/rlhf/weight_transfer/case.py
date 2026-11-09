@@ -23,6 +23,9 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
+    extra_param_builder: Callable[[Any], list[tuple[str, tuple[int, ...], Any]]] | None = None
+    image_prompt: bool = False
+    compilation_config: str = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None

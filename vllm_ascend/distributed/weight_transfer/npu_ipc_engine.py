@@ -5,6 +5,7 @@
 import os
 import socket
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -139,6 +140,46 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
             "NPUIPCTrainerInitInfo(...), client=..., "
             "source=...) and drive it with send_weights()."
         )
+
+    def start_weight_update(self) -> None:
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
+        retained = []
+        if patterns:
+            selected = {
+                id(parameter)
+                for name, parameter in self.model.named_parameters()
+                if any(fnmatchcase(name, pattern) for pattern in patterns)
+            }
+            # Replay each owning module once. A shared module can have several
+            # model paths; loading all paths would count its weights repeatedly
+            # and trigger processing before its received weights arrive.
+            retained = [
+                (module, name, parameter)
+                for module in self.model.modules()
+                for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
+                if id(parameter) in selected
+            ]
+
+        self._retained_parameters = retained
+        super().start_weight_update()
+
+    def finish_weight_update(self) -> None:
+        try:
+            # Only fill omitted parameters after all trainer weights arrive.
+            # Replaying them at start could complete a layer early and suppress
+            # a later trainer-supplied value for a preserved parameter.
+            for module, name, value in getattr(self, "_retained_parameters", []):
+                parameter = getattr(module, name)
+                if parameter is value:
+                    continue
+                from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+                info = get_layerwise_info(module)
+                if not any(loaded_name == name for loaded_name, _ in info.loaded_weights):
+                    parameter.weight_loader(parameter, value)
+            super().finish_weight_update()
+        finally:
+            self._retained_parameters = []
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.

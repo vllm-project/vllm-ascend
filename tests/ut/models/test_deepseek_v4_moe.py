@@ -328,3 +328,33 @@ def test_hash_layer_router_bias_is_skipped_when_unused(monkeypatch):
     assert "model.layers.0.mlp.gate.e_score_correction_bias" not in loaded_params
     assert "model.layers.1.mlp.gate.e_score_correction_bias" in loaded_params
     assert torch.allclose(dense_layer.mlp.gate.e_score_correction_bias, dense_bias)
+
+
+@pytest.mark.parametrize("value", [0.125, 0.375])
+def test_weightless_norm_buffer_preserves_values_and_follows_module(monkeypatch, value):
+    class Norm(nn.Module):
+        def __init__(self, has_weight):
+            super().__init__()
+            self.has_weight = has_weight
+            self.weight = torch.full((3,), value)
+            if has_weight:
+                self.weight = nn.Parameter(self.weight)
+
+    monkeypatch.setattr(deepseek_v4_module, "RMSNorm", Norm)
+
+    class QuantMethod(nn.Module):
+        def apply(self, *args):
+            raise AssertionError("Registration must not invoke quantization apply")
+
+    model = nn.ModuleList([Norm(False), Norm(True), QuantMethod()])
+    identity, parameter = model[0].weight, model[1].weight
+    deepseek_v4_module._register_weightless_norm_buffers(model)
+    assert dict(model.named_buffers())["0.weight"] is identity
+    assert dict(model.named_parameters())["1.weight"] is parameter
+    assert "0.weight" not in model.state_dict()
+    assert torch.equal(identity, torch.full((3,), value))
+    deepseek_v4_module._register_weightless_norm_buffers(model)
+    assert model[0].weight is identity
+    model.to(dtype=torch.float64)
+    assert model[0].weight.dtype == torch.float64
+    assert torch.equal(model[0].weight, torch.full((3,), value, dtype=torch.float64))

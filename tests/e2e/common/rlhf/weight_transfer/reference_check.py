@@ -3,7 +3,10 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Startup-load reference and two-update equivalence checks."""
 
+import base64
 import json
+import struct
+import zlib
 from contextlib import contextmanager
 
 from vllm.utils.network_utils import get_open_port
@@ -40,7 +43,7 @@ def _common_serve_args(
         "--dtype",
         "bfloat16",
         "--compilation-config",
-        FULL_DECODE_ONLY_CONFIG,
+        case.compilation_config,
         # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
         # trainer only gets the HBM it needs once the rollout engine sleeps, so
         # the lane releases the engine with a level-2 sleep before every
@@ -167,7 +170,7 @@ def reference_signature(
             env_dict=env_dict,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model)
+        signature = generation_signature(server.get_client(), case.model, image_prompt=case.image_prompt)
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
@@ -179,8 +182,46 @@ PROMPTS = [
 ]
 
 
-def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...]]]:
-    """Capture deterministic text and logprobs for exact reload comparison."""
+IMAGE_PROMPT = "Describe the colors of this image in one short sentence."
+
+
+def _quadrant_png_data_url(size: int = 384) -> str:
+    """A deterministic four-colour PNG, built without an image library.
+
+    ``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
+    processor does not have to resize the input; a hard-coded blob would be
+    opaque to review, while this is four bytes of code per pixel and compresses
+    to a few KB.
+    """
+    rows = bytearray()
+    half = size // 2
+    for y in range(size):
+        rows.append(0)  # PNG filter type 0 (None) for this scanline
+        top = y < half
+        for x in range(size):
+            rows += bytes((0 if x < half else 255, 0 if top else 255, 128))
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+IMAGE_DATA_URL = _quadrant_png_data_url()
+
+
+def generation_signature(client, model: str, *, image_prompt: bool = False) -> list[tuple[str, tuple[float, ...]]]:
+    """Capture deterministic text and logprobs for exact reload comparison.
+
+    ``image_prompt`` appends one chat request carrying an image for multimodal
+    cases: the vision tower only runs when an image is in the batch, so without
+    it a dropped, renamed or reshaped vision tensor would not move the signature
+    and the case would prove nothing about the tower.
+    """
     signature = []
     for prompt in PROMPTS:
         response = client.completions.create(
@@ -195,6 +236,27 @@ def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
         signature.append((choice.text, token_logprobs))
+    if image_prompt:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": IMAGE_PROMPT},
+                        {"type": "image_url", "image_url": {"url": IMAGE_DATA_URL}},
+                    ],
+                }
+            ],
+            max_tokens=8,
+            temperature=0,
+            seed=0,
+            logprobs=True,
+        )
+        choice = response.choices[0]
+        token_logprobs = tuple(item.logprob for item in (choice.logprobs.content or ()))
+        assert token_logprobs, f"{model}: image generation returned no token logprobs"
+        signature.append((choice.message.content or "", token_logprobs))
     return signature
 
 
@@ -239,7 +301,7 @@ def weight_transfer_servers(
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        dummy_signature = generation_signature(server.get_client(), case.model)
+        dummy_signature = generation_signature(server.get_client(), case.model, image_prompt=case.image_prompt)
         yield server, reference, dummy_signature
 
 

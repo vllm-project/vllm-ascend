@@ -135,6 +135,9 @@ class FixedRandomWeightSource(WeightSource):
             for name, buffer in meta_model.named_buffers()
             if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
         ]
+        if case.extra_param_builder is not None:
+            assert case.checkpoint_model_prefix is None, "Extra parameter names must already use checkpoint namespaces"
+            parameters += case.extra_param_builder(meta_config)
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 
@@ -226,7 +229,11 @@ class FixedRandomWeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        model_dir = Path(self._case.model)
+        config_path = (
+            model_dir / "config.json" if model_dir.is_dir() else Path(hf_hub_download(self._case.model, "config.json"))
+        )
+        shutil.copyfile(config_path, target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
