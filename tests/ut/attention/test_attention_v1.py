@@ -16,10 +16,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendC8AttentionBackendImpl,
     AscendMetadata,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import (
-    AscendAttentionDCPImpl,
-    AscendAttentionDCPMetadataBuilder,
-)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
@@ -40,7 +36,7 @@ class TestAttentionGraphHelpers(TestBase):
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
         spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
-        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl, AscendAttentionDCPImpl):
+        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl):
             with self.subTest(impl=impl_cls):
                 impl = impl_cls.__new__(impl_cls)
                 impl.sliding_window = None
@@ -148,10 +144,7 @@ class TestAscendAttentionBackend(TestBase):
             self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
             @staticmethod
@@ -159,20 +152,6 @@ class TestAscendAttentionBackend(TestBase):
                 return AscendC8AttentionBackendImpl
 
         self.assertFalse(OtherAttentionBackend.supports_pcp())
-
-    def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_impl_cls(),
-                AscendAttentionDCPImpl,
-            )
-
-    def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_builder_cls(),
-                AscendAttentionDCPMetadataBuilder,
-            )
 
     def test_get_kv_cache_shape(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):

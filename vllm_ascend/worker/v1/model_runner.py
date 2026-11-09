@@ -1563,7 +1563,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        # Fill unused with -1. Needed for reshape_and_cache in attention_cp
+        # Fill unused with -1.
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         # Copy the tensors to the NPU.

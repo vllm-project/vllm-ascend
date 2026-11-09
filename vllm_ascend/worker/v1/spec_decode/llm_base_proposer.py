@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.distributed.parallel_state import (
-    get_dcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -209,7 +208,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
 
-        self.dcp_size = self.runner.dcp_size
+        draft_model_config = getattr(self.vllm_config.speculative_config, "draft_model_config", None)
+        self.dcp_size = self.runner.dcp_size if getattr(draft_model_config, "use_mla", False) else 1
         self.dcp_rank = self.runner.dcp_rank
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
@@ -667,20 +667,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             update_params = []
             for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
                 for layer_name, metadata in per_step_metadata.items():
-                    if self.dcp_size > 1:
-                        # Import lazily: attention backends also import spec-decode utilities.
-                        from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
-
-                        update_params.extend(
-                            build_dcp_fia_params(
-                                layer_name,
-                                metadata,
-                                get_dcp_group().rank_in_group,
-                                is_draft_model=True,
-                                is_draft_model_prefill=draft_step == 0,
-                            )
-                        )
-                        continue
                     update_params.append(
                         {
                             "layer_name": layer_name,
@@ -691,26 +677,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
             self._runnable.update_draft_model_metadata(update_params)  # type: ignore
             self._runnable.set_attn_backend(att_backend)  # type: ignore
-
-    def _prepare_dcp_draft_dummy_metadata(self, common_attn_metadata, draft_index: int) -> None:
-        """Match later GQA autoregressive capture steps, including graph padding."""
-        if self.dcp_size <= 1 or draft_index == 0 or self.parallel_drafting:
-            return
-        if self.draft_model_config.use_mla:
-            return
-        num_actual_reqs = min(common_attn_metadata.num_reqs, common_attn_metadata.num_actual_tokens)
-        num_reqs = common_attn_metadata.num_input_tokens
-        common_attn_metadata.num_reqs = num_reqs
-        common_attn_metadata.num_actual_tokens = num_actual_reqs
-        common_attn_metadata.max_query_len = 1
-        common_attn_metadata.query_start_loc_cpu = torch.arange(num_reqs + 1, dtype=torch.int32)
-        common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
-        common_attn_metadata.query_start_loc.copy_(common_attn_metadata.query_start_loc_cpu)
-        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
-        for field in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound", "num_computed_tokens_cpu"):
-            values = getattr(common_attn_metadata, field, None)
-            if values is not None:
-                setattr(common_attn_metadata, field, self._adjust_tensor(values[:num_actual_reqs], num_reqs))
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         self._lim_topk_compactors = []
@@ -908,7 +874,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
                     self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                     common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
-                    self._prepare_dcp_draft_dummy_metadata(common_attn_metadata, draft_index)
                     if self.dcp_size > 1 and draft_index > 0:
                         num_reqs = common_attn_metadata.num_reqs
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
@@ -2357,7 +2322,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # we should fixed them.
         # Mirror ``new_seq_lens_cpu`` into the upstream-canonical
         # ``_seq_lens_cpu`` slot so consumers preferring the parent field
-        # (e.g. attention_cp builder) see the rejection-adjusted value.
+        # see the rejection-adjusted value.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
@@ -2455,7 +2420,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # ``_seq_lens_cpu`` field unchanged. In async-spec mode only the
         # latter is populated (subclass field is None to signal "GPU is
         # authoritative"); dropping ``_seq_lens_cpu`` here causes downstream
-        # backends (e.g. attention_cp) to crash on a None subscript.
+        # backends to crash on a None subscript.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,

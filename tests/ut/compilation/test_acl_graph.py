@@ -17,7 +17,6 @@ import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
-import numpy as np
 import pytest
 import torch
 from vllm.compilation.cuda_graph import CUDAGraphOptions
@@ -26,11 +25,6 @@ from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.context_parallel import mla_cp
-from vllm_ascend.attention.context_parallel.attention_cp import (
-    AscendAttentionDCPMetadata,
-    AscendMetadataForDecode,
-    DCPFIAParamProvider,
-)
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
@@ -50,7 +44,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_full_graph_params,
 )
-from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
 
@@ -1114,34 +1107,6 @@ class TestDCPGraphParams(TestBase):
             workspace=self.graph_params.workspaces.get(4),
             out=[out, lse],
         )
-
-    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_end")
-    @patch("vllm_ascend.compilation.updatable_graph.torch.npu.graph_task_update_begin")
-    def test_update_attn_dcp_params(self, mock_begin, mock_end):
-        """Update GQA DCP tasks with the provider's runtime parameters."""
-        block_table = torch.zeros(2, 5, dtype=torch.int32)
-        decode = AscendMetadataForDecode(
-            num_computed_tokens_of_dcp=np.array([[3, 2], [4, 3]]),
-            actual_seq_lengths_q=[1, 2],
-            block_tables=block_table,
-        )
-        metadata = AscendAttentionDCPMetadata(decode=decode)
-        provider = DCPFIAParamProvider("attn_layer_0", 1, CPKVScope.FULL)
-        operation, handle, event = MagicMock(), MagicMock(), MagicMock()
-        query = torch.randn(2, 4, 8)
-        task = GraphUpdateTask(operation, {"query": query, "actual_seq_lengths_kv": [1, 1]}, provider, 0, handle, event)
-        params = provider.resolve({"attn_layer_0": metadata})
-        task.bind(params).apply(self.update_stream)
-        operation.assert_called_once_with(
-            query=query,
-            actual_seq_lengths=[1, 2],
-            actual_seq_lengths_kv=[2, 3],
-            block_table=block_table,
-        )
-        mock_begin.assert_called_once_with(self.update_stream, handle)
-        mock_end.assert_called_once_with(self.update_stream)
-        event.record.assert_called_once_with(self.update_stream)
-        assert task.kwargs["actual_seq_lengths_kv"] == [1, 1]
 
 
 @pytest.mark.parametrize("graph_kind", ["main", "draft", "draft_prefill"])
