@@ -44,6 +44,7 @@ vLLM-Ascend already ships. Backend selection needs no patch: a config with
 ``index_topk`` and no ``compress_ratios`` resolves to ``AscendSFABackend``.
 """
 
+from collections.abc import Sequence
 from typing import Any, cast
 
 import torch
@@ -640,9 +641,7 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
             )
         if isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 2:
             nope_cache, rope_cache = kv_cache
-            if isinstance(nope_cache, torch.Tensor) and isinstance(
-                rope_cache, torch.Tensor
-            ):
+            if isinstance(nope_cache, torch.Tensor) and isinstance(rope_cache, torch.Tensor):
                 return nope_cache, rope_cache
         raise RuntimeError(
             "Mistral DSpark expected a fused MLA cache or a two-component "
@@ -655,10 +654,7 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
         context_slot_mapping: (
-            torch.Tensor
-            | list[torch.Tensor | None]
-            | tuple[torch.Tensor | None, ...]
-            | None
+            torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None
         ) = None,
     ) -> None:
         """Write draft context KV with Ascend's component-cache operators.
@@ -671,38 +667,26 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
             return
         if context_positions.numel() != context_states.shape[0]:
             raise ValueError("Mistral DSpark context positions must match context rows.")
-        if isinstance(context_slot_mapping, (list, tuple)) and len(
-            context_slot_mapping
-        ) != len(self.model.layers):
-            raise ValueError(
-                "context_slot_mapping must contain one entry per Mistral "
-                "DSpark layer."
-            )
+        if isinstance(context_slot_mapping, (list, tuple)) and len(context_slot_mapping) != len(self.model.layers):
+            raise ValueError("context_slot_mapping must contain one entry per Mistral DSpark layer.")
 
         # Use the draft's plain-YaRN cache. The target has LeRoPE, so the
         # process-global target table is not valid for these dense draft layers.
         rotary = self.model.rotary_emb
         cos_half, sin_half = rotary.cos_sin_cache.chunk(2, dim=-1)
-        cos = (
-            cos_half.repeat(1, 2)
-            .index_select(0, context_positions)
-            .unsqueeze(1)
-            .unsqueeze(2)
-        )
-        sin = (
-            sin_half.repeat(1, 2)
-            .index_select(0, context_positions)
-            .unsqueeze(1)
-            .unsqueeze(2)
-        )
+        cos = cos_half.repeat(1, 2).index_select(0, context_positions).unsqueeze(1).unsqueeze(2)
+        sin = sin_half.repeat(1, 2).index_select(0, context_positions).unsqueeze(1).unsqueeze(2)
 
-        per_layer_slots = isinstance(context_slot_mapping, (list, tuple))
+        # Resolve the one-tensor form into a per-layer sequence up front. A
+        # bool flag plus a ternary leaves one branch holding the whole union,
+        # so the tensor calls below have no type to resolve against.
+        per_layer_slots: Sequence[torch.Tensor | None]
+        if isinstance(context_slot_mapping, (list, tuple)):
+            per_layer_slots = context_slot_mapping
+        else:
+            per_layer_slots = [context_slot_mapping] * len(self.model.layers)
         for layer_idx, layer in enumerate(self.model.layers):
-            slots = (
-                context_slot_mapping[layer_idx]
-                if per_layer_slots
-                else context_slot_mapping
-            )
+            slots = per_layer_slots[layer_idx]
             if slots is None or slots.numel() == 0:
                 continue
             if slots.numel() != context_states.shape[0]:
@@ -711,9 +695,7 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
             attn = layer.self_attn
             mla = attn.attn
             impl = mla.impl
-            kv_cache = self._normalize_draft_kv_cache(
-                mla.kv_cache, attn.kv_lora_rank
-            )
+            kv_cache = self._normalize_draft_kv_cache(mla.kv_cache, attn.kv_lora_rank)
             if impl._cache_requires_prolog_v3_writer(kv_cache):
                 impl.exec_context_kv_prolog_v3(
                     context_states,

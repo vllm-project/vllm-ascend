@@ -433,9 +433,7 @@ def test_target_uses_the_ascend_model_state_for_mrv2():
 
 
 def test_outer_mla_exposes_the_backend_cache_contract():
-    outer = ml4.AscendMultiHeadLatentAttention.__new__(
-        ml4.AscendMultiHeadLatentAttention
-    )
+    outer = ml4.AscendMultiHeadLatentAttention.__new__(ml4.AscendMultiHeadLatentAttention)
     torch.nn.Module.__init__(outer)
     original_cache = torch.zeros(2, 6)
     impl = object()
@@ -459,9 +457,7 @@ def test_outer_mla_exposes_the_backend_cache_contract():
 def test_dspark_splits_a_fused_mla_cache_into_component_views():
     fused = torch.arange(24).view(2, 12)
 
-    nope, rope = ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(
-        fused, kv_lora_rank=8
-    )
+    nope, rope = ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(fused, kv_lora_rank=8)
 
     torch.testing.assert_close(nope, fused[..., :8])
     torch.testing.assert_close(rope, fused[..., 8:])
@@ -472,9 +468,7 @@ def test_dspark_splits_a_fused_mla_cache_into_component_views():
 def test_dspark_accepts_nested_component_cache_views():
     nope, rope = torch.zeros(2, 8), torch.zeros(2, 4)
 
-    actual = ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(
-        ((nope, rope),), kv_lora_rank=8
-    )
+    actual = ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(((nope, rope),), kv_lora_rank=8)
 
     assert actual[0] is nope
     assert actual[1] is rope
@@ -483,9 +477,7 @@ def test_dspark_accepts_nested_component_cache_views():
 @pytest.mark.parametrize("cache", [torch.zeros(2, 8), object()])
 def test_dspark_rejects_an_invalid_cache_layout(cache):
     with pytest.raises(RuntimeError, match="Mistral DSpark"):
-        ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(
-            cache, kv_lora_rank=8
-        )
+        ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(cache, kv_lora_rank=8)
 
 
 def test_the_model_does_not_call_the_indexer_itself():

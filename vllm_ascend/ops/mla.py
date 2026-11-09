@@ -128,6 +128,17 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     def skip_topk(self) -> bool:
         return self.__dict__.get("_skip_topk", False)
 
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self.__dict__["_skip_topk"] = bool(value)
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "skip_topk"):
+            impl.skip_topk = self.__dict__["_skip_topk"]
+
+    # Keep these below the skip_topk setter: a property split across
+    # non-adjacent statements reads as a redefinition, which costs the setter
+    # above its pair and makes skip_topk look read-only at the __init__
+    # assignment.
     @property
     def impl(self) -> Any:
         """Expose the wrapped backend through the upstream MLA contract."""
@@ -148,13 +159,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     @property
     def _k_scale(self) -> Any:
         return self.mla_attn._k_scale
-
-    @skip_topk.setter
-    def skip_topk(self, value: bool) -> None:
-        self.__dict__["_skip_topk"] = bool(value)
-        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
-        if impl is not None and hasattr(impl, "skip_topk"):
-            impl.skip_topk = self.__dict__["_skip_topk"]
 
     @property
     def topk_indices_buffer(self) -> torch.Tensor | None:

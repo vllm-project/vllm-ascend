@@ -40,18 +40,14 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_verify,
 )
 from vllm_ascend.ops.triton.spec_decode.resample import resample
+
 _ENTROPY_EPSILON = 1e-10
 
-_BLOCK_STATS_HAS_DRAFT_ROW_MAPPING = (
-    "draft_logits_row_mapping_ptr" in _compute_block_stats_kernel.arg_names
-)
+_BLOCK_STATS_HAS_DRAFT_ROW_MAPPING = "draft_logits_row_mapping_ptr" in _compute_block_stats_kernel.arg_names
 _BLOCK_STATS_USES_NUM_LOGITS = "num_logits" in _compute_block_stats_kernel.arg_names
-_CUMULATIVE_LOG_P_HAS_DRAFT_ROW_MAPPING = (
-    "draft_logits_row_mapping_ptr" in _compute_cumulative_log_p_kernel.arg_names
-)
+_CUMULATIVE_LOG_P_HAS_DRAFT_ROW_MAPPING = "draft_logits_row_mapping_ptr" in _compute_cumulative_log_p_kernel.arg_names
 _LOCAL_RESIDUAL_MASS_HAS_DRAFT_ROW_MAPPING = (
-    "draft_logits_row_mapping_ptr"
-    in _compute_local_residual_mass_kernel.arg_names
+    "draft_logits_row_mapping_ptr" in _compute_local_residual_mass_kernel.arg_names
 )
 
 
@@ -421,9 +417,7 @@ def rejection_sample(
     # `new_empty` block-statistics buffers uninitialized. Older kernels still
     # expect `num_speculative_steps`; inspect the imported kernel contract
     # because development versions do not map cleanly to release numbers.
-    stats_num_logits = (
-        num_logits if _BLOCK_STATS_USES_NUM_LOGITS else num_speculative_steps
-    )
+    stats_num_logits = num_logits if _BLOCK_STATS_USES_NUM_LOGITS else num_speculative_steps
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton

@@ -211,10 +211,7 @@ def build_qwen4_kv_cache_layout(
     if not role_members[QSA_RAW]:
         return None
     if missing_member_specs:
-        raise ValueError(
-            "Qwen4 QSA hybrid cache layout has group members without cache "
-            f"specs: {missing_member_specs}"
-        )
+        raise ValueError(f"Qwen4 QSA hybrid cache layout has group members without cache specs: {missing_member_specs}")
     required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN, PLE)
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:

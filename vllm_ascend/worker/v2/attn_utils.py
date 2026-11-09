@@ -132,9 +132,7 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.32.0") or find_spec(
-    "vllm.models.qwen4_exp.common.qsa_indexer"
-) is None:
+if vllm_version_is("0.32.0") or find_spec("vllm.models.qwen4_exp.common.qsa_indexer") is None:
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
 
     QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
