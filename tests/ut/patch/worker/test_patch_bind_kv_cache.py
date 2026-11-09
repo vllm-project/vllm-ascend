@@ -84,6 +84,8 @@ def test_binding_retains_tuple_layout_across_tracker_lifecycle(monkeypatch, lega
     context = {name: layer}
     groups: list[object] = []
     hook = Mock()
+    # Model the API version as well as its corresponding tracker hook.
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda version: legacy_hook)
     if legacy_hook:
         monkeypatch.setattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", hook, raising=False)
     else:
@@ -105,6 +107,7 @@ def test_binding_retains_tuple_layout_across_tracker_lifecycle(monkeypatch, lega
 
 
 def test_binding_keeps_scheduler_storage_separate_from_kernel_view(monkeypatch):
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda version: False)
     monkeypatch.delattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", raising=False)
     name = "model.layers.0.self_attn"
     storage = torch.arange(32).reshape(4, 8)
