@@ -71,7 +71,7 @@ class TestMain2MainContracts(unittest.TestCase):
                         req_idx = 2 if mapped else 0
                         memory = {100 + req_idx: 5, 200 + req_idx: 3, 300 + req_idx: 2, 900: conv_width, 1300: 2}
                         copy = MagicMock()
-                        namespace = dict(
+                        namespace: dict[str, Any] = dict(
                             tl=SimpleNamespace(
                                 program_id=lambda _axis: np.int64(0),
                                 load=lambda address, memory=memory: np.int64(memory[int(address)]),
