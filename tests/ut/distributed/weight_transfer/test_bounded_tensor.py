@@ -6,6 +6,8 @@ import dataclasses
 import types
 import weakref
 from collections import deque
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -35,8 +37,8 @@ class QueuedRuntime:
 
         class Stream:
             def __init__(self):
-                self.torch_queue = deque()
-                self.native_queue = deque()
+                self.torch_queue: deque[Callable[[], Any]] = deque()
+                self.native_queue: deque[Callable[[], Any]] = deque()
                 self.wait_count = 0
                 self.skip_waits = 0
 
@@ -96,7 +98,7 @@ class QueuedRuntime:
 class Wire:
     def __init__(self, runtime, payloads=None):
         self.runtime = runtime
-        self.payloads = [] if payloads is None else deque(payloads)
+        self.payloads: list[torch.Tensor] | deque[torch.Tensor] = [] if payloads is None else deque(payloads)
         self.collective_bytes = []
 
     def broadcast(self, tensor, src, stream):
@@ -166,10 +168,10 @@ def consume(items, payloads, capacity, slots, configure=None, callback=None):
             configure(stream, len(runtime.streams) - 1)
         return stream
 
-    runtime.new_stream = new_stream
-    npu, empty, copy, record = runtime.install()
-    with npu, empty, copy, record:
-        bounded.bounded_broadcast_consumer(metadata(items), wire, 0, load, capacity, slots)
+    with patch.object(runtime, "new_stream", new_stream):
+        npu, empty, copy, record = runtime.install()
+        with npu, empty, copy, record:
+            bounded.bounded_broadcast_consumer(metadata(items), wire, 0, load, capacity, slots)
     assert not wire.payloads
     assert runtime.peak_bytes <= slots * capacity + max((tensor.nbytes for _, tensor in items), default=0)
     return observed, runtime
@@ -204,7 +206,7 @@ def test_session_streams_reused_with_changed_weights():
             sending = Wire(runtime)
             bounded.bounded_broadcast_producer(iter(items), metadata(items), sending, 0, 13, 2, streams=send_streams)
             receiving = Wire(runtime, sending.payloads)
-            actual = []
+            actual: list[tuple[str, torch.Tensor]] = []
 
             def load(batch, observed=actual):
                 for name, tensor in batch:
@@ -230,7 +232,7 @@ def test_zero_element_updates(items):
 def test_loader_retains_independent_storage():
     items = weights()
     payloads = produce(items, 13, 2)
-    retained = []
+    retained: list[tuple[str, torch.Tensor]] = []
     # Retention is loader-owned and is measured separately from the transport.
     runtime = QueuedRuntime()
     wire = Wire(runtime, payloads)
@@ -330,3 +332,15 @@ def test_out_of_order_source_rejected():
     npu, empty, copy, record = runtime.install()
     with npu, empty, copy, record, pytest.raises(ValueError, match="metadata"):
         bounded.bounded_broadcast_producer(iter(reversed(items)), metadata(items), wire, 0, 13, 2)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_short_source_reports_missing_parameter_and_drains_streams(count):
+    items = [("first", torch.arange(16)), ("second", torch.arange(16) + 20)]
+    runtime = QueuedRuntime()
+    wire = Wire(runtime)
+    npu, empty, copy, record = runtime.install()
+    with npu, empty, copy, record, pytest.raises(ValueError, match=f"missing parameter '{items[count][0]}'"):
+        bounded.bounded_broadcast_producer(iter(items[:count]), metadata(items), wire, 0, 64, 2)
+    assert len(wire.payloads) == count * 2
+    assert all(not stream.native_queue and not stream.torch_queue for stream in runtime.streams)

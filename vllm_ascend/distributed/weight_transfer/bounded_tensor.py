@@ -93,9 +93,9 @@ def bounded_broadcast_producer(
     """
     if num_buffers <= 0:
         raise ValueError("num_buffers must be positive")
-    metadata = tuple(metadata)
-    capacity = min(buffer_size_bytes, sum(math.prod(shape) * dtype.itemsize for _, (shape, dtype) in metadata))
-    chunks = plan_transfer(iter(metadata), buffer_size_bytes)
+    metadata_items = tuple(metadata)
+    capacity = min(buffer_size_bytes, sum(math.prod(shape) * dtype.itemsize for _, (shape, dtype) in metadata_items))
+    chunks = plan_transfer(iter(metadata_items), buffer_size_bytes)
     chunk = next(chunks, None)
     if chunk is None:
         return
@@ -117,7 +117,13 @@ def bounded_broadcast_producer(
             with torch.npu.stream(stream):
                 for fragment in chunk.fragments:
                     if fragment.parameter_offset == 0:
-                        current = _source_bytes(next(iterator), fragment, buffer.device)
+                        try:
+                            item = next(iterator)
+                        except StopIteration as exc:
+                            raise ValueError(
+                                f"source is missing parameter {fragment.name!r} declared by metadata"
+                            ) from exc
+                        current = _source_bytes(item, fragment, buffer.device)
                     assert current is not None
                     start, source, count = fragment.buffer_offset, fragment.parameter_offset, fragment.nbytes
                     buffer[start : start + count].copy_(current[source : source + count])
@@ -171,11 +177,11 @@ def bounded_broadcast_consumer(
     """
     if num_buffers <= 0:
         raise ValueError("num_buffers must be positive")
-    metadata = tuple(metadata)
-    largest = max((math.prod(shape) * dtype.itemsize for _, (shape, dtype) in metadata), default=0)
-    capacity = min(buffer_size_bytes, sum(math.prod(shape) * dtype.itemsize for _, (shape, dtype) in metadata))
+    metadata_items = tuple(metadata)
+    largest = max((math.prod(shape) * dtype.itemsize for _, (shape, dtype) in metadata_items), default=0)
+    capacity = min(buffer_size_bytes, sum(math.prod(shape) * dtype.itemsize for _, (shape, dtype) in metadata_items))
     weight_budget = largest + num_buffers * (buffer_size_bytes - capacity)
-    chunks = plan_transfer(iter(metadata), buffer_size_bytes)
+    chunks = plan_transfer(iter(metadata_items), buffer_size_bytes)
     chunk = next(chunks, None)
     if chunk is None:
         return
