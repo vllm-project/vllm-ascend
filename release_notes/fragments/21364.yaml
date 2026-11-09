@@ -1,0 +1,5 @@
+pr: 21364
+entries:
+  - category: bugfix
+    text: DeepSeek V4.1 now emits per-layer KV save notifications so compatible layerwise connectors can transfer ready caches during forward execution.
+    model: deepseek-v4.1
