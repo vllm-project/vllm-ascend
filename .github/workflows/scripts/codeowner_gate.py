@@ -27,11 +27,13 @@ workflow (``.github/workflows/pr_test.yaml``):
     an approver, even when listed as an owner.
 
 ``check-coverage``
-    CODEOWNERS health check. Fails when:
-    - a tracked file has no owner entry (active or TODO comment), unless it is
-      explicitly marked as deliberately unowned with a ``SKIP(owner)`` comment;
+    CODEOWNERS health check (strict). Fails when:
+    - a tracked file resolves to no owner at all - no matching entry, or only
+      ownerless TODO entries - unless it is explicitly marked as deliberately
+      unowned with a ``SKIP(owner)`` comment;
     - a non-comment entry matches no tracked file (stale entry: deleted file,
-      removed directory, glob with zero hits).
+      removed directory, glob with zero hits);
+    - an active entry has no owners (GitHub ignores it silently).
 
 Comments carry two markers parsed from comment lines:
 - ``TODO(owner): <pattern>`` followed by ``# <pattern> [@owner ...]``: pending
@@ -265,26 +267,22 @@ def list_tracked_files(repo_root: str) -> list[str]:
 
 
 def check_coverage(rules: list[Rule], tracked: list[str]) -> list[str]:
-    """CODEOWNERS health: coverage of tracked files + stale entry detection."""
+    """CODEOWNERS health: real ownership of tracked files + stale entries.
+
+    Strict mode: a file whose resolved owner set is empty fails the check,
+    even when an ownerless TODO entry nominally covers it - an entry without
+    owners means nobody is accountable. Only ``SKIP(owner)`` paths are
+    exempt.
+    """
     failures = []
 
-    def has_rule(path: str, statuses: set[str]) -> bool:
-        # An active rule without owners is ignored by GitHub, so it provides
-        # no real coverage.
-        return any(
-            r.status in statuses and pattern_matches(r.pattern, path) and (r.owners or r.status != "active")
-            for r in rules
-        )
-
-    covered = {p for p in tracked if has_rule(p, {"active", "todo"})}
-    deliberately_unowned = {p for p in tracked if has_rule(p, {"skip"})}
     for path in tracked:
-        if path in deliberately_unowned:
-            continue
         if path == CODEOWNERS_PATH:
             continue
-        if path not in covered:
-            failures.append(f"file has no CODEOWNERS entry: {path}")
+        owners, skipped = resolve_owners(rules, path)
+        if skipped or owners:
+            continue
+        failures.append(f"file has no CODEOWNERS owner: {path}")
 
     tracked_set = set(tracked)
     for rule in rules:

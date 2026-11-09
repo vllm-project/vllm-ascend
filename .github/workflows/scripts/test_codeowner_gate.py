@@ -10,10 +10,7 @@ import sys
 
 import pytest
 
-sys.path.insert(
-    0,
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", ".github", "workflows", "scripts"),
-)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import codeowner_gate as gate  # noqa: E402
 
@@ -116,7 +113,20 @@ class TestCoverage:
         # TODO entries are inactive; they must not trigger stale errors.
         rules = gate.parse_codeowners("# TODO(owner): /some_dir\n# /some_dir @a\n")
         failures = gate.check_coverage(rules, ["other/file.py"])
-        assert failures == ["file has no CODEOWNERS entry: other/file.py"]
+        assert failures == ["file has no CODEOWNERS owner: other/file.py"]
+
+    def test_ownerless_todo_does_not_count_as_coverage(self):
+        # Strict mode: a file covered only by an ownerless TODO entry is
+        # reported as unowned - nobody is accountable for it.
+        rules = gate.parse_codeowners("# TODO(owner): /some_dir\n# /some_dir\n")
+        failures = gate.check_coverage(rules, ["some_dir/file.py"])
+        assert failures == ["file has no CODEOWNERS owner: some_dir/file.py"]
+
+    def test_todo_with_owner_counts_as_owned(self):
+        # A TODO entry that already names owners counts as owned (it becomes
+        # real the moment it is uncommented).
+        rules = gate.parse_codeowners("# TODO(owner): /some_dir @pending\n# /some_dir @pending\n")
+        assert gate.check_coverage(rules, ["some_dir/file.py"]) == []
 
     def test_coverage_passes(self, rules):
         tracked = ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py", "docs/x.md", "tests/ut/t.py"]
@@ -141,11 +151,11 @@ class TestOwnerlessActiveRule:
         assert any("no owner and is ignored" in f for f in failures)
 
     def test_no_false_coverage_from_ownerless_rule(self):
-        # Files only matched by an ownerless rule must still be reported as
-        # uncovered, because GitHub ignores ownerless entries.
+        # Files only matched by an ownerless rule must be reported as
+        # unowned, because GitHub ignores ownerless entries.
         rules = gate.parse_codeowners("/orphan_dir\n/real @a\n")
         failures = gate.check_coverage(rules, ["orphan_dir/f.py"])
-        assert any("orphan_dir/f.py" in f and "no CODEOWNERS entry" in f for f in failures)
+        assert any("orphan_dir/f.py" in f and "no CODEOWNERS owner" in f for f in failures)
 
 
 class TestNestedOwners:

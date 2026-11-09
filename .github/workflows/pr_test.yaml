@@ -814,6 +814,10 @@ jobs:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
+    permissions:
+      # Post/delete the gate-failure PR comment (issue comments).
+      issues: write
+      pull-requests: write
     env:
       EVENT_NAME: ${{ github.event_name }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
