@@ -465,6 +465,10 @@ jobs:
       source: ${{ steps.decide.outputs.mode }}
       has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
       test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
+      has_tests_a3_sn: ${{ steps.scope-a3-sn.outputs.has_tests || steps.noop-a3-sn.outputs.has_tests }}
+      test_groups_a3_sn: ${{ steps.scope-a3-sn.outputs.test_groups || steps.noop-a3-sn.outputs.test_groups }}
+      has_tests_a5_sn: ${{ steps.scope-a5-sn.outputs.has_tests || steps.noop-a5-sn.outputs.has_tests }}
+      test_groups_a5_sn: ${{ steps.scope-a5-sn.outputs.test_groups || steps.noop-a5-sn.outputs.test_groups }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -613,6 +617,64 @@ jobs:
             echo "test_groups=[]"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select A3 single-node ops tests
+        id: scope-a3-sn
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src == 'true' ||
+            contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+            contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --curated pr-single-node-ops \
+            --runner-label-override linux-aarch64-a3-800i-8
+
+      - name: Set no-tests output for A3-sn when source paths unchanged
+        id: noop-a3-sn
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src != 'true' &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select A5 single-node ops tests
+        id: scope-a5-sn
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src == 'true' ||
+            contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+            contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --curated pr-single-node-ops \
+            --runner-label-override linux-aarch64-a5-4
+
+      - name: Set no-tests output for A5-sn when source paths unchanged
+        id: noop-a5-sn
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src != 'true' &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Add upstream test cache target
         id: cache-targets
         env:
@@ -755,10 +817,64 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
+  run-selected-tests-a3-sn:
+    needs: [pre-commit, select-tests]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.select-tests.result == 'success' &&
+        needs.select-tests.outputs.has_tests_a3_sn == 'true' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        )
+      }}
+    name: run-selected-tests-a3-sn (vllm@${{ matrix.vllm_version_short }})
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+        vllm_version_short:
+          - ${{ needs.pre-commit.outputs.main_commit_short }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups_a3_sn }}
+
+  run-selected-tests-a5-sn:
+    needs: [pre-commit, select-tests]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.select-tests.result == 'success' &&
+        needs.select-tests.outputs.has_tests_a5_sn == 'true' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        )
+      }}
+    name: run-selected-tests-a5-sn (vllm@${{ matrix.vllm_version_short }})
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+        vllm_version_short:
+          - ${{ needs.pre-commit.outputs.main_commit_short }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups_a5_sn }}
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, run-selected-tests-a3-sn, run-selected-tests-a5-sn]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -778,6 +894,8 @@ jobs:
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
+          HAS_TESTS_A3_SN="${{ needs.select-tests.outputs.has_tests_a3_sn }}"
+          HAS_TESTS_A5_SN="${{ needs.select-tests.outputs.has_tests_a5_sn }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
@@ -788,6 +906,8 @@ jobs:
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
           echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
+          echo "has_tests_a3_sn: ${HAS_TESTS_A3_SN}"
+          echo "has_tests_a5_sn: ${HAS_TESTS_A5_SN}"
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
             echo "matched_modules: ${MATCHED_MODULES}"
           fi
@@ -834,6 +954,16 @@ jobs:
             exit 1
           fi
 
+          if [ "${HAS_TESTS_A3_SN}" != "true" ] && [ "${HAS_TESTS_A3_SN}" != "false" ]; then
+            echo "::error::Invalid or missing has_tests_a3_sn output: '${HAS_TESTS_A3_SN}'"
+            exit 1
+          fi
+
+          if [ "${HAS_TESTS_A5_SN}" != "true" ] && [ "${HAS_TESTS_A5_SN}" != "false" ]; then
+            echo "::error::Invalid or missing has_tests_a5_sn output: '${HAS_TESTS_A5_SN}'"
+            exit 1
+          fi
+
           if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
             echo "::error::Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
             exit 1
@@ -871,6 +1001,30 @@ jobs:
             elif [ "${TESTS_A5_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
               echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
+              exit 1
+            fi
+          fi
+
+          if [ "${HAS_TESTS_A3_SN}" = "true" ]; then
+            TESTS_A3_SN_RESULT="${{ needs.run-selected-tests-a3-sn.result }}"
+            echo "run-selected-tests-a3-sn: ${TESTS_A3_SN_RESULT}"
+            if [ "${TESTS_A3_SN_RESULT}" = "skipped" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a3-sn was skipped (no ready-precise/ready-all label)"
+            elif [ "${TESTS_A3_SN_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests-a3-sn did not succeed (result: ${TESTS_A3_SN_RESULT})."
+              echo "::error::The A3 single-node ops test suite failed. Open the failed run-selected-tests-a3-sn job above for details."
+              exit 1
+            fi
+          fi
+
+          if [ "${HAS_TESTS_A5_SN}" = "true" ]; then
+            TESTS_A5_SN_RESULT="${{ needs.run-selected-tests-a5-sn.result }}"
+            echo "run-selected-tests-a5-sn: ${TESTS_A5_SN_RESULT}"
+            if [ "${TESTS_A5_SN_RESULT}" = "skipped" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a5-sn was skipped (no ready-precise/ready-all label)"
+            elif [ "${TESTS_A5_SN_RESULT}" != "success" ]; then
+              echo "::error::run-selected-tests-a5-sn did not succeed (result: ${TESTS_A5_SN_RESULT})."
+              echo "::error::The A5 single-node ops test suite failed. Open the failed run-selected-tests-a5-sn job above for details."
               exit 1
             fi
           fi
