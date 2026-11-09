@@ -1878,6 +1878,11 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         # upstream ngram_embedding, which reads engram_config directly. Keep the
         # config flowing to upstream instead of clearing it; model/layer/device
         # validation is already patched in patch_engram_config.py.
+        if engram_config is not None and engram_config.cpu_offload:
+            if engram_config.embedding_across_dp or engram_config.use_thp:
+                raise ValueError("Qwen PLE offload requires ETP=TP without THP")
+            if not vllm_config.use_v2_model_runner:
+                raise ValueError("Qwen PLE offload requires model runner v2")
         return
     if engram_config is None:
         if (

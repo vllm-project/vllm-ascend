@@ -570,6 +570,8 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Dedicated MemFabric endpoints, keyed by PLE prefix/etp<rank>.
+    ple_gva: dict[str, dict[str, str]] = dataclasses.field(default_factory=dict)
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -693,6 +695,10 @@ class AscendConfig:
         if (
             engram_config is not None
             and not engram_config.dp_shared_memory
+            # Preserve an explicit dp_shared_memory=False for Qwen PLE;
+            # upstream resolves the default when --engram-config is provided.
+            and getattr(vc.model_config, "architecture", None)
+            not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP")
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):

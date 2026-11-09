@@ -2278,3 +2278,37 @@ def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
     assert args[5] == [6.0, 7.0, 9.0]
     np.testing.assert_allclose(args[6], [0.9, 2.12])
     np.testing.assert_allclose(args[7], [0.7, 0.8])
+
+
+def test_shutdown_releases_host_tables_after_parent_graph_cleanup():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    events = []
+    owner = SimpleNamespace(close_host_offload=lambda: events.append("host"))
+    runner.model = SimpleNamespace(modules=lambda: [owner])
+
+    def shutdown():
+        events.append("graphs")
+        del runner.model
+
+    with patch.object(GPUModelRunner, "shutdown", side_effect=shutdown):
+        runner.shutdown()
+    assert events == ["graphs", "host"]
+
+
+def test_shutdown_retains_failed_host_owner_for_retry():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    close = MagicMock(side_effect=[RuntimeError("release failed"), None])
+    owner = SimpleNamespace(close_host_offload=close)
+    runner.model = SimpleNamespace(modules=lambda: [owner])
+
+    def shutdown():
+        runner.model = None
+
+    with patch.object(GPUModelRunner, "shutdown", side_effect=shutdown):
+        with pytest.raises(RuntimeError, match="release failed"):
+            runner.shutdown()
+        assert runner._pending_host_offload == [owner]
+        runner.shutdown()
+        runner.shutdown()
+    assert runner._pending_host_offload == []
+    assert close.call_count == 2
