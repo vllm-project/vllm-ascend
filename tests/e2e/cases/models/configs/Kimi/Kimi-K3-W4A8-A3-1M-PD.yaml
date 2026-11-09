@@ -125,6 +125,7 @@ env_common: &env_common
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
+  TORCH_EXTENSIONS_DIR: "/tmp/kimi_k3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
 
 env_prefill: &env_prefill
   <<: *env_common
