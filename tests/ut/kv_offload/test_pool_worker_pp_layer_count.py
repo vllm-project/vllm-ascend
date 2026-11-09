@@ -16,6 +16,7 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
     LayerwiseKVPoolWorker,
 )
@@ -103,6 +104,10 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     worker.hash_block_size = 16
     worker.cache_coordinator = None
     worker.use_block_key_layerwise = False
+    # The step entry points dispatch through the data plane; the GVA plane is
+    # the thin delegation matching use_block_key_layerwise=False above.
+    worker.layerwise_data_plane = "gva"
+    worker._data_plane = make_data_plane(worker)
     worker.kv_send_thread = None
     worker.kv_recv_thread = None
     # Supply backend allocation results; keep task and address construction real.
