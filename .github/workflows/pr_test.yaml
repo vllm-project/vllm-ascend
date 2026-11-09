@@ -165,7 +165,6 @@ jobs:
               - 'CMakeLists.txt'
               # Requires a run-enabling label, but stays out of ci_pipeline so
               # ready-precise is not escalated to the full suite.
-              - '.github/workflows/pr_test.yaml'
               - '.github/workflows/scripts/test_selector.py'
               - '!**/*.md'
               # CI pipeline files: a PR that touches the test selection or
@@ -177,6 +176,7 @@ jobs:
               # test_selector.py is listed under src instead: a label is
               # required, and ready-precise keeps the precise path.
             ci_pipeline:
+              - '.github/workflows/pr_test.yaml'
               - '.github/workflows/_selected_tests.yaml'
               - '.github/workflows/_selected_tests_upstream.yaml'
               - '.github/workflows/_ensure_csrc_cache.yaml'
