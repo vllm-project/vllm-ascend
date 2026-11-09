@@ -503,6 +503,7 @@ def split_decodes_and_prefills(
     decode_threshold: int = 1,
     require_uniform: bool = False,
     treat_short_extends_as_decodes: bool = True,
+    treat_single_token_extends_as_decodes: bool = False,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -524,6 +525,8 @@ def split_decodes_and_prefills(
         treat_short_extends_as_decodes: If True (default), short extends
             (query_len <= threshold but still prefilling) are counted as
             decodes. If False, they are counted as prefills.
+        treat_single_token_extends_as_decodes: Count one-token extends with
+            existing context as decodes even when other extends remain prefills.
 
     Returns:
         num_decodes: The number of decode requests.
@@ -576,6 +579,13 @@ def split_decodes_and_prefills(
                 (0, query_lens.shape[0] - is_prefilling.shape[0]),
                 value=False,
             )
+        if treat_single_token_extends_as_decodes:
+            seq_lens = common_attn_metadata._seq_lens_cpu
+            if seq_lens is None:
+                seq_lens = common_attn_metadata.seq_lens_cpu
+            assert seq_lens is not None
+            single_token_extends = (query_lens == 1) & (seq_lens[: query_lens.shape[0]] > 1)
+            is_prefilling = is_prefilling & ~single_token_extends
         is_prefill |= is_prefilling
 
     if not torch.any(is_prefill):

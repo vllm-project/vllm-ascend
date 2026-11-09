@@ -600,6 +600,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
+                treat_single_token_extends_as_decodes=self.use_dcp and not self.use_pcp,
                 treat_short_extends_as_decodes=(
                     not (self.use_pcp or self.use_dcp)
                     # Only DCP needs the PD last-token recompute override.

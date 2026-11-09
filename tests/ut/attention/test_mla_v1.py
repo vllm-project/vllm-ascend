@@ -1534,6 +1534,18 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertIsNone(metadata.prefill)
         self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
 
+        # A one-token prefix-cache suffix uses the same DCP decode metadata.
+        self.mock_vllm_config.kv_transfer_config = None
+        with (
+            patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+            patch("vllm_ascend.attention.mla_v1.is_pd_decode_recompute_scheduler_enabled", return_value=False),
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+        self.assertEqual(metadata.num_decodes, 3)
+        self.assertEqual(metadata.num_prefills, 0)
+        self.assertIsNone(metadata.prefill)
+        self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
+
         # Without DCP, preserve the original classification even on a PD consumer.
         self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         builder.use_dcp = False
