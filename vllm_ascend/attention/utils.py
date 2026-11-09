@@ -620,11 +620,13 @@ def maybe_save_kv_layer_to_connector(
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
-def notify_dsv41_cache_written(cache_name: str) -> None:
+def notify_dsv41_cache_written(
+    cache_name: str, swa_slots: torch.Tensor | None, *, cache_only: bool = False
+) -> None:
     if has_kv_transfer_group() and is_v1_kv_transfer_group():
         callback = getattr(get_kv_transfer_group(), "on_dsv41_cache_written", None)
         if callback is not None:
-            callback(cache_name)
+            callback(cache_name, swa_slots, cache_only=cache_only)
 
 
 def notify_kv_cache_written(layer_name: str = ""):

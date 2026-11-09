@@ -115,6 +115,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
 class DSV41MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     te_rpc_port: int
     layer_metadata: dict[str, DSV41LayerMetadata]
+    swa_bounded_replay: bool = False
 
 
 @dataclass
@@ -789,6 +790,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.requests: dict[str, ReqMeta] = {}
         self.send_task: SendTask = SendTask()
+        self.dsv41_resumed_requests: set[str] = set()
 
     def add_new_req(
         self,
@@ -895,6 +897,8 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
+        if self._is_dsv41 and self._is_kv_producer:
+            self.connector_worker.clear_dsv41_replay_requests(finished_req_ids)
         return self.connector_worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -942,11 +946,15 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._connector_metadata)
 
-    def on_dsv41_cache_written(self, cache_name: str) -> None:
+    def on_dsv41_cache_written(
+        self, cache_name: str, swa_slots: torch.Tensor | None, *, cache_only: bool = False
+    ) -> None:
         if self._is_dsv41 and self._is_kv_producer and self.has_connector_metadata():
             assert self.connector_worker is not None
             assert isinstance(self._connector_metadata, MooncakeLayerwiseConnectorMetadata)
-            self.connector_worker.send_dsv41_layer(cache_name, self._connector_metadata)
+            self.connector_worker.send_dsv41_layer(
+                cache_name, self._connector_metadata, swa_slots=swa_slots, cache_only=cache_only
+            )
 
     def wait_for_save(self):
         if self._is_dsv41 and self._is_kv_producer and self.has_connector_metadata():
@@ -1009,6 +1017,9 @@ class MooncakeLayerwiseConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, list[int], list[list[int]]]] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
         self.is_dsv41 = _is_dsv41(vllm_config)
+        self.dsv41_swa_bounded_replay = self.is_dsv41 and bool(
+            getattr(vllm_config.cache_config, "swa_bounded_replay", False)
+        )
         self.need_truncate = self.is_dsv41 or self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.circular_groups = (
             {
@@ -1227,7 +1238,15 @@ class MooncakeLayerwiseConnectorScheduler:
             scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
             for req_id, new_blocks in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
                 if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
-                    self._reqs_need_send_layerwise[req_id].extend_local_block_ids(new_blocks)
+                    send_req_info = self._reqs_need_send_layerwise[req_id]
+                    if self.dsv41_swa_bounded_replay and req_id in cached_reqs.resumed_req_ids:
+                        # Resumed requests have a replacement block table. Replay
+                        # the transfer range against the new allocation.
+                        send_req_info.local_block_ids = [list(group) for group in new_blocks]
+                        send_req_info.update_computed_tokens(0)
+                        meta.dsv41_resumed_requests.add(req_id)
+                    else:
+                        send_req_info.extend_local_block_ids(new_blocks)
             computed_tokens = dict(
                 list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
                 + [(x.req_id, x.num_computed_tokens) for x in new_reqs]
@@ -1517,8 +1536,7 @@ class MooncakeLayerwiseConnectorWorker:
             from vllm_ascend.models.deepseek_v41.layerwise_cache_access import build_layer_cache_access_plan
             from vllm_ascend.models.deepseek_v41.model import build_layer_plan, normalize_deepseek_v41_config
 
-            if getattr(self.vllm_config.cache_config, "swa_bounded_replay", False):
-                raise NotImplementedError("Mooncake layerwise V4.1 requires SWA bounded replay to be disabled.")
+            self.dsv41_swa_bounded_replay = bool(getattr(self.vllm_config.cache_config, "swa_bounded_replay", False))
             parallel = self.vllm_config.parallel_config
             if parallel.pipeline_parallel_size != 1 or self.pcp_size != 1 or self.dcp_size != 1:
                 raise NotImplementedError("Mooncake layerwise V4.1 currently requires PP, PCP and DCP size 1.")
@@ -1537,6 +1555,22 @@ class MooncakeLayerwiseConnectorWorker:
             self.dsv41_ready_resources: set[str] = set()
             self.dsv41_step_requests: dict[str, ReqMeta] = {}
             self.dsv41_failed_requests: dict[str, ReqMeta] = {}
+            self.dsv41_swa_groups: dict[int, int] = {}
+            self.dsv41_swa_targets: dict[str, dict[int, set[int]]] = {}
+            self.dsv41_swa_writes: dict[str, list[torch.Tensor]] = {}
+            self.dsv41_swa_coverage: dict[str, dict[str, set[int]]] = {}
+            if self.dsv41_swa_bounded_replay:
+                for entry in plan:
+                    swa = entry.writes[0]
+                    group = self.kv_cache_config.kv_cache_groups[swa.group_id]
+                    spec = group.kv_cache_spec
+                    if isinstance(spec, UniformTypeKVCacheSpecs):
+                        spec = spec.kv_cache_specs[swa.cache_name]
+                    if not isinstance(spec, SlidingWindowSpec):
+                        raise ValueError(f"Expected a sliding-window cache for {swa.cache_name}")
+                    previous = self.dsv41_swa_groups.setdefault(swa.group_id, spec.sliding_window)
+                    if previous != spec.sliding_window:
+                        raise ValueError("V4.1 SWA transfer requires a consistent window within each group.")
         layer2group_ids: dict[str, int] = {}
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
         for i, kv_cache_group_spec in enumerate(kv_cache_groups):
@@ -1691,6 +1725,8 @@ class MooncakeLayerwiseConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             layer_metadata=self.layer_metadata,
         )
+        if isinstance(metadata, DSV41MooncakeAgentMetadata):
+            metadata.swa_bounded_replay = self.dsv41_swa_bounded_replay
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             ready_event = threading.Event()
             self.kv_send_layer_thread = KVCacheSendingLayerThread(
@@ -1956,7 +1992,7 @@ class MooncakeLayerwiseConnectorWorker:
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
 
-    def _prepare_dsv41_request(self, req_meta: ReqMeta) -> ReqMeta:
+    def _prepare_dsv41_request(self, req_meta: ReqMeta) -> tuple[ReqMeta, dict[int, set[int]]]:
         prepared = copy.copy(req_meta)
         if (
             req_meta.remote_tp_size != self.tp_size
@@ -1969,10 +2005,33 @@ class MooncakeLayerwiseConnectorWorker:
         prepared.trans_count = [1] * self.num_kv_cache_groups
         prepared.local_block_ids = []
         prepared.remote_block_ids = []
+        swa_targets = {}
         for group_id, spec in enumerate(self.kv_cache_specs):
             source = req_meta.local_block_ids[group_id]
             target = req_meta.remote_block_ids[group_id]
-            if is_circular_kv_cache_spec(spec):
+            if group_id in getattr(self, "dsv41_swa_groups", {}):
+                block_size = self.block_size[group_id]
+                # The first D-side query occupies one slot in its own window.
+                window = self.dsv41_swa_groups[group_id]
+                first_token = max(0, req_meta.prompt_len - window + 1)
+                last_token = min(req_meta.prompt_len, req_meta.local_computed_tokens)
+                expected_slots = set()
+                for token in range(first_token, last_token):
+                    block_index, offset = divmod(token, block_size)
+                    if block_index >= len(source) or source[block_index] == NULL_BLOCK_ID:
+                        if req_meta.chunk_finish:
+                            raise ValueError(f"Missing V4.1 source SWA at token {token}")
+                        continue
+                    expected_slots.add(source[block_index] * block_size + offset)
+                swa_targets[group_id] = expected_slots
+                if req_meta.chunk_finish and expected_slots:
+                    start = first_token // block_size
+                    end = math.ceil(last_token / block_size)
+                    if len(target) < end or NULL_BLOCK_ID in target[start:end]:
+                        raise ValueError("Missing V4.1 destination SWA window")
+                else:
+                    start = end = 0
+            elif is_circular_kv_cache_spec(spec):
                 # The same state page is updated each chunk. Send the final state.
                 start, end = 0, int(req_meta.chunk_finish)
                 if end and (len(source) != 1 or len(target) != 1 or target[0] == NULL_BLOCK_ID):
@@ -1988,12 +2047,29 @@ class MooncakeLayerwiseConnectorWorker:
             prepared.remote_block_ids.append(remote)
         prepared.local_block_ids = self._get_kernel_block_ids(prepared.local_block_ids)
         prepared.remote_block_ids = self._get_kernel_block_ids(prepared.remote_block_ids)
-        return prepared
+        return prepared, swa_targets
 
-    def send_dsv41_layer(self, cache_name: str, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
+    def send_dsv41_layer(
+        self,
+        cache_name: str,
+        metadata: MooncakeLayerwiseConnectorMetadata,
+        *,
+        swa_slots: torch.Tensor | None = None,
+        cache_only: bool = False,
+    ) -> None:
         if not metadata.requests:
             return
         access = self.dsv41_cache_plan[cache_name]
+        replay = self.dsv41_swa_bounded_replay
+        if replay and swa_slots is not None and self.dsv41_swa_targets:
+            self.dsv41_swa_writes.setdefault(cache_name, []).append(swa_slots)
+        # A compact replay can still rewrite the cut layer's shared pages.
+        # Send those pages from its normal forward, after both writes.
+        if cache_only:
+            return
+        resources = access.writes[1:] if replay else access.writes
+        if not resources:
+            return
         if not self.dsv41_step_requests:
             for req_id, req_meta in metadata.requests.items():
                 if req_id in self.dsv41_failed_requests:
@@ -2009,11 +2085,11 @@ class MooncakeLayerwiseConnectorWorker:
         requests = {
             req_id: req_meta
             for req_id, req_meta in self.dsv41_step_requests.items()
-            if any(req_meta.local_block_ids[resource.group_id] for resource in access.writes)
+            if any(req_meta.local_block_ids[resource.group_id] for resource in resources)
         }
         if not requests:
             return
-        names = [resource.cache_name for resource in access.writes]
+        names = [resource.cache_name for resource in resources]
         self.dsv41_ready_resources.update(names)
         event = torch.npu.Event()
         event.record()
@@ -2028,9 +2104,77 @@ class MooncakeLayerwiseConnectorWorker:
             )
         )
 
+    def clear_dsv41_replay_requests(self, req_ids: set[str]) -> None:
+        if getattr(self, "dsv41_swa_bounded_replay", False):
+            for req_id in req_ids:
+                self.dsv41_swa_coverage.pop(req_id, None)
+
+    def _send_dsv41_replay_swa(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
+        # Group metadata can share slot buffers across layers. Read each
+        # distinct buffer only once, after forward, and retain only tail slots.
+        slots_by_buffer: dict[tuple[int, int], set[int]] = {}
+        written: dict[str, set[int]] = {}
+        for name, mappings in self.dsv41_swa_writes.items():
+            slots = set()
+            for mapping in mappings:
+                key = (mapping.data_ptr(), mapping.numel())
+                if key not in slots_by_buffer:
+                    slots_by_buffer[key] = set(mapping.tolist())
+                slots.update(slots_by_buffer[key])
+            written[name] = slots
+
+        requests = {}
+        for req_id, req_meta in metadata.requests.items():
+            if req_id in self.dsv41_failed_requests:
+                continue
+            targets = self.dsv41_swa_targets.get(req_id)
+            if targets is None:
+                self.dsv41_swa_coverage.pop(req_id, None)
+                continue
+            coverage = self.dsv41_swa_coverage.setdefault(req_id, {})
+            missing = []
+            for name, access in self.dsv41_cache_plan.items():
+                group_id = access.writes[0].group_id
+                expected = targets[group_id]
+                if not expected:
+                    coverage.pop(name, None)
+                    continue
+                covered = coverage.setdefault(name, set())
+                covered.intersection_update(expected)
+                covered.update(expected.intersection(written.get(name, ())))
+                if req_meta.chunk_finish and covered != expected:
+                    missing.append(name)
+            if not req_meta.chunk_finish:
+                continue
+            self.dsv41_swa_coverage.pop(req_id, None)
+            if missing:
+                logger.error("V4.1 replay did not populate the destination SWA window for %s: %s", req_id, missing)
+                self.dsv41_failed_requests[req_id] = req_meta
+                continue
+            if not any(req_meta.local_block_ids[group_id] for group_id in self.dsv41_swa_groups):
+                continue
+            try:
+                if req_id not in self.dsv41_step_requests:
+                    self.dsv41_step_requests[req_id] = self.update_decoder_info(req_id, req_meta)
+                requests[req_id] = self.dsv41_step_requests[req_id]
+            except Exception:
+                logger.exception("V4.1 Mooncake SWA handshake failed for %s", req_id)
+                self.dsv41_failed_requests[req_id] = req_meta
+        if requests:
+            names = list(self.dsv41_cache_plan)
+            event = torch.npu.Event()
+            event.record()
+            assert self.kv_send_layer_thread is not None
+            self.kv_send_layer_thread.send_queue.put(
+                DSV41SendTask(wait_event=event, layer_name=names[0], layer_names=names, send_request=requests)
+            )
+            self.dsv41_ready_resources.update(names)
+
     def finish_dsv41_step(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
         if not getattr(self, "dsv41_cache_plan", None) or not metadata.requests:
             return
+        if self.dsv41_swa_bounded_replay:
+            self._send_dsv41_replay_swa(metadata)
         for req_id, req_meta in metadata.requests.items():
             if req_id in self.dsv41_failed_requests:
                 continue
@@ -2057,15 +2201,21 @@ class MooncakeLayerwiseConnectorWorker:
         self.dsv41_ready_resources.clear()
         self.dsv41_step_requests.clear()
         self.dsv41_failed_requests.clear()
+        self.dsv41_swa_targets.clear()
+        self.dsv41_swa_writes.clear()
 
     def prepare_layerwise_step(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
         """Prepare layerwise hooks once, when metadata is bound before forward."""
         self.current_layer = 0
         self._cache_write_events = [None] * self.total_layers
         if getattr(self, "dsv41_cache_plan", None) and self.vllm_config.kv_transfer_config.is_kv_producer:
+            self.clear_dsv41_replay_requests(metadata.dsv41_resumed_requests)
             for req_id, req_meta in metadata.requests.items():
                 try:
-                    metadata.requests[req_id] = self._prepare_dsv41_request(req_meta)
+                    prepared, swa_targets = self._prepare_dsv41_request(req_meta)
+                    metadata.requests[req_id] = prepared
+                    if self.dsv41_swa_bounded_replay and any(swa_targets.values()):
+                        self.dsv41_swa_targets[req_id] = swa_targets
                 except (IndexError, ValueError):
                     failed = copy.copy(req_meta)
                     failed.remote_port = req_meta.remote_port + self.tp_rank
@@ -2369,6 +2519,10 @@ class MooncakeLayerwiseConnectorWorker:
                 ensure_zmq_send(sock, encoded_data, path)
                 metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, path)
                 agent_meta = self.decoder.decode(metadata_bytes)
+                if isinstance(agent_meta, DSV41MooncakeAgentMetadata) and (
+                    agent_meta.swa_bounded_replay != self.dsv41_swa_bounded_replay
+                ):
+                    raise ValueError("V4.1 Mooncake requires matching P/D SWA bounded replay settings.")
             except Exception as e:
                 logger.error(
                     "Query to port and kv base addr for request fail. req_id=%s, source=%s:%s, error=%s. ",

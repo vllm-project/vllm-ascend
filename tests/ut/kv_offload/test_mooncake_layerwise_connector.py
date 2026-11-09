@@ -54,6 +54,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     DSV41LayerMetadata,
     DSV41MooncakeAgentMetadata,
+    DSV41SendTask,
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
     KVConnectorBase_V1,
@@ -141,6 +142,89 @@ class TestDSV41Isolation(unittest.TestCase):
                     (set(), {request_id} if is_dsv41 else set()),
                 )
                 self.assertEqual(worker._invalid_block_ids, {19} if is_dsv41 else {0, 19})
+
+
+class TestDSV41ReplayTransfer(unittest.TestCase):
+    def test_replay_defers_swa_and_selects_final_window(self):
+        worker = SimpleNamespace(
+            tp_rank=0,
+            tp_size=1,
+            block_size=[4, 4],
+            num_kv_cache_groups=2,
+            kv_cache_specs=[object(), object()],
+            dsv41_swa_groups={0: 4},
+            _get_kernel_block_ids=lambda block_ids: block_ids,
+        )
+        req = SimpleNamespace(
+            remote_tp_size=1,
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_block_size=[4, 4],
+            remote_port=100,
+            prompt_len=10,
+            local_block_ids=[[0, 5, 6], [7, 8, 9]],
+            remote_block_ids=[[0, 15, 16], [17, 18, 19]],
+            local_transed_tokens=0,
+            remote_cache_tokens=0,
+            local_computed_tokens=8,
+            chunk_finish=False,
+        )
+        prepare = MooncakeLayerwiseConnectorWorker._prepare_dsv41_request
+        prepared, targets = prepare(worker, req)
+        self.assertEqual(prepared.local_block_ids, [[], [7, 8]])
+        self.assertEqual(targets, {0: {23}})
+
+        req.local_transed_tokens = 8
+        req.local_computed_tokens = 10
+        req.chunk_finish = True
+        prepared, targets = prepare(worker, req)
+        self.assertEqual(prepared.local_block_ids, [[5, 6], [9]])
+        self.assertEqual(prepared.remote_block_ids, [[15, 16], [19]])
+        self.assertEqual(targets, {0: {23, 24, 25}})
+
+        worker.dsv41_swa_groups = {}
+        ordinary, targets = prepare(worker, req)
+        self.assertEqual(ordinary.local_block_ids, [[6], [9]])
+        self.assertEqual(targets, {})
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.Event")
+    def test_swa_completion_checks_coverage_across_writes_and_chunks(self, _event):
+        swa = SimpleNamespace(cache_name="swa", group_id=0)
+        shared = SimpleNamespace(cache_name="long_kv", group_id=1)
+        req = SimpleNamespace(local_block_ids=[[5, 6], [9]], chunk_finish=True)
+        metadata = SimpleNamespace(requests={"req": req})
+        worker = SimpleNamespace(
+            dsv41_cache_plan={"swa": SimpleNamespace(execution_layer=20, writes=(swa, shared))},
+            dsv41_swa_bounded_replay=True,
+            dsv41_swa_groups={0: 4},
+            dsv41_swa_targets={"req": {0: {23, 24, 25}}},
+            dsv41_swa_writes={},
+            dsv41_swa_coverage={"req": {"swa": {23}}},
+            dsv41_failed_requests={},
+            dsv41_step_requests={"req": req},
+            dsv41_ready_resources=set(),
+            kv_send_layer_thread=SimpleNamespace(send_queue=MagicMock()),
+        )
+        queue = worker.kv_send_layer_thread.send_queue
+        send = MooncakeLayerwiseConnectorWorker.send_dsv41_layer
+        finish_swa = MooncakeLayerwiseConnectorWorker._send_dsv41_replay_swa
+
+        send(worker, "swa", metadata, swa_slots=torch.tensor([24]), cache_only=True)
+        queue.put.assert_not_called()
+        send(worker, "swa", metadata, swa_slots=torch.tensor([25]))
+        self.assertEqual(queue.put.call_args.args[0].layer_names, ["long_kv"])
+
+        finish_swa(worker, metadata)
+        task = queue.put.call_args.args[0]
+        self.assertIsInstance(task, DSV41SendTask)
+        self.assertEqual(task.layer_names, ["swa"])
+        self.assertEqual(task.send_request, {"req": req})
+
+        queue.reset_mock()
+        worker.dsv41_swa_coverage.clear()
+        finish_swa(worker, metadata)
+        self.assertEqual(worker.dsv41_failed_requests, {"req": req})
+        queue.put.assert_not_called()
 
 
 class TestKVCacheSendingLayerThread(unittest.TestCase):

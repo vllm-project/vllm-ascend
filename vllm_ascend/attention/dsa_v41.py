@@ -98,6 +98,11 @@ def dsa_v41_write_kv(
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
+    if hidden_states.shape[0]:
+        slots = metadata.swa.flat_slot_mapping
+        notify_dsv41_cache_written(
+            attn.v41_impl.swa_prefix, slots[: hidden_states.shape[0]] if slots is not None else None, cache_only=True
+        )
 
 
 def dsa_v41_write_kv_fake(
@@ -820,7 +825,8 @@ class AscendDSAV41Impl:
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         if num_tokens:
-            notify_dsv41_cache_written(self.swa_prefix)
+            slots = metadata.swa.flat_slot_mapping
+            notify_dsv41_cache_written(self.swa_prefix, slots[:num_tokens] if slots is not None else None)
         self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
         return output
 
