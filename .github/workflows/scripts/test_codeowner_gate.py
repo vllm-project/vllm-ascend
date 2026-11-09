@@ -333,3 +333,35 @@ class TestChangesRequested:
         rules = gate.parse_codeowners("/a @solo\n")
         failures = gate.check_approvals(1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"})
         assert any("only owner is the PR author" in f for f in failures)
+
+
+class TestContentlessExemption:
+    """Zero-byte files (empty __init__.py, .gitkeep) are exempt."""
+
+    def test_empty_file_is_exempt(self, tmp_path, monkeypatch):
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "__init__.py").write_bytes(b"")
+        (tmp_path / "sub" / "real.py").write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        rules = gate.parse_codeowners("/sub @a\n")
+        # only the empty file would otherwise be unowned; real file owned
+        assert gate.check_coverage(rules, ["sub/real.py"]) == []
+
+    def test_unowned_empty_file_still_exempt(self, tmp_path, monkeypatch):
+        (tmp_path / "__init__.py").write_bytes(b"")
+        monkeypatch.chdir(tmp_path)
+        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
+        assert gate.check_coverage(rules, ["__init__.py"]) == []
+
+    def test_nonempty_file_needs_owner(self, tmp_path, monkeypatch):
+        (tmp_path / "module.py").write_text("# license header\n")
+        monkeypatch.chdir(tmp_path)
+        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
+        failures = gate.check_coverage(rules, ["module.py"])
+        assert failures == ["file has no CODEOWNERS owner: module.py"]
+
+    def test_missing_file_is_not_exempt(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
+        failures = gate.check_coverage(rules, ["ghost.py"])
+        assert failures == ["file has no CODEOWNERS owner: ghost.py"]
