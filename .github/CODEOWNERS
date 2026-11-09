@@ -89,6 +89,7 @@
 /vllm_ascend/distributed @LCAIZJ @zzzzwwjj @weijinqian0
 /vllm_ascend/distributed/ec_transfer @weijinqian0
 /vllm_ascend/distributed/eplb @freyfwt
+/vllm_ascend/distributed/expert_transfer/ @LookAround0301 @florian0125 @gjc0824 @xuanbozzz
 /vllm_ascend/distributed/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
 /vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
 /vllm_ascend/distributed/kv_transfer @weijinqian0
