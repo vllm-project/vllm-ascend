@@ -6,7 +6,6 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
 
-# Module-level so every test in this file is guarded, not just the first one.
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
@@ -23,25 +22,17 @@ pytestmark = pytest.mark.skipif(
     ],
 )
 def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
-    """Test compute_topk_logprobs for correctness of IDs, logprobs, and ranks.
-    Args:
-        batch_size: Number of sequences in the batch
-        vocab_size: Size of the vocabulary
-        num_logprobs: Number of top-k logprobs to return (excluding the sampled token)
-    """
+    """Check token IDs, logprobs, and ranks against PyTorch."""
     init_device_properties_triton()
-    # ========== 1. Setup test data ==========
     torch.manual_seed(42)
     device = "npu"
 
     logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
     sampled_token_ids = torch.randint(0, vocab_size, (batch_size,), device=device, dtype=torch.int64)
 
-    # ========== 2. Execute Triton implementation ==========
     triton_output = compute_topk_logprobs(logits, num_logprobs, sampled_token_ids)
     torch.npu.synchronize()
 
-    # ========== 3. Compute reference values using PyTorch ==========
     if num_logprobs == 0:
         ref_token_ids = sampled_token_ids.unsqueeze(-1)
     else:
@@ -52,13 +43,9 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     ref_logprobs = torch.gather(ref_all_logprobs, dim=1, index=ref_token_ids)
 
     sampled_logits = torch.gather(logits, 1, sampled_token_ids.unsqueeze(-1))
-    # A rank is the number of entries whose logit is at or above the sampled
-    # token's, so the argmax ranks 1. Using `>` here would mirror a `>`
-    # implementation and hide the divergence from vLLM; the contract itself is
-    # pinned by test_selected_token_rank_is_one_based below.
+    # Match upstream rank semantics: count logits >= the selected logit.
     ref_ranks = (logits >= sampled_logits).sum(dim=1).to(torch.int64)
 
-    # ========== 4. Verify results ==========
     assert torch.equal(triton_output.logprob_token_ids, ref_token_ids), (
         "Token IDs (Sampled + TopK) do not match between Triton and PyTorch."
     )
@@ -74,19 +61,14 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
 
 
 def test_selected_token_rank_is_one_based():
-    """Rank counts entries at or above the sampled logit: a unique argmax ranks
-    1, and both members of a two-way tie rank 2.
-
-    Asserted directly rather than against a local reference, because a `>`-based
-    reference would agree with a `>`-based kernel and hide the divergence.
-    """
+    """Check ranks for a unique maximum, runner-up, and top tie."""
     init_device_properties_triton()
 
     vocab_size = 128
     torch.manual_seed(0)
     logits = torch.randn(3, vocab_size, device="npu", dtype=torch.float32)
 
-    # Row 2: force a two-way tie at the top so the tie semantics are covered.
+    # Force a two-way top tie.
     logits[2].clamp_(max=6.0)
     logits[2, 5] = 7.0
     logits[2, 9] = 7.0
