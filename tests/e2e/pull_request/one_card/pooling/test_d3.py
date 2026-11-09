@@ -4,9 +4,11 @@ import importlib.util
 import json
 from typing import Any
 
+import huggingface_hub
 import pytest
 import requests
 import torch
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModel
 from vllm.utils.network_utils import get_open_port
 
@@ -18,7 +20,7 @@ pytestmark = pytest.mark.skipif(
     reason="D3 needs a vLLM revision with native D3 support",
 )
 
-MODEL = "vllm-sr/d3-edge"
+D3_REPO = "vllm-sr/d3-edge"
 # Allow for numerical differences between the Ascend and reference runtimes.
 SOFTMAX_ATOL = 0.03
 # These tests only send text, so media inputs are switched off. Keep every D3 run on one setting: the torch.compile
@@ -49,7 +51,12 @@ QUESTIONS: dict[str, dict[str, Any]] = {
 
 
 @pytest.fixture(scope="module")
-def d3_server():
+def model_name():
+    yield snapshot_download(D3_REPO, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE)
+
+
+@pytest.fixture(scope="module")
+def d3_server(model_name):
     # Shared by both tests below: starting the engine is the expensive part of this
     # file, and both tests only need HTTP access to the same running server.
     host = "127.0.0.1"
@@ -64,12 +71,12 @@ def d3_server():
         "--limit-mm-per-prompt",
         json.dumps(NO_MEDIA),
     ]
-    with RemoteOpenAIServer(MODEL, server_args, server_host=host, server_port=port, auto_port=False) as server:
+    with RemoteOpenAIServer(model_name, server_args, server_host=host, server_port=port, auto_port=False) as server:
         yield server
 
 
-def test_d3_pooling_matches_checkpoint_runtime(d3_server):
-    reference_model = AutoModel.from_pretrained(MODEL, trust_remote_code=True)
+def test_d3_pooling_matches_checkpoint_runtime(model_name, d3_server):
+    reference_model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
     runtime = reference_model.runtime
     prepared = runtime.prepare(STATE, QUESTIONS)
     runnable_keys = prepared.runnable
@@ -80,7 +87,7 @@ def test_d3_pooling_matches_checkpoint_runtime(d3_server):
 
     response = requests.post(
         d3_server.url_for("classify"),
-        json={"model": MODEL, "input": prompt_ids},
+        json={"model": model_name, "input": prompt_ids},
         timeout=120,
     )
     assert response.status_code == 200, response.text
@@ -99,9 +106,9 @@ def test_d3_pooling_matches_checkpoint_runtime(d3_server):
         )
 
 
-def test_d3_systemone_endpoint(d3_server):
+def test_d3_systemone_endpoint(model_name, d3_server):
     request = {
-        "model": MODEL,
+        "model": model_name,
         "state": STATE,
         "questions": QUESTIONS,
     }
