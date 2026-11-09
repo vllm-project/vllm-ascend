@@ -28,6 +28,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_prefill_metadata
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -584,6 +585,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
+        common_attn_metadata = get_sfa_pcp_prefill_metadata(common_attn_metadata, common_attn_metadata.pcp_context)
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
             lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=common_attn_metadata.pcp_context),

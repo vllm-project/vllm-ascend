@@ -33,6 +33,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
+    get_sfa_pcp_prefill_metadata,
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
@@ -825,6 +826,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
+        common_attn_metadata = get_sfa_pcp_prefill_metadata(common_attn_metadata, common_attn_metadata.pcp_context)
         return self._build(
             common_attn_metadata,
             buffer_key=self._metadata_buffer_key(common_attn_metadata),

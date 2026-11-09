@@ -4,10 +4,30 @@ These helpers encode the replicated SFA indexer-cache layout, so they stay
 outside ``common_cp`` while avoiding a dependency between the two builders.
 """
 
+from copy import copy
 from typing import Any
 
 import torch
 from vllm.utils.math_utils import cdiv
+
+
+def get_sfa_pcp_prefill_metadata(common_attn_metadata: Any, pcp_context: Any) -> Any:
+    """Keep SFA/indexer KV gather boundaries consistent across PCP shards."""
+    if pcp_context is None:
+        return common_attn_metadata
+    local_rows = getattr(pcp_context, "local_to_global_req_indices", None)
+    if local_rows is None:
+        return common_attn_metadata
+
+    # Lookahead shards may start beyond the prompt boundary but still belong
+    # to a global prefill. Restore only the SFA view; other backends keep their
+    # original local flags, and graph-padding requests remain non-prefilling.
+    is_prefilling = torch.zeros(common_attn_metadata.num_reqs, dtype=torch.bool, device="cpu")
+    global_flags = pcp_context.global_batch.is_prefilling_np
+    is_prefilling[: len(local_rows)] = torch.tensor([bool(global_flags[row]) for row in local_rows], dtype=torch.bool)
+    metadata = copy(common_attn_metadata)
+    metadata.is_prefilling = is_prefilling
+    return metadata
 
 
 def get_sfa_pcp_global_metadata(

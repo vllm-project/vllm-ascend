@@ -320,20 +320,6 @@ class AscendPCPManager(PCPManager):
         elif padded_num_reqs is not None:
             self._pad_uniform_query_start_loc(global_batch, local_batch)
 
-        has_global_prefill = bool(global_batch.is_prefilling_np.any())
-        if has_global_prefill:
-            # Lookahead shards can start beyond the prompt boundary while still
-            # belonging to a global prefill. Treating those shards as replicated
-            # decodes makes only some PCP ranks skip SFA/indexer KV collectives.
-            prefill_by_req_id = dict(zip(global_batch.req_ids, global_batch.is_prefilling_np))
-            for local_index, req_id in enumerate(local_batch.req_ids):
-                local_batch.is_prefilling_np[local_index] = prefill_by_req_id[req_id]
-            local_batch.has_prefill = bool(local_batch.is_prefilling_np.any())
-            if local_batch.has_prefill and hasattr(local_batch, "decode_graph_eligible"):
-                # Restoring prefill must disable decode capture, but must not
-                # enable capture for a decode shard rejected for other reasons.
-                local_batch.decode_graph_eligible = False
-
         actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         if local_batch.num_tokens == 0:
             # An empty rank keeps one zero-token placeholder request whose
@@ -350,7 +336,7 @@ class AscendPCPManager(PCPManager):
             local_batch.seq_lens_np = actual_seq_lens_np
         # Preserve the global attention state for decode-only batches, including
         # empty ranks, before upstream clears local draft metadata.
-        if not has_global_prefill:
+        if not bool(global_batch.is_prefilling_np.any()):
             return local_batch
 
         local_batch.attn_state = build_attn_state(
@@ -742,10 +728,13 @@ class AscendPCPManager(PCPManager):
         assert hidden_restore_idx is not None
         global_block_table_num_blocks = None
         local_to_global_req_indices = None
-        if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
-            global_block_table_num_blocks = torch.from_numpy(
-                self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
-            ).to(device=self.device, non_blocking=True)
+        if bool(global_batch.is_prefilling_np.any()):
+            if self.dcp_world_size > 1:
+                global_block_table_num_blocks = torch.from_numpy(
+                    self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
+                ).to(device=self.device, non_blocking=True)
+            # SFA/indexer also need request identity without DCP to distinguish
+            # global prefills from lookahead shards past the prompt boundary.
             global_rows = {
                 int(state): row for row, state in enumerate(global_batch.idx_mapping_np[: global_batch.num_reqs])
             }

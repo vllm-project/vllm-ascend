@@ -642,9 +642,11 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         )
         num_blocks.fill(0)
         assert actual.global_block_table_num_blocks[0, 0] == 7
-        assert actual.local_to_global_req_indices == (1, 1, 0)
     else:
         assert actual.global_block_table_num_blocks is None
+    if is_prefilling:
+        assert actual.local_to_global_req_indices == (1, 1, 0)
+    else:
         assert actual.local_to_global_req_indices is None
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
