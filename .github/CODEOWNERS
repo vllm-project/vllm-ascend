@@ -59,7 +59,7 @@
 # /vllm_ascend/attention/
 /vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/attention/sfa_v1.py @lijiahang226
-/vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01
+/vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
 
@@ -79,7 +79,7 @@
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
 
 # lora
-/vllm_ascend/lora @paulyu12
+/vllm_ascend/lora @paulyu12 @voidvelocity
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
@@ -104,19 +104,9 @@
 /vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
 
 # scheduler
-# TODO(owner): /vllm_ascend/core/__init__.py
-# /vllm_ascend/core/__init__.py
-# TODO(owner): /vllm_ascend/core/batch_job_aware_scheduler.py
-# /vllm_ascend/core/batch_job_aware_scheduler.py
-# TODO(owner): /vllm_ascend/core/dyntra_lb_scheduler.py
-# /vllm_ascend/core/dyntra_lb_scheduler.py
-# TODO(owner): /vllm_ascend/core/recompute_scheduler.py
-# /vllm_ascend/core/recompute_scheduler.py
+/vllm_ascend/core @DavidJiang9
+/vllm_ascend/core/recompute_scheduler.py @nwpu-zxr
 /vllm_ascend/core/scheduler_profiling_chunk.py @weiguihua2
-# TODO(owner): /vllm_ascend/core/short_request_first_scheduler.py
-# /vllm_ascend/core/short_request_first_scheduler.py
-# TODO(owner): /vllm_ascend/core/profiling_chunk_predictor.py
-# /vllm_ascend/core/profiling_chunk_predictor.py
 
 # kv cache
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024
@@ -221,8 +211,7 @@
 # worker root files pending owners (uncomment + set owner to activate)
 # TODO(owner): /vllm_ascend/worker/__init__.py
 # /vllm_ascend/worker/__init__.py
-# TODO(owner): /vllm_ascend/worker/device_metadata.py
-# /vllm_ascend/worker/device_metadata.py
+/vllm_ascend/worker/device_metadata.py @linfeng-yuan
 # TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
 # /vllm_ascend/worker/dspark_utils.py @wxsIcey
 # TODO(owner): /vllm_ascend/worker/encoder_acl_graph.py
