@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -69,9 +70,18 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 device=device,
             )
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        self.use_cuda_graph = False
-        # Max query tokens depend on whether sampling from anchor or not.
+        # Remove the hard-coded False: use the same expression as the base class.
+        # Real capture metadata comes from _build_capture_cad in dummy_run.
+        try:
+            self.use_cuda_graph = bool(self.runner._use_aclgraph() and not self.speculative_config.enforce_eager)
+        except Exception:
+            self.use_cuda_graph = False
+        # Draft graph replay depends on the batch contract and on metadata
+        # producers being ordered on the consumer stream; both are always on.
+        self._draft_graph_contract = True
+        self._draft_metadata_current_stream = True
+        # Target descriptor tokens are a dispatch key, NOT draft query rows.
+        # For SP=5, descriptor (192, 32) executes 32*5=160 draft queries.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
         # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
@@ -225,7 +235,32 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        self._per_group_block_tables[gid] = block_table
+        if not getattr(self, "use_cuda_graph", False):
+            self._per_group_block_tables[gid] = block_table
+            self._per_group_slot_mappings[gid] = slot_mapping
+            return
+        # Keep an enlarged persistent block-table buffer.
+        # The runner passes a view sized by the target-side num_reqs_padded; the draft
+        # mixed-batch branch of _pad_query_start_loc_for_fia adds one dummy request
+        # (num_reqs_padded + 1), so the two sides disagree on the row count;
+        #   AssertionError: assert num_reqs <= num_reqs_padded
+        # allocate max_num_reqs + 2 rows and zero the extra rows.
+        _rows = int(block_table.shape[0])
+        _cols = int(block_table.shape[1])
+        _cap = int(getattr(self.runner, "max_num_reqs", _rows)) + 2
+        _buffers = self._block_table_buffer_map()
+        _buf = _buffers.get(gid)
+        if _buf is None or int(_buf.shape[0]) < max(_rows, _cap) or int(_buf.shape[1]) != _cols:
+            _buf = torch.zeros(
+                (max(_rows, _cap), _cols),
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            _buffers[gid] = _buf
+        _buf[:_rows].copy_(block_table)
+        if int(_buf.shape[0]) > _rows:
+            _buf[_rows:].fill_(0)
+        self._per_group_block_tables[gid] = _buf
         self._per_group_slot_mappings[gid] = slot_mapping
 
     def set_inputs_first_pass(
@@ -255,9 +290,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
         long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
+        # Warmup and graph capture can run before the first batch has populated
+        # the per-group tables, so skip groups that have no table yet instead of
+        # raising KeyError.
         self._per_group_block_table_buffers = {
-            attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
+            attn_group.kv_cache_group_id: table
             for attn_group in self.draft_attn_groups
+            if (table := self._per_group_block_tables.get(attn_group.kv_cache_group_id)) is not None
         }
         self._context_slot_mapping_buffers = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
@@ -361,6 +400,54 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
 
+    def _block_table_buffer_map(self) -> dict[int, torch.Tensor]:
+        """Return the per-group block-table buffer map, creating it on demand.
+
+        Some callers build the proposer without running ``__init__`` (unit tests,
+        warm-up helpers), so the map must not be assumed to exist.
+        """
+        buffers = getattr(self, "_per_group_block_table_buffers", None)
+        if buffers is None:
+            buffers = {}
+            self._per_group_block_table_buffers = buffers
+        return buffers
+
+    def _pad_uniform_draft(self, cad, padded_reqs: int) -> int:
+        """Pad draft requests using q, never the target's q+1 layout."""
+        actual_reqs = cad.num_reqs
+        query_tokens = padded_reqs * self.num_query_per_req
+        assert actual_reqs <= padded_reqs <= self.max_batch_size
+        assert query_tokens <= self.max_query_tokens
+        self.query_start_loc.cpu[: actual_reqs + 1].copy_(cad.query_start_loc_cpu)
+        if actual_reqs < padded_reqs:
+            self.query_start_loc.np[actual_reqs + 1 : padded_reqs + 1] = (
+                self.token_arange_np[actual_reqs + 1 : padded_reqs + 1] * self.num_query_per_req
+            )
+        self.query_start_loc.copy_to_gpu()
+        cad.num_reqs = padded_reqs
+        cad.query_start_loc = self.query_start_loc.gpu[: padded_reqs + 1]
+        cad.query_start_loc_cpu = self.query_start_loc.cpu[: padded_reqs + 1]
+        cad.seq_lens = self._adjust_tensor(cad.seq_lens, padded_reqs)
+        if cad.seq_lens_cpu is not None:
+            cad.seq_lens_cpu = self._adjust_tensor(cad.seq_lens_cpu, padded_reqs)
+        if cad._seq_lens_cpu is not None:
+            cad._seq_lens_cpu = self._adjust_tensor(cad._seq_lens_cpu, padded_reqs)
+        if cad.num_computed_tokens_cpu is not None:
+            cad.num_computed_tokens_cpu = self._adjust_tensor(cad.num_computed_tokens_cpu, padded_reqs)
+        cad.block_table_tensor = self._adjust_tensor(cad.block_table_tensor, padded_reqs)
+        for table in self._block_table_buffer_map().values():
+            table[actual_reqs:padded_reqs].zero_()
+        # Graph precompute captures padded_reqs*(SP+1) context rows. Real
+        # rows can be fewer after rejection; inactive rows must never write KV.
+        context_capacity = padded_reqs * (1 + self.num_speculative_tokens)
+        actual_context = self._dflash_num_context
+        assert actual_context <= context_capacity <= self.max_num_tokens
+        self._dflash_hidden_states[actual_context:context_capacity].zero_()
+        self._context_positions_buffer[actual_context:context_capacity].zero_()
+        for slots in self._per_group_context_slot_mapping_buffers.values():
+            slots[actual_context:].fill_(-1)
+        return padded_reqs
+
     def _clear_dummy_slot_mappings(self) -> None:
         for buf in self._per_group_query_slot_mapping_buffers.values():
             buf.fill_(-1)
@@ -368,6 +455,109 @@ class AscendDSparkProposer(AscendDflashProposer):
             buf.fill_(-1)
 
     @torch.inference_mode()
+    def _build_capture_cad(self, num_reqs: int, num_input_tokens: int):
+        """Build a representative CAD for capture.
+
+        The goal is for `build_draft_attn_metadata` to emit metadata that references
+        persistent buffers during capture, so the graph bakes those addresses in;
+        `set_inputs_first_pass` refreshes the same buffers in place for replay.
+
+        This is required for graph capture: every tensor comes from a persistent buffer.
+        """
+        batch_size = num_reqs
+        num_query_total = batch_size * self.num_query_per_req
+        num_actual_tokens = min(num_query_total, num_input_tokens)
+        primary_gid = getattr(self, "kv_cache_gid", 0)
+
+        buffers = self._block_table_buffer_map()
+        if not buffers:
+            for attn_group in self.draft_attn_groups:
+                gid = attn_group.kv_cache_group_id
+                bt = self._per_group_block_tables.get(gid)
+                if bt is not None:
+                    buffers[gid] = bt
+        if primary_gid not in buffers:
+            for gid in buffers:
+                primary_gid = gid
+                break
+        if primary_gid not in buffers:
+            # Capture can run before the first batch stages the per-group tables.
+            # Use the runner's committed table so the captured graph still gets a
+            # real tensor; without it the CAD below would raise KeyError.
+            try:
+                buffers[primary_gid] = self.runner.input_batch.block_table[primary_gid].get_device_tensor()
+            except (AttributeError, IndexError, KeyError) as exc:
+                raise RuntimeError(
+                    f"draft graph capture requires a staged block table for group {primary_gid}"
+                ) from exc
+
+        if primary_gid not in self._per_group_query_slot_mapping_buffers:
+            query_slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+        else:
+            query_slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_input_tokens]
+
+        # Capture needs a representative seq_len: dummy or small values leave replay
+        # ineffective at real sequence lengths. Use max_num_tokens (8192 in production).
+        # Restore context KV writes: attach the per-group context slot-mapping buffers
+        # during capture so attention writes context KV; otherwise the draft sees no context.
+        try:
+            if getattr(self, "_layer_group_idx", None) and getattr(
+                self, "_per_group_context_slot_mapping_buffers", None
+            ):
+                self._context_slot_mapping_buffers = [
+                    self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
+                ]
+                logger.warning(
+                    "[draft-graph] capture context KV writes restored for %d groups",
+                    len(self._context_slot_mapping_buffers),
+                )
+        except Exception as _ce:
+            logger.warning("[draft-graph] failed to restore context slot mapping: %r", _ce)
+
+        _cap_len = int(getattr(self, "max_num_tokens", 0) or 0) or 8192
+        try:
+            self.runner.seq_lens[:batch_size].fill_(_cap_len)
+            self.runner.optimistic_seq_lens_cpu[:batch_size].fill_(_cap_len)
+            logger.warning("[draft-graph] capture representative seq_len=%d (batch=%d)", _cap_len, batch_size)
+        except Exception as _ce:
+            logger.warning("[draft-graph] failed to set representative seq_len: %r", _ce)
+
+        query_start_loc = self.query_start_loc_group[0]
+        query_start_loc[: batch_size + 1].copy_(self.arange_dflash[: batch_size + 1] * self.num_query_per_req)
+        query_start_loc[batch_size + 1 :].fill_(0)
+        seq_lens = self.seq_lens_group[0]
+        seq_lens[:batch_size].copy_(self.runner.seq_lens[:batch_size] + self.num_query_per_req)
+        seq_lens[batch_size:].fill_(0)
+
+        # Capture slot_mapping values are dummies: set them to -1 (pad, no KV write).
+        _slot = self._per_group_query_slot_mapping_buffers.get(primary_gid)
+        if _slot is None:
+            _slot = self._slot_mapping_buffer
+        _slot[:num_input_tokens].fill_(-1)
+
+        # AscendAttentionState is imported at module scope; only the CAD class is added here.
+        from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
+        return AscendCommonAttentionMetadata(
+            query_start_loc=query_start_loc[: batch_size + 1],
+            query_start_loc_cpu=(
+                torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * self.num_query_per_req
+            ).to(torch.int32),
+            seq_lens=seq_lens[:batch_size],
+            seq_lens_cpu=self.runner.optimistic_seq_lens_cpu[:batch_size],
+            num_reqs=batch_size,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
+            max_query_len=self.num_query_per_req,
+            max_seq_len=0,
+            decode_token_per_req=self.num_query_per_req,
+            slot_mapping=query_slot_mapping,
+            block_table_tensor=self._per_group_block_table_buffers[primary_gid][:batch_size],
+            positions=self.positions,
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            causal=False,
+        )
+
     def dummy_run(
         self,
         num_tokens: int,
@@ -397,8 +587,45 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.token_indices_to_sample.fill_(0)
         self._clear_dummy_slot_mappings()
 
+        # Bake real draft attention metadata into the graph (the original passed an empty list).
+        multi_steps_attn_metadata = []
+        if self.use_cuda_graph and aclgraph_runtime_mode == CUDAGraphMode.FULL and not is_profile and num_reqs > 0:
+            try:
+                _cad = self._build_capture_cad(num_reqs, num_input_tokens)
+                # Returns a pair: (multi_steps_attn_metadata, attn_metadata_i)
+                _md_list, _md_first = self.build_draft_attn_metadata(_cad, num_input_tokens, num_input_tokens)
+                _md = _md_list
+                if self._draft_graph_contract and (not _md or not _md[0]):
+                    raise RuntimeError("Draft graph capture requires nonempty attention metadata")
+                self._draft_capture_first_md = _md_first
+                # Capture must release the device-side metadata submission, otherwise the next
+                # submission fails with "The previous device metadata submission has not been released".
+                _ex = getattr(self.runner, "device_metadata_executor", None)
+                if _ex is not None and (not self._draft_graph_contract or _ex.submission_in_flight):
+                    try:
+                        _ex.release()
+                    except Exception as _re:
+                        logger.warning("[draft-graph] executor.release() failed: %r", _re)
+                if _md:
+                    # _md is list[dict[layer_name -> attn_metadata]], one entry per step
+                    multi_steps_attn_metadata = list(_md)
+                    logger.warning(
+                        "[draft-graph] capture: built draft attn metadata "
+                        "(steps=%d layers=%d num_query_total=%d num_input_tokens=%d)",
+                        len(multi_steps_attn_metadata),
+                        len(multi_steps_attn_metadata[0]) if multi_steps_attn_metadata else 0,
+                        num_query_total,
+                        num_input_tokens,
+                    )
+            except Exception as _e:
+                if self._draft_graph_contract:
+                    raise RuntimeError("Draft capture metadata contract failed") from _e
+                logger.warning("[draft-graph] capture metadata build FAILED: %r", _e)
+
         with set_ascend_forward_context(
-            None,
+            # The model forward looks up draft metadata by key from its first positional
+            # attn_metadata argument; passing None left the draft without attention. Pass the dict.
+            (multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None),
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
@@ -408,7 +635,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             model_instance=self.model,
-            draft_attn_metadatas=[],
+            draft_attn_metadatas=multi_steps_attn_metadata,
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),
@@ -422,6 +649,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 )
 
             else:
+                # Capture must use the same context row count that replay computes,
+                # otherwise the graph writes context KV for only num_input_tokens rows.
                 self._dflash_num_context = num_input_tokens
                 self._runnable(
                     num_input_tokens=num_input_tokens,
@@ -429,6 +658,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
                     target_positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
-                    multi_steps_attn_metadata=[],
+                    multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_input_tokens,
                 )

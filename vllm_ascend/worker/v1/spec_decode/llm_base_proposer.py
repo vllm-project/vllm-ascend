@@ -1085,10 +1085,32 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
+        graph_contract = self.method == "dspark"
+        use_draft_graph = self.use_cuda_graph
+        if graph_contract:
+            # Capture contains a bounded decode context, not arbitrary prefill.
+            # Other parallel layouts need their own shape/synchronization proof.
+            use_draft_graph = use_draft_graph and bool(uniform_decode) and num_prefill_reqs == 0
+            use_draft_graph = use_draft_graph and self.runner.dp_size == 1 and self.dcp_size == 1
+            use_draft_graph = use_draft_graph and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
 
-        if self.use_cuda_graph:
+        # The draft consumes num_query_per_req (=5) tokens per request, while the
+        # dispatcher buckets by uniform_decode_query_len (=6); with more requests it
+        # picks a bucket with too few rows (40 -> 42 gives 7 < 8, 35 -> 36 gives 6 < 7),
+        # and model_runner_v1._pad_query_start_loc_for_fia trips its assertion
+        # `assert num_reqs <= num_reqs_padded` (always at C=32, never at C<=16).
+        # Fix: convert the dispatch input to the equivalent token count using uniform_decode_query_len per request.
+        _dispatch_num_tokens = num_tokens
+        if graph_contract and use_draft_graph and uniform_decode:
+            _udql = int(getattr(self.runner.cudagraph_dispatcher, "uniform_decode_query_len", 0) or 0)
+            _nqr = int(getattr(self, "num_query_per_req", 0) or 0)
+            _nreq = int(getattr(common_attn_metadata, "num_reqs", 0) or 0)
+            if _udql > 0 and _nqr > 0 and _udql != _nqr and _nreq > 0 and num_tokens == _nreq * _nqr:
+                _dispatch_num_tokens = _nreq * _udql
+
+        if use_draft_graph:
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+                num_tokens=_dispatch_num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
         else:
@@ -1100,7 +1122,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
 
-        if self.use_cuda_graph:
+        if use_draft_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -1109,7 +1131,42 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if graph_contract:
+            padded_reqs = getattr(batch_descriptor, "num_reqs", None)
+            # The capture baked context rows for exactly padded_reqs * q query
+            # tokens, and build_model_inputs_first_pass() slices the context
+            # tensors with that shape inside the graph. Replay must therefore be
+            # bounded by the captured size, not by the larger (q + 1) capacity:
+            # a replay carrying more context rows would leave the extra rows'
+            # draft KV uncomputed.
+            draft_rows = getattr(self, "num_query_per_req", None)
+            context_capacity = (padded_reqs or 0) * (draft_rows or 0)
+            if (
+                aclgraph_runtime_mode == CUDAGraphMode.FULL
+                and padded_reqs is not None
+                and draft_rows
+                and common_attn_metadata.num_reqs <= padded_reqs <= self.max_batch_size
+                and getattr(self, "_dflash_num_context", 0) <= context_capacity <= self.max_num_tokens
+            ):
+                # Keep the target descriptor as the graph cache key, but use
+                # the same draft query shape as dummy_run (B_padded * q).
+                num_input_tokens = padded_reqs * self.num_query_per_req
+                assert num_input_tokens <= self.max_query_tokens
+                assert num_tokens_across_dp is None  # guarded to DP=1 above
+            else:
+                aclgraph_runtime_mode = CUDAGraphMode.NONE
+                batch_descriptor = None
+                num_input_tokens = num_tokens
+                # Non-graph multi-DP execution still uses its synchronized size.
+                if num_tokens_across_dp is not None:
+                    if num_tokens_across_dp.dim() == 0:
+                        num_input_tokens = int(num_tokens_across_dp)
+                    else:
+                        num_input_tokens = int(num_tokens_across_dp[getattr(self.runner, "dp_rank", 0)])
+
+        if graph_contract and aclgraph_runtime_mode == CUDAGraphMode.FULL and hasattr(self, "_pad_uniform_draft"):
+            num_reqs_padded = self._pad_uniform_draft(common_attn_metadata, batch_descriptor.num_reqs)
+        elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
@@ -1382,7 +1439,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
-
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
@@ -2653,7 +2709,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         for buf in getattr(self, "_per_group_query_slot_mapping_buffers", {}).values():
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
-            buf[self._dflash_num_context :].fill_(-1)
+            buf[getattr(self, "_dflash_num_context", num_actual_tokens) :].fill_(-1)
 
 
 # draft_embed_mm_kwargs: text-only MTP heads such as Glm5NextMTP expose
