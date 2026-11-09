@@ -921,6 +921,7 @@ class AscendConfig:
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
 
         self._validate_mc2_comm_alg(vc)
+        self._validate_megamoe_shared_expert_fusion(vc)
 
         # mega_moe_max_tokens range (0 = let the MegaMoe operator auto-compute)
         if self.mega_moe_max_tokens < 0:
@@ -990,6 +991,36 @@ class AscendConfig:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication. "
                 "Please set additional_config.enable_fused_mc2 to 0."
+            )
+
+    def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
+        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+
+        The shared expert is fused into the routed A5 MegaMoe operator, so this
+        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        the shared expert and routed experts share the residual width. Latent-MoE
+        models (e.g. Kimi K3) project the residual stream before the routed FFN and
+        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
+        that layout. Fail fast instead of silently downgrading, because a silent
+        downgrade would change results without failing the launch.
+        """
+        if not self.megamoe_shared_expert_fusion:
+            return
+
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "the current hardware profile does not support it. "
+                "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
+            )
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        if getattr(hf_text_config, "routed_expert_hidden_size", None) is not None:
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) does not support latent-MoE models "
+                "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:

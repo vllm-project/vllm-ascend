@@ -86,6 +86,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
+            HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
