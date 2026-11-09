@@ -141,8 +141,7 @@
 /vllm_ascend/worker/device_metadata.py @linfeng-yuan
 # TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
 # /vllm_ascend/worker/dspark_utils.py @wxsIcey
-# TODO(owner): /vllm_ascend/worker/encoder_acl_graph.py
-# /vllm_ascend/worker/encoder_acl_graph.py
+/vllm_ascend/worker/encoder_acl_graph.py @yiz-liu
 # TODO(owner): /vllm_ascend/worker/kvpp_cache.py
 # /vllm_ascend/worker/kvpp_cache.py
 # TODO(owner): /vllm_ascend/worker/npu_input_batch.py
@@ -180,7 +179,7 @@
 /vllm_ascend/_310p @Tflowers-0129 @YangShuai52
 
 # xlite
-/vllm_ascend/xlite @lulina
+/vllm_ascend/xlite @lulina @SijieFu
 
 # release_notes
 /release_notes/ @wangxiyuan
