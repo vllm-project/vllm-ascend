@@ -1,0 +1,10 @@
+pr: 21142
+entries:
+  - category: performance
+    text: >-
+      Added prefill indexer row sharding for DeepSeek-V4 on pure-TP deployments:
+      each tensor-parallel rank now scores and selects TopK for its own balanced
+      slice of the prefill query rows and the results are gathered back into the
+      global row order, instead of every rank scoring the whole batch. Batches
+      below the row/cost floors, and PCP/DCP/DSA-CP or FULL-graph deployments,
+      keep the original replicated path.
