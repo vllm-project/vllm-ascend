@@ -20,6 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -125,6 +127,27 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
     @property
     def skip_topk(self) -> bool:
         return self.__dict__.get("_skip_topk", False)
+
+    @property
+    def impl(self) -> Any:
+        """Expose the wrapped backend through the upstream MLA contract."""
+        return self.mla_attn.impl
+
+    @property
+    def kv_cache(self) -> Any:
+        return self.mla_attn.kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value: Any) -> None:
+        self.mla_attn.kv_cache = value
+
+    @property
+    def kv_cache_dtype(self) -> Any:
+        return self.mla_attn.kv_cache_dtype
+
+    @property
+    def _k_scale(self) -> Any:
+        return self.mla_attn._k_scale
 
     @skip_topk.setter
     def skip_topk(self, value: bool) -> None:
@@ -245,6 +268,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
         )
+        # Some model-specific speculative decoders (for example Mistral
+        # DSpark) access the cache layer directly through the outer MLA
+        # wrapper. Keep the same public layer-name contract as the wrapped
+        # attention layer so KV-cache discovery resolves the registered key.
+        self.layer_name = self.mla_attn.layer_name
 
         # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
         # layers, so quant methods must skip their own NZ conversion.

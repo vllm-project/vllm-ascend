@@ -45,6 +45,52 @@ def _groups() -> list[KVCacheGroupSpec]:
         "model.layers.47.self_attn",
         "model.mtp.layers.48.self_attn",
     ]
+
+
+def test_non_qwen_uniform_group_ignores_a_logical_kv_sharing_consumer():
+    target = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=8,
+        dtype=torch.bfloat16,
+    )
+    group = KVCacheGroupSpec(
+        ["model.layers.0.self_attn", "model.layers.1.self_attn"],
+        UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={"model.layers.0.self_attn": target},
+        ),
+    )
+
+    assert build_qwen4_kv_cache_layout([group], num_blocks=1) is None
+
+
+def test_v2_cache_specs_skip_logical_kv_sharing_consumers():
+    target = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=8,
+        dtype=torch.bfloat16,
+    )
+    target_name = "model.layers.0.self_attn"
+    shared_name = "model.layers.1.self_attn"
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [target_name, shared_name],
+                UniformTypeKVCacheSpecs(
+                    block_size=16,
+                    kv_cache_specs={target_name: target},
+                ),
+            )
+        ]
+    )
+
+    specs = attn_utils_v2._get_layer_kv_cache_specs(config, {shared_name})
+
+    assert specs == {target_name: target}
     main = FullAttentionSpec(
         block_size=256,
         num_kv_heads=1,

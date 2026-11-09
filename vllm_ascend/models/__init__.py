@@ -135,3 +135,7 @@ def register_model():
             "MistralLarge4ForCausalLM",
             "vllm_ascend.models.mistral_large4:AscendMistralLarge4ForCausalLM",
         )
+        ModelRegistry.register_model(
+            "MistralLarge4DSparkModel",
+            "vllm_ascend.models.mistral_large4:AscendMistralLarge4DSparkForCausalLM",
+        )

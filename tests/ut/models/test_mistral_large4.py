@@ -421,6 +421,73 @@ def test_a_model_without_ssmax_needs_no_log_positions():
     assert backend.mistral_q(torch.zeros(3, 16)).shape == (3, 2, 4)
 
 
+# ----------------------------------------------------- graph and DSpark
+
+
+def test_target_uses_the_ascend_model_state_for_mrv2():
+    from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+    model_cls = ml4.AscendMistralLarge4ForCausalLM
+
+    assert model_cls.get_model_state_cls(None) is AscendModelState
+
+
+def test_outer_mla_exposes_the_backend_cache_contract():
+    outer = ml4.AscendMultiHeadLatentAttention.__new__(
+        ml4.AscendMultiHeadLatentAttention
+    )
+    torch.nn.Module.__init__(outer)
+    original_cache = torch.zeros(2, 6)
+    impl = object()
+    outer.mla_attn = SimpleNamespace(
+        impl=impl,
+        kv_cache=original_cache,
+        kv_cache_dtype="auto",
+        _k_scale=torch.tensor(1.0),
+    )
+
+    assert outer.impl is impl
+    assert outer.kv_cache is original_cache
+    assert outer.kv_cache_dtype == "auto"
+    assert outer._k_scale.item() == 1.0
+
+    replacement = torch.ones(2, 6)
+    outer.kv_cache = replacement
+    assert outer.mla_attn.kv_cache is replacement
+
+
+def test_dspark_splits_a_fused_mla_cache_into_component_views():
+    fused = torch.arange(24).view(2, 12)
+
+    nope, rope = ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(
+        fused, kv_lora_rank=8
+    )
+
+    torch.testing.assert_close(nope, fused[..., :8])
+    torch.testing.assert_close(rope, fused[..., 8:])
+    assert nope.untyped_storage().data_ptr() == fused.untyped_storage().data_ptr()
+    assert rope.untyped_storage().data_ptr() == fused.untyped_storage().data_ptr()
+
+
+def test_dspark_accepts_nested_component_cache_views():
+    nope, rope = torch.zeros(2, 8), torch.zeros(2, 4)
+
+    actual = ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(
+        ((nope, rope),), kv_lora_rank=8
+    )
+
+    assert actual[0] is nope
+    assert actual[1] is rope
+
+
+@pytest.mark.parametrize("cache", [torch.zeros(2, 8), object()])
+def test_dspark_rejects_an_invalid_cache_layout(cache):
+    with pytest.raises(RuntimeError, match="Mistral DSpark"):
+        ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(
+            cache, kv_lora_rank=8
+        )
+
+
 def test_the_model_does_not_call_the_indexer_itself():
     """AscendSFAImpl runs it; calling it here too would write the cache twice."""
     attn = _attn(_spec(0, 0))

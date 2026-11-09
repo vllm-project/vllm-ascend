@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -131,7 +132,9 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.32.0") or find_spec(
+    "vllm.models.qwen4_exp.common.qsa_indexer"
+) is None:
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
 
     QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
@@ -739,11 +742,21 @@ def build_attn_state(
     return attn_state
 
 
-def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+def _get_layer_kv_cache_specs(
+    kv_cache_config: KVCacheConfig,
+    shared_layers: Iterable[str] = (),
+) -> dict[str, KVCacheSpec]:
+    shared_layer_names = set(shared_layers)
     layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
     for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
         group_spec = group_kv_cache_spec.kv_cache_spec
         for layer_name in group_kv_cache_spec.layer_names:
+            # KV-sharing layers are logical consumers of their target layer's
+            # cache. They remain in ``layer_names`` for scheduler bookkeeping,
+            # but UniformTypeKVCacheSpecs intentionally has no independent
+            # entry or allocation for them.
+            if layer_name in shared_layer_names:
+                continue
             if isinstance(group_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
             else:
@@ -1167,7 +1180,7 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
-        specs = _get_layer_kv_cache_specs(kv_cache_config)
+        specs = _get_layer_kv_cache_specs(kv_cache_config, shared_layers)
         # Indexer reshape expects a tuple even without a quantization scale.
         # Single-component main MLA caches still use a raw Tensor.
         return {
@@ -1179,7 +1192,7 @@ def _allocate_kv_cache(
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
-    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config, shared_layers)
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
@@ -1713,7 +1726,7 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     is_dsv4_model = _is_dsv4_model(vllm_config)
-    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config, shared_kv_cache_layers)
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
@@ -2181,7 +2194,7 @@ def _reshape_kv_cache_v2(
                 k_dtype = (
                     torch.int8
                     if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+                    else kv_cache_spec.dtype
                 )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)

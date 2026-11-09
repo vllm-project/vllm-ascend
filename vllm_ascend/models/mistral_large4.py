@@ -48,6 +48,7 @@ from typing import Any, cast
 
 import torch
 from torch import nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_ep_group
@@ -63,6 +64,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.mistral.amd.attention import MistralMLAAttention
 from vllm.models.mistral.amd.indexer import MistralIndexer
 from vllm.models.mistral.amd.ssmax import SSMaxScaling
+from vllm.models.mistral.mistral_large4.amd.dspark import (
+    MistralLarge4DSparkForCausalLM,
+)
 from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
 )
@@ -78,6 +82,7 @@ from vllm_ascend.ops.rotary_embedding import (
 __all__ = [
     "AscendMistralIndexerBackend",
     "AscendMistralIndexer",
+    "AscendMistralLarge4DSparkForCausalLM",
     "AscendMistralLarge4ForCausalLM",
     "AscendMistralMLAAttention",
     "adopt_ascend_modules",
@@ -535,6 +540,7 @@ def validate_moe_parallelism(vllm_config: VllmConfig) -> None:
         )
 
 
+@support_torch_compile
 class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
     """Mistral Large 4 with the Ascend paths adopted after construction.
 
@@ -573,6 +579,15 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
                 f"layer would overwrite the latent cache it borrows."
             )
 
+    def get_model_state_cls(self):
+        # Upstream returns MistralLarge4ModelState solely to construct the
+        # HIP-only specialized decode after weight loading. Ascend disables
+        # that path above and must retain its own MRV2 attention-metadata
+        # builder for graph capture and execution.
+        from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+        return AscendModelState
+
     def load_weights(self, weights):
         loaded = super().load_weights(weights)
         # Mistral owns a shared MistralRotaryEmbedding rather than one of the
@@ -583,3 +598,137 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
         _record_cos_sin_cache(rotary_emb.cos_sin_cache)
         _record_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
         return loaded
+
+
+class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
+    """Build Mistral Large 4's dense MLA DSpark draft with Ascend attention.
+
+    The upstream draft imports the same AMD decoder layer as the target, but
+    constructs it outside :class:`AscendMistralLarge4ForCausalLM`. Without the
+    scoped constructor replacement below it falls back to the generic upstream
+    MLA wrapper, which does not pass the Ascend backend's required MLA module
+    contract and fails while looking up ``rotary_emb``.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        from vllm.models.mistral.mistral_large4.amd import model as upstream_model
+
+        original_attention_cls = upstream_model.MistralMLAAttention
+        upstream_model.MistralMLAAttention = AscendMistralMLAAttention
+        try:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        finally:
+            upstream_model.MistralMLAAttention = original_attention_cls
+
+    @staticmethod
+    def _normalize_draft_kv_cache(
+        kv_cache: Any,
+        kv_lora_rank: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the NoPE/RoPE component views used by Ascend MLA writers."""
+        while isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 1:
+            kv_cache = kv_cache[0]
+        if isinstance(kv_cache, torch.Tensor):
+            if kv_cache.shape[-1] <= kv_lora_rank:
+                raise RuntimeError(
+                    "Mistral DSpark fused MLA cache is missing its RoPE component: "
+                    f"shape={tuple(kv_cache.shape)}, kv_lora_rank={kv_lora_rank}."
+                )
+            return (
+                kv_cache[..., :kv_lora_rank],
+                kv_cache[..., kv_lora_rank:],
+            )
+        if isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 2:
+            nope_cache, rope_cache = kv_cache
+            if isinstance(nope_cache, torch.Tensor) and isinstance(
+                rope_cache, torch.Tensor
+            ):
+                return nope_cache, rope_cache
+        raise RuntimeError(
+            "Mistral DSpark expected a fused MLA cache or a two-component "
+            f"NoPE/RoPE cache, got {type(kv_cache).__name__}."
+        )
+
+    @torch.inference_mode()
+    def precompute_and_store_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: (
+            torch.Tensor
+            | list[torch.Tensor | None]
+            | tuple[torch.Tensor | None, ...]
+            | None
+        ) = None,
+    ) -> None:
+        """Write draft context KV with Ascend's component-cache operators.
+
+        Upstream calls ``MLAAttentionImpl.do_kv_cache_update``, whose CUDA
+        contract is one fused cache tensor. Model Runner V2 binds Ascend MLA
+        as separate NoPE/RoPE cache views, so that helper cannot be used here.
+        """
+        if context_states.numel() == 0 or context_slot_mapping is None:
+            return
+        if context_positions.numel() != context_states.shape[0]:
+            raise ValueError("Mistral DSpark context positions must match context rows.")
+        if isinstance(context_slot_mapping, (list, tuple)) and len(
+            context_slot_mapping
+        ) != len(self.model.layers):
+            raise ValueError(
+                "context_slot_mapping must contain one entry per Mistral "
+                "DSpark layer."
+            )
+
+        # Use the draft's plain-YaRN cache. The target has LeRoPE, so the
+        # process-global target table is not valid for these dense draft layers.
+        rotary = self.model.rotary_emb
+        cos_half, sin_half = rotary.cos_sin_cache.chunk(2, dim=-1)
+        cos = (
+            cos_half.repeat(1, 2)
+            .index_select(0, context_positions)
+            .unsqueeze(1)
+            .unsqueeze(2)
+        )
+        sin = (
+            sin_half.repeat(1, 2)
+            .index_select(0, context_positions)
+            .unsqueeze(1)
+            .unsqueeze(2)
+        )
+
+        per_layer_slots = isinstance(context_slot_mapping, (list, tuple))
+        for layer_idx, layer in enumerate(self.model.layers):
+            slots = (
+                context_slot_mapping[layer_idx]
+                if per_layer_slots
+                else context_slot_mapping
+            )
+            if slots is None or slots.numel() == 0:
+                continue
+            if slots.numel() != context_states.shape[0]:
+                raise ValueError("Mistral DSpark slot mapping must match context rows.")
+
+            attn = layer.self_attn
+            mla = attn.attn
+            impl = mla.impl
+            kv_cache = self._normalize_draft_kv_cache(
+                mla.kv_cache, attn.kv_lora_rank
+            )
+            if impl._cache_requires_prolog_v3_writer(kv_cache):
+                impl.exec_context_kv_prolog_v3(
+                    context_states,
+                    cos,
+                    sin,
+                    kv_cache,
+                    slots,
+                )
+                continue
+
+            kv_no_split = attn.kv_a_proj_with_mqa(context_states)[0]
+            impl.exec_kv_prefill(
+                kv_no_split,
+                cos,
+                sin,
+                kv_cache,
+                slots,
+            )

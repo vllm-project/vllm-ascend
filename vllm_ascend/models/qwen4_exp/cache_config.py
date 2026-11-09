@@ -189,11 +189,19 @@ def build_qwen4_kv_cache_layout(
     }
     owner_group_ids: dict[str, int] = {}
     unknown: list[tuple[str, KVCacheSpec]] = []
+    missing_member_specs: list[str] = []
     for group_id, group in enumerate(kv_cache_groups):
         member_specs = _group_member_specs(group)
         for layer_name in group.layer_names:
             owner_group_ids[layer_name] = group_id
-            spec = member_specs[layer_name]
+            spec = member_specs.get(layer_name)
+            if spec is None:
+                # Uniform groups may retain logical KV-sharing consumers in
+                # ``layer_names`` while omitting their independent cache spec.
+                # Ignore that shape for non-Qwen models; if QSA members are
+                # present below, the incomplete Qwen layout still fails.
+                missing_member_specs.append(layer_name)
+                continue
             role = _classify_spec(layer_name, spec)
             if role is None:
                 unknown.append((layer_name, spec))
@@ -202,6 +210,11 @@ def build_qwen4_kv_cache_layout(
 
     if not role_members[QSA_RAW]:
         return None
+    if missing_member_specs:
+        raise ValueError(
+            "Qwen4 QSA hybrid cache layout has group members without cache "
+            f"specs: {missing_member_specs}"
+        )
     required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN, PLE)
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:
