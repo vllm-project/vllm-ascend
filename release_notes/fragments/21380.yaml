@@ -1,0 +1,4 @@
+pr: 21380
+entries:
+  - category: bugfix
+    text: Fixed inconsistent PCP prefill classification for speculative lookahead shards that could cause KV collective mismatches and hangs during short prefills.
