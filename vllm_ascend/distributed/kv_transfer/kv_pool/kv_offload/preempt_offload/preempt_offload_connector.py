@@ -172,6 +172,14 @@ class PreemptOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
 
     # NOTE: New API only for PreemptOffloadConnector.
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        # A's scheduler also calls this soft API. Keep the call idempotent so
+        # PreemptOffload does not double-bind when both paths are active.
+        bound = getattr(self, "_bound_gpu_block_pool", None)
+        if bound is gpu_block_pool:
+            return
+        if bound is not None:
+            raise RuntimeError("PreemptOffloadConnector is already bound to another GPU block pool")
+        self._bound_gpu_block_pool = gpu_block_pool
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
 

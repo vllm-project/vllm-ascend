@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import torch
 from typing_extensions import override
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
@@ -17,11 +18,21 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu impor
     NPUOffloadingWorker,
 )
 
+logger = init_logger(__name__)
+
 
 class _NPUWorkerMixin:
     """Replace only the accelerator worker and upstream platform gate."""
 
     _worker: NPUOffloadingWorker | None
+
+    @classmethod
+    def build_metric_definitions(cls, extra_config):
+        return {}
+
+    @classmethod
+    def config_info_keys(cls, extra_config):
+        return ()
 
     def create_worker(
         self,
@@ -46,6 +57,7 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         self,
         kv_caches: CanonicalKVCaches,
     ) -> NPUOffloadingWorker:
+        logger.info("Creating NPUOffloadingWorker")
         # Keep the single-tier path on PyTorch's pinned allocator. Unlike CUDA,
         # Ascend has no public cudaHostRegister-equivalent for an arbitrary
         # mmap buffer, and the pinned tensor path has the best proven H2D/D2H

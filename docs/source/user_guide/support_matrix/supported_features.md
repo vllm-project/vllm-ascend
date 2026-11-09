@@ -10,6 +10,8 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 |-------------------------------|----------------|------------------------------------------------------------------------|
 | Chunked Prefill               | 🟢 Functional    | Functional, see detailed note: [Chunked Prefill][cp]                     |
 | Automatic Prefix Caching      | 🟢 Functional    | Functional, see detailed note: [vllm-ascend#732][apc]                    |
+| KV Hint (agent kv_hints)      | 🟡 Planned       | Requires the vLLM kv-hints execution layer (A branch / upstream RFC); G1 set_priority validation on NPU pending. |
+| KV Offloading                 | 🟢 Functional    | Native `NPUOffloadingSpec` / `NPUTieringOffloadingSpec`; request-free COPY_TO prefetch pending KV-Pool validation. |
 | LoRA                          | 🔵 Experimental  | Functional, see detailed note: [LoRA][LoRA]                    |
 | Speculative decoding          | 🟢 Functional    | Basic support                                                          |
 | Pooling                       | 🔵 Experimental  | CI needed to adapt to more models; V1 support relies on vLLM support.   |
