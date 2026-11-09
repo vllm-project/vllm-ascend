@@ -76,7 +76,7 @@
 /vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
-/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024
+/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
 
 # lora
 /vllm_ascend/lora @paulyu12
@@ -188,6 +188,7 @@
 /recipes/ @SOMEONEUNSEEN
 
 # tests
+/tests/ @wenjun91
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 
@@ -210,8 +211,6 @@
 # /vllm_ascend/ec_manager
 # TODO(owner): /vllm_ascend/model_executor
 # /vllm_ascend/model_executor
-# TODO(owner): /vllm_ascend/model_loader
-# /vllm_ascend/model_loader
 # TODO(owner): /vllm_ascend/profiler
 # /vllm_ascend/profiler
 # TODO(owner): /vllm_ascend/weight_switch
@@ -246,19 +245,6 @@
 #  precedence via last-match-wins — keep this line ABOVE them when activated)
 # TODO(owner): /vllm_ascend/models
 # /vllm_ascend/models
-# (minimax_m3 is owned by an active rule above; when activated this line must
-#  stay ABOVE that rule, or models/minimax_m3 gets re-owned by mistake)
-# TODO(owner): /tests/*.py
-# /tests/*.py
-# TODO(owner): /tests/coveragerc
-# /tests/coveragerc
-# TODO(owner): /tests/coverage_settingInfo.xml
-# /tests/coverage_settingInfo.xml
-# TODO(owner): /tests/manual/
-# /tests/manual/
-# TODO(owner): /tests/e2e/
-# /tests/e2e/
-# (e2e/nightly is owned by active rules above; same ordering caveat as models)
 
 # ==================== Deliberately unowned (no entry needed) ====================
 # Paths below are intentionally left without a CODEOWNERS entry:
@@ -271,9 +257,6 @@
 
 # Deliberately unowned: scheduled for removal
 # SKIP(owner): /vllm_ascend/worker/v1/
-# SKIP(owner): /vllm_ascend/worker/v1/_310p/
-# SKIP(owner): /vllm_ascend/worker/v1/spec_decode/
-# SKIP(owner): /vllm_ascend/worker/v1/xlite/
 # SKIP(owner): /vllm_ascend/worker/block_table.py
 
 # Deliberately unowned: touched by every PR, ownership stays with PR author
