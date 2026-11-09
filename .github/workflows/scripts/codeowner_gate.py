@@ -50,6 +50,7 @@ import subprocess
 import sys
 import urllib.request
 from dataclasses import dataclass, field
+from typing import Any
 
 CODEOWNERS_PATH = ".github/CODEOWNERS"
 
@@ -168,7 +169,7 @@ def _token() -> str:
     raise SystemExit("GH_TOKEN or GITHUB_TOKEN must be set for GitHub API access")
 
 
-def gh_api(endpoint: str, **params: object) -> object:
+def gh_api(endpoint: str, **params: object) -> Any:
     """Paginated GitHub REST call using urllib (no gh CLI dependency).
 
     Self-hosted runners do not ship the gh CLI, so requests go through the
@@ -342,8 +343,8 @@ def main() -> int:
         failures = check_approvals(args.pr or 0, args.author, rules, files, reviews)
         if failures:
             print("codeowner approval check FAILED:")
-            for f in failures:
-                print(f"  ::error::{f}")
+            for failure in failures:
+                print(f"  ::error::{failure}")
             return 1
         print("codeowner approval check PASSED")
         return 0
@@ -356,8 +357,8 @@ def main() -> int:
         failures = check_coverage(rules, tracked)
         if failures:
             print("codeowner coverage check FAILED:")
-            for f in failures:
-                print(f"  ::error::{f}")
+            for failure in failures:
+                print(f"  ::error::{failure}")
             return 1
         print(f"codeowner coverage check PASSED ({len(tracked)} files)")
         return 0
