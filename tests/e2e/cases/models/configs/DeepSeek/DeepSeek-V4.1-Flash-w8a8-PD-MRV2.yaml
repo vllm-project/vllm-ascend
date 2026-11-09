@@ -4,6 +4,10 @@ num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: external
 
+startup_commands:
+  # Enable advised huge pages for Engram on both nodes before service startup.
+  - ["mount", "-o", "remount,huge=advise", "/dev/shm"]
+
 routing:
   type: "disaggregated_prefill"
   groups:

@@ -127,6 +127,7 @@ class ExternalDPConfig:
     launch_templates: list[NodeTemplate]
     benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
     special_dependencies: dict[str, str] = field(default_factory=dict)
+    startup_commands: list[list[str]] = field(default_factory=list)
     kv_pool: KVPoolConfig | None = None
     test_content: list[str] = field(default_factory=list)
     chat_prompts: list[Any] = field(default_factory=list)
@@ -231,6 +232,7 @@ class ExternalDPConfigLoader:
             launch_templates=launch_templates,
             benchmark_cases=benchmark_cases,
             special_dependencies=dict(raw_config.get("special_dependencies", {})),
+            startup_commands=cls._parse_startup_commands(raw_config),
             kv_pool=kv_pool,
             test_content=list(raw_config.get("test_content", [])),
             chat_prompts=list(raw_config.get("chat_prompts", [])),
@@ -260,6 +262,20 @@ class ExternalDPConfigLoader:
             raise KeyError(f"Missing required external DP config fields: {missing}")
         if int(config["num_nodes"]) <= 0:
             raise ValueError("num_nodes must be greater than 0")
+
+    @staticmethod
+    def _parse_startup_commands(raw_config: dict[str, Any]) -> list[list[str]]:
+        commands = raw_config.get("startup_commands", [])
+        if not isinstance(commands, list):
+            raise ValueError("startup_commands must be a list of argument lists")
+        for command in commands:
+            if (
+                not isinstance(command, list)
+                or not command
+                or any(not isinstance(arg, str) or not arg.strip() for arg in command)
+            ):
+                raise ValueError("Each startup_commands entry must be a non-empty list of non-empty strings")
+        return commands
 
     @staticmethod
     def _resolve_cluster_ips(
