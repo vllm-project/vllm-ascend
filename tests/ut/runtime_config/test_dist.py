@@ -25,9 +25,7 @@ import pytest
 import vllm_ascend.observability.runtime_config.dist as dist
 from vllm_ascend.observability.runtime_config.dist import (
     broadcast_when_due,
-    sync_due_bits,
     sync_due_bits_from_src,
-    sync_task_bus,
 )
 
 # ---- sync group ----
@@ -93,16 +91,6 @@ def test_sync_group_none_when_pp_unavailable(monkeypatch):
 # ---- task bus ----
 
 
-def test_sync_due_bits_none_group_returns_local():
-    assert sync_due_bits(None, [False, True, False]) == [False, True, False]
-    assert sync_due_bits(None, []) == []
-
-
-def test_sync_due_bits_world_size_one():
-    group = SimpleNamespace(world_size=1)
-    assert sync_due_bits(group, [True, False]) == [True, False]
-
-
 def test_broadcast_when_due_false_is_noop():
     assert broadcast_when_due(None, due=False, payload={"x": 1}) is None
 
@@ -110,11 +98,6 @@ def test_broadcast_when_due_false_is_noop():
 def test_broadcast_when_due_single_process_uses_payload():
     assert broadcast_when_due(None, due=True, payload={"x": 1}) == {"x": 1}
     assert broadcast_when_due(None, due=True, build_payload=lambda: {"y": 2}) == {"y": 2}
-
-
-def test_sync_task_bus_idle():
-    assert sync_task_bus(None, due_local=False, payload={"a": 1}) is None
-    assert sync_task_bus(None, due_local=True, payload={"a": 1}) == {"a": 1}
 
 
 def _patch_dist(monkeypatch, fake_broadcast):

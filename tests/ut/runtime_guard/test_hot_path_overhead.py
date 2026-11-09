@@ -477,17 +477,20 @@ def test_run_sample_phase_marks_finished_before_eow_when_hooks_off(tmp_path: Pat
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_due_bits_all_reduce_even_when_not_due():
-    """Due-vector AR always runs; due=false pays only the cheap all_reduce."""
-    from vllm_ascend.observability.runtime_config.dist import sync_due_bits
+def test_sync_due_bits_from_src_broadcast_even_when_not_due():
+    """Merged due-bus always pays the source broadcast (idle bits included)."""
+    from vllm_ascend.observability.runtime_config.dist import sync_due_bits_from_src
 
     group = MagicMock()
     group.world_size = 2
+    group.rank_in_group = 0
     group.cpu_group = object()
-    group.device_group = object()  # distinct from cpu_group → CPU tensor path
-    with patch("torch.distributed.all_reduce") as ar:
-        assert sync_due_bits(group, [False, False]) == [False, False]
-        ar.assert_called_once()
+    with (
+        patch("torch.distributed.broadcast") as bcast,
+        patch("torch.distributed.get_process_group_ranks", return_value=[0, 1]),
+    ):
+        assert sync_due_bits_from_src(group, [False, False], wave_idx=1) == [False, False]
+        bcast.assert_called_once()
 
 
 def test_refresh_config_skips_detector_apply_when_unchanged(tmp_path: Path):
