@@ -22,12 +22,12 @@ from vllm_ascend._310p.worker.v2.model_state import (
 from vllm_ascend._310p.worker.v2.rejection_sampler import RejectionSampler310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
-from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 
 pytestmark = pytest.mark.usefixtures("sampling_kernel_overrides")
 
