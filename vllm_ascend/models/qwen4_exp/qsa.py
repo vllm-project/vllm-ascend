@@ -50,6 +50,7 @@ from vllm_ascend.utils import vllm_version_is
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .topk_buffer import share_topk_buffer
 
 if vllm_version_is("0.32.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -737,6 +738,12 @@ qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        # Rebind immediately rather than retaining every layer's allocation
+        # until the entire model has been constructed.
+        share_topk_buffer(self)
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache

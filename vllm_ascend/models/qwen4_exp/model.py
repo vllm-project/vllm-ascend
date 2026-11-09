@@ -28,6 +28,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 )
 
 from .ple import patch_upstream_ple_short_conv
+from .topk_buffer import share_target_topk_buffers
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -54,7 +55,10 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
     """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # Sequential layers consume their selection before the next layer writes.
+        # DBO can interleave microbatches, so retain private storage in that mode.
+        with share_target_topk_buffers(not vllm_config.parallel_config.enable_dbo):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
         # two. Marking that length dynamic makes TorchDynamo reject the static
         # specialization used by PLE during FULL_DECODE_ONLY graph capture.
