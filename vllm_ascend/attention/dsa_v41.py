@@ -890,6 +890,25 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # FULL warmup/capture so producers and consumer waits share one graph.
         self._device_metadata_in_graph = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
+        # Graph replay does not re-run Python, so CP lengths must live at a
+        # fixed address for the lifetime of the captured graph.
+        self._cp_lengths_buffer: torch.Tensor | None = None
+        self._cp_length_high_water = 0
+
+    def _stage_cp_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
+        """Keep graph-external CP lengths alive and refresh their fixed address."""
+        rows = lengths.shape[0]
+        assert rows <= self._max_tokens
+        if self._cp_lengths_buffer is None:
+            self._cp_lengths_buffer = lengths.new_zeros((self._max_tokens, *lengths.shape[1:]))
+        target = self._cp_lengths_buffer[:rows]
+        target.copy_(lengths)
+        # A replay can contain more padded rows than this step has live rows.
+        # Clear previously written rows so their lengths cannot leak forward.
+        if rows < self._cp_length_high_water:
+            self._cp_lengths_buffer[rows : self._cp_length_high_water].zero_()
+        self._cp_length_high_water = max(self._cp_length_high_water, rows)
+        return target
 
     @classmethod
     def get_cudagraph_support(
@@ -1221,7 +1240,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_sparse_indices, ori_topk_length = cached_window
         if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
             ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-
         # SWA bounded replay (vLLM #56227): a prefill admission that hit the
         # prefix cache recomputes the hit's last window, and only the
         # sliding-window group is rebuilt by it. That group's window is the one
@@ -1251,6 +1269,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # list. The operator's mask mode is therefore the band in both cases.
         if replay_visible_lens is not None:
             ori_topk_length = replay_visible_lens
+        if ori_topk_length is not None:
+            ori_topk_length = self._stage_cp_lengths(ori_topk_length)
         ori_mask_mode = 0 if noncausal else 4
         ori_win_left = max(0, window_size - 1)
         ori_win_right = 0
