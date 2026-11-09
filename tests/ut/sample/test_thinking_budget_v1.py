@@ -232,3 +232,24 @@ def test_matching_suffix_before_budget_is_not_committed_end():
     holder.update_state([output], [[]])
     logits = holder.apply_to_logits(torch.zeros(1, VOCAB), False, [[]])
     assert int(logits[0].argmax()) == END[0]
+
+
+@pytest.mark.parametrize("committed", [[END[0]], [END[0], FILLER], [FILLER, END[0]]])
+def test_rejection_before_forced_boundary_keeps_remaining_budget(committed):
+    holder, output = _start(budget=10)
+    output.extend([FILLER] * 7)
+    holder.update_state([output], [[9] * NUM_SPEC])
+    assert holder._state[0]["force_index"] == [3]
+
+    # The bonus position was scheduled for forcing, but rejection committed
+    # only ordinary tokens. A matching first token is not a forced prefix.
+    output.extend(committed)
+    holder.update_state([output], [[]])
+    logits = torch.randn(1, VOCAB)
+    assert torch.equal(holder.apply_to_logits(logits.clone(), False, [[]]), logits)
+    assert holder._state[0]["check_count_down"] == 10 - 7 - len(committed)
+
+    # Consuming the remaining budget must still force the first end token.
+    output.extend([FILLER] * (10 - 7 - len(committed)))
+    holder.update_state([output], [[]])
+    assert int(holder.apply_to_logits(torch.zeros(1, VOCAB), False, [[]])[0].argmax()) == END[0]

@@ -28,6 +28,7 @@ class NPUThinkingBudgetStateHolder(ThinkingBudgetStateHolder):
     def _force_end_window(self, state: dict[str, Any], progress: int, start: int = 0) -> None:
         window = len(state.get("spec_token_ids", [])) + 1
         n = max(0, min(len(self.think_end_token_ids) - progress, window - start))
+        state["forced_end_start"] = len(state.get("output_tok_ids", [])) + start - progress
         state["force_index"] = list(range(start, start + n))
         state["force_tokens"] = self.think_end_token_ids[progress : progress + n]
 
@@ -38,8 +39,10 @@ class NPUThinkingBudgetStateHolder(ThinkingBudgetStateHolder):
         end_ids = self.think_end_token_ids
         # Continue a forced end only from committed tokens, never from drafts.
         # Otherwise retain upstream counting, natural EOS and rejection recovery.
-        if end_ids and state.get("in_end", False) and (state["end_count"] > 0 or end_ids[0] in output[prev_length:]):
-            recent = output[max(0, prev_length - len(end_ids) + 1) :]
+        forced_start = state.get("forced_end_start", len(output))
+        committed = output[forced_start : forced_start + len(end_ids)]
+        if end_ids and state.get("in_end", False) and committed and committed == end_ids[: len(committed)]:
+            recent = committed
             state["prev_output_length"] = len(output)
             if self._find_last_sequence_index(recent, end_ids) >= 0:
                 state.update(
@@ -57,6 +60,18 @@ class NPUThinkingBudgetStateHolder(ThinkingBudgetStateHolder):
                 state["end_count"] = self._committed_end_prefix(output)
                 self._force_end_window(state, state["end_count"])
             return
+
+        if state.get("in_end", False) and len(output) > prev_length:
+            # Rejection happened before the scheduled forced boundary. Reset
+            # speculative end mode before upstream counts the committed tokens;
+            # a matching token elsewhere in the suffix is ordinary output.
+            state.update(
+                in_think=True,
+                in_end=False,
+                end_count=0,
+                bonus_token_forced=False,
+                check_count_down=max(0, state["thinking_token_budget"] - state["think_count"]),
+            )
 
         super()._update_think_state(state)
         if state.get("in_end", False) and state.get("force_index"):
