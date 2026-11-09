@@ -1,0 +1,4 @@
+pr: 21342
+entries:
+  - category: bugfix
+    text: Fixed MLA DCP decode graph execution for one-token prompt suffixes with cached context.
