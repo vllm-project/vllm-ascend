@@ -479,7 +479,6 @@ def test_sync_due_bits_all_reduce_even_when_not_due():
     group = MagicMock()
     group.world_size = 2
     group.cpu_group = object()
-    group.device_group = object()  # distinct from cpu_group → CPU tensor path
     with patch("torch.distributed.all_reduce") as ar:
         assert sync_due_bits(group, [False, False]) == [False, False]
         ar.assert_called_once()
