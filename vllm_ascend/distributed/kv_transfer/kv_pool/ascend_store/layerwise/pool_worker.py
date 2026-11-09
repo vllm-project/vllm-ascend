@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     get_partial_block_index,
     masked_block_runs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import RecvTraceSession
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
@@ -453,6 +454,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if thread.is_alive():
                 thread.join()
         try:
+            if self.kv_recv_thread is not None and self.kv_recv_thread.recv_trace is not None:
+                try:
+                    self.kv_recv_thread.recv_trace.close()
+                except OSError:
+                    logger.exception("Failed to write layerwise receive trace")
             if self._step_load_keys:
                 result = self.m_store.batch_remove_lease(list(self._step_load_keys))
                 if result != 0:
@@ -583,6 +589,21 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.kv_recv_thread.save_disabled = self._save_disabled
         if self.kv_send_thread is not None:
             self.kv_send_thread.save_disabled = self._save_disabled
+        trace_path = self._extra_config.get("layerwise_trace_path")
+        if trace_path:
+            self.kv_recv_thread.recv_trace = RecvTraceSession(
+                self.kv_recv_thread,
+                str(trace_path) + f".tp{self.tp_rank}.pid{os.getpid()}.json",
+                self._extra_config.get("layerwise_trace_capacity", 100000),
+                float(self._extra_config.get("layerwise_trace_interval_ms", 1)),
+                metrics_probe=lambda: {
+                    "npu_allocated_bytes": torch.npu.memory_allocated(),
+                    "npu_peak_allocated_bytes": torch.npu.max_memory_allocated(),
+                    "npu_reserved_bytes": torch.npu.memory_reserved(),
+                    "step_lease_keys": len(self._step_load_keys),
+                    "backend_queue_depth": None,
+                },
+            )
         self.kv_recv_thread.start()
         ready_event.wait()
         self._transfer_threads_started = True

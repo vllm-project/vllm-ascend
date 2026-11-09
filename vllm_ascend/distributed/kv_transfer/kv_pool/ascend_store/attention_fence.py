@@ -62,14 +62,29 @@ class AttentionComputeStartGate:
         self.on_finish = None
         self.record()
 
-    def wait(self, timeout: float = 10.0) -> bool:
+    def readiness(self) -> tuple[bool, bool]:
+        """Nonblocking diagnostic query; does not record or synchronize events."""
+        with self._condition:
+            event = self._event
+        return (False, False) if event is None else (True, bool(event.query()))
+
+    def wait(self, timeout: float = 10.0, observer: Callable[[str], None] | None = None) -> bool:
+        if observer is not None:
+            observer("gate_record_wait_begin")
         with self._condition:
             while self._event is None:
                 if not self._condition.wait(timeout=timeout):
+                    if observer is not None:
+                        observer("gate_record_wait_timeout")
                     return False
             event = self._event
 
+        if observer is not None:
+            observer("gate_record_wait_end")
+            observer("gate_npu_wait_begin")
         event.synchronize()
+        if observer is not None:
+            observer("gate_npu_wait_end")
         return True
 
 

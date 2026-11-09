@@ -178,6 +178,7 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    recv_trace_id: int | None = None
 
 
 @dataclass(init=False)
