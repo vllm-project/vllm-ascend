@@ -985,6 +985,33 @@ def test_sampler_accepts_warmup_params_with_empty_history() -> None:
     assert output.sampled_token_ids.shape == (1, 1)
     assert output.logprobs_tensors is not None
 
+def test_sampler_warmup_params_tolerated_only_on_main_profile_run() -> None:
+    sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=64)
+    warmup_params = SamplingParams.for_sampler_warmup()
+    version_is = "vllm_ascend._310p.worker.v2.sampler.vllm_version_is"
+
+    # 0.32.0 has no sampler warm-up pass: keep rejecting unsupported params.
+    with (
+        patch(version_is, return_value=True),
+        pytest.raises(NotImplementedError, match="Unsupported sampling parameters"),
+    ):
+        _add_request(sampler, 0, 0, warmup_params)
+
+    # On main, real requests keep rejecting unsupported params outside profile_run.
+    with (
+        patch(version_is, return_value=False),
+        pytest.raises(NotImplementedError, match="Unsupported sampling parameters"),
+    ):
+        _add_request(sampler, 0, 0, warmup_params)
+
+    # On main, profile_run's sampler warm-up pass is allowed to probe all features.
+    with patch(version_is, return_value=False), override_mrv2_in_profile_run(True):
+        _add_request(sampler, 0, 0, warmup_params)
+
+    sampler.apply_staged_writes()
+    assert sampler.sampling_states.temperature.gpu[0].item() == pytest.approx(0.9)
+    assert sampler.sampling_states.top_p.gpu[0].item() == pytest.approx(0.9)
+    assert int(sampler.sampling_states.top_k.gpu[0].item()) == 50
 
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
     """Non-1 temperature must change relative logits before greedy/top paths."""
