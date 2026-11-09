@@ -1,0 +1,7 @@
+pr: 21300
+entries:
+  - category: performance
+    text: >-
+      Qwen4Exp PLE short convolution now supports internal prefill checkpoints
+      with aligned Mamba caching and gdn_internal_prefill_checkpoints enabled
+      on a single pipeline stage, allowing prefix-cache reuse within prefill chunks.
