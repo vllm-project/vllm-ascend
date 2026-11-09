@@ -2097,6 +2097,7 @@ def test_runner_selects_sp_multistream_custom_op(
     shared_executor = SimpleNamespace(
         multistream_overlap=multistream_overlap,
         parallel_mode=MagicMock(return_value=mode),
+        megamoe_shared_fusion=MagicMock(return_value=SimpleNamespace()),
     )
 
     def init_base_runner(
