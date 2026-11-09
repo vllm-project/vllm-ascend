@@ -128,8 +128,6 @@ variants:
       - '--gpu-memory-utilization'
       - '0.90'
       - '--enable-prefix-caching'
-      - '--speculative-config'
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - '--compilation-config'
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - '--additional-config'
@@ -145,6 +143,30 @@ variants:
         docker_serve_command: "vllm serve"
         install:
           pip: false
+features:
+  spec_decoding:
+    modes:
+      qwen3_5_mtp:
+        hardware_overrides:
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+presets:
+  ascend_a3_w8a8_tp16:
+    label: A3 W8A8 TP16
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_a3
+    default: true
+    select:
+      frontend: python
+      features:
+        spec_decoding: qwen3_5_mtp
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
 meta:
   hardware:
     ascend_950dt: verified
