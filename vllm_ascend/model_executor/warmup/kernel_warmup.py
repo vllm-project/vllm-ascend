@@ -30,31 +30,7 @@ from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-
     from vllm_ascend.worker.worker import NPUWorker
-
-
-def register_v1_sampling_warmup(vllm_config: VllmConfig) -> None:
-    """Register the v1 sampling stack's Triton kernels with the active JIT
-    warmup registry.
-
-    Called from the v1 model runner inside a registry window; outside a
-    window every ``register_warmup`` below is a no-op, which also keeps the
-    v2 runner (which never constructs the v1 sampling stack) free of these
-    kernels.
-    """
-    from vllm_ascend.ops.triton.v1.bincount import _TOKEN_BIN_COUNTS_AND_MASK_KERNEL
-    from vllm_ascend.ops.triton.v1.penalty import _APPLY_ALL_PENALTIES_KERNEL
-    from vllm_ascend.ops.triton.v1.reject_sample import register_rejection_warmup
-    from vllm_ascend.ops.triton.v1.spec_decode.utils import (
-        _PREPARE_INPUTS_PADDED_KERNEL,
-    )
-
-    _APPLY_ALL_PENALTIES_KERNEL.register_warmup(vllm_config)
-    _TOKEN_BIN_COUNTS_AND_MASK_KERNEL.register_warmup(vllm_config)
-    _PREPARE_INPUTS_PADDED_KERNEL.register_warmup()
-    register_rejection_warmup(vllm_config)
 
 
 def _iter_dspark_draft_groups(runner: Any) -> Any:

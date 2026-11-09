@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import torch
 import torch_npu
@@ -78,12 +78,6 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
 )
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-
-    from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
@@ -575,10 +569,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         ):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
-
-    def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
-        # No need to reorder for Ascend SFA
-        return False
 
     def build(
         self,
