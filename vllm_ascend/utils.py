@@ -67,6 +67,7 @@ _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_QWEN4_EXP_HC_INJECTION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
@@ -652,6 +653,14 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
         # we return the default stream.
         _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
+def qwen4_exp_hc_injection_stream() -> torch.npu.Stream:
+    """One injection stream per worker; graph capture reuses its stream ID."""
+    global _QWEN4_EXP_HC_INJECTION_STREAM
+    if _QWEN4_EXP_HC_INJECTION_STREAM is None:
+        _QWEN4_EXP_HC_INJECTION_STREAM = torch_npu.npu.Stream()
+    return _QWEN4_EXP_HC_INJECTION_STREAM
 
 
 def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:

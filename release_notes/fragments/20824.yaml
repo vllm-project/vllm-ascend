@@ -1,0 +1,4 @@
+pr: 20824
+entries:
+  - category: config
+    text: Added an experimental, disabled-by-default Qwen3.8-Flash-Next HC injection overlap switch, `multistream_qwen4_exp_hc`, for Attention dual-stream testing.
