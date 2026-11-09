@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.config import CacheConfig, CompilationConfig, VllmConfig
 from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
@@ -29,6 +30,10 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_indexer.topk_indices_buffer = torch.randn(10)
         mock_indexer.k_cache = MagicMock()
         mock_indexer.k_cache.prefix = "model.layers.0.indexer"
+        mock_indexer.k_cache.head_dim = 132
+        mock_indexer.k_cache.get_kv_cache_spec.return_value = MLAAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8
+        )
         return mock_indexer
 
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
@@ -38,6 +43,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+        mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+        mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+        mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
         mock_indexer = self._make_vllm_indexer()
 
         indexer = AscendSFAIndexerBackend(mock_indexer, qk_rope_head_dim=64)
@@ -65,6 +73,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+        mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+        mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+        mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
 
         indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
 
@@ -78,6 +89,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+        mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+        mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+        mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
 
         # The dtype pair is derived from attention_config.indexer_kv_dtype. In UT
         # processes the worker patch (patch_kv_cache_dtype) is not applied, so fp8

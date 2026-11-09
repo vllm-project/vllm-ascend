@@ -113,7 +113,6 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
-    enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
@@ -220,29 +219,11 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
-    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-
-    use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
-    sfa_dcp_replicated_indexer_size = (
-        vllm_config.parallel_config.decode_context_parallel_size
-        if enable_sfa_dcp_replicated_indexer(vllm_config)
-        else 1
-    )
-    enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
-    if enable_sparse_li_c8:
-        c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-            vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
-        )
-        if c8_k_cache_dtype == torch.float8_e4m3fn:
-            c8_k_scale_cache_dtype = torch.float32
-        elif c8_k_cache_dtype == torch.int8:
-            c8_k_scale_cache_dtype = torch.float16
-
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
@@ -267,44 +248,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # Keep Mamba groups after attention groups. Ascend graph parameter
             # updates rely on this stable backend ordering.
             mamba_specs[layer_name] = spec
-            continue
-
-        if isinstance(attn_module, DeepseekV32IndexerCache):
-            if not getattr(
-                getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
-                "runtime_has_indexer",
-                True,
-            ):
-                continue
-            cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
-            cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
-            head_dim = vllm_config.model_config.hf_text_config.index_head_dim
-            kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
-                block_size=vllm_config.cache_config.block_size,
-                num_kv_heads=1,
-                head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
-                dtype=torch.uint8
-                if cache_sparse_li_c4
-                else c8_k_cache_dtype
-                if cache_sparse_li_c8
-                else vllm_config.model_config.dtype,
-                cache_dtype_str=(
-                    vllm_config.cache_config.cache_dtype
-                    if (cache_sparse_li_c8 or cache_sparse_li_c4)
-                    else None
-                    if use_turboquant
-                    else "auto"
-                ),
-                scale_dim=head_dim // 32 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
-                scale_dtype=torch.float8_e8m0fnu
-                if cache_sparse_li_c4
-                else c8_k_scale_cache_dtype
-                if cache_sparse_li_c8
-                else torch.int8,
-                cache_sparse_li_c4=cache_sparse_li_c4,
-                cache_sparse_li_c8=cache_sparse_li_c8,
-                sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
-            )
             continue
 
         if getattr(attn_module, "attn_backend", None) is AscendFlashAttentionBackend:
