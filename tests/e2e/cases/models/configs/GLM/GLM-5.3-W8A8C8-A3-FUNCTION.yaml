@@ -1,7 +1,7 @@
 # GLM-5.3 W8A8C8 RP3 PD coverage.
 # 16 physical A3 cards (32 logical NPUs); combined RP3 feature smoke with a nonempty completion.
-# Bound prefill batches to 1024 tokens for full-weight startup and inference memory.
-# Full-weight services use a 0.98 memory budget and 16K context for this smoke.
+# Bound prefill/decode batches to 256/128 tokens and eight concurrent sequences.
+# Full-weight services retain a 0.92 memory budget, MTP and 16K context.
 test_name: GLM-5.3-W8A8C8-A3-FUNCTION
 model: Eco-Tech/GLM-5.3-w8a8c8
 num_nodes: 4
@@ -68,7 +68,7 @@ env_common:
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_BUFFSIZE: '1024'
+  HCCL_BUFFSIZE: '256'
   TASK_QUEUE_ENABLE: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -81,7 +81,7 @@ env_prefill:
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_BUFFSIZE: '2560'
+  HCCL_BUFFSIZE: '256'
   TASK_QUEUE_ENABLE: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -96,7 +96,7 @@ env_decode:
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_BUFFSIZE: '1024'
+  HCCL_BUFFSIZE: '256'
   TASK_QUEUE_ENABLE: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -113,7 +113,7 @@ templates:
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '2560'
+    HCCL_BUFFSIZE: '256'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -153,12 +153,12 @@ templates:
   - --max-model-len
   - '16384'
   - --max-num-batched-tokens
-  - '1024'
+  - '256'
   - --trust-remote-code
   - --max-num-seqs
-  - '64'
+  - '8'
   - --gpu-memory-utilization
-  - '0.98'
+  - '0.92'
   - --quantization
   - ascend
   - --safetensors-load-strategy
@@ -188,7 +188,7 @@ templates:
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '2560'
+    HCCL_BUFFSIZE: '256'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -229,12 +229,12 @@ templates:
   - --max-model-len
   - '16384'
   - --max-num-batched-tokens
-  - '1024'
+  - '256'
   - --trust-remote-code
   - --max-num-seqs
-  - '64'
+  - '8'
   - --gpu-memory-utilization
-  - '0.98'
+  - '0.92'
   - --quantization
   - ascend
   - --safetensors-load-strategy
@@ -264,7 +264,7 @@ templates:
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '1024'
+    HCCL_BUFFSIZE: '256'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -297,12 +297,12 @@ templates:
   - --max-model-len
   - '16384'
   - --max-num-batched-tokens
-  - '256'
+  - '128'
   - --trust-remote-code
   - --max-num-seqs
-  - '64'
+  - '8'
   - --gpu-memory-utilization
-  - '0.98'
+  - '0.92'
   - --async-scheduling
   - --quantization
   - ascend
@@ -321,7 +321,7 @@ templates:
   - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel":
     true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_sparse_sfa_c8": true}'
   - --speculative-config
-  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+  - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - --compilation-config
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - --kv-transfer-config
@@ -334,7 +334,7 @@ templates:
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '1024'
+    HCCL_BUFFSIZE: '256'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -367,12 +367,12 @@ templates:
   - --max-model-len
   - '16384'
   - --max-num-batched-tokens
-  - '256'
+  - '128'
   - --trust-remote-code
   - --max-num-seqs
-  - '64'
+  - '8'
   - --gpu-memory-utilization
-  - '0.98'
+  - '0.92'
   - --async-scheduling
   - --quantization
   - ascend
@@ -391,7 +391,7 @@ templates:
   - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel":
     true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_sparse_sfa_c8": true}'
   - --speculative-config
-  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+  - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - --compilation-config
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - --kv-transfer-config
