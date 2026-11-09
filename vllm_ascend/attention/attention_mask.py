@@ -47,7 +47,7 @@ class AttentionMaskBuilder:
         assert self.attn_mask_cache is not None, "Something is wrong in generate_attn_mask."
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
-        if self.attn_mask_device_cache_enabled:
+        if _get_attn_mask_device_cache_enabled():
             key = (max_seq_len, dtype, self.device)
             attn_mask = self.attn_mask_device_cache.get(key)
             # Save attention mask to device.
