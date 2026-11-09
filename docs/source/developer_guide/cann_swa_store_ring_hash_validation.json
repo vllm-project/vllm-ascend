@@ -1,0 +1,120 @@
+{
+  "date": "2026-11-09",
+  "branch": "backport/cann-swa-bounded-replay",
+  "base_revision": "962a1bb144e5fef291c44a9323751d1150949541",
+  "upstream_vllm_pin": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "reproducer": {
+    "layout": "13 groups: native C4/C128 MLA, SWA and 10 non-prefix-cacheable circular buffers; hash_block_size=128",
+    "before_fix": "sender get_block_hashes raises block_size must be divisible by hash_block_size",
+    "log": "/tmp/cann-swa-store-rings-before.log",
+    "limits": "Representative CPU layout. User log alone does not identify the failing group ID."
+  },
+  "fix": [
+    "Exclude non-prefix-cacheable groups before token/chunk key generation, including sync and async receive",
+    "Generate sender event hashes only after nonempty masked chunks are selected",
+    "Apply private-group exclusion to startup alignment checks with SWA both ON and OFF",
+    "Preserve alignment errors for prefix-cacheable groups and preserve valid existing Store key mappings"
+  ],
+  "focused_regression": {
+    "passed": 30,
+    "log": "/tmp/cann-swa-store-rings-after.log",
+    "coverage": [
+      "SWA ON/OFF",
+      "KV events ON/OFF",
+      "all original group IDs",
+      "C4/C128 CPU bytes saved and loaded",
+      "no private-state transfer",
+      "sync load planner and async receive",
+      "cacheable invalid block sizes still fail"
+    ]
+  },
+  "cpu_regression": {
+    "files": 35,
+    "passed": 1688,
+    "skipped": 23,
+    "subtests_passed": 513,
+    "seconds": 24.36,
+    "log": "/tmp/cann-swa-store-rings-primary.log",
+    "junit": "/tmp/cann-swa-store-rings-primary.xml"
+  },
+  "expanded_legacy_store_suite": {
+    "baseline_failed_cases": 36,
+    "current_failed_cases": 36,
+    "new_failing_cases": [],
+    "fixed_cases": [],
+    "summary": "39 failed, 158 passed, 1 warning, 8 subtests passed in 1.22s",
+    "baseline_junit": "/tmp/cann-store-swa-expanded-final.xml",
+    "current_junit": "/tmp/cann-swa-store-rings-expanded.xml",
+    "fixture_change": "Declare prefix_cacheable_group_ids=(0,) on existing fake coordinator"
+  },
+  "lint": {
+    "new_ruff_diagnostics": [],
+    "format_ci": "Blocked before hooks by existing nodeenv prerelease parsing error: invalid literal for int() with base 10: 0-alpha",
+    "format_ci_log": "/tmp/cann-swa-store-rings-format-ci.log",
+    "codespell": "passed for changed files",
+    "typos": "passed for changed files"
+  },
+  "simulation_limits": [
+    "CPU tensors and in-memory backend; no A3/NPU, model computation, Mooncake network or master",
+    "13-group regression holds prefix_match_unit=128 for both SWA OFF/ON; it does not change default hash-size selection",
+    "No model quality or performance measurements"
+  ],
+  "environment": {
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    "VLLM_VERSION": "0.30.0",
+    "VLLM_PLUGINS": "",
+    "OMP_NUM_THREADS": "1"
+  },
+  "primary_argv": [
+    "/tmp/cann-swa-ut-env/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/ut/_310p/test_model_runner_310p.py",
+    "tests/ut/attention/test_decoder_replay_swa_indices.py",
+    "tests/ut/core/test_kv_cache_interface.py",
+    "tests/ut/core/test_swa_replay_downgrade.py",
+    "tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py",
+    "tests/ut/kv_offload/test_dspark_resident_kv.py",
+    "tests/ut/models/test_deepseek_v41_cache.py",
+    "tests/ut/models/test_deepseek_v41_decoder_replay.py",
+    "tests/ut/models/test_deepseek_v41_decoder_replay_state.py",
+    "tests/ut/models/test_deepseek_v41_dspark.py",
+    "tests/ut/models/test_deepseek_v41_hyper_connection.py",
+    "tests/ut/models/test_deepseek_v41_replay_distributed.py",
+    "tests/ut/models/test_engram_multistream.py",
+    "tests/ut/models/test_engram_v2_model_state.py",
+    "tests/ut/patch/platform/test_packed_kv_cache_compat.py",
+    "tests/ut/patch/platform/test_patch_swa_bounded_replay.py",
+    "tests/ut/patch/platform/test_patch_swa_bounded_replay_legacy.py",
+    "tests/ut/patch/platform/test_prefix_cache_cp_patches.py",
+    "tests/ut/worker/test_attn_utils_v2.py",
+    "tests/ut/worker/test_disable_compilation.py",
+    "tests/ut/worker/test_idle_dummy_config.py",
+    "tests/ut/worker/test_model_runner_v1.py",
+    "tests/ut/worker/test_model_runner_v2.py",
+    "tests/ut/worker/test_pcp_manager_v2.py",
+    "tests/ut/worker/test_replay_slot_padding.py",
+    "tests/ut/worker/test_v2_dummy_padding.py",
+    "tests/ut/worker/test_worker_v1.py",
+    "tests/ut/worker/v2/test_deepseek_v41_engram_state.py",
+    "tests/ut/attention/test_dsa_v41_cp.py",
+    "--disable-warnings",
+    "tests/ut/kv_offload/test_hybrid_prefix_truncation.py",
+    "tests/ut/kv_offload/test_mooncake_hybrid_connector.py",
+    "--tb=short",
+    "tests/ut/kv_offload/test_store_swa_replay.py",
+    "tests/ut/kv_offload/test_ascend_multi_connector.py",
+    "tests/ut/kv_offload/test_ascend_multi_connector_pingpong.py",
+    "tests/ut/kv_offload/test_ascend_store_legacy_config.py",
+    "--junitxml=/tmp/cann-swa-store-rings-primary.xml"
+  ],
+  "source_sha256": {
+    "tests/ut/distributed/ascend_store/test_config_data.py": "d8e953bd268f97ebdb1ea70e97a4ee1d494385a6c24a4794806f89c70332ea25",
+    "tests/ut/kv_offload/test_store_swa_replay.py": "3723308d14d79fad4009e9412443cfef079a6f28fcd7115f4b48ec42843ea948",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/config_data.py": "f25d7f71d4fa669cda9234a08a25163cfb709bb310936b643e5a197486bdfe86",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py": "aa2e57517611cc948533680e656cf66d4c24adcee6a28a4a9c7648f132bcbfcb",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py": "7cbd04165c56536562a595645b3b3a893a5a542b2b3f75f62b03f23163addda9",
+    "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py": "23dcf8e28a427e2baaf51b50cde77cf0f38ba9f527376c6567e816ff6c4450e7"
+  }
+}

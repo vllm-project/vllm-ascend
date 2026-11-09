@@ -121,7 +121,7 @@ class KVPoolScheduler:
         store_groups = None if kv_cache_config is None else kv_cache_config.kv_cache_groups
         store_group_ids = get_store_cache_group_ids(store_groups)
         for group_id, group_block_size in enumerate(self.grouped_block_size):
-            if self.swa_bounded_replay and group_id not in store_group_ids:
+            if group_id not in store_group_ids:
                 continue
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         if self.swa_bounded_replay:

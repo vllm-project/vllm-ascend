@@ -392,11 +392,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     else group_block_size
                 )
                 assert event_granularity is not None
-                group_block_hashes = get_block_hashes(
-                    req_meta.block_hashes,
-                    event_granularity,
-                    getattr(self.token_database, "hash_block_size", group_block_size),
-                )
                 chunks = [
                     chunk
                     for chunk in self._process_transfer_chunks_with_block_ids(
@@ -419,6 +414,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if not chunks:
                     continue
 
+                # Private groups yield no chunks. Do not hash their physical
+                # ring capacities as if they were prefix-cache token blocks.
+                group_block_hashes = get_block_hashes(
+                    req_meta.block_hashes,
+                    event_granularity,
+                    getattr(self.token_database, "hash_block_size", group_block_size),
+                )
                 keys = [chunk.key.to_string() for chunk in chunks]
                 exists_states = self.lookup(keys)
                 missing_indices = [index for index, exists in enumerate(exists_states) if not exists]

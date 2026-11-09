@@ -32,7 +32,11 @@ from tests.ut.patch.platform.test_patch_swa_bounded_replay_legacy import (
 from tests.ut.patch.platform.test_patch_swa_bounded_replay_legacy import (
     replay_scheduler as _replay_scheduler_fixture,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendCircularBufferSpec,
+    AscendMLAAttentionSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_scheduler, pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
@@ -594,3 +598,153 @@ def test_native_compressed_specs_preserve_logical_pages_and_physical_bytes(store
         pool.kv_recv_thread.executor.shutdown(wait=True)
         if pool.kv_send_thread is not None:
             pool.kv_send_thread.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("bounded_replay", [False, True], ids=["swa-off", "swa-on"])
+@pytest.mark.parametrize("kv_events", [False, True])
+def test_small_private_rings_do_not_enter_store_hashing(store_runtime, bounded_replay, kv_events):
+    """Exercise all 13 groups, including private rings smaller than hash=128."""
+    config = copy.copy(store_runtime.store._vllm_config)
+    config.model_config = copy.copy(config.model_config)
+    config.model_config.max_model_len = 512
+    config.cache_config = CacheConfig(block_size=128, prefix_match_unit=128, swa_bounded_replay=bounded_replay)
+    config.kv_transfer_config = KVTransferConfig(kv_connector="AscendStoreConnector", kv_role="kv_producer")
+    specs = [
+        AscendCircularBufferSpec(block_size=size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+        for size in [4, 128, 8, 128, 16, 128, 4, 8, 16, 32, 64, 128, 4]
+    ]
+    for group_id, ratio in [(1, 4), (5, 128)]:
+        specs[group_id] = AscendMLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            tokens_per_state=ratio,
+            storage_block_size=128 // ratio,
+            model_version="deepseek_v41",
+        )
+    specs[3] = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        bounded_replay=bounded_replay,
+    )
+    plan = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec([f"group{index}"], spec) for index, spec in enumerate(specs)],
+    )
+    backend = MemoryBackend()
+    with patch.object(
+        pool_worker.importlib, "import_module", return_value=SimpleNamespace(MooncakeBackend=lambda *_a, **_k: backend)
+    ):
+        worker = AscendStoreConnector(config, KVConnectorRole.WORKER, plan)
+    caches = {
+        f"group{index}": (
+            torch.full((32, getattr(spec, "storage_block_size", None) or spec.block_size, 1, 8), 42, dtype=spec.dtype),
+        )
+        for index, spec in enumerate(specs)
+    }
+    worker.register_kv_caches(caches)
+    pool = worker.connector_worker
+    sender = pool.kv_send_thread
+    receiver = KVCacheStoreRecvingThread(
+        backend,
+        pool.token_database,
+        pool.grouped_block_size,
+        0,
+        1,
+        threading.Event(),
+        set(),
+        threading.Lock(),
+        report_request_failures=True,
+    )
+    try:
+        with patch.object(pool_scheduler, "LookupKeyClient"):
+            scheduler = pool_scheduler.KVPoolScheduler(config, False, plan)
+        expected_groups = (1, 5) if bounded_replay else (1, 3, 5)
+        assert pool.cache_coordinator.prefix_cacheable_group_ids == expected_groups
+        assert scheduler.hash_block_size == 128
+        assert pool.hash_block_size == pool.cache_transfer_granularity == 128
+        init_none_hash(sha256)
+        req = Request(
+            "rings",
+            list(range(385)),
+            SamplingParams(max_tokens=1),
+            None,
+            block_hasher=get_request_block_hasher(128, sha256),
+        )
+        sender.enable_kv_event = kv_events
+        metadata = ReqMeta(
+            "rings",
+            384,
+            block_ids_by_group=[list(range(1, 4)) if index in (1, 3, 5) else [1] for index in range(13)],
+            block_hashes=req.block_hashes,
+            kv_cache_group_ids=list(range(13)),
+            num_prompt_tokens=384,
+            original_block_size=pool.original_block_size,
+        )
+        sender.add_stored_request(req.request_id)
+        sender.request_queue.put(metadata)
+        sender._handle_request(sender.request_queue.get_nowait())
+        assert sender.stored_requests[req.request_id] == 0
+        assert sender.request_queue.unfinished_tasks == 0
+        assert bool(sender.get_kv_events()) == kv_events
+        assert pool.lookup_scheduler(384, req.block_hashes, list(range(13))) == 384
+
+        masks = pool.token_database.store_mask(384, 384)
+        expected_keys = set()
+        for group_id in range(13):
+            chunks = list(
+                pool.token_database.process_transfer_chunks(384, req.block_hashes, kv_cache_group_id=group_id)
+            )
+            if group_id not in expected_groups:
+                assert not chunks
+            expected_keys.update(
+                chunk.key.to_string()
+                for chunk in chunks
+                if pool.token_database.mask_allows_chunk(masks, group_id, chunk.raw_start)
+            )
+        assert set(backend.objects) == expected_keys and expected_keys
+        for tensors in caches.values():
+            tensors[0].fill_(-777)
+        metadata.block_ids_by_group = [list(range(8, 11)) if index in (1, 3, 5) else [8] for index in range(13)]
+        metadata.load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=384, can_load=True, token_len=384)
+        load_masks = pool.token_database.load_mask(req.block_hashes, 384)
+        expected_load_keys = {
+            chunk.key.to_string()
+            for group_id in expected_groups
+            for chunk in pool.token_database.process_transfer_chunks(384, req.block_hashes, kv_cache_group_id=group_id)
+            if pool.token_database.mask_allows_chunk(load_masks, group_id, chunk.raw_start)
+        }
+        # The synchronous planner and asynchronous receiver must select the same keys.
+        sync_keys, *_ = pool._collect_sync_load_chunks(metadata, 384, list(range(13)))
+        assert set(sync_keys) == expected_load_keys
+        receiver.request_queue.put(metadata)
+        receiver._handle_request(receiver.request_queue.get_nowait())
+        assert receiver.get_and_clear_finished_requests() == {req.request_id}
+        assert not receiver.get_and_clear_failed_requests()
+        assert set(backend.gets[-1]) == expected_load_keys
+        for group_id, tensors in enumerate(caches.values()):
+            if group_id not in expected_groups:
+                assert torch.all(tensors[0] == -777)
+                continue
+            for page_index in range(3):
+                expected = 42 if load_masks[group_id][page_index] else -777
+                assert torch.all(tensors[0][8 + page_index] == expected)
+    finally:
+        receiver.executor.shutdown(wait=True)
+        if pool.kv_recv_thread is not None:
+            pool.kv_recv_thread.executor.shutdown(wait=True)
+        sender.executor.shutdown(wait=True)
+
+
+def test_incompatible_cacheable_group_is_not_silently_skipped(store_runtime):
+    database = copy.copy(store_runtime.pool.token_database)
+    database.block_size = [4]
+    database.hash_block_size = 128
+    database.cache_coordinator = SimpleNamespace(prefix_cacheable_group_ids=(0,))
+    with pytest.raises(AssertionError, match="block_size must be divisible by hash_block_size"):
+        list(database.process_transfer_chunks(128, ["hash"], kv_cache_group_id=0))

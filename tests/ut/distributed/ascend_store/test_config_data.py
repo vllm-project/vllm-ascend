@@ -211,6 +211,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             group_cache_families={0: "c4"},
         )
         db.cache_coordinator = MagicMock()
+        db.cache_coordinator.prefix_cacheable_group_ids = (0,)
         db.cache_coordinator.transfer_value_block_range.side_effect = AssertionError(
             "disabled transfer path must preserve legacy block-id mapping"
         )

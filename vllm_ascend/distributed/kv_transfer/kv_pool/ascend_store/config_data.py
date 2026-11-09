@@ -454,6 +454,10 @@ class ChunkedTokenDatabase:
     def set_cache_coordinator(self, cache_coordinator: Any | None) -> None:
         self.cache_coordinator = cache_coordinator
 
+    def is_store_cache_group(self, kv_cache_group_id: int) -> bool:
+        """Private request state must never enter prefix-key generation."""
+        return self.cache_coordinator is None or kv_cache_group_id in self.cache_coordinator.prefix_cacheable_group_ids
+
     def store_mask(
         self,
         aligned_token_len: int,
@@ -627,6 +631,8 @@ class ChunkedTokenDatabase:
         cache_family: str | None = None,
     ) -> Iterable[TransferChunk]:
         """Return explicit raw-token and physical-value coordinates."""
+        if not self.is_store_cache_group(kv_cache_group_id):
+            return
         config = self.hybrid_cache_c128_config
         if not config.enabled:
             group_block_size = self.get_block_size(kv_cache_group_id)
@@ -855,7 +861,7 @@ class ChunkedTokenDatabase:
         cache_family: str | None = None,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys."""
-        if not block_hashes:
+        if not block_hashes or not self.is_store_cache_group(kv_cache_group_id):
             return
         group_block_size = self.get_block_size(kv_cache_group_id)
         if cache_family is None:
@@ -995,7 +1001,10 @@ def get_block_hashes(
 ) -> BlockHashList | list[str]:
     if group_block_size == hash_block_size:
         return block_hashes
-    assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
+    assert group_block_size % hash_block_size == 0, (
+        "block_size must be divisible by hash_block_size "
+        f"(block_size={group_block_size}, hash_block_size={hash_block_size})"
+    )
     scale_factor = group_block_size // hash_block_size
     return [
         _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])

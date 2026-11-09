@@ -153,10 +153,33 @@ python tests/e2e/models/swa_bounded_replay_probe.py \
 
 ## 5 验证记录
 
-CPU 主回归：**1658 passed、23 skipped、513 subtests passed**。
+2026-11-07 CPU 主回归：**1658 passed、23 skipped、513 subtests passed**。
 覆盖真实 MultiConnector 构造、元数据与完成通知，真实 Store worker/scheduler、
 发送和接收线程；后端以 CPU 内存模拟，模型计算、NPU 和真实网络未执行。
 另用真实 v0.30 C4/C128 MLA 规格覆盖不同物理行数、本地缓存开关和 P/D 角色，
 检查逻辑页地址、传输字节数及共享页保护，保留现有缓存键映射。
 旧 Store 扩展测试仍有与修复前一致的失败，完整 CI 不能视作通过。
 详细范围、基线对照与复现命令见[验证记录](cann_swa_store_replay_validation.json)。
+
+## 6 2026-11-09 小环形状态组的哈希断言修复
+
+收到 13 个缓存组、`hash_block_size=128` 的发送线程整除报错后，
+CPU 回归复现了相同路径：非持久化环形状态组的 `block_size` 是物理容量，
+可以为 4、8 等，不能作为 128 token 前缀哈希的分组粒度。
+旧实现先生成哈希、后应用过滤掩码，导致本应排除的组仍触发断言。
+仅凭日志中的组数量无法确定实际出错的 group ID。
+
+修复在 token/chunk 生成前按 `prefix_cacheable` 语义排除私有组；
+发送线程也在确认存在待发送 chunk 后才生成事件哈希。
+同步加载和异步接收共用这一过滤，SWA 关闭时私有环形组同样不参与 Store。
+可持久化组仍必须满足整除约束，不采用“所有不整除的组都静默跳过”的规避。
+既有合法对象的键映射和布局保持不变。
+
+新增 30 个 CPU 回归覆盖原生 C4/C128、SWA、私有环形状态混合的 13 组布局，
+检查真实字节写入/读回、私有组未传输、KV 事件开关和非法可缓存组仍报错。
+相关主回归结果为 **1688 passed、23 skipped、513 subtests passed**。
+这仍不包含 A3、Mooncake 网络或模型精度/性能验证。
+新增记录见[小环形组修复验证](cann_swa_store_ring_hash_validation.json)。
+
+更新后两端重启全部 worker，沿用原来的 OFF/ON 对照配置。
+不要只检查报错消失，还要通过选中 Store 的来源日志和实际缓存读入确认外部命中生效。
