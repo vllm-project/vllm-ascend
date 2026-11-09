@@ -14,6 +14,7 @@ from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_allgather,
     all2all_lora_indices,
     has_lora,
+    has_moe_lora,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
     postprocess_lora_indices,
@@ -196,6 +197,43 @@ def test_has_lora_follows_batch_metadata() -> None:
     assert not has_lora(None)
     assert not has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)))
     assert has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
+
+
+def test_has_moe_lora_narrows_the_batch_flag_to_the_layer() -> None:
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=False),
+        layer_lora_slots=set(),
+    )
+    # The batch still carries adapter tokens, so the dense wrappers must work.
+    assert has_lora(context)
+    # ... but this layer holds no routed-expert weights, so the fused base
+    # kernel has to stay in place.
+    assert not has_moe_lora(context)
+
+    context.layer_lora_slots = {0}
+    assert has_moe_lora(context)
+
+    # A context published by a wrapper that does not track slots keeps the
+    # batch-level answer instead of silently disabling the MoE LoRA path.
+    assert has_moe_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
+    assert not has_moe_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True), layer_lora_slots={0}))
+
+
+def test_set_and_reset_lora_track_the_layer_slots(monkeypatch) -> None:
+    layer = AscendFusedMoEWithLoRA.__new__(AscendFusedMoEWithLoRA)
+    layer._lora_slots = set()
+    # The base class buffers are irrelevant for the slot bookkeeping.
+    monkeypatch.setattr(FusedMoEWithLoRA, "set_lora", lambda self, index, lora_a, lora_b: None)
+    monkeypatch.setattr(FusedMoEWithLoRA, "reset_lora", lambda self, index: None)
+
+    layer.set_lora(3, [], [])
+    assert layer._lora_slots == {3}
+    layer.set_lora(5, [], [])
+    assert layer._lora_slots == {3, 5}
+    layer.reset_lora(3)
+    assert layer._lora_slots == {5}
+    layer.reset_lora(5)
+    assert not layer._lora_slots
 
 
 def test_reset_lora_indices_drops_only_present_fields() -> None:
