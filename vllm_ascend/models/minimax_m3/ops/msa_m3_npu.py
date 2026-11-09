@@ -36,7 +36,7 @@ if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
 elif get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
-    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+    from vllm_ascend.ops.triton.msa.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
 
