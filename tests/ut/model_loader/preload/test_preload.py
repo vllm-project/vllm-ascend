@@ -442,7 +442,9 @@ def test_fp32_weight_reload_preserves_graph_storage(monkeypatch):
     layer.precast_fp32_weight = True
     layer.skip_weight_nz_conversion = True
     layer.prefix = "test"
-    layer.weight_fp32 = torch.nn.Parameter(torch.zeros_like(layer.weight))
+    # Loaded inference weights are not trainable. vLLM 0.32 copies into the
+    # existing parameter when preserving graph-captured storage.
+    layer.weight_fp32 = torch.nn.Parameter(torch.zeros_like(layer.weight), requires_grad=False)
     previous = layer.weight_fp32
     monkeypatch.setattr(linear, "_should_keep_nd_for_compatibility_weight", lambda _: False)
     monkeypatch.setattr(linear, "_should_reshape_wo_a_to_3d", lambda *_: False)
@@ -544,10 +546,30 @@ def test_multinode_daemon_rejects_invalid_rendezvous(rendezvous):
         instance._get_daemon_init_config()
 
 
-def test_daemon_memory_logging_uses_native_npu_allocator():
-    import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa: F401
+def test_daemon_memory_logging_uses_native_npu_allocator(monkeypatch):
+    import runpy
+    from pathlib import Path
 
-    assert torch.accelerator.memory_allocated is torch.npu.memory_allocated
+    native_memory_allocated = Mock()
+    native_memory_stats = Mock()
+    native_memory_reserved = Mock()
+    native_reset_peak_memory_stats = Mock()
+    native_mem_get_info = Mock()
+    npu = SimpleNamespace(
+        empty_cache=Mock(),
+        memory_stats=native_memory_stats,
+        memory_allocated=native_memory_allocated,
+        memory_reserved=native_memory_reserved,
+        reset_peak_memory_stats=native_reset_peak_memory_stats,
+        mem_get_info=native_mem_get_info,
+    )
+    accelerator = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(npu=npu, accelerator=accelerator))
+
+    patch_file = Path(__file__).parents[4] / "vllm_ascend/patch/platform/patch_torch_accelerator.py"
+    runpy.run_path(str(patch_file))
+
+    assert accelerator.memory_allocated is native_memory_allocated
 
 
 def test_device_uuid_is_a_protocol_string(monkeypatch):
