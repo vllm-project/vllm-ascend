@@ -1261,8 +1261,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "single node; got "
                 f"nnodes_within_dp={parallel_config.nnodes_within_dp}."
             )
-        if scheduler_extension_config.profiling_chunk_config.enabled:
-            raise ValueError("DyntraLB cannot be used with profiling_chunk_config.")
 
     # recompute_scheduler_enable: only supported on PD-disaggregated D nodes
     if scheduler_extension_config.recompute_scheduler_enable:
@@ -1540,18 +1538,6 @@ def _setup_worker_and_scheduler(
             async_scheduling=vllm_config.scheduler_config.async_scheduling
         )
 
-    # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-    if scheduler_config.profiling_chunk_config.enabled:
-        vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
-            if vllm_config.scheduler_config.async_scheduling
-            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
-        )
-        # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
-        # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
-        # has been moved to patch_engine_core.py.
-        import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
-
     # Extend original scheduler_config to use BatchJobAwareScheduler.
     if scheduler_config.batch_job_sched_config.enabled:
         if vllm_config.scheduler_config.async_scheduling:
@@ -1587,8 +1573,6 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
         return "recompute_scheduler_enable"
     if scheduler_config.dyntra_lb_config.enabled:
         return "dyntra_lb_config"
-    if scheduler_config.profiling_chunk_config.enabled:
-        return "profiling_chunk_config"
     if scheduler_config.enable_balance_scheduling:
         return "enable_balance_scheduling"
     return None
