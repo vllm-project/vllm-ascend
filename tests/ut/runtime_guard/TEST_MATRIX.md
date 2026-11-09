@@ -58,7 +58,7 @@ Priorities: **P0** every PR / smoke; **P1** full suite; **P2** env-dependent.
 | **A3** Soft-fail bad JSON | **Yes** | `tests/ut/runtime_config/test_runtime_config_core.py` |
 | Hot-path gate / idle sync correctness | **Yes** | `test_hot_path_overhead.py` (no wall-clock) |
 | Guard decorator wiring (v1/v2 step sync, v2 sample-phase hooks, worker idle sync, inference-mode inner placement) | **Yes** | `test_hooks.py` |
-| Merged due-bus async (`DueBitsBusWorker`: TP0 `sync_due_bits_from_src` on **cpu_group**/Gloo submit@wave-head, drain@end-of-wave, depth-1, rate-limited warn-if-wait, bounded shutdown drain, submit-fail/timeout refund, `wave_idx` misalignment, no HCCL fallback) | **Yes** | `test_bus_worker.py`; `test_dist.py` (`sync_due_bits_from_src`, requires `cpu_group`); V18f/g + V28d in `test_review_regressions.py` |
+| Merged due-bus async (`DueBitsBusWorker`: TP0 `broadcast_due_bits_from_src` on **cpu_group**/Gloo submit@wave-head, drain@end-of-wave, depth-1, rate-limited warn-if-wait, bounded shutdown drain, submit-fail/timeout refund, `wave_idx` misalignment, no HCCL fallback) | **Yes** | `test_bus_worker.py`; `test_dist.py` (`broadcast_due_bits_from_src`, requires `cpu_group`); V18f/g + V28d in `test_review_regressions.py` |
 | Live NPU TPS / wall-clock microbench | **No** | Out of this product tree (manual Ascend runs) |
 
 CI proves **functional isolation** and detector/report/dump contracts.  

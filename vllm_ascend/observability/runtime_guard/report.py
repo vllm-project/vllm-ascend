@@ -408,7 +408,7 @@ class ReportWriter:
         """Write one pretty-printed anomaly JSON file. Returns path or None on failure.
 
         ``dump_attempted`` means ``dump_kv`` was in this incident's action list
-        (not that D2H already succeeded — dump runs on a later ``sync_for_step``).
+        (not that D2H already succeeded — dump runs on a later ``begin_wave``).
         ``dump_arm_wave`` is the real-step wave when the incident was handled;
         same-pair rate limiting uses it (64 waves, then doubles) up to
         ``max_per_req``.

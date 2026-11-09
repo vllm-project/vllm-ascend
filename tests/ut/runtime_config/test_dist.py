@@ -24,8 +24,8 @@ import pytest
 
 import vllm_ascend.observability.runtime_config.dist as dist
 from vllm_ascend.observability.runtime_config.dist import (
+    broadcast_due_bits_from_src,
     broadcast_when_due,
-    sync_due_bits_from_src,
 )
 
 # ---- sync group ----
@@ -123,7 +123,7 @@ def test_group_rank_unknown_group_raises():
         dist._group_rank(group, src=0)
 
 
-def test_sync_due_bits_from_src_source_packs_without_rank_in_group(monkeypatch):
+def test_broadcast_due_bits_from_src_source_packs_without_rank_in_group(monkeypatch):
     """Missing rank_in_group still lets the source pack when is_first_rank."""
     seen = {}
 
@@ -132,23 +132,23 @@ def test_sync_due_bits_from_src_source_packs_without_rank_in_group(monkeypatch):
 
     _patch_dist(monkeypatch, fake_broadcast)
     group = SimpleNamespace(world_size=2, is_first_rank=True, cpu_group=object())
-    out = sync_due_bits_from_src(group, [True, False], wave_idx=3)
+    out = broadcast_due_bits_from_src(group, [True, False], wave_idx=3)
     assert out == [True, False]
     assert seen["payload"][0] == 3.0
     assert seen["payload"][1:] == [1.0, 0.0]
 
 
-def test_sync_due_bits_from_src_none_group_returns_local():
-    assert sync_due_bits_from_src(None, [False, True]) == [False, True]
-    assert sync_due_bits_from_src(None, [], wave_idx=3) == []
+def test_broadcast_due_bits_from_src_none_group_returns_local():
+    assert broadcast_due_bits_from_src(None, [False, True]) == [False, True]
+    assert broadcast_due_bits_from_src(None, [], wave_idx=3) == []
 
 
-def test_sync_due_bits_from_src_world_size_one():
+def test_broadcast_due_bits_from_src_world_size_one():
     group = SimpleNamespace(world_size=1)
-    assert sync_due_bits_from_src(group, [True, False], wave_idx=7) == [True, False]
+    assert broadcast_due_bits_from_src(group, [True, False], wave_idx=7) == [True, False]
 
 
-def test_sync_due_bits_from_src_source_packs_payload(monkeypatch):
+def test_broadcast_due_bits_from_src_source_packs_payload(monkeypatch):
     seen = {}
 
     def fake_broadcast(tensor, src=0, group=None):
@@ -157,14 +157,14 @@ def test_sync_due_bits_from_src_source_packs_payload(monkeypatch):
 
     _patch_dist(monkeypatch, fake_broadcast)
     group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=object())
-    out = sync_due_bits_from_src(group, [True, False], wave_idx=(1 << 24) + 5)
+    out = broadcast_due_bits_from_src(group, [True, False], wave_idx=(1 << 24) + 5)
     assert out == [True, False]
     assert seen["src"] == 7
     assert seen["payload"][0] == 5.0  # wave_idx compared modulo 2**24
     assert seen["payload"][1:] == [1.0, 0.0]
 
 
-def test_sync_due_bits_from_src_receiver_applies_source_bits(monkeypatch):
+def test_broadcast_due_bits_from_src_receiver_applies_source_bits(monkeypatch):
     def fake_broadcast(tensor, src=0, group=None):
         tensor[0] = 9.0
         tensor[1] = 0.0
@@ -172,39 +172,39 @@ def test_sync_due_bits_from_src_receiver_applies_source_bits(monkeypatch):
 
     _patch_dist(monkeypatch, fake_broadcast)
     group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    assert sync_due_bits_from_src(group, [False, False], wave_idx=9) == [False, True]
+    assert broadcast_due_bits_from_src(group, [False, False], wave_idx=9) == [False, True]
 
 
-def test_sync_due_bits_from_src_wave_mismatch_raises(monkeypatch):
+def test_broadcast_due_bits_from_src_wave_mismatch_raises(monkeypatch):
     def fake_broadcast(tensor, src=0, group=None):
         tensor[0] = 8.0  # source is one wave behind
 
     _patch_dist(monkeypatch, fake_broadcast)
     group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
     with pytest.raises(RuntimeError, match="misalignment"):
-        sync_due_bits_from_src(group, [False, False], wave_idx=9)
+        broadcast_due_bits_from_src(group, [False, False], wave_idx=9)
 
 
-def test_sync_due_bits_from_src_wraparound_matches(monkeypatch):
+def test_broadcast_due_bits_from_src_wraparound_matches(monkeypatch):
     def fake_broadcast(tensor, src=0, group=None):
         tensor[0] = 5.0
 
     _patch_dist(monkeypatch, fake_broadcast)
     group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    assert sync_due_bits_from_src(group, [False, False], wave_idx=(1 << 24) + 5) == [
+    assert broadcast_due_bits_from_src(group, [False, False], wave_idx=(1 << 24) + 5) == [
         False,
         False,
     ]
 
 
-def test_sync_due_bits_from_src_unset_wave_skips_assert(monkeypatch):
+def test_broadcast_due_bits_from_src_unset_wave_skips_assert(monkeypatch):
     _patch_dist(monkeypatch, lambda t, src=0, group=None: None)
     group = SimpleNamespace(world_size=2, rank_in_group=1, cpu_group=object())
-    assert sync_due_bits_from_src(group, [True, False]) == [False, False]
+    assert broadcast_due_bits_from_src(group, [True, False]) == [False, False]
 
 
-def test_sync_due_bits_from_src_requires_cpu_group():
+def test_broadcast_due_bits_from_src_requires_cpu_group():
     """No device_group/HCCL fallback — missing cpu_group fails closed."""
     group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
     with pytest.raises(RuntimeError, match="requires group.cpu_group"):
-        sync_due_bits_from_src(group, [False, True], wave_idx=1)
+        broadcast_due_bits_from_src(group, [False, True], wave_idx=1)
