@@ -152,7 +152,7 @@ def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config"),
         patch.object(RuntimeGuardProcessor, "end_of_wave_sync") as eow,
-        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp"),
+        patch.object(RuntimeGuardProcessor, "_stash_local_dump_jobs_to_deferred"),
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
@@ -215,7 +215,7 @@ def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
     """Detectors off and dump on: wave-head bus via refresh; not fully off.
 
     Hot-reload off still delivers dump jobs through refresh → merged due bus
-    (or local claim when tp<=1). skip_wave_head_bus is only for fully idle.
+    (or local stash when tp<=1). skip_wave_head_bus is only for fully idle.
     """
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
@@ -225,7 +225,7 @@ def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
     assert cfg.is_fully_off() is False
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
-        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp") as claim,
+        patch.object(RuntimeGuardProcessor, "_stash_local_dump_jobs_to_deferred") as stash,
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
@@ -235,8 +235,8 @@ def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
         proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
         refresh.assert_called_once()
-        # claim lives inside refresh/wave_head; refresh is mocked so claim stays idle.
-        claim.assert_not_called()
+        # stash lives inside refresh/wave_head; refresh is mocked so stash stays idle.
+        stash.assert_not_called()
     RuntimeGuardProcessor.reset_for_tests()
 
 

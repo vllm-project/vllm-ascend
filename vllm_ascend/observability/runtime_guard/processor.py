@@ -298,8 +298,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             cfg = self.runtime_config
             # No detectors, no manual dump, no dump quota, hot-reload off: nothing
             # for the wave-head bus. Dump-only (auto dump on, detectors off) still
-            # goes through refresh → merged due bus / local claim so TP peers get
-            # jobs; config_due stays false when hot-reload is off.
+            # goes through refresh → merged due bus / local stash so dump jobs
+            # reach end-of-wave D2H; config_due stays false when hot-reload is off.
             skip_wave_head_bus = (
                 not cfg.hot_reload_enabled
                 and not cfg.manual_trigger()

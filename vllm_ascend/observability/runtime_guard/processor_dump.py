@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""KV dump queue / claim / D2H orchestration mixin for RuntimeGuardProcessor."""
+"""KV dump queue / local stash / D2H orchestration mixin for RuntimeGuardProcessor."""
 
 from __future__ import annotations
 
@@ -21,10 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from vllm.distributed.parallel_state import get_tp_group
-
 from vllm_ascend.logger import init_logger_ascend
-from vllm_ascend.observability.runtime_config.dist import sync_task_bus
 from vllm_ascend.observability.runtime_guard.dump import (
     REQUEST_FINISHED_AT_DUMP_KEY,
     KvCacheReader,
@@ -157,53 +154,21 @@ class RuntimeGuardDumpMixin:
             self._run_kv_dumps(deferred)
         self._maybe_fire_manual_local(has_scheduled_tokens=has_scheduled_tokens)
 
-    def _claim_dump_jobs_to_deferred_via_tp(self) -> None:
-        """Fallback dump handoff when the merged due bus is not used.
+    def _stash_local_dump_jobs_to_deferred(self) -> None:
+        """Move local ``_kv_dump_jobs`` into deferred D2H (no TP collective).
 
         last-PP × TP>1 delivers jobs on the merged due bus dump lane. This
-        path covers ``tp_size<=1`` / missing TP group (local move into
-        deferred) and the rare non-merged wave-head. When dump is inactive,
-        stray local jobs are dropped with a per-arm refund.
+        path is only for ``tp_size<=1`` / missing TP group wave-heads: take
+        the local queue and stash it for ``end_of_wave_sync``. When dump is
+        inactive, stray local jobs are dropped with a per-arm refund.
         """
-        if not should_dump_kv_on_rank():
-            self._drop_pending_dump_jobs()
-            return
-        # Shared config gate (identical on every rank after sync): skip TP bus.
-        if not self.runtime_config.dump_enabled():
+        if not should_dump_kv_on_rank() or not self.runtime_config.dump_enabled():
             self._drop_pending_dump_jobs()
             return
         payload = list(self._kv_dump_jobs)
         self._kv_dump_jobs.clear()
-        try:
-            tp_group = get_tp_group()
-        except Exception:
-            if payload:
-                self._deferred_kv_dump_jobs.extend(payload)
-            return
-        tp_size = int(getattr(tp_group, "world_size", 1) or 1)
-        if tp_size <= 1:
-            if payload:
-                self._deferred_kv_dump_jobs.extend(payload)
-            return
-        try:
-            rank = int(tp_group.rank_in_group)
-        except Exception:
-            rank = 0
-
-        try:
-            jobs = sync_task_bus(
-                tp_group,
-                due_local=bool(rank == 0 and payload),
-                payload=payload if rank == 0 else None,
-                src=0,
-            )
-        except Exception:
-            # Bus failure: payload dropped with no D2H — refund before the
-            # caller's soft-fail swallows the exception.
-            self._refund_dropped_dump_arms(payload)
-            raise
-        if jobs:
-            self._deferred_kv_dump_jobs.extend(list(jobs))
+        if payload:
+            self._deferred_kv_dump_jobs.extend(payload)
 
     def _run_kv_dumps(self, jobs: list[dict[str, Any]]) -> None:
         reader = self.action_executor._kv_reader

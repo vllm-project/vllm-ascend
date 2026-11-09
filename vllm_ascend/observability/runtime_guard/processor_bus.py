@@ -39,7 +39,7 @@ class RuntimeGuardBusMixin:
     :class:`DueBitsBusWorker` at wave head (``config_due`` is false when
     hot-reload is off); apply/stash in :meth:`_drain_merged_bus` at
     end-of-wave so the collective overlaps forward. Non-last PP and
-    ``tp_size<=1`` poll JSON locally and claim dump jobs without a TP bus.
+    ``tp_size<=1`` poll JSON locally and stash dump jobs without a TP bus.
     """
 
     # Attributes provided by RuntimeGuardProcessor (mixin composition).
@@ -60,7 +60,7 @@ class RuntimeGuardBusMixin:
     _merged_bus_warn_ts: float
 
     # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
-    _claim_dump_jobs_to_deferred_via_tp: Any
+    _stash_local_dump_jobs_to_deferred: Any
     _drop_pending_dump_jobs: Any
     _refund_dropped_dump_arms: Any
     needs_sample_phase_hooks: Any
@@ -120,7 +120,7 @@ class RuntimeGuardBusMixin:
         group = _runtime_config_sync_group_or_none()
         if group is not None and int(getattr(group, "world_size", 1) or 1) > 1:
             return self._wave_head_merged_bus(group)
-        # Non-last-PP / tp_size<=1: local config (if reload); dump is local claim.
+        # Non-last-PP / tp_size<=1: local config (if reload); dump is local stash.
         changed = False
         if cfg.hot_reload_enabled:
             prev_hooks = bool(self.needs_sample_phase_hooks())
@@ -134,8 +134,8 @@ class RuntimeGuardBusMixin:
                 changed = False
             if changed:
                 self._apply_config_cascade(prev_needs_sample_hooks=prev_hooks)
-        # tp<=1 / no TP group: no dump collective — move local jobs to deferred.
-        self._claim_dump_jobs_to_deferred_via_tp()
+        # tp<=1 / no TP group: no dump collective — stash local jobs for eow D2H.
+        self._stash_local_dump_jobs_to_deferred()
         logger.debug(
             "[runtime_guard sync] leave stage=wave_head_task_bus changed=%s file_or_non_last_pp",
             changed,
