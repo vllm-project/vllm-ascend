@@ -985,6 +985,7 @@ def test_sampler_accepts_warmup_params_with_empty_history() -> None:
     assert output.sampled_token_ids.shape == (1, 1)
     assert output.logprobs_tensors is not None
 
+
 def test_sampler_warmup_params_tolerated_only_on_main_profile_run() -> None:
     sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=64)
     warmup_params = SamplingParams.for_sampler_warmup()
@@ -1012,6 +1013,7 @@ def test_sampler_warmup_params_tolerated_only_on_main_profile_run() -> None:
     assert sampler.sampling_states.temperature.gpu[0].item() == pytest.approx(0.9)
     assert sampler.sampling_states.top_p.gpu[0].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[0].item()) == 50
+
 
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
     """Non-1 temperature must change relative logits before greedy/top paths."""
