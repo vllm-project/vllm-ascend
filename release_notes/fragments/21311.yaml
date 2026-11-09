@@ -1,0 +1,4 @@
+pr: 21311
+entries:
+  - category: breaking
+    text: Removed Decode Context Parallelism (DCP) support for GQA/MQA models. DCP now strictly requires MLA or SFA model architectures.
