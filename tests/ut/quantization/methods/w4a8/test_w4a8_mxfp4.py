@@ -153,6 +153,11 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
+        # The NZ cast recipes read torch_npu's FP4 enum from their own module,
+        # which environments without the NPU extension do not provide.
+        nz_npu_patcher = patch("vllm_ascend.quantization.nz.torch_npu")
+        self.addCleanup(nz_npu_patcher.stop)
+        nz_npu_patcher.start().float4_e2m1fn_x2 = 296
 
     def test_v2_eplb_uses_expert_weight_list(self):
         vllm_config = create_mock_vllm_config()
@@ -263,17 +268,17 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_reported_eplb_cast_params_match_the_weight_casts(self, mock_npu, mock_empty_cache):
-        """EPLB rebuilds these weights, so what it is told must be what was done.
+    def test_exported_eplb_views_carry_the_cast_they_were_built_with(self, mock_npu, mock_empty_cache):
+        """EPLB rebuilds these weights, so the exported cast must be the one performed.
 
         A cast with these parameters lands on FRACTAL_NZ_C0_16 rather than
         FRACTAL_NZ, and copy_ refuses internal-format tensors whose storage
-        descriptions disagree. If the reported parameters drift from the casts
-        below, every Gloo expert transfer for this method fails.
+        descriptions disagree. The cast below and the exported view share one
+        spec, and this pins that neither side restates the dtypes on its own.
         """
-        mock_npu.float4_e2m1fn_x2 = 296
         mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
         self.scheme.use_expert_weight_list = True
+        w13_specs = {}
 
         for activation in (MoEActivation.SITU, "silu"):
             with self.subTest(activation=activation):
@@ -282,15 +287,20 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
                 layer.activation = activation
 
                 self.scheme.process_weights_after_loading(layer)
+                views = self.scheme.get_eplb_weight_views(layer)
 
-                reported = self.scheme.get_eplb_nz_cast_params(layer)
                 calls = mock_npu.npu_format_cast.call_args_list
                 self.assertEqual(len(calls), 2 * self.num_experts)
-                self.assertEqual([call.kwargs for call in calls[: self.num_experts]], [reported[0]] * self.num_experts)
-                self.assertEqual([call.kwargs for call in calls[self.num_experts :]], [reported[1]] * self.num_experts)
-                # The scales stay ND and carry no parameters.
-                self.assertEqual(reported[2:], [{}, {}])
-                self.assertEqual(len(reported), len(self.scheme.get_eplb_weight_views(layer)))
+                expected = [views[0]] * self.num_experts + [views[1]] * self.num_experts
+                for call, view in zip(calls, expected):
+                    self.assertEqual(call.kwargs, view.nz_cast_spec.cast_kwargs())
+                # The scales stay ND and declare no cast.
+                self.assertFalse([view for view in views[2:] if hasattr(view, "nz_cast_spec")])
+                w13_specs[activation] = views[0].nz_cast_spec
+
+        # SiTU reads the same bytes with the semantic dtype, so its w13 cast
+        # differs; one spec for the whole method would be wrong.
+        self.assertNotEqual(w13_specs[MoEActivation.SITU], w13_specs["silu"])
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=True)
@@ -344,8 +354,9 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             context.use_mega_moe = True
             weights = self.scheme.get_fused_mc2_weights(layer)
         eplb_views = self.scheme.get_eplb_weight_views(layer)
-        self.assertIs(weights.w1, eplb_views[0])
-        self.assertIs(weights.w2, eplb_views[1])
+        # EPLB exports a container declaring the cast, over the same tensors.
+        self.assertTrue(all(a is b for a, b in zip(weights.w1, eplb_views[0], strict=True)))
+        self.assertTrue(all(a is b for a, b in zip(weights.w2, eplb_views[1], strict=True)))
         self.assertEqual(weights.w1[0].dtype, torch.float4_e2m1fn_x2)
         self.assertEqual(weights.w1_scale[0].data_ptr(), eplb_views[2][0].data_ptr())
         self.assertEqual(weights.w2_scale[0].data_ptr(), eplb_views[3][0].data_ptr())

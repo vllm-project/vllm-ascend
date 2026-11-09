@@ -29,7 +29,11 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.ops.fused_moe.routed_experts import (
+    AscendRoutedExperts,  # noqa: F401
+    EplbExpertTensorList,
+)
+from vllm_ascend.quantization.nz import NzCastSpec, fp4_packed_nz, fp4_semantic_nz
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
 
 from ..base import (
@@ -268,26 +272,18 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         return getattr(layer, "activation", None) in (MoEActivation.SITU, "situ")
 
     @classmethod
-    def _w13_input_dtype(cls, layer: torch.nn.Module) -> torch.dtype:
+    def _w13_cast_spec(cls, layer: torch.nn.Module) -> NzCastSpec:
         # SiTU needs the semantic FP4 dtype; ordinary GMM takes torch_npu's.
-        return torch.float4_e2m1fn_x2 if cls._is_situ(layer) else torch_npu.float4_e2m1fn_x2
+        return fp4_semantic_nz() if cls._is_situ(layer) else fp4_packed_nz()
 
-    def get_eplb_nz_cast_params(self, layer: torch.nn.Module) -> list[dict[str, torch.dtype]]:
-        # Mirror the casts in process_weights_after_loading below. The scales
-        # stay ND, so they carry no parameters.
-        return [
-            {"customize_dtype": torch.float8_e4m3fn, "input_dtype": self._w13_input_dtype(layer)},
-            {"customize_dtype": torch.float8_e4m3fn, "input_dtype": torch_npu.float4_e2m1fn_x2},
-            {},
-            {},
-        ]
-
-    @staticmethod
-    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+    @classmethod
+    def get_eplb_weight_views(cls, layer: torch.nn.Module) -> list:
         if hasattr(layer, "w13_weight_list"):
+            # The expert weights are cast with parameters, so EPLB cannot
+            # rebuild them without the same cast. The scales stay ND.
             return [
-                layer.w13_weight_list,
-                layer.w2_weight_list,
+                EplbExpertTensorList(layer.w13_weight_list, cls._w13_cast_spec(layer)),
+                EplbExpertTensorList(layer.w2_weight_list, fp4_packed_nz()),
                 layer.w13_weight_scale_list,
                 layer.w2_weight_scale_list,
             ]
@@ -324,7 +320,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.use_expert_weight_list:
             is_situ = self._is_situ(layer)
-            w13_input_dtype = self._w13_input_dtype(layer)
+            # One definition behind both the cast and what get_eplb_weight_views
+            # reports, so the two cannot drift apart.
+            w13_cast_spec = self._w13_cast_spec(layer)
 
             layer.w13_weight_list = []
             for weight in layer.w13_weight.data.unbind(dim=0):
@@ -339,16 +337,14 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                     torch_npu.npu_format_cast(
                         expert_weight,
                         ACL_FORMAT_FRACTAL_NZ,
-                        customize_dtype=torch.float8_e4m3fn,
-                        input_dtype=w13_input_dtype,
+                        **w13_cast_spec.cast_kwargs(),
                     )
                 )
             layer.w2_weight_list = [
                 torch_npu.npu_format_cast(
                     weight.clone(),
                     ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                    **fp4_packed_nz().cast_kwargs(),
                 )
                 for weight in layer.w2_weight.data.unbind(dim=0)
             ]

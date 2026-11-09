@@ -15,6 +15,7 @@ from vllm_ascend.distributed.eplb.eplb_communicator import AscendGlooEplbCommuni
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 from vllm_ascend.quantization.methods.base import AscendMoEScheme
+from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
@@ -132,20 +133,22 @@ def test_execute_converts_nz_receives_on_device(communicator, monkeypatch, devic
         get_format.assert_not_called()
 
 
-def _staged_recv(monkeypatch, npu_format, cast_params, views=None):
-    """Drive one receive whose destination reports ``npu_format``.
+def _staged_recv(monkeypatch, npu_format, cast_spec=None, expert_buffer=None):
+    """Drive one receive into a buffer tensor that reports ``npu_format``.
 
-    The communicator learns the cast behind each weight view at construction,
-    the way the HIXL one learns the weights. ``views`` replaces the stub views
-    when the weight views have to come from somewhere further upstream.
+    The communicator learns each buffer's cast at construction, the way the
+    HIXL one learns the weights, and upstream hands add_recv() those exact
+    buffer tensors.
     """
-    if views is None:
-        views = [EplbExpertTensorList([MagicMock()], cast_params)]
-    communicator = AscendGlooEplbCommunicator(cpu_group=MagicMock(), all_expert_weights=[views])
-    recv_tensor = MagicMock()
-    recv_tensor.device.type = "npu"
+    if expert_buffer is None:
+        destination = MagicMock()
+        destination.device.type = "npu"
+        expert_buffer = [EplbExpertTensorList([destination], cast_spec)]
+    else:
+        destination = expert_buffer[0][0]
+    communicator = AscendGlooEplbCommunicator(cpu_group=MagicMock(), expert_buffer=expert_buffer)
     staging_tensor = MagicMock()
-    communicator.add_recv([recv_tensor], src_rank=0, expert_id=3)
+    communicator.add_recv([destination], src_rank=0, expert_id=3)
     monkeypatch.setattr(communicator, "_acquire_staging_buffer", lambda *_args: staging_tensor)
     monkeypatch.setattr(
         "vllm_ascend.distributed.eplb.eplb_communicator.P2POp",
@@ -159,50 +162,54 @@ def _staged_recv(monkeypatch, npu_format, cast_params, views=None):
     monkeypatch.setattr(torch_npu, "get_npu_format", MagicMock(return_value=npu_format), raising=False)
     format_cast = MagicMock()
     monkeypatch.setattr(torch_npu, "npu_format_cast", format_cast)
-    return communicator, recv_tensor, staging_tensor, format_cast
+    return communicator, destination, staging_tensor, format_cast
 
 
-def test_execute_rebuilds_a_c0_variant_with_the_destination_cast_params(monkeypatch):
+def test_execute_rebuilds_a_c0_variant_with_the_destination_cast(monkeypatch):
     """FRACTAL_NZ_C0_16 destinations need the cast that produced them.
 
     Converting to plain FRACTAL_NZ yields a different storage description, and
     copy_ refuses internal-format tensors whose descriptions disagree, so the
     hardcoded conversion made every parameterized expert weight unreachable.
     """
-    params = {"customize_dtype": torch.float8_e4m3fn, "input_dtype": torch.bfloat16}
-    communicator, recv_tensor, staging_tensor, format_cast = _staged_recv(monkeypatch, 50, params)
+    spec = NzCastSpec(customize_dtype=torch.float8_e4m3fn, input_dtype=torch.bfloat16)
+    communicator, destination, staging_tensor, format_cast = _staged_recv(monkeypatch, 50, spec)
 
     communicator.execute()
 
-    format_cast.assert_called_once_with(staging_tensor.to.return_value, ACL_FORMAT_FRACTAL_NZ, **params)
-    recv_tensor.copy_.assert_called_once_with(format_cast.return_value, non_blocking=True)
+    format_cast.assert_called_once_with(
+        staging_tensor.to.return_value,
+        ACL_FORMAT_FRACTAL_NZ,
+        **spec.cast_kwargs(),
+    )
+    destination.copy_.assert_called_once_with(format_cast.return_value, non_blocking=True)
 
 
-def test_execute_rejects_an_internal_format_whose_cast_params_are_unknown(monkeypatch):
+def test_execute_rejects_an_internal_format_whose_cast_is_unknown(monkeypatch):
     """Name the missing contract instead of failing inside copy_.
 
     Without the parameters the conversion lands on plain FRACTAL_NZ and copy_
     reports a storage-description mismatch, which says nothing about the quant
     method that has to report its cast.
     """
-    communicator, recv_tensor, _, format_cast = _staged_recv(monkeypatch, 50, {})
+    communicator, destination, _, format_cast = _staged_recv(monkeypatch, 50, None)
 
-    with pytest.raises(RuntimeError, match="get_eplb_nz_cast_params"):
+    with pytest.raises(RuntimeError, match="get_eplb_weight_views"):
         communicator.execute()
 
     format_cast.assert_not_called()
-    recv_tensor.copy_.assert_not_called()
+    destination.copy_.assert_not_called()
 
 
-def test_cast_params_reach_the_receive_path_through_the_quant_adapter(monkeypatch):
-    """Production reads the hook off the adapter, not off the scheme.
+def test_the_cast_travels_from_the_quant_method_to_the_receive_buffers():
+    """The buffers are what the receive path writes into, so they carry the cast.
 
-    An AscendRoutedExperts layer holds an AscendFusedMoEMethod, so a hook the
-    adapter does not forward leaves every weight view with no parameters and
-    the receive path then refuses a destination it could have rebuilt. Tests
-    that call a scheme directly never cross the adapter.
+    A quant method hands the cast over on the view it exports; the layer keeps
+    it through get_expert_weights(), the upstream buffer allocation inherits it
+    through empty_like, and the communicator finds it by buffer identity. The
+    adapter sits in the middle of that chain in production.
     """
-    params = {"customize_dtype": torch.float8_e4m3fn, "input_dtype": torch.bfloat16}
+    spec = NzCastSpec(customize_dtype=torch.float8_e4m3fn, input_dtype=torch.bfloat16)
 
     class _Scheme(AscendMoEScheme):
         def get_weight(self, *args, **kwargs):
@@ -212,31 +219,34 @@ def test_cast_params_reach_the_receive_path_through_the_quant_adapter(monkeypatc
             return {}
 
         def apply(self, *args, **kwargs):
-            raise AssertionError("EPLB weight views do not run a forward pass.")
+            raise AssertionError("Exporting EPLB weight views runs no forward pass.")
 
         def get_eplb_weight_views(self, layer):
-            return [[torch.ones(3, 4, dtype=torch.int8) for _ in range(2)]]
-
-        def get_eplb_nz_cast_params(self, layer):
-            return [params]
+            experts = [torch.ones(3, 4, dtype=torch.int8) for _ in range(2)]
+            return [EplbExpertTensorList(experts, spec)]
 
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     routed_experts.local_num_experts = 2
     routed_experts.quant_method = AscendFusedMoEMethod(_Scheme(), MagicMock())
     views = list(routed_experts.get_expert_weights())
 
-    communicator, recv_tensor, staging_tensor, format_cast = _staged_recv(monkeypatch, 50, None, views=views)
-    communicator.execute()
+    # Upstream allocates one buffer set from the first layer's views.
+    expert_buffer = [torch.empty_like(view) for view in views]
+    communicator = AscendGlooEplbCommunicator(cpu_group=MagicMock(), expert_buffer=expert_buffer)
 
-    format_cast.assert_called_once_with(staging_tensor.to.return_value, ACL_FORMAT_FRACTAL_NZ, **params)
-    recv_tensor.copy_.assert_called_once_with(format_cast.return_value, non_blocking=True)
+    for destination in expert_buffer[0]:
+        assert communicator._destination_cast_kwargs(destination) == spec.cast_kwargs()
 
 
-def test_cast_params_must_agree_across_layers():
-    """One list by view position only describes every layer if they agree."""
-    params = {"customize_dtype": torch.float8_e4m3fn}
-    first = [EplbExpertTensorList([MagicMock()], params)]
-    second = [EplbExpertTensorList([MagicMock()])]
+def test_every_layer_must_agree_with_the_shared_receive_buffers():
+    """One buffer set serves every layer, so a layer cast differently cannot work."""
+    spec = NzCastSpec(customize_dtype=torch.float8_e4m3fn)
+    expert_buffer = [EplbExpertTensorList([MagicMock()], spec)]
+    divergent_layer = [EplbExpertTensorList([MagicMock()])]
 
-    with pytest.raises(ValueError, match="one NZ cast layout per weight view"):
-        AscendGlooEplbCommunicator(cpu_group=MagicMock(), all_expert_weights=[first, second])
+    with pytest.raises(ValueError, match="NZ cast layout has to match"):
+        AscendGlooEplbCommunicator(
+            cpu_group=MagicMock(),
+            expert_buffer=expert_buffer,
+            all_expert_weights=[divergent_layer],
+        )

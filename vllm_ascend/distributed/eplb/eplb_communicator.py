@@ -24,6 +24,7 @@ from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
+from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_internal_npu_format
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
@@ -68,24 +69,40 @@ def _resolve_hixl_module() -> Any:
     return hixl_compat
 
 
-def _collect_nz_cast_params(all_expert_weights: Sequence[Sequence[Any]]) -> list[dict[str, torch.dtype]]:
-    """Read the NZ cast parameters off each weight view, by view position.
+def _view_cast_specs(views: Sequence[Any]) -> list[NzCastSpec | None]:
+    return [getattr(view, "nz_cast_spec", None) for view in views]
 
-    The views are built per layer from the same quant method, so one list
-    indexed by view position describes every layer. Views that were not cast
-    with parameters report none, which leaves the conversion unparameterized.
+
+def _map_buffer_cast_specs(
+    expert_buffer: Sequence[Any],
+    all_expert_weights: Sequence[Sequence[Any]],
+) -> tuple[dict[int, NzCastSpec], list[torch.Tensor]]:
+    """Associate every parameterized receive buffer tensor with its cast.
+
+    The buffers are allocated as ``empty_like`` of one layer's weight views, so
+    a view cast with parameters hands its cast down to the buffer that receives
+    into it. ``add_recv`` is given those exact tensor objects, which is what
+    lets the receive path look the cast up by identity instead of tracking
+    positions. The buffers are kept alive here so an identity cannot be reused
+    by a later allocation.
     """
-    collected: list[dict[str, torch.dtype]] = []
+    buffer_specs = _view_cast_specs(expert_buffer)
     for layer_views in all_expert_weights:
-        params = [dict(getattr(view, "nz_cast_params", None) or {}) for view in layer_views]
-        if not collected:
-            collected = params
-        elif params != collected:
+        layer_specs = _view_cast_specs(layer_views)
+        if layer_specs != buffer_specs:
             raise ValueError(
-                "Gloo EPLB requires one NZ cast layout per weight view across layers, "
-                f"but got {params} after {collected}."
+                "Gloo EPLB receives into buffers shared by every layer, so each layer's NZ cast layout has to "
+                f"match theirs, but got {layer_specs} against {buffer_specs}."
             )
-    return collected
+    specs: dict[int, NzCastSpec] = {}
+    retained: list[torch.Tensor] = []
+    for view, spec in zip(expert_buffer, buffer_specs):
+        if spec is None:
+            continue
+        for tensor in view:
+            specs[id(tensor)] = spec
+            retained.append(tensor)
+    return specs, retained
 
 
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
@@ -101,27 +118,19 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     def __init__(
         self,
         cpu_group: ProcessGroup,
+        expert_buffer: Sequence[Any] = (),
         all_expert_weights: Sequence[Sequence[Any]] = (),
     ) -> None:
         super().__init__(cpu_group)
         # The async worker hands its own stream over through set_stream().
         self._stream: torch.Stream | None = None
         self._pinned_staging_buffers: dict[tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]] = {}
-        # One entry per weight view, in the order add_recv() receives them.
-        self._nz_cast_params = _collect_nz_cast_params(all_expert_weights)
+        # Keyed by the identity of the buffer tensors add_recv() receives, and
+        # holding those buffers so no later allocation can reuse an identity.
+        self._buffer_cast_specs, self._retained_buffers = _map_buffer_cast_specs(expert_buffer, all_expert_weights)
 
     def set_stream(self, stream: torch.Stream | None) -> None:
         self._stream = stream
-
-    def add_send(self, tensors: list[torch.Tensor], dst_rank: int, expert_id: int) -> None:
-        # Carry the weight-view position so the receive side can look up how
-        # its destination was built. Upstream's tuples do not hold it.
-        for view_idx, tensor in enumerate(tensors):
-            self._ops.append(("send", tensor, dst_rank, view_idx))
-
-    def add_recv(self, tensors: list[torch.Tensor], src_rank: int, expert_id: int) -> None:
-        for view_idx, tensor in enumerate(tensors):
-            self._ops.append(("recv", tensor, src_rank, view_idx))
 
     def _acquire_staging_buffer(
         self,
@@ -142,11 +151,11 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
 
         stream = self._stream
         p2p_ops: list[P2POp] = []
-        recv_staging: list[tuple[torch.Tensor, torch.Tensor, int]] = []
+        recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
         buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
         try:
             with stream if stream is not None else contextlib.nullcontext():
-                for operation, tensor, peer_rank, view_idx in self._ops:
+                for operation, tensor, peer_rank in self._ops:
                     cpu_tensor = self._acquire_staging_buffer(tensor, buffer_indices)
                     if operation == "send":
                         cpu_tensor.copy_(tensor, non_blocking=True)
@@ -167,7 +176,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
                                 group_peer=peer_rank,
                             )
                         )
-                        recv_staging.append((tensor, cpu_tensor, view_idx))
+                        recv_staging.append((tensor, cpu_tensor))
         finally:
             self._ops.clear()
 
@@ -181,7 +190,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
             request.wait()
 
         with stream if stream is not None else contextlib.nullcontext():
-            for dst_tensor, src_tensor, view_idx in recv_staging:
+            for dst_tensor, src_tensor in recv_staging:
                 if is_internal_npu_format(dst_tensor):
                     # Ascend950 cannot copy CPU tensors directly into internal
                     # storage, so stage on device and convert there. The
@@ -193,23 +202,25 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
                     src_tensor = torch_npu.npu_format_cast(
                         src_tensor.to(dst_tensor.device, non_blocking=True),
                         ACL_FORMAT_FRACTAL_NZ,
-                        **self._view_cast_params(dst_tensor, view_idx),
+                        **self._destination_cast_kwargs(dst_tensor),
                     )
                 dst_tensor.copy_(src_tensor, non_blocking=True)
 
-    def _view_cast_params(self, dst_tensor: torch.Tensor, view_idx: int) -> dict[str, torch.dtype]:
+    def _destination_cast_kwargs(self, dst_tensor: torch.Tensor) -> dict[str, Any]:
         """Return how to rebuild an NZ source for one receive destination."""
-        params = self._nz_cast_params[view_idx] if view_idx < len(self._nz_cast_params) else {}
+        spec = self._buffer_cast_specs.get(id(dst_tensor))
+        if spec is not None:
+            return spec.cast_kwargs()
         dst_format = int(torch_npu.get_npu_format(dst_tensor))
-        if params or dst_format == ACL_FORMAT_FRACTAL_NZ:
-            return params
+        if dst_format == ACL_FORMAT_FRACTAL_NZ:
+            return {}
         # Converting without the parameters would land on plain FRACTAL_NZ and
         # the copy below would fail with a description mismatch. Name the
         # missing contract instead: the quant method owning this weight has to
-        # report its cast through get_eplb_nz_cast_params().
+        # hand its cast over on the view it exports to EPLB.
         raise RuntimeError(
-            f"Gloo EPLB cannot rebuild expert weight view {view_idx} in format {dst_format}: its quant method "
-            "does not report the NZ cast parameters it was built with through get_eplb_nz_cast_params()."
+            f"Gloo EPLB cannot rebuild a receive destination in format {dst_format}: the quant method that "
+            "built it does not report the NZ cast behind its get_eplb_weight_views() entry."
         )
 
     @property

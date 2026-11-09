@@ -346,7 +346,10 @@ def _wrap_communicator_factory(original_factory):
             return AscendGlooEplbCommunicator(
                 cpu_group=bound.arguments["group_coordinator"].cpu_group,
                 # Host staging has to rebuild an NZ source for each receive
-                # destination, which needs the cast behind each weight view.
+                # destination, which needs the cast behind the buffer it
+                # receives into. The weights come along to validate that every
+                # layer agrees with those shared buffers.
+                expert_buffer=bound.arguments["expert_buffer"],
                 all_expert_weights=bound.arguments["expert_weights"],
             )
         if backend == "hixl":
