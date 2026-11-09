@@ -1431,7 +1431,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_submits_batch_without_joining_queue(self):
+    def test_wait_for_save_submits_batch_and_joins_queue(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
         worker.kv_send_thread.request_queue = MagicMock()
@@ -1452,7 +1452,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             worker.wait_for_save(meta)
         worker.kv_send_thread.raise_if_failed.assert_not_called()
         worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
         self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_wait_for_save_skip_non_save(self):

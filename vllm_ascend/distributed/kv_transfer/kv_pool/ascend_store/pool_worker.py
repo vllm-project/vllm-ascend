@@ -1525,6 +1525,9 @@ class KVPoolWorker(BaseKVPoolWorker):
             return
 
         self._previous_save_batch = send_thread.add_save_batch(requests)
+        # task_done() runs after m_store.put() returns, so this waits until every
+        # queued batch_put on this TP rank has left execute().
+        send_thread.request_queue.join()
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.
