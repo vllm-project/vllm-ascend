@@ -386,6 +386,42 @@ class AscendModelState(DefaultModelState):
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        if self.rope_state is not None and self.pcp_manager is not None:
+            num_dims = self.rope_state.num_dims
+            num_tokens = input_batch.num_tokens_after_padding
+            positions = torch.empty(
+                (num_dims, num_tokens),
+                dtype=torch.int64,
+                device=input_batch.positions.device,
+            )
+            offset = 0
+            for row_idx in range(input_batch.num_reqs):
+                length = int(input_batch.num_scheduled_tokens[row_idx])
+                if length == 0:
+                    continue
+                req_idx = int(input_batch.idx_mapping_np[row_idx])
+                if bool(input_batch.is_prefilling_np[row_idx]):
+                    start = int(input_batch.num_computed_prefill_tokens_np[row_idx])
+                    base = req_idx * num_dims
+                    source = self.rope_state.prefill_positions.gpu[
+                        base : base + num_dims, start : start + length
+                    ]
+                    positions[:, offset : offset + length] = source.to(
+                        device=positions.device, dtype=torch.int64
+                    )
+                else:
+                    delta = int(self.rope_state.prefill_delta.np[req_idx])
+                    source = input_batch.positions[offset : offset + length].to(
+                        device=positions.device, dtype=torch.int64
+                    )
+                    positions[:, offset : offset + length] = (
+                        source.unsqueeze(0).repeat(num_dims, 1) + delta
+                    )
+                offset += length
+            if offset < num_tokens:
+                positions[:, offset:] = 0
+            model_inputs["positions"] = positions
+                    
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
         return model_inputs
 
