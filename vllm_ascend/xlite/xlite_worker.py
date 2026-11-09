@@ -17,8 +17,6 @@
 """xlite worker subclass for `vllm-ascend`"""
 
 from vllm.logger import logger
-from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.workspace import init_workspace_manager
 
 from vllm_ascend.worker.worker import NPUWorker
 from vllm_ascend.xlite.xlite_model_runner import XliteModelRunnerV2
@@ -29,10 +27,9 @@ class XliteWorker(NPUWorker):
 
     def init_device(self):
         self.device = self._init_device()
-        # Initialize workspace manager
-        num_ubatches = 1
-        init_workspace_manager(self.device, num_ubatches)
-        # Init ModelRunner here, so that we have access to self.device.
+        self._init_workspace_and_model_runner()
+
+    def _make_model_runner(self):
         if self.use_v2_model_runner:
             logger.warning_once("xlite: npu model runner v2 is in developing, some features doesn't work for now.")
             runner_cls = XliteModelRunnerV2
@@ -41,10 +38,8 @@ class XliteWorker(NPUWorker):
 
             runner_cls = XliteModelRunner
         logger.info_once("XliteModelRunner: using xlite model runner class `%s`", runner_cls.__name__)
-        self.xlite_runner = self.model_runner = runner_cls(self.vllm_config, self.device)  # type: ignore[assignment]
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        self.xlite_runner = runner_cls(self.vllm_config, self.device)
+        return self.xlite_runner
 
     def compile_or_warm_up_model(self):
         # Currently, the xlite runner does not need explicit compilation or warmup

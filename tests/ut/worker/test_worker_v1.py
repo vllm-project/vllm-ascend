@@ -88,6 +88,7 @@ class TestNPUWorker(TestBase):
         self.model_config_mock.hf_text_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
+        self.parallel_config_mock.enable_fault_tolerance = False
 
         self.vllm_config_mock = MagicMock(spec=VllmConfig)
         self.vllm_config_mock.cache_config = self.cache_config_mock
@@ -103,6 +104,8 @@ class TestNPUWorker(TestBase):
         self.vllm_config_mock.kernel_config.ir_op_priority = MagicMock()
         self.vllm_config_mock.kernel_config.ir_op_priority.set_default = MagicMock()
         self.vllm_config_mock.profiler_config = MagicMock()
+        self.vllm_config_mock.profiler_config.profiler = None
+        self.vllm_config_mock.use_v2_model_runner = False
         self.vllm_config_mock.quant_config = MagicMock()
         self.vllm_config_mock.speculative_config = None
         self.vllm_config_mock.observability_config = None
@@ -618,7 +621,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_sleep_uses_rl_extra_cleanup(
         self, mock_get_config, mock_allocator_class, mock_mem_get_info, mock_synchronize_device
@@ -630,6 +633,12 @@ class TestNPUWorker(TestBase):
         )
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
         worker.model_runner = MagicMock()
         worker.model_runner.model.named_buffers.return_value = []
         worker.sleep_wakeup_manager = MagicMock()
@@ -644,7 +653,7 @@ class TestNPUWorker(TestBase):
         self.assertEqual(mock_synchronize_device.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         mock_config = MagicMock()
@@ -673,6 +682,12 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
@@ -691,7 +706,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(mock_synchronize_device.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         from vllm_ascend.worker.worker import NPUWorker
@@ -708,6 +723,12 @@ class TestNPUWorker(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
         worker.model_runner = SimpleNamespace(model=MagicMock())
         worker._sleep_saved_buffers = {}
 
@@ -761,7 +782,7 @@ class TestNPUWorker(TestBase):
         return model
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_does_not_transpose_moe_weights(
         self, mock_get_config, mock_allocator_class, mock_synchronize_device
@@ -785,6 +806,12 @@ class TestNPUWorker(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
         worker.model_runner = SimpleNamespace(
             model=target_model,
             drafter=SimpleNamespace(model=draft_model),
@@ -1125,6 +1152,7 @@ class TestNPUWorker(TestBase):
 
     def test_execute_dummy_batch(self):
         """Test execute_dummy_batch method"""
+        from vllm_ascend.utils import vllm_version_is
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
@@ -1133,6 +1161,7 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             worker.vllm_config = MagicMock()
+            worker.parallel_config = SimpleNamespace(data_parallel_size=1)
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
@@ -1141,10 +1170,12 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
+            extra_kwargs = {} if vllm_version_is("0.32.0") else {"randomize_inputs": False}
             mock_model_runner._dummy_run.assert_called_once_with(
                 mock_uniform_decode_query_len,
                 uniform_decode=True,
                 skip_gdn_state_update=True,
+                **extra_kwargs,
             )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
@@ -1781,7 +1812,7 @@ class TestNPUWorker(TestBase):
             # In external_launcher mode, it doesn't enter middle processing logic, returns result directly
             self.assertEqual(result, mock_model_output)
 
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     def test_load_model_with_sleep_mode(self, mock_allocator_class):
         """Test load_model method - with sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -1789,6 +1820,12 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
@@ -1819,6 +1856,12 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
@@ -1850,7 +1893,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner.load_model.assert_called_once()
             join_nz.assert_not_called()
 
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):
         """Test load_model method - assertion error in sleep mode"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -1858,6 +1901,12 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
@@ -2050,7 +2099,7 @@ class TestNPUWorker(TestBase):
             mock_save_startup_plan.assert_called_once_with(worker, expected_kv_cache_memory)
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     def test_initialize_from_config_with_sleep_mode(self, mock_allocator_class, mock_ensure_kv_transfer):
         """Test initialize_from_config method - with sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -2061,6 +2110,12 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
         ):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
@@ -2156,6 +2211,12 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
         ):
             worker = NPUWorker()
+            worker.model_config = SimpleNamespace(
+                sleep_mode_backend="cumem", enable_nccl_comm_suspend=False, sleep_preserve_parameter_names=[]
+            )
+            worker._sleep_mode_backend = None
+            worker._sleep_saved_parameters = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
@@ -2316,17 +2377,24 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, mock_empty_output)
 
     def test_update_config(self):
-        """Test update_config delegates to model_runner.update_config"""
+        """A replacement must be shared by the config, worker and runner."""
         from vllm_ascend.worker.worker import NPUWorker
 
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-
-            overrides = {"load_config": {"load_format": "dummy"}}
-            worker.update_config(overrides)
-
-            worker.model_runner.update_config.assert_called_once_with(overrides)
+        for use_v2 in (False, True):
+            with self.subTest(use_v2=use_v2), patch("vllm.v1.worker.gpu_worker.update_config") as update:
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.use_v2_model_runner = use_v2
+                worker.model_runner = MagicMock()
+                worker.vllm_config = SimpleNamespace(load_config=object())
+                replacement = object()
+                update.return_value = replacement
+                worker.update_config({"load_config": {"load_format": "dummy"}})
+                self.assertIs(worker.vllm_config.load_config, replacement)
+                self.assertIs(worker.load_config, replacement)
+                self.assertIs(worker.model_runner.load_config, replacement)
+                worker.model_runner.update_config.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "cache_config"):
+                    worker.update_config({"cache_config": {}})
 
     def test_reload_weights(self):
         """Test reload_weights delegates to model_runner.reload_weights"""
@@ -2335,6 +2403,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
 
             worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
 
@@ -2351,6 +2420,9 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker.vllm_config = MagicMock()
+        worker.speculative_config = None
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()

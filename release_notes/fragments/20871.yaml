@@ -1,0 +1,4 @@
+pr: 20871
+entries:
+  - category: other
+    text: Unified NPU, 310P and Xlite runner construction; 310P now follows common rank-zero usage reporting after construction.
