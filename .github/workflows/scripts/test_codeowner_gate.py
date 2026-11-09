@@ -365,3 +365,27 @@ class TestContentlessExemption:
         rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
         failures = gate.check_coverage(rules, ["ghost.py"])
         assert failures == ["file has no CODEOWNERS owner: ghost.py"]
+
+
+class TestNoRulePollution:
+    """resolve_owners must never mutate the parsed rules (regression: an
+    aliasing bug made resolving one path inject owners into ownerless TODO
+    rules, polluting all later resolutions)."""
+
+    def test_todo_rule_not_polluted_by_active_rule(self):
+        rules = gate.parse_codeowners(
+            "# TODO(owner): /pkg\n# /pkg\n/pkg/sub @alice\n")
+        snapshot = [(r.pattern, list(r.owners)) for r in rules]
+        # resolve a path that matches both the TODO and the active rule
+        gate.resolve_owners(rules, "pkg/sub/x.py")
+        after = [(r.pattern, list(r.owners)) for r in rules]
+        assert snapshot == after
+
+    def test_later_resolutions_independent(self):
+        rules = gate.parse_codeowners(
+            "# TODO(owner): /pkg\n# /pkg\n/pkg/sub @alice\n")
+        # first resolve pollutes in the buggy version
+        gate.resolve_owners(rules, "pkg/sub/x.py")
+        # a path covered ONLY by the ownerless TODO must stay unowned
+        owners, skipped = gate.resolve_owners(rules, "pkg/other.py")
+        assert owners == [] and not skipped

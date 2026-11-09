@@ -154,10 +154,18 @@ def resolve_owners(rules: list[Rule], path: str) -> tuple[list[str], bool]:
             owners = []
             skipped = True
         elif rule.status == "active" and rule.owners:
-            owners.extend(o for o in rule.owners if o not in owners)
+            # Union across all matching active rules (parent owner covers
+            # submodules; a more specific rule adds owners).
+            for o in rule.owners:
+                if o not in owners:
+                    owners.append(o)
             skipped = False
         elif rule.status == "todo" and not owners and not skipped:
-            owners = rule.owners
+            # IMPORTANT: copy, never alias `rule.owners`. Binding the rule's
+            # list directly made a later `append()` (from an active rule)
+            # mutate the TODO rule in place, polluting every subsequent
+            # path resolution.
+            owners = list(rule.owners)
     return owners, skipped
 
 
