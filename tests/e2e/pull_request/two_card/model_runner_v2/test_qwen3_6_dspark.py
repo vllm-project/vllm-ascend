@@ -16,7 +16,6 @@
 # This file is a part of the vllm-ascend project.
 #
 """Qwen3.6-27B BF16 DSPARK acceptance on MRV2 over two NPUs.
-
 Run "pytest tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py".
 """
 
