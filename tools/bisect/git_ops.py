@@ -101,10 +101,15 @@ def resolve_commit(repo: Path, ref: str) -> str:
     # 1) Bare PR number -> fetch its head ref.
     if pr.isdigit():
         logger.info("Ref %s not local; fetching PR head refs/pull/%s/head", ref, pr)
-        _git(repo, "fetch", "--quiet", "origin", f"refs/pull/{pr}/head:refs/bisect_tmp/pr_{pr}", check=False)
-        sha = _try_rev_parse(repo, f"refs/bisect_tmp/pr_{pr}")
-        if sha:
-            return sha
+        try:
+            _git(repo, "fetch", "--quiet", "origin", f"+refs/pull/{pr}/head:refs/bisect_tmp/pr_{pr}")
+        except GitError:
+            # A failed fetch leaves any cached PR ref unchanged.
+            pass
+        else:
+            sha = _try_rev_parse(repo, f"refs/bisect_tmp/pr_{pr}")
+            if sha:
+                return sha
         attempts.append(f"fetch refs/pull/{pr}/head")
 
     # 2) Shallow clone -> deepen to FULL history FIRST. This is both the reliable
