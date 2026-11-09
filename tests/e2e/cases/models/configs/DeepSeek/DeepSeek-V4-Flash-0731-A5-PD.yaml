@@ -27,7 +27,7 @@ _envs: &envs
   PREFILL_PORT: "DEFAULT_PORT"
   DECODE_PORT: "DEFAULT_PORT"
   PROXY_PORT: "DEFAULT_PORT"
-  VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+
 test_cases:
   - name: "DeepSeek-V4-Flash-0731-A5-PD-single-node"
     model: "deepseek-ai/DeepSeek-V4-Flash-0731"
