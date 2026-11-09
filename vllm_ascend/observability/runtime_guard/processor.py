@@ -296,15 +296,18 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         try:
             self.wave_tracker.advance(has_scheduled_tokens=has_scheduled_tokens)
             cfg = self.runtime_config
-            # No detectors, no manual dump, hot-reload off: nothing to broadcast.
-            # Claim already-armed auto-dump jobs, or drop them if dump is inactive.
-            skip_config_bus = (
-                not cfg.hot_reload_enabled and not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
+            # No detectors, no manual dump, no dump quota, hot-reload off: nothing
+            # for the wave-head bus. Dump-only (auto dump on, detectors off) still
+            # goes through refresh → merged due bus / local stash so dump jobs
+            # reach end-of-wave D2H; config_due stays false when hot-reload is off.
+            skip_wave_head_bus = (
+                not cfg.hot_reload_enabled
+                and not cfg.manual_trigger()
+                and not cfg.needs_sample_phase_hooks()
+                and not cfg.dump_enabled()
             )
-            if skip_config_bus:
-                if cfg.dump_enabled():
-                    self._claim_dump_jobs_to_deferred_via_tp()
-                elif self._kv_dump_jobs:
+            if skip_wave_head_bus:
+                if self._kv_dump_jobs:
                     # Dump inactive: drop with per-arm refund (quota was
                     # consumed at arm time; no D2H will happen).
                     self._drop_pending_dump_jobs()

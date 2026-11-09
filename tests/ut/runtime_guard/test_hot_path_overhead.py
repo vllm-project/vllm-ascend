@@ -152,7 +152,7 @@ def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config"),
         patch.object(RuntimeGuardProcessor, "end_of_wave_sync") as eow,
-        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp"),
+        patch.object(RuntimeGuardProcessor, "_stash_local_dump_jobs_to_deferred"),
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
@@ -211,8 +211,12 @@ def test_sample_tokens_decorator_fully_off_bypasses_wrap(tmp_path: Path):
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_dump_only_claims(tmp_path: Path):
-    """Detectors off and dump on: advance + claim; not fully off."""
+def test_sync_for_step_dump_only_uses_wave_head(tmp_path: Path):
+    """Detectors off and dump on: wave-head bus via refresh; not fully off.
+
+    Hot-reload off still delivers dump jobs through refresh → merged due bus
+    (or local stash when tp<=1). skip_wave_head_bus is only for fully idle.
+    """
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
     cfg._invalidate_hot_path_gates()
@@ -221,7 +225,7 @@ def test_sync_for_step_dump_only_claims(tmp_path: Path):
     assert cfg.is_fully_off() is False
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
-        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp") as claim,
+        patch.object(RuntimeGuardProcessor, "_stash_local_dump_jobs_to_deferred") as stash,
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
@@ -230,8 +234,9 @@ def test_sync_for_step_dump_only_claims(tmp_path: Path):
         proc = _bind(cfg)
         proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
         proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
-        refresh.assert_not_called()
-        claim.assert_called_once()
+        refresh.assert_called_once()
+        # stash lives inside refresh/wave_head; refresh is mocked so stash stays idle.
+        stash.assert_not_called()
     RuntimeGuardProcessor.reset_for_tests()
 
 
@@ -472,17 +477,20 @@ def test_run_sample_phase_marks_finished_before_eow_when_hooks_off(tmp_path: Pat
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_due_bits_all_reduce_even_when_not_due():
-    """Due-vector AR always runs; due=false pays only the cheap all_reduce."""
-    from vllm_ascend.observability.runtime_config.dist import sync_due_bits
+def test_sync_due_bits_from_src_broadcast_even_when_not_due():
+    """Merged due-bus always pays the source broadcast (idle bits included)."""
+    from vllm_ascend.observability.runtime_config.dist import sync_due_bits_from_src
 
     group = MagicMock()
     group.world_size = 2
+    group.rank_in_group = 0
     group.cpu_group = object()
-    group.device_group = object()  # distinct from cpu_group → CPU tensor path
-    with patch("torch.distributed.all_reduce") as ar:
-        assert sync_due_bits(group, [False, False]) == [False, False]
-        ar.assert_called_once()
+    with (
+        patch("torch.distributed.broadcast") as bcast,
+        patch("torch.distributed.get_process_group_ranks", return_value=[0, 1]),
+    ):
+        assert sync_due_bits_from_src(group, [False, False], wave_idx=1) == [False, False]
+        bcast.assert_called_once()
 
 
 def test_refresh_config_skips_detector_apply_when_unchanged(tmp_path: Path):
