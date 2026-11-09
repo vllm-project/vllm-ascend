@@ -106,9 +106,10 @@ through the existing transfer contract where possible. Do not make the proxy
 understand layouts, TP rank mapping, MTP configuration or physical block IDs.
 
 Reuse existing MTP execution and V2 target/draft behavior. P and D must use
-the same speculative token count for this Flash phase; the handoff verifies
-that count, while each endpoint initializes its own draft cache. Verify
-target/draft selection, D startup boundaries and schema compatibility.
+the same speculative token count. P publishes the computed MTP history and D
+restores it before the first forward. D then generates subsequent proposals
+locally. The MTP handoff protocol distinguishes this payload from the earlier
+target-only payload.
 D full-block publication must stay within accepted tokens with materialized
 KV; reuse existing committed-hash/save-range logic. Do not implement a new
 speculative algorithm or Flash recurrent-state recovery here.
@@ -161,8 +162,8 @@ flowchart TD
 
 The response envelope contains `do_remote_prefill`, `do_remote_decode`,
 `pool_pd_protocol`, `remote_num_prompt_tokens`, and, for stateful or speculative
-handoffs, `pool_pd_mtp_tokens`. The last field checks compatibility; it does not
-ask P to compute D's draft cache. The envelope contains no object keys,
+handoffs, `pool_pd_mtp_tokens`. The last field checks the configured draft
+width. The envelope contains no object keys,
 physical block addresses or producer ranks. Full hashes are the
 request's committed prefix hashes. `prompt_digest` uses upstream extra-hash
 identity (salt, LoRA, multimodal content and embeddings) plus the entire prompt;
@@ -187,7 +188,10 @@ An image with a newer Ascend package may still contain an older vLLM checkout.
 Check the actual imported source and dependencies; copying only `layout.py`
 into an older upstream installation does not establish compatibility.
 
-Draft specs marked `is_draft` are excluded from persistent target objects and
-from loaded-group reporting. Allocator group numbers are not part of the
-shared identity. This implements the target/draft boundary; it is not evidence
-that every proposer or MTP execution mode has passed model acceptance.
+Target objects retain their original layout. MTP layers and their auxiliary
+indexer layers use separate draft objects. A reusable draft block is keyed by
+the following prefix hash because MTP shifts its input by one token. If the
+handoff boundary lacks that hash, the final draft block uses the prompt
+digest and block end. Allocator group numbers are excluded from object
+identity. The scheduler manifest includes groups restored by the active
+connector.

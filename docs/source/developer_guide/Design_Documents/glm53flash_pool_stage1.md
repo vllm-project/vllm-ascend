@@ -116,14 +116,16 @@ also require their exact circular snapshot.
 
 ## MTP and ownership
 
-P does not ask D to execute a draft model on its behalf. D performs its own
-MTP work. The compatibility field checks equal speculative-token counts
-because this Flash configuration changes target conv and circular storage as
-well as adding draft caches. Different MTP configurations are rejected.
+P publishes the MTP KV computed during prefill. D restores the history and
+generates subsequent proposals locally. The handoff validates the protocol
+and speculative-token count, which also affect target conv and circular
+storage for this Flash configuration.
 
-`shared_draft_names` and `target_group_specs` exclude draft owners without
-dropping target owners that share a grouped spec. A worker-generated manifest
-keeps scheduler group selection consistent with actual registration.
+`shared_draft_names` identifies draft attention and auxiliary indexer owners.
+Target objects keep their existing layout. Separate draft objects commit to
+the following prefix hash when MTP consumes the next token, with a
+request-specific key at the terminal handoff boundary. A worker-generated
+manifest describes the restored groups.
 
 One metadata-only change outside PD/pool is necessary:
 `worker/v2/attn_utils.py::get_kv_cache_spec` propagates an owner's

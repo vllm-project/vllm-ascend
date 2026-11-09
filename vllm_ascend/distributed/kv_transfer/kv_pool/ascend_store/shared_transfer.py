@@ -31,16 +31,38 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import M
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import RequestStateLayout, SharedPoolLayout
 
 
-def target_group_specs(group, draft_names=()):
-    """Use runner-provided ownership; draft caches never enter shared objects."""
+def group_specs(group):
     spec = group.kv_cache_spec
-    specs = {
+    return {
         name: spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
         for name in group.layer_names
     }
+
+
+def target_group_specs(group, draft_names=()):
+    """Use runner-provided ownership to keep the target object schema stable."""
     return {
-        name: item for name, item in specs.items() if not getattr(item, "is_draft", False) and name not in draft_names
+        name: item
+        for name, item in group_specs(group).items()
+        if not getattr(item, "is_draft", False) and name not in draft_names
     }
+
+
+def transfers_mtp_cache(config):
+    transfer = config.kv_transfer_config
+    speculative = getattr(config, "speculative_config", None)
+    return getattr(transfer, "kv_connector", None) == "LayerwisePoolConnector" and getattr(
+        speculative, "method", None
+    ) == "mtp"
+
+
+def draft_block_digest(hashes, block_hash_index):
+    # The MTP input at the last slot is shifted by one token. The following
+    # prefix hash commits to that token as well as the complete current block.
+    next_index = block_hash_index + 1
+    if next_index < len(hashes):
+        return "mtp_" + block_hash_to_str(hashes[next_index])
+    return None
 
 
 def shared_draft_names(cache_config):
@@ -52,15 +74,7 @@ def shared_draft_names(cache_config):
     """
     from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendSFAIndexerCacheSpec
 
-    all_specs = {}
-    for group in cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        all_specs.update(
-            {
-                name: spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-                for name in group.layer_names
-            }
-        )
+    all_specs = {name: spec for group in cache_config.kv_cache_groups for name, spec in group_specs(group).items()}
     draft = {name for name, spec in all_specs.items() if getattr(spec, "is_draft", False)}
     for name, spec in all_specs.items():
         if isinstance(spec, AscendSFAIndexerCacheSpec):
@@ -123,14 +137,15 @@ def validate_shared_pool(config, cache_config, *, worker=True):
             or any(
                 not hasattr(spec, "is_draft")
                 for group in cache_config.kv_cache_groups
-                for spec in target_group_specs(group).values()
+                for spec in group_specs(group).values()
             )
         ):
             raise ValueError("Shared pool MTP requires explicit target and draft cache ownership from the runner")
     for group in cache_config.kv_cache_groups:
         if getattr(group, "host_resident", False):
             raise ValueError("Shared pool does not yet support host-resident cache groups")
-        for item in target_group_specs(group, draft_names).values():
+        specs = group_specs(group) if transfers_mtp_cache(config) else target_group_specs(group, draft_names)
+        for item in specs.values():
             if is_circular_kv_cache_spec(item):
                 # Only PD restores these request-lifetime pages. Ordinary
                 # pooling leaves them to the model's aligned-prefix replay.
@@ -170,7 +185,9 @@ class SharedPoolTransfer:
         self.layerwise = shared_pool_uses_layerwise(worker.vllm_config)
         self.io = MemcacheStoreLayoutIO(worker.m_store, int(extra.get("store_lease_ttl_ms", 600000)))
         self.layouts = {}
+        self.draft_layouts = {}
         self.request_states = {}
+        self.draft_request_states = {}
         self.regions = {}
         self.saves = []
         self.loads = []
@@ -184,68 +201,87 @@ class SharedPoolTransfer:
     def register(self, caches):
         worker = self.worker
         config = worker.kv_cache_config
-        extra = worker.vllm_config.kv_transfer_config.kv_connector_extra_config
         draft_names = shared_draft_names(config)
+        mtp_cache = transfers_mtp_cache(worker.vllm_config)
         for gid, group in enumerate(config.kv_cache_groups):
-            spec = group.kv_cache_spec
-            specs = target_group_specs(group, draft_names)
-            if not specs:
-                continue
-            tensors = {}
-            for name in specs:
-                value = caches[name]
-                # Some runners return stacked (K,V), others expose two views.
-                tensors[name] = (
-                    tuple(value.unbind(0))
-                    if isinstance(value, torch.Tensor) and value.ndim == 5 and value.shape[0] == 2
-                    else worker._as_cache_tuple(value)
+            target = target_group_specs(group, draft_names)
+            self._register_group(gid, group.kv_cache_spec.block_size, target, caches, self.layouts, self.request_states)
+            if mtp_cache:
+                draft = {name: spec for name, spec in group_specs(group).items() if name in draft_names}
+                self._register_group(
+                    gid, group.kv_cache_spec.block_size, draft, caches, self.draft_layouts, self.draft_request_states
                 )
-            identity = KeyMetadata(worker.model_name, worker.tp_rank, 0, 0, gid)
-            if all(is_circular_kv_cache_spec(item) for item in specs.values()):
-                self.request_states[gid] = RequestStateLayout(
-                    identity, specs, tensors, config.num_blocks, extra["cache_prefix"], worker.tp_rank
-                )
-            else:
-                layout = SharedPoolLayout(
-                    identity,
-                    specs,
-                    local_tp=worker.tp_size,
-                    store_tp=extra["store_tp_size"],
-                    rank=worker.tp_rank,
-                    chunk_size=spec.block_size,
-                    hash_block_size=worker.hash_block_size,
-                    cache_prefix=extra["cache_prefix"],
-                )
-                layout.register(tensors, config.num_blocks)
-                self.layouts[gid] = layout
-            for entries in tensors.values():
-                for tensor in entries:
-                    storage = tensor.untyped_storage()
-                    self.regions[storage.data_ptr()] = storage.nbytes()
         worker.m_store.register_buffer(list(self.regions), list(self.regions.values()))
-        if self.request_states or any(layout.replicated for layout in self.layouts.values()):
+        layouts = [layout for _, layout, _ in self.prefix_layouts()] + [layout for _, layout in self.request_state_layouts()]
+        if any(layout.replicated for layout in layouts):
             from vllm_ascend.core.kv_cache_placement import build_layer_cache_bundles
 
-            specs = {
-                name: spec
-                for layout in (*self.layouts.values(), *self.request_states.values())
-                for name, spec in layout.specs.items()
-            }
+            specs = {name: spec for layout in layouts for name, spec in layout.specs.items()}
             self.layer_bundles = build_layer_cache_bundles(specs)
         self._registered = True
+
+    def _register_group(self, gid, chunk_size, specs, caches, layouts, request_states):
+        if not specs:
+            return
+        worker = self.worker
+        config = worker.kv_cache_config
+        extra = worker.vllm_config.kv_transfer_config.kv_connector_extra_config
+        tensors = {}
+        for name in specs:
+            value = caches[name]
+            # Some runners return stacked (K,V), others expose two views.
+            tensors[name] = (
+                tuple(value.unbind(0))
+                if isinstance(value, torch.Tensor) and value.ndim == 5 and value.shape[0] == 2
+                else worker._as_cache_tuple(value)
+            )
+        identity = KeyMetadata(worker.model_name, worker.tp_rank, 0, 0, gid)
+        if all(is_circular_kv_cache_spec(item) for item in specs.values()):
+            request_states[gid] = RequestStateLayout(
+                identity, specs, tensors, config.num_blocks, extra["cache_prefix"], worker.tp_rank
+            )
+        else:
+            layout = SharedPoolLayout(
+                identity,
+                specs,
+                local_tp=worker.tp_size,
+                store_tp=extra["store_tp_size"],
+                rank=worker.tp_rank,
+                chunk_size=chunk_size,
+                hash_block_size=worker.hash_block_size,
+                cache_prefix=extra["cache_prefix"],
+            )
+            layout.register(tensors, config.num_blocks)
+            layouts[gid] = layout
+        for entries in tensors.values():
+            for tensor in entries:
+                storage = tensor.untyped_storage()
+                self.regions[storage.data_ptr()] = storage.nbytes()
+
+    def prefix_layouts(self):
+        for gid, layout in self.layouts.items():
+            yield gid, layout, False
+        for gid, layout in self.draft_layouts.items():
+            yield gid, layout, True
+
+    def request_state_layouts(self):
+        yield from self.request_states.items()
+        yield from self.draft_request_states.items()
 
     def describe_groups(self):
         if not self._registered:
             raise RuntimeError("Shared pool caches have not been registered")
+        prefix_groups = set(self.layouts) | set(self.draft_layouts)
+        state_groups = set(self.request_states) | set(self.draft_request_states)
         return {
             "version": 1,
             "group_count": len(self.worker.kv_cache_config.kv_cache_groups),
-            "target_groups": sorted(set(self.layouts) | set(self.request_states)),
-            "prefix_groups": sorted(self.layouts),
-            "stateful": bool(self.request_states)
+            "target_groups": sorted(prefix_groups | state_groups),
+            "prefix_groups": sorted(prefix_groups),
+            "stateful": bool(state_groups)
             or any(
                 isinstance(spec, MambaSpec) or getattr(spec, "tokens_per_state", 1) != 1
-                for layout in self.layouts.values()
+                for _, layout, _ in self.prefix_layouts()
                 for spec in layout.specs.values()
             ),
         }
@@ -253,7 +289,7 @@ class SharedPoolTransfer:
     def _plans(self, request, *, writing):
         result = []
         load = request.load_spec
-        for gid, layout in self.layouts.items():
+        for gid, layout, draft in self.prefix_layouts():
             if writing and layout.replicated and layout.writer_rank != 0:
                 continue
             length = request.save_end_token if writing else load.kvpool_cached_tokens
@@ -280,7 +316,14 @@ class SharedPoolTransfer:
                         # the bytes of the current live state.
                         continue
                     raise ValueError("Shared full-attention object cannot reference a null block")
-                digest = block_hash_to_str(request.block_hashes[hash_index])
+                if draft:
+                    digest = draft_block_digest(request.block_hashes, hash_index)
+                    if digest is None:
+                        if writing:
+                            continue  # The terminal block can only be published by PD.
+                        raise ValueError("Shared MTP prefix is missing its next-token hash")
+                else:
+                    digest = block_hash_to_str(request.block_hashes[hash_index])
                 result.extend(layout.objects(index * layout.chunk_size, blocks[index], digest))
         return tuple(result)
 
@@ -392,14 +435,16 @@ class SharedPoolTransfer:
         if not self.layouts:
             return 0
         common = None
-        for layout in self.layouts.values():
+        for _, layout, draft in self.prefix_layouts():
             hits = set()
             for start in range(0, token_len - layout.chunk_size + 1, layout.chunk_size):
                 end = start + layout.chunk_size
                 hash_index = end // layout.hash_block_size - 1
                 if hash_index >= len(hashes):
                     break
-                digest = block_hash_to_str(hashes[hash_index])
+                digest = draft_block_digest(hashes, hash_index) if draft else block_hash_to_str(hashes[hash_index])
+                if digest is None:
+                    break
                 keys = [layout.key(shard, digest) for shard in range(layout.store_tp)]
                 if not all(self.io.batch_is_exist(keys)):
                     if layout.state:

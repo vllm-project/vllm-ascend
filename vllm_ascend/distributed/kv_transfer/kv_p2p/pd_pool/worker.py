@@ -14,6 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import (
     MemCacheReadLeaseError,
     MemcacheStoreLayoutIO,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import draft_block_digest
 
 _HANDOFF_RELEASE_GRACE_S = 2.0
 _HANDOFF_LEASE_GRACE_S = 30.0
@@ -40,14 +41,14 @@ class PoolPDWorker:
         cache_end = request.prompt_tokens if request.cache_tokens is None else request.cache_tokens
         if not writing and request.local_tokens >= receive_end:
             return ()
-        for gid, layout in self.transfer.request_states.items():
+        for gid, layout in self.transfer.request_state_layouts():
             if writing and layout.writer_rank != 0:
                 continue
             blocks = request.block_ids[gid]
             if len(blocks) != 1:
                 raise ValueError("PD circular state requires exactly one block per request")
             plans.extend(layout.snapshot(blocks[0], request.prompt_digest, cache_end))
-        for gid, layout in self.transfer.layouts.items():
+        for gid, layout, draft in self.transfer.prefix_layouts():
             if writing and layout.replicated and layout.writer_rank != 0:
                 continue
             complete, remainder = divmod(cache_end, layout.chunk_size)
@@ -68,16 +69,28 @@ class PoolPDWorker:
                 # blocks to restore from each group's actual allocation.
                 unhashed = set(request.unhashed_block_ids[gid])
                 first = 0
-            if not tail_only:
+            if not tail_only or draft:
                 for index in range(first, complete):
+                    end = (index + 1) * layout.chunk_size
+                    hash_index = end // layout.hash_block_size - 1
+                    if draft:
+                        digest = (
+                            draft_block_digest(request.block_hashes, hash_index)
+                            if end + layout.hash_block_size <= cache_end
+                            else None
+                        )
+                        if digest is None:
+                            digest = f"pd_mtp_{end}_{request.prompt_digest}"
+                        elif tail_only:
+                            # Ordinary prefix publication owns reusable draft blocks.
+                            continue
+                    else:
+                        digest = block_hash_to_str(request.block_hashes[hash_index])
                     block_id = blocks[index]
                     if block_id <= 0:
                         raise ValueError("PD cannot restore a null full-attention block")
                     if unhashed is not None and block_id not in unhashed:
                         continue
-                    digest = block_hash_to_str(
-                        request.block_hashes[(index + 1) * layout.chunk_size // layout.hash_block_size - 1]
-                    )
                     plans.extend(layout.objects(index * layout.chunk_size, block_id, digest))
             needs_tail = writing or receive_end > complete * layout.chunk_size
             if remainder and needs_tail and request.local_tokens < request.prompt_tokens:

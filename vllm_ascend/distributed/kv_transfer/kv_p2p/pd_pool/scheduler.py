@@ -11,6 +11,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import truncate_stateful_prefill_request
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
     HANDOFF_DEADLINE_MARGIN_S,
+    POOL_PD_MTP_PROTOCOL,
     POOL_PD_PROTOCOL,
     PoolPDMetadata,
     PoolPDRequest,
@@ -19,13 +20,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
 
 
 class PoolPDScheduler:
-    def __init__(self, pool, *, need_truncate=False, mtp_tokens=0, handoff_ttl_s=0):
+    def __init__(self, pool, *, need_truncate=False, mtp_tokens=0, transfer_mtp=False, handoff_ttl_s=0):
         if type(mtp_tokens) is not int or mtp_tokens < 0:
             raise ValueError("Pool PD requires a nonnegative speculative token count")
         self.handoff_ttl_s = handoff_ttl_s
         self.handoff_deadlines = {}
         self.pool = pool
         self.mtp_tokens = mtp_tokens
+        self.handoff_protocol = POOL_PD_MTP_PROTOCOL if transfer_mtp else POOL_PD_PROTOCOL
         self.need_truncate = need_truncate
         self.original_prompts = {}
         self.requests = {}
@@ -47,7 +49,7 @@ class PoolPDScheduler:
         params = request.kv_transfer_params or {}
         if not params.get("do_remote_prefill"):
             return self.pool.get_num_new_matched_tokens(request, num_computed_tokens)
-        if params.get("pool_pd_protocol") != POOL_PD_PROTOCOL:
+        if params.get("pool_pd_protocol") != self.handoff_protocol:
             raise ValueError("Pool PD receive requires a compatible completed producer handoff")
         remote_mtp = params.get("pool_pd_mtp_tokens", 0)
         if type(remote_mtp) is not int or remote_mtp != self.mtp_tokens:
@@ -63,7 +65,7 @@ class PoolPDScheduler:
                 or time.time() + HANDOFF_DEADLINE_MARGIN_S >= deadline
             ):
                 raise ValueError("Pool PD handoff protection expired or missing")
-        # Keep the existing CPD last-token recomputation. Draft cache is local.
+        # Keep the CPD last-token recomputation on D.
         count = max(0, length - 1 - num_computed_tokens)
         if count:
             self.pd_load_requests.add(request.request_id)
@@ -148,7 +150,7 @@ class PoolPDScheduler:
             handoff = {
                 "do_remote_prefill": True,
                 "do_remote_decode": False,
-                "pool_pd_protocol": POOL_PD_PROTOCOL,
+                "pool_pd_protocol": self.handoff_protocol,
                 "remote_num_prompt_tokens": self.original_prompts.get(
                     request.request_id, (len(request.prompt_token_ids), None)
                 )[0],
@@ -159,8 +161,6 @@ class PoolPDScheduler:
                     raise RuntimeError("Pool PD handoff protection expired before response")
                 handoff["pool_pd_handoff_deadline"] = deadline
             if self.need_truncate or self.mtp_tokens:
-                # This verifies the cache contract, not draft work requested
-                # from D. Each endpoint initializes its own draft state.
                 handoff["pool_pd_mtp_tokens"] = self.mtp_tokens
             logger.info(
                 "Pool PD handoff req=%s prompt_tokens=%d cache_tokens=%d",

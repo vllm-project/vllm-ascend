@@ -14,6 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 POOL_PD_PROTOCOL = "ascend_shared_v2"
+POOL_PD_MTP_PROTOCOL = "ascend_shared_mtp_v1"
 HANDOFF_DEADLINE_MARGIN_S = 1.0
 
 

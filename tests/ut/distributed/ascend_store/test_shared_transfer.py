@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -160,12 +160,21 @@ def test_layerwise_failure_drains_pending_tasks_without_publication(monkeypatch)
     assert writer._sender.request_queue.unfinished_tasks == 0
 
 
-def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True):
+def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True, mtp=False):
     layout, caches = attention(tp, rank, source=source, chunk=4)
+    spec = next(iter(layout.specs.values()))
+    if mtp:
+        draft_name = "draft.attn"
+        values = next(iter(caches.values()))
+        caches[draft_name] = tuple(value + 100 if source else value.clone() for value in values)
+        specs = {**layout.specs, draft_name: replace(spec, is_draft=True)}
+        spec = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs=specs)
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(enforce_eager=enforce_eager),
+            speculative_config=SimpleNamespace(method="mtp") if mtp else None,
             kv_transfer_config=SimpleNamespace(
+                kv_connector="LayerwisePoolConnector",
                 kv_connector_extra_config={
                     "store_tp_size": 4,
                     "use_layerwise": layerwise,
@@ -179,7 +188,7 @@ def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True):
         kv_cache_config=SimpleNamespace(
             num_blocks=3,
             kv_cache_groups=[
-                SimpleNamespace(layer_names=list(caches), kv_cache_spec=next(iter(layout.specs.values()))),
+                SimpleNamespace(layer_names=list(caches), kv_cache_spec=spec),
             ],
         ),
         tp_size=tp,

@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import (
     shared_pool_uses_layerwise,
+    transfers_mtp_cache,
     validate_shared_pool,
 )
 
@@ -49,6 +50,7 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
                 pool_scheduler,
                 need_truncate=groups["stateful"],
                 handoff_ttl_s=handoff_ttl_s,
+                transfer_mtp=transfers_mtp_cache(vllm_config),
                 mtp_tokens=getattr(vllm_config.speculative_config, "num_speculative_tokens", 0),
             )
         else:

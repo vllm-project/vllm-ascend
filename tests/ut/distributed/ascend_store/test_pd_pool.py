@@ -13,6 +13,7 @@ from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.connector import LayerwisePoolConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.failure import install_handoff_failure_handler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
+    POOL_PD_MTP_PROTOCOL,
     POOL_PD_PROTOCOL,
     PoolPDMetadata,
     PoolPDRequest,
@@ -155,6 +156,64 @@ def test_pd_tail_and_full_block_copy_and_retention(monkeypatch, layerwise, lengt
     assert not backend.leases
 
 
+
+@pytest.mark.parametrize("layerwise", [False, True])
+@pytest.mark.parametrize("cache_end", [4, 7, 8])
+def test_mtp_handoff_transfers_draft_history_without_changing_target_keys(monkeypatch, layerwise, cache_end):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    hashes = [b"h2", b"h4", b"h6", b"h8"][:cache_end // 2]
+    prompt_tokens = cache_end + 1
+    source = PoolPDRequest("p", prompt_tokens, "prompt", [[1, 2]], hashes, cache_tokens=cache_end)
+    full = ReqMeta(
+        "p", block_ids_by_group=[[1, 2]], block_hashes=hashes, can_save=True, save_end_token=cache_end // 4 * 4
+    )
+    for rank in range(2):
+        common, caches = transfer(backend, 2, rank, layerwise, True, mtp=True)
+        baseline, _ = transfer(MemoryBackend(), 2, rank, False, True)
+        assert common.layouts[0].key(0, "prefix") == baseline.layouts[0].key(0, "prefix")
+        producer = PoolPDWorker(SimpleNamespace(shared_pool=common))
+        meta = PoolPDMetadata(step(full), tails=[source])
+        producer.prepare(meta)
+        producer.start_load(meta)
+        if layerwise:
+            for name in caches:
+                producer.save_layer(name)
+        producer.finish()
+    common, actual = transfer(backend, 2, 0, False, False, mtp=True)
+    _, expected = transfer(MemoryBackend(), 2, 0, False, True, mtp=True)
+    receive = PoolPDRequest("d", prompt_tokens, "prompt", [[1, 2]], hashes, cache_tokens=cache_end)
+    consumer = PoolPDWorker(SimpleNamespace(shared_pool=common))
+    consumer.start_load(PoolPDMetadata(step(), receives=[receive]))
+    assert consumer.take_results().finished_recving == {"d"}
+    for name in actual:
+        for output, reference in zip(actual[name], expected[name], strict=True):
+            flattened = output[2:6].transpose(0, 1).flatten(1, 2)
+            wanted = reference[2:6].transpose(0, 1).flatten(1, 2)
+            torch.testing.assert_close(flattened[:, :cache_end], wanted[:, :cache_end], rtol=0, atol=0)
+            assert (flattened[:, cache_end:] == -99).all()
+    assert common.lookup(4, hashes) == (4 if cache_end >= 6 else 0)
+    assert common.lookup(4, [b"h2", b"h4", b"other-next-token"]) == 0
+    assert not backend.leases
+
+
+def test_mtp_handoff_rejects_target_only_protocol():
+    consumer = PoolPDScheduler(MagicMock(), transfer_mtp=True, mtp_tokens=3)
+    req = request(
+        [1, 2, 3, 4],
+        kv_transfer_params=dict(
+            do_remote_prefill=True,
+            pool_pd_protocol=POOL_PD_PROTOCOL,
+            remote_num_prompt_tokens=4,
+            pool_pd_mtp_tokens=3,
+        ),
+    )
+    with pytest.raises(ValueError, match="compatible completed producer handoff"):
+        consumer.get_num_new_matched_tokens(req, 0)
+    req.kv_transfer_params["pool_pd_protocol"] = POOL_PD_MTP_PROTOCOL
+    assert consumer.get_num_new_matched_tokens(req, 0) == (3, True)
+
+
 def test_pd_adopts_per_group_attention_hits_and_restores_state():
     connector = LayerwisePoolConnector.__new__(LayerwisePoolConnector)
     config = SimpleNamespace(kv_role="kv_consumer", kv_connector_extra_config={})
@@ -189,11 +248,11 @@ def test_pd_adopts_per_group_attention_hits_and_restores_state():
             partial_objects=lambda start, block, key, remainder: [(group, start, block, remainder)],
         )
 
-    transfer = SimpleNamespace(
-        layouts={0: layout(0), 1: layout(1), 2: layout(2, state=True)},
-        request_states={3: SimpleNamespace(snapshot=lambda block, digest, end: [(3, end, block)])},
+    common = SimpleNamespace(
+        prefix_layouts=lambda: [(0, layout(0), False), (1, layout(1), False), (2, layout(2, state=True), False)],
+        request_state_layouts=lambda: [(3, SimpleNamespace(snapshot=lambda block, digest, end: [(3, end, block)]))],
     )
-    worker = PoolPDWorker(SimpleNamespace(shared_pool=transfer))
+    worker = PoolPDWorker(SimpleNamespace(shared_pool=common))
     receive = scheduler.receives["r"]
     # The second attention group missed a block inside the first group's
     # local hit. Restore it, both tails and the exact recurrent/ring state.

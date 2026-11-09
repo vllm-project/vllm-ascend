@@ -42,6 +42,8 @@ def test_registered_layouts_are_authoritative():
     transfer.worker = SimpleNamespace(kv_cache_config=SimpleNamespace(kv_cache_groups=[None] * 4))
     transfer.layouts = {0: SimpleNamespace(specs={}), 3: SimpleNamespace(specs={})}
     transfer.request_states = {2: object()}
+    transfer.draft_layouts = {}
+    transfer.draft_request_states = {}
     with pytest.raises(RuntimeError, match="not been registered"):
         transfer.describe_groups()
     transfer._registered = True
