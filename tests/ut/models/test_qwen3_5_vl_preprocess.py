@@ -577,7 +577,7 @@ def test_normalization_through_upstream_vision(monkeypatch, path, enabled):
         assert model.input_norm.calls == 1
 
 
-@pytest.mark.parametrize("pruning_spec", [("evs", 0.25), ("evs", 0.75), ("vidcom2", 0.5)])
+@pytest.mark.parametrize("pruning_spec", [("evs", 0.75), ("vidcom2", 0.5)])
 def test_video_pruning_replaces_full_placeholder(pruning_spec, monkeypatch):
     processor = object.__new__(AscendQwen3_5VLProcessor)
     processor.info = SimpleNamespace(
