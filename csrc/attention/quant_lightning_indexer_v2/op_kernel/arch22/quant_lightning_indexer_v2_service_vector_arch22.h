@@ -140,7 +140,8 @@ protected:
         uint32_t tileBegin = 0;
         uint32_t tileEnd = 0;
         uint32_t wsBase = 0;
-        bool needSpill = false;
+        bool needSpill = false;    uint32_t taskSeq = 0U;   // 所属候选任务序号：分数区 parity 周期 2，任务 t 的写会覆写 t-2 的同 parity 区，故任务 t 开跑前必须消费掉 ≤t-2 的 pending 记录（2026-11-10 B5 decode 混合 L 145 丢 token 根因）
+
     };
     PendingCandScore pendingScore_[CAND_PENDING_SCORE_SLOTS];
     uint32_t pendingHead_ = 0U;
@@ -182,7 +183,7 @@ private:
                                                   uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset,
                                                   uint32_t outputIdxOffsetBase, uint64_t scoreSlotBase,
                                                   uint32_t tileBegin, uint32_t tileEnd, bool needSpill,
-                                                  uint32_t wsBase);
+                                                  uint32_t wsBase, uint32_t taskSeq);
     // v16：候选 × FD —— 把本行（分片）的 token 级累积器溢写到 LD 工作区（布局与全量扫
     // ProcessVec1 溢写一致：[wsBase × s1Base + 块内相对行][value+index 对]，供 ProcessLD 归并）
     __aicore__ inline void SpillCandTokenTopk(uint32_t wsBase, uint32_t tokenIdx);
@@ -1210,6 +1211,19 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::RunCandTask(
     if (!candGatherEnabled_ || taskTokens == 0U) {
         return;
     }
+    // v19：分数区 parity 双缓冲只隔一个任务 —— 任务 t 的 AIC 写会覆写任务 t-2 同 parity 区的
+    // 分数（pending 记录若拖到核尾 drain 才读，读到的已是 t-2 之后同 parity 任务的分数：
+    // B5 decode 混合 L 实测 row5 分片被同核第 3 个任务覆写、145 token 错排，确定性复现）。
+    // 任务 t 开跑前强制消费所有 taskSeq ≤ t-2 的队首记录；t-1 的记录保留（消费间距仍 ≥1 个
+    // 任务的 gather+计算时间，GM 落地余量不小于原 2-token 滞后路径）。每任务入队 ≤ taskTokens
+    // （≤4）条，队列深度恒 ≤ 8，原有"队列满 7 消费队首"逻辑自然退化不触发。
+    while (pendingCount_ > 0U) {
+        const PendingCandScore &front = pendingScore_[pendingHead_];
+        if (!front.valid || front.taskSeq + 2U > taskSeq) {
+            break;
+        }
+        ConsumePendingCandScore();
+    }
     const uint64_t scoreSlotBase = static_cast<uint64_t>(taskSeq & 1U) * QLIV2Common::CAND_SCORE_TILES_PER_TASK *
                                    QLIV2Common::CAND_TILE_TOKENS;
     if (maxTiles == 0U) {
@@ -1249,7 +1263,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::RunCandTask(
     for (uint32_t t = pendBegin; t < taskTokens; t++) {
         RecordPendingCandScore(bIdx, rowBase, s1RowBase, n2Idx, t, maxTiles, actS1Size, actS2Size,
                                actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase, scoreSlotBase,
-                               tileBegin, tileEnd, needSpill, wsBase);
+                               tileBegin, tileEnd, needSpill, wsBase, taskSeq);
     }
     while (pendingCount_ > CAND_PENDING_SCORE_SLOTS - 1U) {
         ConsumePendingCandScore();
@@ -1261,7 +1275,8 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::RecordPendingCandScore(
     uint32_t bIdx, uint32_t rowBase, uint32_t s1RowBase, uint32_t n2Idx, uint32_t tokenIdx, uint32_t maxTiles,
     uint32_t actS1Size,
     uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset, uint32_t outputIdxOffsetBase,
-    uint64_t scoreSlotBase, uint32_t tileBegin, uint32_t tileEnd, bool needSpill, uint32_t wsBase)
+    uint64_t scoreSlotBase, uint32_t tileBegin, uint32_t tileEnd, bool needSpill, uint32_t wsBase,
+    uint32_t taskSeq)
 {
     const uint32_t slot = (pendingHead_ + pendingCount_) % CAND_PENDING_SCORE_SLOTS;
     PendingCandScore &rec = pendingScore_[slot];
@@ -1281,6 +1296,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::RecordPendingCandScore(
     rec.tileBegin = tileBegin;
     rec.tileEnd = tileEnd;
     rec.needSpill = needSpill;
+    rec.taskSeq = taskSeq;
     rec.wsBase = wsBase;
     ++pendingCount_;
 }
