@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 class GDNProjectionTest(unittest.TestCase):
     def setUp(self):
-        self.trace = []
+        self.trace: list[tuple[str, str]] = []
         trace = self.trace
 
         class Event:
@@ -75,6 +75,8 @@ class GDNProjectionTest(unittest.TestCase):
             modules[name] = module
         path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/gdn_projection.py"
         spec = importlib.util.spec_from_file_location("gdn_projection_under_test", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load the GDN projection module from {path}")
         self.module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, modules):
             spec.loader.exec_module(self.module)
