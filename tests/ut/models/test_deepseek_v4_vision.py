@@ -4,8 +4,8 @@ import pytest
 import torch
 from torch import nn
 from vllm.model_executor.models.interfaces import supports_eagle3
+from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
-from vllm_ascend.models.deepseek_v4.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm_ascend.models.deepseek_v4.vl_model import (
     AscendDeepseekV4ForConditionalGeneration,
 )

@@ -19,9 +19,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from vllm_ascend.models.deepseek_v4.mm_preprocess import (
+from vllm.models.deepseek_v4.common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
@@ -29,6 +27,8 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
     DeepseekV4VLProcessingInfo,
     image_sentinel_mask,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
 from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
 from vllm_ascend.models.deepseek_v4.vision import (
     DeepseekV4Aligner,

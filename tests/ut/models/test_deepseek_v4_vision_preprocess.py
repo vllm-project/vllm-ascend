@@ -9,19 +9,18 @@ import torch
 from PIL import Image
 from transformers import DeepseekV4Config
 from vllm.config.multimodal import MultiModalConfig
-from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails
-from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
-from vllm.multimodal.processing.inputs import ProcessorInputs
-
-from vllm_ascend.models.deepseek_v4 import mm_preprocess as prep
-from vllm_ascend.models.deepseek_v4.mm_preprocess import (
+from vllm.models.deepseek_v4.common import mm_preprocess as prep
+from vllm.models.deepseek_v4.common.mm_preprocess import (
     COMPRESS_PAD_TO,
     IMAGE,
     IMAGE_PAD,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessor,
 )
+from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails
+from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 
 
 class _StubInfo:
