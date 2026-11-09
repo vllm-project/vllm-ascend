@@ -2438,6 +2438,25 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
+    def test_shutdown_weight_transfer_engine_only_releases_transfer_session(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        worker.shutdown_weight_transfer_engine()
+
+        engine.shutdown.assert_called_once_with()
+        worker.model_runner.shutdown.assert_not_called()
+
+    def test_shutdown_weight_transfer_engine_rejects_active_update(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+
+        with self.assertRaisesRegex(RuntimeError, "during a weight update"):
+            worker.shutdown_weight_transfer_engine()
+
+        engine.shutdown.assert_not_called()
+
     @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
     def test_shutdown_releases_engine(self, mock_kv_shutdown, mock_ec_shutdown):
