@@ -32,7 +32,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -130,7 +129,7 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
         for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed")
         for pa_enabled in (False, True)
     ]
-    + [("c8", True), ("dcp", True)],
+    + [("c8", True)],
 )
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
@@ -162,7 +161,6 @@ def test_main_allocator_attention_layout(
     )
     impl_cls = {
         "c8": AscendC8AttentionBackendImpl,
-        "dcp": AscendAttentionDCPImpl,
     }.get(cache_kind, AscendAttentionBackendImpl)
     impl = impl_cls.__new__(impl_cls)
     impl.sliding_window = extra_args.get("sliding_window")
@@ -183,7 +181,7 @@ def test_main_allocator_attention_layout(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         quant_config=None,
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)

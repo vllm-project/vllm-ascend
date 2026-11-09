@@ -34,10 +34,10 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 | Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | Speculative Decoding + DCP | PCP + DCP |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Ascend A2/A3 | MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
-| Ascend A2/A3 | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (`DCP_SIZE = PCP_SIZE` only) |
+| Ascend A2/A3 | GQA | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported |
 | Ascend A2/A3 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
 | 950PR&950DT Products | MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
-| 950PR&950DT Products | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (`DCP_SIZE = PCP_SIZE` only) |
+| 950PR&950DT Products | GQA | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported | ❌ Not supported |
 | 950PR&950DT Products | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
@@ -110,7 +110,7 @@ For either method, remove `--enforce-eager` and add the following option to use 
   Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
-- PCP and DCP can be stacked for MLA, SFA, and GQA. See
+- PCP and DCP can be stacked for MLA and SFA. GQA does not support DCP. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
@@ -137,16 +137,15 @@ Standalone DCP reuses only the TP ranks and does not increase the world size.
     - `tensor_parallel_size % decode_context_parallel_size == 0`
 - For a sparse SFA model with DCP enabled (`decode_context_parallel_size>1`):
     - `decode_context_parallel_size == tensor_parallel_size`
-- For a GQA model such as Qwen3-235B:
-    - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
-    - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
+- For GQA/MQA models:
+    - Decode Context Parallelism (DCP) is not supported. GQA/MQA models must keep `decode_context_parallel_size=1`.
 
 #### Combining PCP and DCP { #combining-pcp-and-dcp }
 
 When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode_context_parallel_size>1`), their supported sizes depend on the attention backend. The standalone DCP constraints above do not apply to this topology. Here, `PCP_SIZE` is `prefill_context_parallel_size`, `DCP_SIZE` is `decode_context_parallel_size`, and `TP_SIZE` is `tensor_parallel_size`:
 
 - **MLA and SFA**: Support `DCP_SIZE = PCP_SIZE` and `DCP_SIZE = PCP_SIZE * TP_SIZE`.
-- **GQA**: Supports only `DCP_SIZE = PCP_SIZE`. When `TP_SIZE > 1`, `DCP_SIZE = PCP_SIZE * TP_SIZE` is not supported.
+- **GQA**: Decode Context Parallelism (DCP) is not supported for GQA models.
 
 DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
 

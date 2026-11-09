@@ -173,7 +173,7 @@ DSA PCP gathers hidden states and restores global order for cache updates, compr
 
 - **Weight sharding:** Embedding and LM-head weights can be partitioned across TP×PCP. Supported SFA/DSA O-projections also use PCP weight shards: prefill can gather weights temporarily, while sharded decode exchanges activations and returns projected results to their owners. See the [PCP weight-sharding configuration](../../user_guide/feature_guide/context_parallel.md#usage) for the embedding, LM-head, and O-projection options.
 - **Graph execution:** Local execution sizes and global batch metadata coexist. Input, slot, and restore buffers keep stable addresses across replay, and capture metadata must describe the runtime layouts. See [ACL Graph](ACL_Graph.md) for replay mechanisms and the CP user guide for supported modes.
-- **Speculative decoding:** The target uses its PCP topology; supported draft paths run with logical PCP=1 on each peer. Target outputs are restored for draft processing and sampling. Draft DCP support remains model-specific.
+- **Speculative decoding:** The target uses its PCP topology; supported draft paths run with logical PCP=1 on each peer. Target outputs are restored for draft processing and sampling. Draft DCP support remains model-specific (supported for MLA draft models; GQA draft models maintain native TP head sharding without DCP).
 - **KV transfer:** In the documented PCP P/D setup, the producer uses PCP and the consumer uses PCP=1. For standalone DCP and PCP+DCP, KV transfer requires `cp_kv_cache_interleave_size` to be set explicitly to the cache block size.
 
 Configuration and connector compatibility are listed in the [Context Parallel user guide](../../user_guide/feature_guide/context_parallel.md).
@@ -185,7 +185,6 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - Slot mapping: `vllm_ascend/worker/block_table.py`
 - Input and attention metadata: `vllm_ascend/worker/v1/model_runner.py`
 - Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`
-- GQA DCP backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
 - MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
 - SFA DCP backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
 - DSA PCP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`

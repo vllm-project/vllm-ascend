@@ -28,7 +28,6 @@ from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -41,8 +40,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
-from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
@@ -644,7 +641,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             for metadata in per_step_attn_metadata.values():
                 metadata.attn_state = attn_state
                 metadata.seq_lens_cpu = seq_lens_cpu
-                if self.attn_architecture == "MLA" or (self.use_dcp and self.attn_architecture == "GQA"):
+                if self.attn_architecture == "MLA":
                     # Clone per-step decode state so length updates do not alias.
                     metadata.decode = copy(metadata.decode)
             draft_attn_metadatas.append(per_step_attn_metadata)
@@ -698,7 +695,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
-    # TODO: Move build_fia_params and build_fia_params_dcp out of the
+    # TODO: Move build_fia_params out of the
     # speculator into the attention backend's graph-parameter helpers.
     def build_fia_params(
         self,
@@ -707,8 +704,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
-        if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
@@ -736,55 +731,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": seq_lens,
                         "block_table": block_table,
-                    }
-                )
-        return fia_params
-
-    def build_fia_params_dcp(
-        self,
-        num_reqs_padded: int,
-        draft_attn_metadata: dict[str, Any],
-        is_draft_model_prefill: bool,
-    ) -> list[dict[str, Any]]:
-        """Build all GQA DCP draft steps' history/current or cache parameters."""
-        assert self.dcp_manager is not None
-        if is_draft_model_prefill:
-            return [
-                params
-                for layer_name, metadata in draft_attn_metadata.items()
-                for params in build_dcp_fia_params(
-                    layer_name,
-                    metadata,
-                    self.dcp_manager.dcp_world_rank,
-                    is_draft_model=True,
-                    is_draft_model_prefill=True,
-                )
-            ]
-        assert self.input_batch is not None
-        parallel_config = self.draft_vllm_config.parallel_config
-        num_reqs = self.input_batch.num_reqs
-        query_start_loc = list(range(1, num_reqs_padded + 1))
-        fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            kv_lens_cpu = torch.tensor(seq_lens, dtype=torch.int32)
-            local_kv_lens = get_dcp_local_seq_lens(
-                kv_lens_cpu,
-                dcp_size=parallel_config.decode_context_parallel_size,
-                dcp_rank=self.dcp_manager.dcp_world_rank,
-                cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
-            ).tolist()
-            for layer_name in self.draft_attn_layer_names:
-                metadata = draft_attn_metadata[layer_name]
-                fia_params.append(
-                    {
-                        "layer_name": (layer_name, CPKVScope.FULL),
-                        "actual_seq_lengths": query_start_loc,
-                        "actual_seq_lengths_kv": local_kv_lens,
-                        "block_table": metadata.decode.block_tables,
                     }
                 )
         return fia_params

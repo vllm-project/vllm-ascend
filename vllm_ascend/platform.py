@@ -1950,24 +1950,29 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
+def _supports_dcp(model_config: ModelConfig) -> bool:
+    return (
+        getattr(model_config, "use_mla", False)
+        or getattr(model_config, "is_deepseek_mla", False)
+        or model_uses_sfa_sparse(model_config)
+        or model_uses_kpool_indexer(model_config)
+    )
+
+
 def _validate_model_pcp_dcp_config(
     model_config: ModelConfig,
     pcp_size: int,
     dcp_size: int,
 ) -> None:
-    """Require equal PCP/DCP sizes for GQA/MQA stacking."""
-    if model_config.use_mla or pcp_size <= 1 or dcp_size <= 1:
-        return
-    if pcp_size != dcp_size:
+    """Validate DCP support for the model architecture."""
+    if dcp_size > 1 and not _supports_dcp(model_config):
         raise ValueError(
-            "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
-            "to equal decode_context_parallel_size; "
-            f"got PCP={pcp_size}, DCP={dcp_size}."
+            "Decode Context Parallelism (DCP) is not supported for GQA/MQA models. Only MLA and SFA models support DCP."
         )
 
 
 def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
-    """Validate GQA/MQA PCP+DCP sizes for the target model."""
+    """Validate DCP support for the target model."""
     parallel_config = vllm_config.parallel_config
     _validate_model_pcp_dcp_config(
         vllm_config.model_config,
@@ -2057,50 +2062,6 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if draft_model_config is None:
         return
 
-    # MLA draft models do not use the GQA/MQA head-sharding rules below.
-    if draft_model_config.use_mla:
-        return
-
-    pcp_size = parallel_config.prefill_context_parallel_size
-    if pcp_size > 1:
-        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
-        return
-
-    draft_parallel_config = speculative_config.draft_parallel_config
-    if draft_parallel_config is not None:
-        draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
-    elif speculative_config.draft_tensor_parallel_size is not None:
-        draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
-    else:
-        draft_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-    total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
-    total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
-
-    if draft_tensor_parallel_size <= total_num_kv_heads:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"tensor parallel size {draft_tensor_parallel_size} must be "
-            f"greater than total num kv heads {total_num_kv_heads} when "
-            "enable decode context parallel for GQA/MQA draft model"
-        )
-
-    max_dcp_size = draft_tensor_parallel_size // total_num_kv_heads
-    if decode_context_parallel_size > max_dcp_size:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            "decode context parallel size must less than or equal to "
-            f"(draft tensor parallel size {draft_tensor_parallel_size} // "
-            f"draft total num kv heads {total_num_kv_heads}) = "
-            f"{max_dcp_size}, but got {decode_context_parallel_size}"
-        )
-
-    num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-    if num_q_per_kv % decode_context_parallel_size != 0:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"total number of q per kv attn heads ({num_q_per_kv}) must "
-            "be divisible by dcp world size when enable decode context "
-            f"parallel for GQA draft model "
-            f"({decode_context_parallel_size})."
-        )
+    # GQA draft models maintain native TP head sharding without DCP when target
+    # enables DCP. Only MLA draft models may participate in DCP.
+    return

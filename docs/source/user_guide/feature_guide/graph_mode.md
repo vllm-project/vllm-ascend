@@ -102,7 +102,6 @@ On Ascend, the current attention backend support levels are:
 | Attention backend | Declared support | Practical meaning |
 |---|---|---|
 | `attention_v1` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
-| `context_parallel/attention_cp` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
 | `mla_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 | `context_parallel/mla_cp` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 | `sfa_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |

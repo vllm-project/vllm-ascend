@@ -558,37 +558,6 @@ MTP_PCP_CASE = AccuracyCase(
 )
 
 
-EAGLE3_PCP_CASE = AccuracyCase(
-    name="eagle3_gqa_pcp_dcp",
-    model=EAGLE3_PCP_TARGET_MODEL,
-    prompts=ACCURACY_PROMPTS,
-    expected_outputs=EAGLE3_PCP_GOLDENS,
-    minimum_acceptance_rates=EAGLE3_PCP_MIN_ACCEPTANCE_RATES,
-    max_tokens=32,
-    output_prefix_tokens=5,
-    runner_kwargs={
-        "tensor_parallel_size": 2,
-        "prefill_context_parallel_size": 2,
-        "decode_context_parallel_size": 2,
-        "max_model_len": 2048,
-        "max_num_seqs": 256,
-        "distributed_executor_backend": "mp",
-        "gpu_memory_utilization": 0.7,
-        "disable_log_stats": False,
-        "async_scheduling": True,
-        "seed": 0,
-        "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [12]},
-        "speculative_config": {
-            "method": "eagle3",
-            "model": EAGLE3_PCP_DRAFT_MODEL,
-            "num_speculative_tokens": 3,
-            "draft_tensor_parallel_size": 2,
-            "disable_padded_drafter_batch": False,
-        },
-    },
-)
-
-
 @pytest.mark.e2e_model(MTP_PCP_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -611,30 +580,6 @@ EAGLE3_PCP_CASE = AccuracyCase(
 def test_mtp_mla_spec_decode_with_pcp() -> None:
     """Verify MRV2 MTP MLA PCP output consistency against its reference golden."""
     _run_accuracy_case(MTP_PCP_CASE)
-
-
-@pytest.mark.e2e_model(EAGLE3_PCP_TARGET_MODEL, EAGLE3_PCP_DRAFT_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="dense",
-    feature="eagle3,chunked_prefill",
-    parallel="TP,PCP,DCP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="BF16",
-    graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "HCCL_BUFFSIZE": "1024",
-    },
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_eagle3_gqa_spec_decode_with_pcp() -> None:
-    """Verify MRV2 Eagle3 PCP+DCP output accuracy and acceptance in one generation."""
-    _run_accuracy_case(EAGLE3_PCP_CASE)
 
 
 @pytest.mark.e2e_model(EAGLE3_PCP_TARGET_MODEL)
