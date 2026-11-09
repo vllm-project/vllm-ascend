@@ -10,7 +10,12 @@ import torch_npu  # noqa: F401
 from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend
-from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, allocate_mapped_host, scatter_packed_kv
+from vllm_ascend.hisparse.cache_ops import (
+    HiSparseNPUOps,
+    allocate_mapped_host,
+    gather_valid_resident_rows,
+    scatter_packed_kv,
+)
 from vllm_ascend.hisparse.prefill import build_hisparse_prefill_staging_plan
 
 
@@ -113,6 +118,47 @@ def test_backend_resident_payload_graph_replay(dtype, width):
         safe = torch.tensor(values).clamp_min(0)
         expected = source.view(torch.uint8).cpu()[safe // 2, safe % 2]
         assert torch.equal(destination.view(torch.uint8).cpu(), expected)
+
+
+@pytest.mark.parametrize("row_bytes", [37, 656])
+@pytest.mark.parametrize("capture", [False, True])
+def test_prefill_resident_patch_changing_extents(row_bytes, capture):
+    if not torch.npu.is_available():
+        pytest.skip("NPU required")
+    torch.npu.set_device(0)
+    block = 4
+    for rows, source_blocks in ((8, 4), (24, 6), (40, 8)):
+        source_cpu = (torch.arange(source_blocks * 5 * block * row_bytes) % 251).to(torch.uint8)
+        source_cpu = source_cpu.view(source_blocks, 5, block, row_bytes)
+        source = source_cpu.npu()
+        destination = torch.full((rows // block, 2, block, row_bytes), 7, dtype=torch.uint8, device="npu:0")
+        indices = torch.empty(rows, dtype=torch.int32, device="npu:0")
+        source_view, destination_view = source[:, 0], destination[:, 0]
+
+        indices.fill_(-1)
+        gather_valid_resident_rows(source_view, destination_view, indices)
+        torch.npu.synchronize()
+        graph = None
+        if capture:
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                gather_valid_resident_rows(source_view, destination_view, indices)
+        for iteration in range(2):
+            values = (torch.arange(rows, dtype=torch.int32) + iteration * 3) % (source_blocks * block + 2) - 1
+            current_source = source_cpu + iteration * 13
+            source.copy_(current_source)
+            indices.copy_(values)
+            destination.fill_(7)
+            if graph is None:
+                gather_valid_resident_rows(source_view, destination_view, indices)
+            else:
+                graph.replay()
+            torch.npu.synchronize()
+            expected = torch.full(destination.shape, 7, dtype=torch.uint8)
+            for row, selected in enumerate(values.tolist()):
+                if 0 <= selected < source_blocks * block:
+                    expected[row // block, 0, row % block] = current_source[selected // block, 0, selected % block]
+            assert torch.equal(destination.cpu(), expected)
 
 
 def test_prefill_singleton_column_mapping_tracks_current_residency():
