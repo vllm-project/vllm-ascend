@@ -1096,6 +1096,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
             # computing the pool bytes per block.
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
         ),
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
     builder = AscendKVCacheConfigBuilder()
     ascend_bytes_per_block = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
