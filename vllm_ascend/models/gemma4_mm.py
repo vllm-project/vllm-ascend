@@ -18,6 +18,7 @@
 import torch
 from transformers import AutoModel
 from vllm.config import VllmConfig
+from vllm.model_executor.models import gemma4_mm
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
@@ -85,9 +86,15 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         # Initialize the attribute here to prevent AttributeError when processing image inputs.
         lora_config = vllm_config.lora_config
         self._enable_mm_lora = bool(lora_config is not None and lora_config.enable_tower_connector_lora)
+        self.use_data_parallel = bool(
+            multimodal_config is not None and getattr(multimodal_config, "mm_encoder_tp_mode", None) == "data"
+        )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            # Older vLLM versions do not use device-side input normalization.
+            if hasattr(gemma4_mm, "build_mm_input_norm"):
+                self.vision_input_norm = gemma4_mm.build_mm_input_norm(vllm_config.model_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
