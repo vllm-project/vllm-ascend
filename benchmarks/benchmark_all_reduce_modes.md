@@ -54,13 +54,14 @@ python3 benchmarks/benchmark_all_reduce_modes.py \
 终端显示每个消息大小的校验结果以及最终对比表：
 
 ```text
-     Payload   AI_CPU med   AI_CPU p95      AIV med      AIV p95    Speedup
-      4096 B          ...          ...          ...          ...       ...x
+     Payload   AI_CPU avg   AI_CPU med   AI_CPU p95      AIV avg      AIV med      AIV p95 Speedup(med)
+      4096 B          ...          ...          ...          ...          ...          ...         ...x
 ```
 
 - `AI_CPU.json` / `AIV.json`：各 rank 的设备、主机、torch/torch_npu 版本、相关环境变量、每轮中位数、跨 rank 取最大值后的全部时延样本，单位微秒。
 - `comparison.json`：包含两个原始报告和对比结果。
-- `comparison.csv`：每个消息大小一行，提供两个模式的中位数/p95、加速比和延迟下降百分比。
+- `comparison.csv`：每个消息大小一行，提供两个模式的 AVG/中位数/p95、加速比和延迟下降百分比。
+- AVG 是所有轮次样本的算术平均值，每个样本先跨 rank 取最大值；终端进度和最终对比表均显示 AVG，CSV/对比 JSON 字段为 `ai_cpu_mean_us`、`aiv_mean_us`，单位微秒。
 - `speedup_ai_cpu_over_aiv = AI_CPU median / AIV median`，大于 1 表示请求 AIV 的运行更快。
 - `aiv_latency_reduction_pct = (1 - AIV median / AI_CPU median) * 100`，正值表示延迟下降。
 

@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only checks for aggregation and mode isolation; no NPU imports."""
 
+import csv
 import importlib.util
+import io
+import json
 import math
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,6 +30,7 @@ class TestAllReduceModesBenchmark(unittest.TestCase):
         self.assertEqual(samples, [100, 100, 10])
         summary = bench.summarize(samples)
         self.assertEqual(summary["median_us"], 100)
+        self.assertEqual(summary["mean_us"], 70)
         self.assertEqual(summary["p95_us"], 100)
         for invalid in ([], [0], [-1], [math.inf], [math.nan]):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
@@ -36,12 +41,43 @@ class TestAllReduceModesBenchmark(unittest.TestCase):
     def test_comparison_direction_and_workload_consistency(self):
         config = dict(world_size=4, dtype="bfloat16", timing="event", warmup=20, iterations=100, rounds=3)
         reports = {
-            "AI_CPU": {**config, "results": [{"payload_bytes": 4096, "numel": 2048, "median_us": 20, "p95_us": 30}]},
-            "AIV": {**config, "results": [{"payload_bytes": 4096, "numel": 2048, "median_us": 10, "p95_us": 15}]},
+            "AI_CPU": {
+                **config,
+                "results": [{"payload_bytes": 4096, "numel": 2048, "mean_us": 25, "median_us": 20, "p95_us": 30}],
+            },
+            "AIV": {
+                **config,
+                "results": [{"payload_bytes": 4096, "numel": 2048, "mean_us": 12, "median_us": 10, "p95_us": 15}],
+            },
         }
         row = bench.comparison_rows(reports)[0]
+        self.assertEqual(row["ai_cpu_mean_us"], 25)
+        self.assertEqual(row["aiv_mean_us"], 12)
         self.assertEqual(row["speedup_ai_cpu_over_aiv"], 2)
         self.assertEqual(row["aiv_latency_reduction_pct"], 50)
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+
+            def run_mode(command, **kwargs):
+                mode = command[command.index("--mode") + 1]
+                (output_dir / f"{mode}.json").write_text(json.dumps(reports[mode]), encoding="utf-8")
+
+            output = io.StringIO()
+            args = bench.parse_args(["--sizes", "4K", "--output-dir", directory])
+            with redirect_stdout(output), patch.object(bench.subprocess, "run", side_effect=run_mode):
+                bench._launch(args)
+            self.assertIn("AI_CPU avg", output.getvalue())
+            self.assertIn("AIV avg", output.getvalue())
+            self.assertIn("Speedup(med)", output.getvalue())
+            self.assertIn("25.000", output.getvalue())
+            self.assertIn("12.000", output.getvalue())
+            with (output_dir / "comparison.csv").open(newline="", encoding="utf-8") as stream:
+                csv_row = next(csv.DictReader(stream))
+            self.assertEqual(float(csv_row["ai_cpu_mean_us"]), 25)
+            self.assertEqual(float(csv_row["aiv_mean_us"]), 12)
+            json_row = json.loads((output_dir / "comparison.json").read_text(encoding="utf-8"))["comparison"][0]
+            self.assertEqual(json_row["ai_cpu_mean_us"], 25)
+            self.assertEqual(json_row["aiv_mean_us"], 12)
         reports["AIV"]["timing"] = "wall"
         with self.assertRaisesRegex(ValueError, "timing"):
             bench.comparison_rows(reports)

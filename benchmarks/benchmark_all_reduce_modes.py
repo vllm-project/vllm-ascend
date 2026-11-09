@@ -141,8 +141,10 @@ def comparison_rows(reports: dict[str, dict]) -> list[dict]:
             {
                 "payload_bytes": size,
                 "numel": base["numel"],
+                "ai_cpu_mean_us": base["mean_us"],
                 "ai_cpu_median_us": base["median_us"],
                 "ai_cpu_p95_us": base["p95_us"],
+                "aiv_mean_us": aiv["mean_us"],
                 "aiv_median_us": aiv["median_us"],
                 "aiv_p95_us": aiv["p95_us"],
                 "speedup_ai_cpu_over_aiv": base["median_us"] / aiv["median_us"],
@@ -227,13 +229,17 @@ def _launch(args: argparse.Namespace) -> None:
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-        print(f"\nRequested modes; {args.timing} timing, median/p95 of per-sample slowest rank (us)")
-        print(f"{'Payload':>12} {'AI_CPU med':>12} {'AI_CPU p95':>12} {'AIV med':>12} {'AIV p95':>12} {'Speedup':>10}")
+        print(f"\nRequested modes; {args.timing} timing, avg/median/p95 of per-sample slowest rank (us)")
+        print(
+            f"{'Payload':>12} {'AI_CPU avg':>12} {'AI_CPU med':>12} {'AI_CPU p95':>12} "
+            f"{'AIV avg':>12} {'AIV med':>12} {'AIV p95':>12} {'Speedup(med)':>12}"
+        )
         for row in rows:
             print(
-                f"{row['payload_bytes']:>10} B {row['ai_cpu_median_us']:>12.3f} {row['ai_cpu_p95_us']:>12.3f} "
-                f"{row['aiv_median_us']:>12.3f} {row['aiv_p95_us']:>12.3f} "
-                f"{row['speedup_ai_cpu_over_aiv']:>9.3f}x"
+                f"{row['payload_bytes']:>10} B {row['ai_cpu_mean_us']:>12.3f} "
+                f"{row['ai_cpu_median_us']:>12.3f} {row['ai_cpu_p95_us']:>12.3f} "
+                f"{row['aiv_mean_us']:>12.3f} {row['aiv_median_us']:>12.3f} {row['aiv_p95_us']:>12.3f} "
+                f"{row['speedup_ai_cpu_over_aiv']:>11.3f}x"
             )
     print(f"\nResults: {output_dir}\n{_MODE_NOTE}", flush=True)
 
@@ -387,7 +393,8 @@ def _worker(args: argparse.Namespace) -> None:
         report["results"].append(row)
         if rank == 0:
             print(
-                f"{args.mode:>6} {size:>10} B  median={row['median_us']:.3f} us  p95={row['p95_us']:.3f} us  PASS",
+                f"{args.mode:>6} {size:>10} B  avg={row['mean_us']:.3f} us  "
+                f"median={row['median_us']:.3f} us  p95={row['p95_us']:.3f} us  PASS",
                 flush=True,
             )
         del working, source
