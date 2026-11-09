@@ -55,24 +55,25 @@ def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
         token_size_bytes_v=4,
         selective_hot_keys=torch.full((2, 2, 4), -1, dtype=torch.int64),
         selective_hot_requests=torch.full((2, 2, 1), -1, dtype=torch.int64),
+        selective_hot_lookup=torch.zeros((2, 5), dtype=torch.int32),
+        selective_slot_ids=torch.arange(3, dtype=torch.int32),
         selective_copy_src=torch.empty((2, 12), dtype=torch.int64),
         selective_copy_dst=torch.empty((2, 12), dtype=torch.int64),
         selective_copy_lengths=torch.empty((2, 12), dtype=torch.int32),
         selective_copy_counts=torch.tensor([6, 12]),
         selective_hot_offsets=torch.tensor([[0], [3]]),
         selective_physical=torch.empty((2, 2, 1, 3), dtype=torch.int32),
-        selective_current=torch.empty((2, 2, 3), dtype=torch.bool),
+        selective_current_slots=torch.empty((2, 2, 1), dtype=torch.int64),
         copy_sfa_kv=MagicMock(),
     )
     metadata = SimpleNamespace(block_table=torch.tensor([[1, 0], [0, 1]]), req_ids_tensor=torch.tensor([1, 2]))
     indices = torch.tensor([[0, 2, -1], [0, 1, -1]])
-    for layer in range(2):
-        AscendSFAKVOffloadImpl._prepare_selective_kv(
-            manager, layer, indices, metadata, torch.tensor([3, 2]), prefetch=True
-        )
+    seq_lens = torch.tensor([3, 2])
+    plan = AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, seq_lens)
+    AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 1, indices, metadata, seq_lens, plan=plan)
 
     assert manager.copy_sfa_kv.call_count == 2
-    assert manager.selective_current.tolist() == [[[False, True, False], [False, True, False]]] * 2
+    assert manager.selective_current_slots.tolist() == [[[1], [1]]] * 2
     assert manager.selective_copy_lengths.tolist() == [[4, 0, 0, 4, 0, 0] * 2] * 2
     assert manager.selective_copy_src[0, 0] == host[0].data_ptr() + 8
     assert manager.selective_copy_src[1, 0] == host[1].data_ptr() + 8
@@ -81,10 +82,41 @@ def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
     assert manager.selective_copy_dst[0, 3] >= hot[0].data_ptr() + 12
     assert manager.selective_physical[:, :, 0, 2].tolist() == [[-1, -1]] * 2
 
+    # The second layer can have different residency even with identical request metadata.
+    manager.selective_hot_keys[1, 0].fill_(-1)
+    plan = AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, seq_lens)
+    AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 1, indices, metadata, seq_lens, plan=plan)
+    assert manager.selective_copy_lengths[0].count_nonzero() == 0
+    assert manager.selective_copy_lengths[1].tolist() == [4, 0, 0, 0, 0, 0] * 2
+
     metadata.req_ids_tensor = torch.tensor([2, 0])
-    AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, torch.tensor([3, 2]), prefetch=True)
+    AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, torch.tensor([3, 2]))
     assert manager.selective_copy_lengths[0].tolist() == [4, 0, 0, 0, 0, 0] * 2
     assert manager.selective_physical[0, 1].tolist() == [[-1, -1, -1]]
+
+
+def test_selective_current_kv_updates_only_selected_row_slots():
+    keys = torch.arange(24).view(3, 4, 1, 2)
+    values = torch.arange(12).view(3, 4, 1, 1)
+    current = (torch.tensor([[80, 81], [90, 91], [100, 101]]), torch.tensor([[50], [60], [70]]))
+    manager = SimpleNamespace(
+        selective_current_slots=torch.tensor([[[2], [-1], [0]]]),
+        current_kv_by_layer={0: current},
+        topk_buffers_k=[keys],
+        topk_buffers_v=[values],
+    )
+    expected_keys = keys.clone()
+    expected_values = values.clone()
+    expected_keys[0, 2, 0] = torch.tensor([80, 81])
+    expected_keys[2, 0, 0] = torch.tensor([100, 101])
+    expected_values[0, 2, 0] = 50
+    expected_values[2, 0, 0] = 70
+
+    AscendSFAKVOffloadImpl._fill_selective_current_kv(manager, 0, 3)
+
+    torch.testing.assert_close(keys, expected_keys)
+    torch.testing.assert_close(values, expected_values)
+    assert manager.current_kv_by_layer[0] is current
 
 
 class TestAscendSFABackend(TestBase):

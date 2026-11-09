@@ -100,16 +100,17 @@ def _sparse_kv_ops():
     return _SPARSE_KV_OFFLOAD_OPS
 
 
-def plan_selective_hot_slots(keys, previous_request, request, source_slots, valid):
+def plan_selective_hot_slots(keys, previous_request, request, source_slots, valid, lookup, slot_ids):
     """Keep selected resident rows and assign misses to unselected slots."""
     capacity = keys.shape[-1] - 1  # Last entry in each row absorbs invalid selections.
     if capacity < source_slots.shape[-1]:
         raise ValueError("Selective hot capacity must cover every TopK entry")
     resident = torch.where(previous_request == request, keys[..., :capacity], -1)
-    sorted_keys, order = torch.sort(resident)
-    positions = torch.searchsorted(sorted_keys, source_slots).clamp_max(capacity - 1)
-    hits = valid & (sorted_keys.gather(-1, positions) == source_slots)
-    hit_slots = order.gather(-1, positions)
+    sentinel = lookup.shape[-1] - 1
+    lookup.scatter_(-1, torch.where(resident >= 0, resident, sentinel), slot_ids.expand_as(resident))
+    hit_slots = lookup.gather(-1, torch.where(valid, source_slots, sentinel)).to(torch.int64)
+    # Entries left by an earlier layer or request are hits only if the current slot agrees.
+    hits = valid & (resident.gather(-1, hit_slots) == source_slots)
     used = torch.zeros_like(keys)
     used.scatter_(-1, torch.where(hits, hit_slots, capacity), 1)
     free = torch.argsort((used[..., :capacity] * 2 + (resident >= 0).to(torch.int64)).float())
@@ -835,8 +836,6 @@ class SparseKVOffloadManager:
             rows = self.topk_buffers_k[0].shape[0]
             # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
             descriptor_shape = (self.num_layers, 2 * rows * self.topk)
-            if self.tp_size > 1:
-                self.selective_writeback_sync = torch.zeros(1, dtype=torch.int32, device=device)
             self.selective_copy_src = torch.empty(descriptor_shape, dtype=torch.int64, device=device)
             self.selective_copy_dst = torch.empty_like(self.selective_copy_src)
             self.selective_copy_lengths = torch.empty(descriptor_shape, dtype=torch.int32, device=device)
@@ -844,7 +843,7 @@ class SparseKVOffloadManager:
             self.selective_physical = torch.empty(
                 (self.num_layers, rows, 1, self.topk), dtype=torch.int32, device=device
             )
-            self.selective_current = torch.empty((self.num_layers, rows, self.topk), dtype=torch.bool, device=device)
+            self.selective_current_slots = torch.empty((self.num_layers, rows, 1), dtype=torch.int64, device=device)
             self.selective_prefetch_topk = torch.empty((rows, self.topk), dtype=torch.int64, device=device)
             self.selective_prefetch_stream = torch_npu.npu.Stream(device=device)
             self.selective_prefetch_ready = [torch_npu.npu.Event() for _ in self.offload_layer_names]
@@ -868,6 +867,11 @@ class SparseKVOffloadManager:
                 torch.full((rows, self.topk_buffer_size + 1), -1, dtype=torch.int64, device=device)
                 for _ in self.offload_layer_names
             ]
+            # The main and prefetch streams can plan different layers concurrently.
+            lookup_shape = (rows, self.kv_cache_config.num_blocks * self.block_size + 1)
+            self.selective_hot_lookup = torch.zeros(lookup_shape, dtype=torch.int32, device=device)
+            self.selective_prefetch_lookup = torch.zeros_like(self.selective_hot_lookup)
+            self.selective_slot_ids = torch.arange(self.topk_buffer_size, dtype=torch.int32, device=device)
             self.selective_hot_requests = [
                 torch.full((rows, 1), -1, dtype=torch.int64, device=device) for _ in self.offload_layer_names
             ]
@@ -885,8 +889,9 @@ class SparseKVOffloadManager:
         self.d2h_src_ptrs_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int64, device=device)
         self.d2h_dst_ptrs_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int64, device=device)
         self.d2h_lengths_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int32, device=device)
+        if self.use_fused_overlap or (selective and self.tp_rank == 0):
+            self.current_kv_save_stream = torch_npu.npu.Stream(device=device)
         if self.use_fused_overlap:
-            self.current_kv_save_stream = torch_npu.npu.Stream()
             self.fused_plan_stream = torch_npu.npu.Stream()
             self.fused_plan_metadata_npu = torch.zeros(
                 1 + self.max_num_topk_rows,
@@ -895,7 +900,7 @@ class SparseKVOffloadManager:
             )
             self.fused_plan_status_npu = self.fused_plan_metadata_npu[:1]
             self.fused_plan_current_linear_slots_npu = self.fused_plan_metadata_npu[1:]
-            self.current_kv_by_layer: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.current_kv_by_layer: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.d2h_size_npu = torch.empty(1, dtype=torch.int32, device=device)
         self.d2h_token_indices_npu = torch.arange(self.max_num_tokens, dtype=torch.int64, device=device)
 
@@ -1233,12 +1238,12 @@ class SparseKVOffloadManager:
         has_prefill: bool = False,
         capturing: bool = False,
     ) -> None:
-        if getattr(self.sparse_kv_offload_config, "selective_offload", False):
-            self._get_offload_layer_id(layer_name)
-        if not has_prefill and k is not None and v is not None and self.use_fused_overlap:
+        selective = getattr(self.sparse_kv_offload_config, "selective_offload", False)
+        if selective or (self.use_fused_overlap and not has_prefill and k is not None and v is not None):
             layer_id = self._get_offload_layer_id(layer_name)
-            self.current_kv_by_layer[layer_id] = (k, v)
-        use_side_stream = self.tp_rank == 0 and self.use_fused_overlap and capturing and not has_prefill
+            if not has_prefill and k is not None and v is not None:
+                self.current_kv_by_layer[layer_id] = (k, v)
+        use_side_stream = self.tp_rank == 0 and (selective or self.use_fused_overlap) and capturing and not has_prefill
         if not use_side_stream:
             self._offload_new_kv_on_current_stream(
                 slot_mapping,
@@ -1250,9 +1255,6 @@ class SparseKVOffloadManager:
                 v,
                 has_prefill,
             )
-            if self.sparse_kv_offload_config.selective_offload and self.tp_size > 1:
-                # Rank 0 writes the shared row before any rank reloads the current token.
-                self.tp_group.all_reduce(self.selective_writeback_sync)
             return
 
         current_kv_ready = torch_npu.npu.current_stream().record_event()
@@ -1306,8 +1308,7 @@ class SparseKVOffloadManager:
                 raise ValueError("decode offload requires current-token K/V")
             device = k.device
 
-        slots = slot_mapping.reshape(-1).to(device=device, dtype=torch.int64)
-        token_count = slots.numel()
+        token_count = slot_mapping.numel()
         if token_count > self.max_num_tokens:
             raise ValueError(
                 "Sparse KV offload rows exceed D2H descriptor capacity, "
@@ -1320,6 +1321,44 @@ class SparseKVOffloadManager:
             raise ValueError(
                 f"Sparse KV offload CPU K/V pools have incompatible token capacities: k={num_k_slots}, v={num_v_slots}"
             )
+        if (
+            getattr(self.sparse_kv_offload_config, "selective_offload", False)
+            and not has_prefill
+            and k is not None
+            and v is not None
+            and k.is_contiguous()
+            and v.is_contiguous()
+            and slot_mapping.is_contiguous()
+            and slot_mapping.device == device
+            and token_count
+        ):
+            if k.numel() * k.element_size() != token_count * self.token_size_bytes_k or (
+                v.numel() * v.element_size() != token_count * self.token_size_bytes_v
+            ):
+                raise ValueError("decode K/V row counts must match slot_mapping")
+            from vllm_ascend.ops.triton.selective_kv_writeback import build_d2h_descriptors
+
+            block = min(128, max(16, 1 << (token_count - 1).bit_length()))
+            build_d2h_descriptors[(cdiv(token_count, block),)](
+                slot_mapping,
+                self.d2h_src_ptrs_npu,
+                self.d2h_dst_ptrs_npu,
+                self.d2h_lengths_npu,
+                self.d2h_size_npu,
+                k.data_ptr(),
+                v.data_ptr(),
+                k_cache_cpu.data_ptr(),
+                v_cache_cpu.data_ptr(),
+                token_count,
+                num_k_slots,
+                self.token_size_bytes_k,
+                self.token_size_bytes_v,
+                block,
+            )
+            self._submit_current_kv_writeback(device)
+            return
+
+        slots = slot_mapping.reshape(-1).to(device=device, dtype=torch.int64)
         valid = (slots >= 0) & (slots < num_k_slots)
         safe_slots = slots.clamp(min=0, max=num_k_slots - 1)
 
@@ -1352,7 +1391,9 @@ class SparseKVOffloadManager:
         self.d2h_lengths_npu[:token_count].masked_fill_(~valid, 0)
         self.d2h_lengths_npu[token_count : 2 * token_count].masked_fill_(~valid, 0)
         self.d2h_size_npu.fill_(2 * token_count)
+        self._submit_current_kv_writeback(device)
 
+    def _submit_current_kv_writeback(self, device: torch.device) -> None:
         result = offload.sparse_copy(
             self.d2h_src_ptrs_npu,
             self.d2h_dst_ptrs_npu,
@@ -1583,7 +1624,8 @@ class SparseKVOffloadManager:
         torch_npu.npu_scatter_nd_update_(flat_rope, indices, current_rope)
 
     def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
-        if self.use_fused_overlap and capturing and self.tp_rank == 0:
+        selective = getattr(self.sparse_kv_offload_config, "selective_offload", False)
+        if (selective or self.use_fused_overlap) and capturing and self.tp_rank == 0:
             torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
 
 

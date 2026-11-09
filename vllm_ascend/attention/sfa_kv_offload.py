@@ -1579,37 +1579,55 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         topk_indices: torch.Tensor,
         metadata: AscendSFAOffloadMetadata,
         seq_lengths: torch.Tensor,
-        prefetch: bool,
-    ) -> None:
+        plan: tuple[torch.Tensor, ...] | None = None,
+        lookup: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, ...]:
         block_size = manager.block_size
         topk = manager.topk
-        logical = topk_indices.reshape(-1, topk).to(torch.int64)
-        rows = logical.shape[0]
-        table = metadata.block_table[:rows].to(torch.int64)
-        seq_lengths = seq_lengths[:rows].reshape(rows, 1)
-        if metadata.req_ids_tensor is None:
-            raise RuntimeError("Selective Host KV requires request identity metadata")
-        request = metadata.req_ids_tensor[:rows].reshape(rows, 1)
-        valid = (request != 0) & (logical >= 0) & (logical < seq_lengths)
-        valid &= logical < table.shape[1] * block_size
-        block_indices = (logical.clamp_min(0) // block_size).clamp_max(table.shape[1] - 1)
-        physical_blocks = table.gather(-1, block_indices)
-        host_blocks = manager.kv_cache_config.num_blocks
-        valid &= (physical_blocks >= 0) & (physical_blocks < host_blocks)
-        source_slots = physical_blocks.clamp(0, host_blocks - 1) * block_size + logical.clamp_min(0) % block_size
+        rows = topk_indices.numel() // topk
+        keys = manager.selective_hot_keys[layer_id][:rows]
+        previous_request = manager.selective_hot_requests[layer_id][:rows]
+        if plan is None:
+            logical = topk_indices.reshape(-1, topk).to(torch.int64)
+            table = metadata.block_table[:rows].to(torch.int64)
+            seq_lengths = seq_lengths[:rows].reshape(rows, 1)
+            if metadata.req_ids_tensor is None:
+                raise RuntimeError("Selective Host KV requires request identity metadata")
+            request = metadata.req_ids_tensor[:rows].reshape(rows, 1)
+            valid = (request != 0) & (logical >= 0) & (logical < seq_lengths)
+            valid &= logical < table.shape[1] * block_size
+            block_indices = (logical.clamp_min(0) // block_size).clamp_max(table.shape[1] - 1)
+            physical_blocks = table.gather(-1, block_indices)
+            host_blocks = manager.kv_cache_config.num_blocks
+            valid &= (physical_blocks >= 0) & (physical_blocks < host_blocks)
+            source_slots = physical_blocks.clamp(0, host_blocks - 1) * block_size + logical.clamp_min(0) % block_size
 
-        destinations, misses, updated_keys = plan_selective_hot_slots(
-            manager.selective_hot_keys[layer_id][:rows],
-            manager.selective_hot_requests[layer_id][:rows],
-            request,
-            source_slots,
-            valid,
-        )
-        if prefetch:
-            # This layer has not produced the current token's KV yet.
+            destinations, misses, updated_keys = plan_selective_hot_slots(
+                keys,
+                previous_request,
+                request,
+                source_slots,
+                valid,
+                (manager.selective_hot_lookup if lookup is None else lookup)[:rows],
+                manager.selective_slot_ids,
+            )
+            # Current KV is produced locally by this layer on each TP rank.
             current = valid & (logical == seq_lengths - 1)
-            manager.selective_current[layer_id, :rows].copy_(current)
-            misses &= ~current
+            current_slots = torch.where(current, destinations, -1).amax(-1, keepdim=True)
+            plan = source_slots, destinations, valid, current, current_slots, request
+        else:
+            source_slots, destinations, valid, current, current_slots, request = plan
+            # A follower can be cold even when the shared placement plan is valid.
+            resident = torch.where(previous_request == request, keys, -1)
+            misses = valid & (resident.gather(-1, destinations) != source_slots)
+            sentinel = keys.shape[-1] - 1
+            updated_keys = resident.scatter(
+                -1,
+                torch.where(valid, destinations, sentinel),
+                torch.where(valid, source_slots, -1),
+            )
+        manager.selective_current_slots[layer_id, :rows].copy_(current_slots)
+        misses &= ~current
         entries = rows * topk
         src = manager.selective_copy_src[layer_id, : 2 * entries]
         dst = manager.selective_copy_dst[layer_id, : 2 * entries]
@@ -1629,6 +1647,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager.selective_hot_keys[layer_id][:rows].copy_(updated_keys)
         manager.selective_hot_requests[layer_id][:rows].copy_(request)
         manager.selective_physical[layer_id, :rows].copy_(torch.where(valid, destinations, -1).unsqueeze(1))
+        return plan
 
     def _prefetch_selective_followers(self, topk_indices, metadata) -> None:
         if not metadata.num_decodes or metadata.num_decode_tokens != metadata.num_decodes or metadata.num_prefills:
@@ -1648,12 +1667,37 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         stream = manager.selective_prefetch_stream
         stream.wait_stream(torch_npu.npu.current_stream())
         with torch_npu.npu.stream(stream):
+            plans = {}
             for name in followers:
                 layer_id = manager._get_offload_layer_id(name)
                 follower = context.attn_metadata[name]
-                self._prepare_selective_kv(manager, layer_id, prefetch_topk, follower, follower.seq_lens, prefetch=True)
+                key = id(follower)
+                plans[key] = self._prepare_selective_kv(
+                    manager,
+                    layer_id,
+                    prefetch_topk,
+                    follower,
+                    follower.seq_lens,
+                    plan=plans.get(key),
+                    lookup=manager.selective_prefetch_lookup,
+                )
                 manager.selective_prefetch_ready[layer_id].record()
                 ready_layers.add(layer_id)
+
+    @staticmethod
+    def _fill_selective_current_kv(manager, layer_id: int, rows: int) -> None:
+        slots = manager.selective_current_slots[layer_id, :rows].unsqueeze(-1)
+        k, v = manager.current_kv_by_layer[layer_id]
+        for cache, current in (
+            (manager.topk_buffers_k[layer_id], k),
+            (manager.topk_buffers_v[layer_id], v),
+        ):
+            width = cache.shape[-1]
+            hot = cache[:rows].view(rows, -1, width)
+            index = slots.clamp_min(0).expand(-1, -1, width)
+            # Keep the existing slot for padding and rows whose TopK excludes the current token.
+            values = torch.where(slots >= 0, current.reshape(-1, 1, width)[:rows], hot.gather(1, index))
+            hot.scatter_(1, index, values)
 
     def _execute_selective_host_attention(
         self,
@@ -1669,28 +1713,15 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager = get_sparse_kv_offload_manager()
         layer_id = manager._get_offload_layer_id(self._offload_layer_name())
         rows = query.shape[0]
-        entries = rows * manager.topk
         ready_layers = (
             getattr(get_forward_context(), "_selective_prefetched_layers", ()) if is_forward_context_available() else ()
         )
         if layer_id in ready_layers:
             torch_npu.npu.current_stream().wait_event(manager.selective_prefetch_ready[layer_id])
             ready_layers.remove(layer_id)
-            # exec_kv has written the current token to Host on this stream.
-            current = manager.selective_current[layer_id, :rows].flatten()
-            lengths = manager.selective_copy_lengths[layer_id, : 2 * entries]
-            lengths[:entries].copy_(current * manager.token_size_bytes_k)
-            lengths[entries:].copy_(current * manager.token_size_bytes_v)
-            manager.copy_sfa_kv(
-                manager.selective_copy_src[layer_id, : 2 * entries],
-                manager.selective_copy_dst[layer_id, : 2 * entries],
-                lengths,
-                manager.selective_copy_counts[rows - 1],
-            )
         else:
-            AscendSFAKVOffloadImpl._prepare_selective_kv(
-                manager, layer_id, topk_indices, metadata, seq_lengths, prefetch=False
-            )
+            AscendSFAKVOffloadImpl._prepare_selective_kv(manager, layer_id, topk_indices, metadata, seq_lengths)
+        self._fill_selective_current_kv(manager, layer_id, rows)
 
         hot_shape = (-1, manager.block_size, 1)
         k_hot = manager.topk_buffers_k[layer_id].view(*hot_shape, self.kv_lora_rank)
@@ -1713,6 +1744,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             attention_mode=2,
             return_softmax_lse=False,
         )
+        # Join before the TP output projection so peers can read the committed KV next step.
+        manager.wait_for_current_kv_writeback(self._in_graph_runtime())
+        manager.current_kv_by_layer.pop(layer_id)
         return output[0]
 
     def _execute_sparse_flash_attention_process(

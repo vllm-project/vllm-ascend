@@ -443,7 +443,9 @@ class TestHostKVRegistration(unittest.TestCase):
         previous = torch.tensor([-1])
         request = torch.tensor([10])
         cache = torch.full((4,), -1, dtype=torch.int64)
-        for selection, expected_misses in (([2, 4, 6], 3), ([6, 2, 8], 1), ([8, 8, -1], 0)):
+        lookup = torch.zeros(11, dtype=torch.int32)
+        slot_ids = torch.arange(4, dtype=torch.int32)
+        for selection, expected_misses in (([2, 4, 6], 3), ([6, 2, 8], 1), ([8, 8, -1], 0), ([4, 0, -1], 1)):
             sources = torch.tensor(selection)
             valid = sources >= 0
             slots, misses, updated = manager_module.plan_selective_hot_slots(
@@ -452,6 +454,8 @@ class TestHostKVRegistration(unittest.TestCase):
                 request,
                 sources,
                 valid,
+                lookup,
+                slot_ids,
             )
             self.assertEqual(int(misses.sum()), expected_misses)
             cache[slots[misses]] = sources[misses]
@@ -464,6 +468,8 @@ class TestHostKVRegistration(unittest.TestCase):
             torch.tensor([11]),
             torch.tensor([8, 2, 6]),
             torch.ones(3, dtype=torch.bool),
+            lookup,
+            slot_ids,
         )
         self.assertEqual(int(misses.sum()), 3)
 
