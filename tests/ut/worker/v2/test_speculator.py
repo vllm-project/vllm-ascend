@@ -833,9 +833,11 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
         assert speculator._lmhead_pad_size == num_reqs
 
     module = "vllm_ascend.worker.v2.spec_decode."
+    # #60989 renamed the native single-step draft entry point on main.
+    parent_method = "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
     with (
         patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, "_generate_draft", side_effect=parent) as generate,
+        patch.object(TargetDependentARSpeculator, parent_method, side_effect=parent) as generate,
     ):
         speculator._generate_draft(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
