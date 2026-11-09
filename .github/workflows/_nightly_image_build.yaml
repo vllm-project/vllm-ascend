@@ -70,6 +70,16 @@ on:
         type: boolean
         default: false
         description: "If true, login to SWR and push built images. Set to false for PR verification builds."
+      image_repo_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the default image repositories (base_image/ascend-ci/vllm-ascend and atlas_inference/vllm-ascend). E.g. '_presmoke' for presmoke builds. Nightly builds keep the default empty suffix."
+      base_tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the runtime base image tag used by Dockerfile.nightly.<target> (FROM <base>:nightly-<branch><os-mark><suffix>). E.g. '-presmoke' so the nightly layer consumes the base image rebuilt by the same presmoke run. Nightly builds keep the default empty suffix."
       cann_swr_url:
         required: false
         type: string
@@ -225,6 +235,8 @@ jobs:
       - name: Build nightly-${{ inputs.target }} image
         id: build
         shell: bash
+        env:
+          BASE_TAG_SUFFIX: ${{ inputs.base_tag_suffix }}
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
@@ -242,8 +254,10 @@ jobs:
             OS_MARK="-openeuler"
           fi
           # Runtime image tags are stable now that dependency versions are pinned
-          # in the Dockerfiles, so no CANN/date suffix is appended.
-          TAG_SUFFIX=""
+          # in the Dockerfiles, so no CANN/date suffix is appended. Callers that
+          # rebuild the runtime image in the same run (presmoke) pass their tag
+          # suffix here so this layer consumes that freshly built base image.
+          TAG_SUFFIX="${BASE_TAG_SUFFIX}"
           FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
           # Same dual-tag rule as the mainline nightly builds: the stable tag is
           # overwritten by each nightly, while a unique tag (CANN version +
@@ -260,14 +274,16 @@ jobs:
             # tag; the merge job creates the final multi-arch manifests. Ubuntu
             # full builds are published to the CI repo and to atlas_inference
             # (mirrored to swr.cn-north-4); openEuler only to atlas_inference.
+            # image_repo_suffix isolates presmoke builds into *_presmoke repos
+            # without changing the nightly paths.
             if [ -n "$OS_MARK" ]; then
-              FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
+              FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend${{ inputs.image_repo_suffix }}:${FULL_TAG}"
             else
-              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
+              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend${{ inputs.image_repo_suffix }}:${FULL_TAG}"
             fi
             PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}-${{ matrix.arch_name }}"
           else
-            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
+            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:${FULL_TAG}"
             PUSH_IMAGE="${FINAL_IMAGE}"
           fi
 
@@ -316,6 +332,7 @@ jobs:
         id: merge
         env:
           SWR_REGISTRY: ${{ inputs.swr_registry }}
+          IMAGE_REPO_SUFFIX: ${{ inputs.image_repo_suffix }}
           TARGET: ${{ inputs.target }}
           VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
           OS_FILTER: ${{ inputs.os_filter }}
@@ -343,14 +360,14 @@ jobs:
               TAG_SUFFIX="${TAG_SUFFIX_OPENEULER}"
               # openEuler nightly images only live in the release-shaped repo
               # that the sync-tools workflow mirrors to swr.cn-north-4.
-              DESTS="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
+              DESTS="${SWR_REGISTRY}/atlas_inference/vllm-ascend${IMAGE_REPO_SUFFIX}"
             else
               OS_MARK=""
               TAG_SUFFIX="${TAG_SUFFIX_UBUNTU}"
               # ubuntu nightly images serve the CI contract (test workflows
               # pull from ascend-ci) and the north-4 consumers through the
               # atlas_inference mirror, matching the retired daily pipeline.
-              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
+              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend${IMAGE_REPO_SUFFIX} ${SWR_REGISTRY}/atlas_inference/vllm-ascend${IMAGE_REPO_SUFFIX}"
             fi
             TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
             # The build step pushed the per-arch images under the unique tag.
