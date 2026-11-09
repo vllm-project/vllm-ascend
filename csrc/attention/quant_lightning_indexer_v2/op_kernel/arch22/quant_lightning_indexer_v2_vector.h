@@ -166,7 +166,13 @@ __aicore__ inline void SortAll(LocalTensor<float> &src, LocalTensor<float> &tmp,
         AscendC::PipeBarrier<PIPE_V>();
     }
     if (i % CONST_TWO == 0) {
-        AscendC::DataCopy(src, tmp, logitsNum * VALUE_AND_INDEX_NUM);
+        // 纯 V 回拷（bit-exact）：UB->UB DataCopy 走 MTE 管道，PipeBarrier<PIPE_V> 不构成
+        // fence，后续读 src 的向量指令可能读到 stale 数据（同 MergeSortVecCopy 的教训）。
+        LocalTensor<int32_t> dstI = src.template ReinterpretCast<int32_t>();
+        LocalTensor<int32_t> srcI = tmp.template ReinterpretCast<int32_t>();
+        for (int32_t off = 0; off < static_cast<int32_t>(logitsNum * VALUE_AND_INDEX_NUM); off += 64) {
+            AscendC::Adds(dstI[off], srcI[off], 0, 64);
+        }
         AscendC::PipeBarrier<PIPE_V>();
     }
 }
@@ -192,7 +198,13 @@ __aicore__ inline void MergeSort(const LocalTensor<float> &mrgDst, int32_t mrgDs
 
     AscendC::MrgSort<float>(tmpTensor, srcList, params);
     AscendC::PipeBarrier<PIPE_V>();
-    AscendC::DataCopy(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
+    // 纯 V 回拷（bit-exact），同 MergeSortVecCopy / VecCopyExact 的教训
+    LocalTensor<int32_t> dstI = mrgDst.template ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> srcI = tmpTensor.template ReinterpretCast<int32_t>();
+    const int32_t copyNum = mrgDstNum * VALUE_AND_INDEX_NUM;
+    for (int32_t off = 0; off < copyNum; off += 64) {
+        AscendC::Adds(dstI[off], srcI[off], 0, 64);
+    }
     AscendC::PipeBarrier<PIPE_V>();
 }
 
@@ -238,6 +250,21 @@ __aicore__ inline void MergeSortVecCopy(const LocalTensor<float> &mrgDst, int32_
     LocalTensor<int32_t> dstI = mrgDst.template ReinterpretCast<int32_t>();
     LocalTensor<int32_t> srcI = tmpTensor.template ReinterpretCast<int32_t>();
     for (int32_t off = 0; off < copyNum; off += 64) {
+        AscendC::Adds(dstI[off], srcI[off], 0, 64);
+    }
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+/**
+  UB→UB 位精确回拷（纯 V 管道）。DataCopy 走 MTE 管道，其后的 PipeBarrier<PIPE_V> 不构成
+  fence —— 多段归并里下一轮 MrgSort 会读到 stale 累加器（累加器出现 -inf 位型，表现为输出
+  顶 512 里混入 -1 空槽/丢有效项）。用 int32 视图 Adds(+0) 分 64 元素块回拷：位精确且全程 V。
+ */
+__aicore__ inline void VecCopyExact(const LocalTensor<float> &dst, const LocalTensor<float> &src, int32_t num)
+{
+    LocalTensor<int32_t> dstI = dst.template ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> srcI = src.template ReinterpretCast<int32_t>();
+    for (int32_t off = 0; off < num; off += 64) {
         AscendC::Adds(dstI[off], srcI[off], 0, 64);
     }
     AscendC::PipeBarrier<PIPE_V>();

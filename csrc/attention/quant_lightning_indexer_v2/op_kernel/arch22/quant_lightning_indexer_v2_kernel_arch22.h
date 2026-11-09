@@ -995,6 +995,10 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
         CrossCoreWaitFlag(constInfo.syncV1C1);
         CrossCoreWaitFlag(constInfo.syncV1C1);
         if (constInfo.candidateMode == QLIV2Common::CANDIDATE_MODE_CONSUMER && hasCandidateBlockLength_) {
+            // v17：AIC_DONE 前必须先等 fixpipe 队列清空 —— 核尾排空读最后一个 tile 的
+            // 分数，若分数写未落地，AIV 读到的是旧区域数据（FD 单 tile 分片让"最后写"
+            // 与"排空读"几乎背靠背，实测 tile5 高分 token 被旧区域数据顶替）。
+            AscendC::PipeBarrier<PIPE_FIX>();
             CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(
                 QLIV2Common::CAND_AIC_DONE_FLAG);
         }

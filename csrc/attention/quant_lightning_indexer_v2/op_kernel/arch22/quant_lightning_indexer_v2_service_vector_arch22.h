@@ -1369,6 +1369,11 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::GatherTokenCandidates(uint32_t bIdx,
                 int32_t c = candidateTopkIndexInGm.GetValue(
                     rowOff + static_cast<uint64_t>(tile) * CAND_BLOCKS_PER_TILE + halfBlkBase + blkBase + i);
                 if (c < 0) {
+                    // v17: 无效槽的 aux 必须显式写 0 —— 陈旧位型可能是 NaN，下游"score=raw×scale"
+                    // 会得 NaN（NaN×0=NaN、惩罚压不住、归并时把高分局挤掉，slot 头实测 (nan,-1)）。
+                    // 必须 V 管道清零 + V_MTE3 栅栏：标量 SetValue 的写对 MTE3 的 staging DMA
+                    // 不可见（曾因此偶发搬进陈旧 NaN），Duplicate 走 V 管道受栅栏约束。
+                    AscendC::Duplicate(scaleUb[i * 16], static_cast<half>(0.0f), 16);
                     continue;
                 }
                 uint64_t page = static_cast<uint64_t>(c) / pageBlkNum;
@@ -1395,6 +1400,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::GatherTokenCandidates(uint32_t bIdx,
                 AscendC::DataCopyPad(scaleUb[i * 16], kScaleGm[sOff], sParams, sPad);
             }
             SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
+            SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3); // v17: 覆盖无效槽的 V 管道清零写
             AscendC::DataCopyExtParams outParams;
             outParams.blockCount = 1;
             outParams.blockLen = CAND_BLOCKS_PER_CHUNK * CAND_BLOCK_BYTES; // 16KB
@@ -1411,8 +1417,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::GatherTokenCandidates(uint32_t bIdx,
             auxParams.rsv = 0;
             AscendC::DataCopyPad(candAuxScaleGm_[auxTileBase + static_cast<uint64_t>(blkBase) * 16ULL],
                                  scaleUb, auxParams);
-            // 本 chunk 的 staging/辅助区写已下发（MTE3 同管有序）；kUb 下 chunk 复用前等读完成
+            // 本 chunk 的 staging/辅助区写已下发（MTE3 同管有序）；kUb/scaleUb 下 chunk 复用前
+            // 必须分别等 MTE2 与 V 管道读完 —— 原缺 MTE3_V：下一 chunk 的无效槽清零 Duplicate
+            // （V 管道）会在本 chunk 的 aux MTE3 还在读 scaleUb 时把它清成 0，整块 tile
+            // （下一 chunk 全真实 gather、无 V 写）永不踩，末 tile（下一 chunk 全无效 = 16 个
+            // Duplicate）必踩 —— aux 区落定 0，score=raw×0=0，8 个有效 token 被归并丢弃
+            // （L=321 类确定性 508/512 的根因）。
             SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+            SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
         }
         // 本 AIV 的一半（两个 chunk）已写完 → 通知 AIC（两个 AIV 的 set 合并成 1 个令牌/tile）
         AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(
@@ -1622,7 +1634,13 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
         }
         PipeBarrier<PIPE_V>();
         // 分数 = 原始分数 × kscale - 1e30 × (1 - valid)
+        // （无效槽的 scale 已在上游生产侧写 0，见 GatherTokenCandidates 的 v17 注）
         Mul(curScore, curScore, scaleF, CAND_TILE_TOKENS);
+        PipeBarrier<PIPE_V>();
+        // v17：缩放后必须再 clamp 一次 —— 无效位置的 raw 先被 NaN-clamp 到 1e30，若乘上
+        // 未 gather 的陈旧 kscale（≤65504）可达 6.5e34，1e31 惩罚压不住，会以 idx=-1
+        // 占位挤进 top-512（仅在"末 tile 含无效候选块"的形状暴露，且随陈旧数据概率出现）。
+        Mins(curScore, curScore, 1.0e30f, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
         Muls(penF, penF, 1.0e31f, CAND_TILE_TOKENS); // ≥ clamp 上界 × kscale 上界，保证无效分 < 0
         PipeBarrier<PIPE_V>();
@@ -2011,7 +2029,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlo
         srcList.src4 = curCand[3 * candPairWidth];
         MrgSort(tmpCand, srcList, prm);
         PipeBarrier<PIPE_V>();
-        DataCopy(curCand, tmpCand, candPairWidth);
+        // 回拷走纯 V（bit-exact）：DataCopy 走 MTE，PipeBarrier<PIPE_V> 不构成 fence，
+        // 多段归并下一轮 MrgSort 会读到 stale 累加器（输出 -1 空槽/丢项，非确定）。
+        QLIV2ServiceVec::VecCopyExact(curCand, tmpCand, candPairWidth);
         PipeBarrier<PIPE_V>();
     }
 
@@ -2039,7 +2059,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlo
         srcList.src4 = curCand[3 * candPairWidth];
         MrgSort(tmpCand, srcList, tailPrm);
         PipeBarrier<PIPE_V>();
-        DataCopy(curCand, tmpCand, candPairWidth);
+        QLIV2ServiceVec::VecCopyExact(curCand, tmpCand, candPairWidth);
         PipeBarrier<PIPE_V>();
     }
 
@@ -2136,8 +2156,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             srcList.src4 = curValueIdxUb[3 * topkPairWidth_];
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, topkPairWidth_);
-            PipeBarrier<PIPE_V>();
+            // 回拷必须走纯 V（bit-exact）：DataCopy 走 MTE，PipeBarrier<PIPE_V> 不构成 fence，
+            // 多段归并下一轮 MrgSort 会读到 stale 累加器（输出 -1 空槽/丢项，非确定）。
+            QLIV2ServiceVec::VecCopyExact(curValueIdxUb, tmpUb, topkPairWidth_);
         }
 
         // 处理不等于4的部分
@@ -2147,15 +2168,17 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
                 static_cast<uint64_t>(ldInfo_.workspaceIdx) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldProcessNum * (ldProcessLen - 1) + 1) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldInfo_.mStart + j) * topkPairWidth_;
-            // 尾段一次性跨段搬运（blockCount = ldTailLen）。原实现在这里崩 507015 的原因是
-            // srcStride 单位写错：DataCopyExtParams.srcStride 的单位是**字节**，而原代码按"32B 块"
-            // 除了 32（s1Base*pairW*4/32 = 512），实际只跳 512B 而不是一个槽位 16KB，
-            // 段与段几乎重叠；该路径只在"一行切成 ≥3 段"（ldTailLen≥2）时才走到，故 2 段用例从未暴露。
-            indexValueParams.blockCount = ldTailLen;
-            indexValueParams.srcStride = (s1BaseSize_ * topkPairWidth_ - topkPairWidth_) * sizeof(int32_t);  // 字节：段间"空隙"
+            // 尾段逐槽显式拷贝（blockCount=1，srcStride 不参与）：早期多块单次搬运依赖
+            // DataCopyExtParams.srcStride（字节/段间空隙语义）实现跨槽跳读，曾因单位写错
+            // （按 32B 块除了 32，只跳 512B）导致 507015；修正公式后仍实测偶发读错槽
+            // （非整 tile 末片形状 L=321 十轮 2 次输出混入 -1 空槽）。
+            // 与上游 P10 同策略：逐槽单块拷贝，彻底绕开 stride 语义。
             SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
-            AscendC::DataCopyPad(curValueIdxUb[valueOffset], vec1ResGm[wsOffsetTail], indexValueParams,
-                                 indexValuePadParams);
+            for (uint32_t k = 0; k < ldTailLen; k++) {
+                uint64_t segSlot = wsOffsetTail + static_cast<uint64_t>(k) * s1BaseSize_ * topkPairWidth_;
+                AscendC::DataCopyPad(curValueIdxUb[valueOffset + k * topkPairWidth_], vec1ResGm[segSlot],
+                                     indexValueParams, indexValuePadParams);
+            }
             SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
             AscendC::MrgSort4Info params;
             params.elementLengths[0] = topkWidth_;
@@ -2178,8 +2201,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             PipeBarrier<PIPE_V>();
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, topkPairWidth_);
-            PipeBarrier<PIPE_V>();
+            // 回拷必须走纯 V（bit-exact）：DataCopy 走 MTE，PipeBarrier<PIPE_V> 不构成 fence，
+            // 多段归并下一轮 MrgSort 会读到 stale 累加器（输出 -1 空槽/丢项，非确定）。
+            QLIV2ServiceVec::VecCopyExact(curValueIdxUb, tmpUb, topkPairWidth_);
         }
 
         // 搬出 (P3: Extract repeat = topkWidth_/32, 每 repeat 消费 32 对)
