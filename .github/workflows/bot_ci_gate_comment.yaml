@@ -1,0 +1,128 @@
+#
+# Copyright (c) 2026 vLLM Ascend contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: CI Gate Comment
+
+# Posts (or removes) the ci-gate failure comment on the PR.
+#
+# Why a separate workflow_run workflow: fork PRs get a read-only
+# GITHUB_TOKEN under `pull_request`, so the ci-gate job itself cannot post
+# comments. `workflow_run` always runs in the base repository context with
+# the base workflow file and a writable token, for same-repo and fork PRs
+# alike. This workflow only reads the gate-result artifact produced by the
+# trusted ci-gate job and talks to the GitHub API - it never checks out or
+# executes code from the PR, which keeps the write token out of reach of
+# untrusted input (the safe pull_request_target-style pattern).
+
+on:
+  workflow_run:
+    workflows:
+      - "E2E" # pr_test.yaml
+    types:
+      - completed
+
+permissions:
+  actions: read # download the gate-result artifact
+  issues: write # PR comments are issue comments
+  pull-requests: write
+
+concurrency:
+  group: ci-gate-comment-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Download gate result artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: ci-gate-result-${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: result
+
+      - name: Post or remove the failure comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          with open("result/ci-gate-result.json") as f:
+              result = json.load(f)
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          pr = result["pr"]
+          conclusion = result["conclusion"]
+          reason = result.get("reason") or (
+              "ci-gate failed; open the workflow run for the detailed log."
+          )
+          run_url = os.environ["RUN_URL"]
+          marker = "<!-- vllm-ascend-ci-gate-failure -->"
+
+          def api(path, method="GET", payload=None):
+              request = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  method=method,
+                  data=json.dumps(payload).encode() if payload is not None else None,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  data = response.read()
+                  return json.loads(data) if data else {}
+
+          comments = api(f"/repos/{repo}/issues/{pr}/comments?per_page=100")
+          old_id = next(
+              (c["id"] for c in comments if c.get("body", "").startswith(marker)),
+              None,
+          )
+
+          if conclusion == "success":
+              if old_id:
+                  api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
+                  print("gate passed; removed stale failure comment")
+              else:
+                  print("gate passed; no failure comment to remove")
+          else:
+              body = (
+                  f"{marker}\n"
+                  "**ci-gate failed.** Reason:\n\n"
+                  f"> {reason}\n\n"
+                  f"See the [workflow run]({run_url}) for full logs. This "
+                  "comment is deleted and re-posted on each new failure and "
+                  "removed once the gate passes."
+              )
+              # Delete the previous failure comment (if any), then post a
+              # fresh one at the bottom of the timeline so it is visible and
+              # notifies participants.
+              if old_id:
+                  api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
+              api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
+                  payload={"body": body})
+              print(f"posted failure comment on PR {pr}")
+          PY

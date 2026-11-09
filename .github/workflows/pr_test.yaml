@@ -825,6 +825,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Check all required jobs
+        id: check
         env:
           HAS_MAIN2MAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
@@ -839,6 +840,7 @@ jobs:
           # (or updates) the PR comment from this file when the gate fails.
           FAILURE_FILE="${RUNNER_TEMP}/ci_gate_failure_reason.txt"
           rm -f "${FAILURE_FILE}"
+          # shellcheck disable=SC2317  # fail() is only invoked conditionally
           fail() {
             echo "$1" >> "${FAILURE_FILE}"
             echo "::error::${1}"
@@ -846,6 +848,11 @@ jobs:
           }
 
           OWNER_RESULT="${{ needs.codeowner-approval.result }}"
+          fail() {
+            echo "$1" >> "${RUNNER_TEMP}/ci_gate_failure_reason.txt"
+            echo "::error::${1}"
+            exit 1
+          }
 
           # On review events the heavy jobs above are skipped; the gate verdict
           # is: (a) owner approval still holds and (b) the previous ci-gate run
@@ -955,113 +962,45 @@ jobs:
 
           echo "=== CI Gate: PASSED ==="
 
-      - name: Post failure comment on the PR
-        # Explains WHY the gate failed as a PR comment. The previous failure
-        # comment (found via a hidden marker) is deleted first so the fresh
-        # one is always the newest comment in the timeline and triggers a
-        # notification; it is removed automatically once the gate is green.
-        # Uses python3+urllib: self-hosted runners have no gh CLI.
-        if: ${{ failure() }}
+      - name: Package gate result
+        if: ${{ always() }}
         env:
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - <<'PY'
           import json
           import os
-          import urllib.request
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          pr = os.environ["PR_NUMBER"]
-          token = os.environ["GH_TOKEN"]
-          run_id = os.environ["RUN_ID"]
-          server = os.environ["GITHUB_SERVER_URL"]
-          failure_file = os.path.join(
-              os.environ.get("RUNNER_TEMP", "/tmp"), "ci_gate_failure_reason.txt")
+          result_dir = os.path.join(os.environ["RUNNER_TEMP"], "ci-gate-result")
+          os.makedirs(result_dir, exist_ok=True)
+          reason_file = os.path.join(
+              os.environ["RUNNER_TEMP"], "ci_gate_failure_reason.txt")
           try:
-              with open(failure_file) as f:
+              with open(reason_file) as f:
                   reason = f.read().strip()
           except OSError:
               reason = ""
-          if not reason:
-              reason = ("ci-gate failed; open the ci-gate job in this "
-                        "workflow run for the detailed log.")
-
-          marker = "<!-- vllm-ascend-ci-gate-failure -->"
-          body = (
-              f"{marker}\n"
-              "**ci-gate failed.** Reason:\n\n"
-              f"> {reason}\n\n"
-              f"See the [workflow run]({server}/{repo}/actions/runs/{run_id}) "
-              "for full logs. This comment is deleted and re-posted on each "
-              "new failure and removed once the gate passes."
-          )
-
-          def api(path, method="GET", payload=None):
-              request = urllib.request.Request(
-                  f"https://api.github.com{path}",
-                  method=method,
-                  data=json.dumps(payload).encode() if payload is not None else None,
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Accept": "application/vnd.github+json",
-                      "Content-Type": "application/json",
-                  },
-              )
-              with urllib.request.urlopen(request) as response:
-                  data = response.read()
-                  return json.loads(data) if data else {}
-
-          comments = api(f"/repos/{repo}/issues/{pr}/comments?per_page=100")
-          old_id = next(
-              (c["id"] for c in comments if c.get("body", "").startswith(marker)),
-              None,
-          )
-          # Delete the previous failure comment (if any), then post a fresh
-          # one at the bottom of the timeline so it is visible and notifies
-          # participants.
-          if old_id:
-              api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
-          api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
-              payload={"body": body})
-          print("posted failure comment on the PR")
+          result = {
+              "conclusion": os.environ["CHECK_OUTCOME"],
+              "reason": reason,
+              "pr": int(os.environ["PR_NUMBER"]),
+              "head_sha": os.environ["HEAD_SHA"],
+          }
+          with open(os.path.join(result_dir, "ci-gate-result.json"), "w") as f:
+              json.dump(result, f)
           PY
 
-      - name: Remove stale failure comment
-        if: ${{ success() }}
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import urllib.request
+      - name: Upload gate result for the comment bot
+        # The PR comment is posted by bot_ci_gate_comment.yml (workflow_run)
+        # in the base repo context: fork PRs get a read-only GITHUB_TOKEN
+        # here, so this job must not depend on write access. The bot never
+        # touches PR code, so its write token is safe.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-gate-result-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: ${{ runner.temp }}/ci-gate-result/ci-gate-result.json
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          pr = os.environ["PR_NUMBER"]
-          token = os.environ["GH_TOKEN"]
-          marker = "<!-- vllm-ascend-ci-gate-failure -->"
-
-          def api(path, method="GET"):
-              request = urllib.request.Request(
-                  f"https://api.github.com{path}",
-                  method=method,
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Accept": "application/vnd.github+json",
-                  },
-              )
-              with urllib.request.urlopen(request) as response:
-                  data = response.read()
-                  return json.loads(data) if data else {}
-
-          comments = api(f"/repos/{repo}/issues/{pr}/comments?per_page=100")
-          old_id = next(
-              (c["id"] for c in comments if c.get("body", "").startswith(marker)),
-              None,
-          )
-          if old_id:
-              api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
-              print("removed stale failure comment")
-          PY

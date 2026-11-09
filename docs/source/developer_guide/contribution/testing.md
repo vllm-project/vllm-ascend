@@ -447,6 +447,10 @@ owners before the PR can merge. Key points:
 - The PR author does not count as an approver even when listed as an owner.
 - Submitting or dismissing a review re-evaluates the gate without re-running
   the heavy CI jobs; previously green CI results on the same commit are kept.
+- The failure comment is posted by `.github/workflows/bot_ci_gate_comment.yaml`
+  (a `workflow_run` bot running in the base repository context), so it works
+  for fork PRs too - the gate job itself only has a read-only token on fork
+  PRs and never posts comments directly.
 - The gate also runs a CODEOWNERS health check: a tracked file without any
   owner entry, or an entry pointing at a deleted/renamed path, fails the gate
   for everyone. If your change adds, removes, or renames files, update
