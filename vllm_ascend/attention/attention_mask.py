@@ -52,13 +52,9 @@ class AttentionMaskBuilder:
             attn_mask = self.attn_mask_device_cache.get(key)
             # Save attention mask to device.
             if attn_mask is None:
-                attn_mask = torch.empty(
-                    (max_seq_len, max_seq_len), dtype=dtype, device=self.device
-                )
+                attn_mask = torch.empty((max_seq_len, max_seq_len), dtype=dtype, device=self.device)
                 self.attn_mask_device_cache[key] = attn_mask
-            attn_mask.copy_(
-                self.attn_mask_cache[:max_seq_len, :max_seq_len], non_blocking=True
-            )
+            attn_mask.copy_(self.attn_mask_cache[:max_seq_len, :max_seq_len], non_blocking=True)
             return attn_mask
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous().to(self.device, non_blocking=True)
 
