@@ -1,0 +1,4 @@
+pr: 21037
+entries:
+  - category: performance
+    text: Added opt-in overlap of BF16 Qwen GDN input projections during ACLGraph execution.

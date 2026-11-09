@@ -44,6 +44,5 @@ above the threshold. Include Qwen3-Next if deploying the interleaved layout.
   finish before their outputs are consumed. Host submission to two streams
   alone does not demonstrate parallel device execution or a performance gain.
 
-Hardware tests have not been run locally on this checkout. Use the real PR
-number for the release fragment and recheck overlapping community work
-before submission.
+Hardware tests have not been run locally on this checkout. Record results for
+the paired commits in PR #21037.
