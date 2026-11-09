@@ -80,6 +80,7 @@ class AttentionMaskBuilder:
 
         return self.get_splitfuse_attn_mask()
 
+
 def _get_attn_mask_device_cache_enabled():
     from vllm_ascend.ascend_config import get_ascend_config
     try:
