@@ -174,10 +174,15 @@ def test_only_tiering_spec_overrides_shared_region_capability() -> None:
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "device", "world_size", "expected_rank"),
+    ("replicated_layout", "device", "world_size", "worker_rank", "expected_rank"),
     [
-        (False, 5, 4, 1),
-        (True, 5, 4, 0),
+        (False, 0, 2, 0, 0),
+        (False, 1, 2, 1, 1),
+        (False, 1, 2, 0, 0),
+        (False, 3, 2, 1, 1),
+        (False, 0, 2, 1, 1),
+        (False, 1, 8, 5, 5),
+        (True, 3, 2, 1, 0),
     ],
 )
 def test_tiering_worker_matches_v027_shared_region_contract(
@@ -185,6 +190,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     replicated_layout: bool,
     device: int,
     world_size: int,
+    worker_rank: int,
     expected_rank: int,
 ) -> None:
     captured: dict = {}
@@ -204,7 +210,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     monkeypatch.setattr(npu_mod, "SharedOffloadRegion", FakeRegion)
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", fake_worker)
     monkeypatch.setattr(
-        npu_mod.torch,
+        torch,
         "npu",
         SimpleNamespace(current_device=lambda: device),
         raising=False,
@@ -212,7 +218,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
     spec = npu_mod.NPUTieringOffloadingSpec.__new__(npu_mod.NPUTieringOffloadingSpec)
     spec.config = SimpleNamespace(
-        parallel=SimpleNamespace(world_size=world_size),
+        parallel=SimpleNamespace(world_size=world_size, rank=worker_rank),
     )
     spec._engine_id = "engine-dp0"
     spec.replicated_layout = replicated_layout

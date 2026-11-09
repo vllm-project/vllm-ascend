@@ -722,6 +722,7 @@
       "vllm-ascend/GSM8K_prefix0_in10240_Qwen3_6_35B_w4a8_mxfp",
       "vllm-ascend/GSM8K_prefix90_in131072_bs1000_Qwen3.5-397B-A17B-w8a8c8-mxfp8",
       "vllm-ascend/aime2026",
-      "vllm-ascend/gsm8k_step"
+      "vllm-ascend/gsm8k_step",
+      "vllm-ascend/GSM8K_prefix90_in131072_bs500_DeepSeek-V4-Flash-0731"
     ]
 }
