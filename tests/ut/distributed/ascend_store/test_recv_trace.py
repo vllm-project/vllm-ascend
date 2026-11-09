@@ -11,7 +11,11 @@ from unittest.mock import patch
 
 from tools.kv_pool.analyze_recv_trace import summarize
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import RecvTimeline, RecvTraceSession
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.recv_trace import (
+    RecvTimeline,
+    RecvTraceSession,
+    trace_session_path,
+)
 
 
 class PublishedTimeline(RecvTimeline):
@@ -170,7 +174,7 @@ class TestRecvTimeline(unittest.TestCase):
         self.assertNotEqual(first, second)
 
     def test_invalid_capacity(self):
-        for value in (0, -1, True, 1.5):
+        for value in (0, -1, True, 1.5, "100000"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 RecvTimeline(value)
 
@@ -252,12 +256,17 @@ class TestRecvTraceSession(unittest.TestCase):
                 session.close()
 
     def test_save_event_is_not_queried_before_record_and_wait_is_latched(self):
-        calls = []
+        calls: list[str] = []
         event = threading.Event()
+
+        def query():
+            calls.append("query")
+            return True
+
         worker = SimpleNamespace(
             m_store=SimpleNamespace(set_device=lambda: None),
             layer_save_finished_events=[event],
-            sync_save_events=[SimpleNamespace(query=lambda: calls.append("query") or True)],
+            sync_save_events=[SimpleNamespace(query=query)],
             load_disabled=threading.Event(),
             name="gva",
         )
@@ -308,15 +317,61 @@ class TestRecvTraceSession(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_metrics_failure_does_not_stop_observer(self):
+        recovered = threading.Event()
+        calls = 0
+
+        def metrics():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary metrics failure")
+            recovered.set()
+            return {"npu_allocated_bytes": 123}
+
+        worker = SimpleNamespace(m_store=SimpleNamespace(set_device=lambda: None))
+        with tempfile.TemporaryDirectory() as directory:
+            session = RecvTraceSession(worker, str(Path(directory) / "trace.json"), 100, 1, metrics)
+            try:
+                self.assertTrue(recovered.wait(timeout=3))
+                self.assertTrue(session._observer.is_alive())
+            finally:
+                session.close()
+            report = summarize(session.timeline.snapshot())
+            self.assertEqual([e["event"] for e in report["errors"]], ["metrics_error"])
+            self.assertEqual(report["resource_peaks"]["npu_allocated_bytes"], 123)
+
+    def test_sessions_with_same_rank_and_pid_have_distinct_snapshots(self):
+        worker = SimpleNamespace(m_store=SimpleNamespace(set_device=lambda: None))
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = str(Path(directory) / "trace")
+            first_path = trace_session_path(prefix, 0)
+            second_path = trace_session_path(prefix, 0)
+            self.assertNotEqual(first_path, second_path)
+            first = RecvTraceSession(worker, first_path, 100, 1000)
+            second = RecvTraceSession(worker, second_path, 100, 1000)
+            try:
+                first.timeline.mark(1, "first")
+                second.timeline.mark(2, "second")
+            finally:
+                first.close()
+                second.close()
+            self.assertIn('"first"', Path(first_path).read_text())
+            self.assertNotIn('"second"', Path(first_path).read_text())
+            self.assertIn('"second"', Path(second_path).read_text())
+
 
 class TestAttentionGateTrace(unittest.TestCase):
     def test_split_wait_does_not_add_synchronization(self):
-        calls = []
+        calls: list[str] = []
         gate = AttentionComputeStartGate()
-        gate._event = cast(
-            Any, SimpleNamespace(synchronize=lambda: calls.append("sync"), query=lambda: calls.append("query") or True)
-        )
-        marks = []
+
+        def query():
+            calls.append("query")
+            return True
+
+        gate._event = cast(Any, SimpleNamespace(synchronize=lambda: calls.append("sync"), query=query))
+        marks: list[str] = []
         self.assertTrue(gate.wait(observer=marks.append))
         self.assertEqual(calls, ["sync"])
         self.assertEqual(
@@ -328,7 +383,7 @@ class TestAttentionGateTrace(unittest.TestCase):
     def test_unrecorded_gate_query_does_not_create_an_event(self):
         gate = AttentionComputeStartGate()
         self.assertEqual(gate.readiness(), (False, False))
-        marks = []
+        marks: list[str] = []
         self.assertFalse(gate.wait(timeout=0, observer=marks.append))
         self.assertEqual(marks, ["gate_record_wait_begin", "gate_record_wait_timeout"])
         self.assertIsNone(gate._event)

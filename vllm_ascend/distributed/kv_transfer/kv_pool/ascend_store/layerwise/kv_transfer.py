@@ -789,8 +789,10 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
             addr_list_c = _circular_shift(addr_list, shift)
             size_list_c = _circular_shift(size_list, shift)
             self._trace_mark("backend_submit")
-            self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            result = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             self._trace_mark("backend_complete")
+            if self.recv_trace is not None and (result is None or any(code != 0 for code in result)):
+                self._trace_mark("backend_error")
 
         if layer_id == self.final_layer_id:
             for req_id, is_last_chunk in zip(req_ids, is_last_chunks):

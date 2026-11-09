@@ -55,7 +55,7 @@ def summarize(trace):
             if begin is not None:
                 durations[phase].append(timestamp - begin)
                 per_task[phase][task] += timestamp - begin
-        if name in ("error", "observer_error", "probe_error", "backend_error"):
+        if name in ("error", "observer_error", "probe_error", "backend_error", "metrics_error"):
             errors.append(row)
         if name == "readiness_sample":
             unknown_samples += int(any(value is None for _, deps in row["dependencies"] for value in deps.values()))

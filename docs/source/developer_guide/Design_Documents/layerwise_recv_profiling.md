@@ -13,8 +13,9 @@ changing dispatch order. Configure it in `kv_connector_extra_config`:
 ```
 
 The parent directory is created when profiling starts. Each receive worker writes
-`<path>.tp<rank>.pid<pid>.json` every five seconds and during connector shutdown.
-Snapshots replace the previous file atomically. Use a distinct prefix for each
+`<path>.tp<rank>.pid<pid>.<session-id>.json` every five seconds and during connector shutdown.
+A random session ID separates workers sharing a directory, including containers
+with identical PIDs. Snapshots replace the previous file atomically. Use a distinct prefix for each
 independent run. After the measured interval, allow a snapshot to complete before
 stopping the server; some engine exit paths do not call connector shutdown.
 Omitting `layerwise_trace_path` disables collection and the observer thread.
@@ -42,6 +43,8 @@ with separately collected NPU traces.
 - `backend_submit/complete`: synchronous backend call boundaries. This interval
   includes native submission and completion; it is not device-only transfer time.
 - `complete/error`: receive task outcome.
+- `metrics_error`: resource collection failed; dependency sampling continues.
+  The analyzer reports the error so partial resource data can be identified.
 - `resources`: 100 ms samples of process peak RSS, NPU allocator usage and peak,
   reserved bytes, and active step lease-key count. RSS is the process lifetime
   peak. Native Store allocations are outside the PyTorch allocator; collect
