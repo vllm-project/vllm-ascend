@@ -515,6 +515,7 @@ def test_constructor_preserves_shared_configuration(runtime, enabled, cache_mode
             self.conv_size = 4
             self.local_projection_size = 8
             self.model_config = SimpleNamespace(dtype=torch.bfloat16)
+            self.gate_lower_bound = -5.0
             self.conv1d = SimpleNamespace(
                 weight=torch.zeros(24, 1, 4),
                 quant_method=SimpleNamespace(process_weights_after_loading=lambda: None),
@@ -524,6 +525,7 @@ def test_constructor_preserves_shared_configuration(runtime, enabled, cache_mode
         KimiK3DeltaAttention=Upstream,
         validate_additional_config_bool=lambda value, path: value,
         wraps=lambda f: lambda g: g,
+        load_prefill_fused_kda_operator=MagicMock(return_value=None),
     )
     runtime["import_module"].return_value = SimpleNamespace(mega_recurrent_kda=MagicMock())
     _definitions(
@@ -547,6 +549,7 @@ def test_constructor_preserves_shared_configuration(runtime, enabled, cache_mode
     assert repr(config) == before
     assert not hasattr(layer, "_mega_runtime_supported")
     assert runtime["import_module"].call_count == int(enabled)
+    runtime["load_prefill_fused_kda_operator"].assert_called_once_with()
 
 
 def test_operator_loader_rejects_19_argument_abi(runtime):

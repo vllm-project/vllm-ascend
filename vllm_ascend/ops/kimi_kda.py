@@ -50,6 +50,10 @@ from vllm_ascend.ops.kimi_mega_kda import (
     mega_kda_nz_operand,
     run_mega_recurrent_kda,
 )
+from vllm_ascend.ops.kimi_prefill_fused_kda import (
+    load_prefill_fused_kda_operator,
+    run_prefill_fused_kda,
+)
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -264,7 +268,7 @@ direct_register_custom_op(
 
 
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
-    """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
+    """Kimi K3 KDA with optional FlashKDA prefill and AscendC fallback kernels."""
 
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
@@ -289,6 +293,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         super().__init__(config, vllm_config, prefix)
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
+        # Resolve once in the worker, before Dynamo tracing or graph capture.
+        # The reference FlashKDA ABI requires BF16 and a bounded gate.
+        self._prefill_fused_kda_operator = (
+            load_prefill_fused_kda_operator()
+            if self.model_config.dtype == torch.bfloat16 and self.gate_lower_bound is not None
+            else None
+        )
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -406,7 +417,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
-                beta_is_preprocessed=True,
+                beta_is_preprocessed=getattr(self, "_prefill_fused_kda_operator", None) is None,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -763,7 +774,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self._fused_bfg_output_sizes,
             dim=-1,
         )
-        beta = beta.float().sigmoid().unsqueeze(0)
+        if getattr(self, "_prefill_fused_kda_operator", None) is None:
+            beta = beta.float().sigmoid().unsqueeze(0)
+        else:
+            # The fused prefill ABI applies sigmoid in the kernel.  Preserve
+            # logits here; the regular recurrent/chunk fallback preprocesses
+            # them immediately before dispatch.
+            beta = beta.unsqueeze(0)
         raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
         return beta, raw_gate, output_gate
@@ -950,6 +967,65 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         state_copy.scatter(recurrent_state, final_state, state_indices)
         return output
 
+    def _run_prefill_fused_kda(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        raw_gate: torch.Tensor,
+        raw_beta: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        prebuilt_metadata,
+        *,
+        query_start_loc: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run CANNBot's TND prefill kernel around the V2 state-copy plan."""
+        operator = self._prefill_fused_kda_operator
+        if operator is None:
+            raise RuntimeError("prefill fused KDA operator is not loaded")
+        if has_initial_state is None:
+            raise ValueError("KDA prefill requires has_initial_state metadata")
+        if query_start_loc is None or query_start_loc.ndim != 1 or query_start_loc.numel() != state_indices.numel() + 1:
+            raise ValueError("Kimi KDA prefill query boundaries must match the state indices")
+        if has_initial_state.numel() != state_indices.numel():
+            raise ValueError("Kimi KDA prefill flags must match the state indices")
+        keep = prebuilt_metadata.keep_meta
+        if keep is not None:
+            state_indices = state_indices[keep]
+            has_initial_state = has_initial_state[keep]
+            query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:][keep]))
+        if state_indices.numel() == 0:
+            return torch.empty_like(v)
+        # Reuse V2's device offsets; do not upload host lengths in every layer.
+        query_start_loc = query_start_loc.to(dtype=torch.int32).contiguous()
+
+        state_copy = getattr(self, "_ascend_kda_state_copy", None)
+        if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
+            raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
+        # Gather clears rows for requests without a reusable initial state and
+        # keeps all page/stride handling inside the worker-owned plan.
+        initial_state = state_copy.gather(recurrent_state, state_indices, has_initial_state).float()
+        output, final_state = run_prefill_fused_kda(
+            operator,
+            q.squeeze(0),
+            k.squeeze(0),
+            v.squeeze(0),
+            raw_gate.squeeze(0),
+            raw_beta.squeeze(0),
+            initial_state,
+            query_start_loc,
+            self.A_log,
+            self.dt_bias.reshape(self.local_num_heads, self.head_dim),
+            scale=self.head_dim**-0.5,
+            lower_bound=self.gate_lower_bound,
+        )
+        # Publish only a successful result. Conv has already advanced; errors
+        # propagate without retrying the batch against partly updated caches.
+        state_copy.scatter(recurrent_state, final_state, state_indices)
+        return output.unsqueeze(0)
+
     @eager_break_during_capture
     def _forward(
         self,
@@ -984,11 +1060,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         g2 = g2[:num_actual_tokens]
-        beta = _prepare_beta(
-            beta,
-            num_actual_tokens,
-            is_preprocessed=beta_is_preprocessed,
+        raw_beta = beta[:, :num_actual_tokens]
+        use_fused_prefill = (
+            getattr(self, "_prefill_fused_kda_operator", None) is not None
+            and attn_metadata.num_prefills > 0
+            and self.gate_lower_bound is not None
+            and mixed_qkv.dtype == torch.bfloat16
+            and not beta_is_preprocessed
         )
+        if not (use_fused_prefill and attn_metadata.num_decodes == 0 and attn_metadata.num_spec_decodes == 0):
+            beta = _prepare_beta(raw_beta, num_actual_tokens, is_preprocessed=beta_is_preprocessed)
+        else:
+            beta = raw_beta  # Only FlashKDA consumes this batch; sigmoid is fused.
 
         conv_state, recurrent_state = self.kv_cache
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
@@ -1002,6 +1085,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 raw_gate_spec = g1
                 beta_spec = beta
                 mixed_non_spec = raw_gate_non_spec = beta_non_spec = None
+                raw_beta_non_spec = None
             else:
                 assert spec_token_indices is not None
                 assert non_spec_token_indices is not None
@@ -1011,11 +1095,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 mixed_non_spec = mixed_qkv.index_select(0, non_spec_token_indices)
                 raw_gate_non_spec = g1.index_select(1, non_spec_token_indices)
                 beta_non_spec = beta.index_select(1, non_spec_token_indices)
+                raw_beta_non_spec = raw_beta.index_select(1, non_spec_token_indices) if use_fused_prefill else None
         else:
             mixed_spec = raw_gate_spec = beta_spec = None
             mixed_non_spec = mixed_qkv
             raw_gate_non_spec = g1
             beta_non_spec = beta
+            raw_beta_non_spec = raw_beta
 
         core_spec = None
         if mixed_spec is not None:
@@ -1109,22 +1195,39 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     v_non_spec = v_non_spec[:, num_decode_tokens:]
                     raw_gate_non_spec = raw_gate_non_spec[:, num_decode_tokens:]
                     beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+                    if raw_beta_non_spec is not None:
+                        raw_beta_non_spec = raw_beta_non_spec[:, num_decode_tokens:]
 
                 assert attn_metadata.prefill_state_indices is not None
                 assert attn_metadata.prefill_has_initial_state is not None
                 prefill_meta = attn_metadata.non_spec_prefill_metadata
                 assert prefill_meta is not None
-                core_prefill = self._run_prefill(
-                    q_non_spec,
-                    k_non_spec,
-                    v_non_spec,
-                    raw_gate_non_spec,
-                    beta_non_spec,
-                    recurrent_state,
-                    attn_metadata.prefill_state_indices,
-                    attn_metadata.prefill_has_initial_state,
-                    prefill_meta.chunk,
-                )
+                if use_fused_prefill:
+                    assert raw_beta_non_spec is not None
+                    core_prefill = self._run_prefill_fused_kda(
+                        q_non_spec,
+                        k_non_spec,
+                        v_non_spec,
+                        raw_gate_non_spec,
+                        raw_beta_non_spec,
+                        recurrent_state,
+                        attn_metadata.prefill_state_indices,
+                        attn_metadata.prefill_has_initial_state,
+                        prefill_meta.chunk,
+                        query_start_loc=attn_metadata.prefill_query_start_loc,
+                    )
+                else:
+                    core_prefill = self._run_prefill(
+                        q_non_spec,
+                        k_non_spec,
+                        v_non_spec,
+                        raw_gate_non_spec,
+                        beta_non_spec,
+                        recurrent_state,
+                        attn_metadata.prefill_state_indices,
+                        attn_metadata.prefill_has_initial_state,
+                        prefill_meta.chunk,
+                    )
                 core_non_spec = (
                     torch.cat((core_decode, core_prefill), dim=1) if core_decode is not None else core_prefill
                 )
