@@ -1,3 +1,4 @@
+# Reproduce the MRv2 expert weight offload startup failure.
 # GLM-5.1-W8A8C8-MTP offload Performance Testing
 test_cases:
   - name: "GLM-5.1-w8a8c8-MTP-offload-test-perf"
