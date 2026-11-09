@@ -52,6 +52,9 @@ TP groups follow the table's rows: `[0, 1]` and `[2, 3]`. PCP groups follow its 
 
 The lists follow logical DCP rank order: the PCP coordinate varies first, then the TP coordinate.
 
+> [!WARNING]
+> **Sunset Notice for GQA DCP**: Decode Context Parallelism (DCP) for GQA models is **deprecated** as of v0.32.0 and will be removed in a future release. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+
 MLA and SFA implement both stacked layouts; GQA/MQA stacking requires `DCP=PCP`. DSA and DSA V4.1 PCP use replicated caches, with DCP stacking outside their documented PCP configuration. With PCP=1, DCP groups lie within TP: MLA requires `TP % DCP == 0`, sparse SFA requires `DCP == TP` when DCP is enabled, and GQA has additional KV-head constraints. Deployment constraints are listed in the [Context Parallel user guide](../../user_guide/feature_guide/context_parallel.md).
 
 ### Batch lifecycle

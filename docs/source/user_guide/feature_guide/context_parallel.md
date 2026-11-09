@@ -117,6 +117,10 @@ For either method, remove `--enforce-eager` and add the following option to use 
 
 ### Decode Context Parallel
 
+!!! warning "Deprecation Notice for GQA Models"
+
+    Decode Context Parallelism (DCP) for **GQA models** is **deprecated** as of v0.32.0 and has entered the sunset process (will be removed in a future release). GQA models naturally shard KV heads across TP ranks, and in speculative decoding, GQA draft models maintain native TP sharding under target DCP. Maintaining dedicated GQA DCP metadata and communication paths is no longer justified. Note that DCP for **MLA and SFA models** remains fully supported and recommended. For more details, see [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+
 #### Standalone DCP (PCP=1)
 
 Use the following topology when PCP is disabled (`prefill_context_parallel_size=1`):
