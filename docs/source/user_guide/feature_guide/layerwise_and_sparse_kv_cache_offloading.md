@@ -174,7 +174,7 @@ missing historical KV rows for the shared layers in its group. Each shared
 layer waits for its own prefetch before attention and loads the current
 token's KV after that layer writes it.
 
-This mode requires TP=1 and DP=1 without speculative decoding. Use
+This mode requires Model Runner V2, TP=1, and DP=1 without speculative decoding. Use
 `--max-num-seqs 1` and either `--enforce-eager` or the following Decode graph
 configuration:
 
