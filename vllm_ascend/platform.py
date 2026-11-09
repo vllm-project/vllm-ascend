@@ -572,9 +572,8 @@ class NPUPlatform(Platform):
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
         # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default.
-        # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision.
+        # make V2 the unconditional platform default. Feature validation is
+        # left to upstream.
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
         # override the default runner selection.
         apply_v2_model_runner_config_patch()
@@ -618,14 +617,12 @@ class NPUPlatform(Platform):
                 if ratios:
                     config.compress_ratios = list(ratios)
 
-        _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
-        _validate_aux_output_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1077,15 +1074,6 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             "seconds for execute_model RPC calls in multiprocessing must be "
             "greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000"
         )
-
-
-def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
-    if (
-        vllm_config.model_config.architecture in ("DeepseekV41ForCausalLM", "DeepseekV41DSparkModel")
-        and get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
-        and not vllm_config.use_v2_model_runner
-    ):
-        raise ValueError("DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
@@ -1972,25 +1960,6 @@ def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
-
-
-def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
-    """Reject AuxOutput configurations the Ascend runner cannot service.
-
-    vLLM main moved routed-experts output to the AuxOutput connector and
-    requires Model Runner V2 for it. Ascend is an out-of-tree platform, so the
-    upstream check is skipped and only the V2 NPUModelRunner wires the worker
-    connector up. Without this guard a V1 run enables the scheduler-side
-    connector and crashes with "auxiliary output worker output is missing".
-    """
-    if getattr(vllm_config, "aux_output_config", None) is None:
-        return
-    if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
-        raise ValueError(
-            "enable_return_routed_experts (AuxOutput Connector) is only "
-            "supported by Model Runner V2 on Ascend. Set "
-            "VLLM_USE_V2_MODEL_RUNNER=1."
-        )
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:

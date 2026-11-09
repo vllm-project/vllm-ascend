@@ -292,24 +292,6 @@ def test_a5_index_fill_uses_scatter():
     tensor.index_fill_.assert_not_called()
 
 
-@pytest.mark.parametrize("packed_cache", [False, True])
-@pytest.mark.parametrize("use_v2", [False, True])
-@pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "DeepseekV41DSparkModel", "DeepseekV3ForCausalLM"])
-def test_v41_runner_support_is_hardware_scoped(packed_cache, use_v2, architecture):
-    from types import SimpleNamespace
-
-    from vllm_ascend.platform import _validate_model_runner_config
-
-    config = SimpleNamespace(model_config=SimpleNamespace(architecture=architecture), use_v2_model_runner=use_v2)
-    with mock.patch("vllm_ascend.platform.get_current_hardware_profile") as profile:
-        profile.return_value.supports.return_value = packed_cache
-        if packed_cache and not use_v2 and architecture != "DeepseekV3ForCausalLM":
-            with pytest.raises(ValueError, match="requires Model Runner V2"):
-                _validate_model_runner_config(config)
-        else:
-            _validate_model_runner_config(config)
-
-
 @pytest.mark.parametrize(
     ("adaptor", "uses_fused_kernel"),
     [
