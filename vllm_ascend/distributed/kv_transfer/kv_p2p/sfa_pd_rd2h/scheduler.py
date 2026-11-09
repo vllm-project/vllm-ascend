@@ -310,6 +310,7 @@ class SFAPDRD2HScheduler:
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
+        self._selective_pending_recv: set[str] | None = set() if self.selective_offload else None
         self._dspark_pending_recv: set[str] = set()
         self._deferred_finished_req_ids: set[str] = set()
         self.executor = ThreadPoolExecutor(32)
@@ -530,6 +531,10 @@ class SFAPDRD2HScheduler:
                     dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
                 )
         self._reqs_need_recv.clear()
+        pending = getattr(self, "_selective_pending_recv", None)
+        if pending is not None:
+            pending.update(req.req_id for req in meta.requests)
+            meta.pending_recv_ids = frozenset(pending)
         return meta
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:
@@ -540,7 +545,9 @@ class SFAPDRD2HScheduler:
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        if request.request_id in self._dspark_pending_recv:
+        if request.request_id in self._dspark_pending_recv or request.request_id in (
+            getattr(self, "_selective_pending_recv", None) or ()
+        ):
             # Let the existing rendezvous and reads drain naturally. vLLM
             # retains the KV blocks; retain the connector's destinations too.
             self._deferred_finished_req_ids.add(request.request_id)
@@ -551,6 +558,9 @@ class SFAPDRD2HScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         completed = set(connector_output.finished_recving or ())
         self._dspark_pending_recv.difference_update(completed)
+        pending = getattr(self, "_selective_pending_recv", None)
+        if pending is not None:
+            pending.difference_update(completed)
         for request_id in completed & self._deferred_finished_req_ids:
             self._cleanup_finished_request(request_id)
 

@@ -335,7 +335,12 @@ class SFAPDRD2HConsumerWorker:
         )
         return [status for status in gathered if status is not None]
 
-    def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self,
+        finished_req_ids: set[str] | None = None,
+        *,
+        pending_recv_ids: frozenset[str] | None = None,
+    ) -> tuple[set[str], set[str]]:
         done_recving: set[str] = set()
         local_failed: set[str] = set()
 
@@ -355,7 +360,12 @@ class SFAPDRD2HConsumerWorker:
                 if descriptor is not None:
                     receiver.mark_target_kv_done(ext_id, descriptor.generation)
             local_terminal = (local_terminal & receiver.ready_requests()) | local_failed
-        tp_status = self._gather_tp_read_status(local_terminal, local_failed)
+        # The scheduler sends the same snapshot to all TP ranks.
+        tp_status = (
+            self._gather_tp_read_status(local_terminal, local_failed)
+            if pending_recv_ids is None or pending_recv_ids
+            else []
+        )
         finished_on_all = set.intersection(*(terminal for terminal, _ in tp_status)) if tp_status else set()
         failed_on_any = set().union(*(failed for _, failed in tp_status))
         if receiver is not None:
@@ -418,6 +428,12 @@ class SFAPDRD2HConsumerWorker:
             ready_to_cleanup = self._deferred_finished_req_ids - self._dspark_pending_recv
             if ready_to_cleanup:
                 self._cleanup_request_state(ready_to_cleanup)
+        elif pending_recv_ids is not None:
+            self._deferred_finished_req_ids.update(finished_req_ids or ())
+            ready_to_cleanup = self._deferred_finished_req_ids - (pending_recv_ids - done_recving)
+            if ready_to_cleanup:
+                self._cleanup_request_state(ready_to_cleanup)
+                self._deferred_finished_req_ids.difference_update(ready_to_cleanup)
         elif finished_req_ids:
             self._cleanup_request_state(finished_req_ids)
 

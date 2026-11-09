@@ -208,7 +208,8 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         if self.is_consumer:
-            return self.connector_worker.get_finished(finished_req_ids)
+            pending = getattr(self._connector_metadata, "pending_recv_ids", None)
+            return self.connector_worker.get_finished(finished_req_ids, pending_recv_ids=pending)
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:

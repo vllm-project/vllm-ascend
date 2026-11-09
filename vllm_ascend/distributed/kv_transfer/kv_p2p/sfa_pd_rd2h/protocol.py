@@ -214,6 +214,8 @@ class CopySfaTailDest:
 class SfaPDConsumerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
         self.requests: list[SfaPDConsumerReqMeta] = []
+        # None preserves polling for consumers outside selective offload.
+        self.pending_recv_ids: frozenset[str] | None = None
 
     def add_request(
         self,

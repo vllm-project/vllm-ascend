@@ -683,6 +683,57 @@ def test_failed_tp_rank_remains_terminal_until_other_ranks_finish():
     assert worker._gather_tp_read_status.call_args_list[1].args[0] == {"req-0"}
 
 
+def test_selective_scheduler_polls_until_cancelled_receive_drains():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler._selective_pending_recv = set()
+    scheduler._dspark_pending_recv = set()
+    scheduler._deferred_finished_req_ids = set()
+    scheduler._reqs_need_recv = {"req-0"}
+    scheduler._request_trackers = {"req-0": ([1], [1], [1])}
+    scheduler._cleanup_finished_request = MagicMock()
+    request = SimpleNamespace(request_id="req-0")
+
+    first_meta = scheduler.build_connector_meta(MagicMock())
+    assert first_meta.pending_recv_ids == {"req-0"}
+    assert scheduler.request_finished_all_groups(request, ([1],)) == (True, None)
+    scheduler._cleanup_finished_request.assert_not_called()
+    assert scheduler.build_connector_meta(MagicMock()).pending_recv_ids == {"req-0"}
+
+    scheduler.update_connector_output(SimpleNamespace(finished_recving={"req-0"}))
+    scheduler._cleanup_finished_request.assert_called_once_with("req-0")
+    assert scheduler.build_connector_meta(MagicMock()).pending_recv_ids == set()
+    assert first_meta.pending_recv_ids == {"req-0"}
+
+
+def test_selective_idle_step_skips_tp_status_collective():
+    worker = _make_consumer_worker_for_completion_test()
+    worker._deferred_finished_req_ids = set()
+    worker._mf_read_thread.get_and_clear_done.return_value = set()
+    worker._gather_tp_read_status = MagicMock()
+
+    assert worker.get_finished(pending_recv_ids=frozenset()) == (set(), set())
+    worker._gather_tp_read_status.assert_not_called()
+
+
+def test_selective_cancel_keeps_destinations_until_all_ranks_finish():
+    worker = _make_consumer_worker_for_completion_test()
+    worker._deferred_finished_req_ids = set()
+    worker._mf_read_thread.get_and_clear_done.side_effect = [{"req-0"}, set()]
+    worker._gather_tp_read_status = MagicMock(
+        side_effect=[
+            [({"req-0"}, set()), (set(), set())],
+            [({"req-0"}, set()), ({"req-0"}, {"req-0"})],
+        ]
+    )
+    pending = frozenset({"req-0-internal"})
+
+    assert worker.get_finished({"req-0-internal"}, pending_recv_ids=pending) == (set(), set())
+    assert "req-0" in worker._dest_blocks_by_req
+    assert worker.get_finished(pending_recv_ids=pending) == (set(), {"req-0-internal"})
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+    assert "req-0" not in worker._dest_blocks_by_req
+
+
 def test_owned_component_without_descriptors_still_fails():
     thread = _make_read_thread()
     thread.engine = MagicMock()
