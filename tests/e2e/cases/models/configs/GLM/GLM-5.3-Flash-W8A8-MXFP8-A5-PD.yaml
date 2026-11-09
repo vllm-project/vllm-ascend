@@ -1,5 +1,5 @@
 test_name: "GLM-5.3-Flash-w8a8-mxfp8-A5-PD"
-model: "Eco-Tech/GLM-5.3-w8a8c8"
+model: "Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8"
 num_nodes: 2
 npu_per_node: 8
 dp_load_balancing: external
