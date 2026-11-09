@@ -99,7 +99,16 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan i
     cp_group_meta as pull_cp_group_meta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    dcp_shard_pulls as pull_dcp_shard_pulls,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     group_kernel_params as pull_group_kernel_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    group_pulls_metadata as pull_group_pulls_metadata,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    hybrid_remote_rank_group_pulls as pull_hybrid_remote_rank_group_pulls,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     kernel_block_scale as pull_kernel_block_scale,
@@ -120,7 +129,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan i
     remote_port_send_num as pull_remote_port_send_num,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    remote_ranks_for_req as pull_remote_ranks_for_req,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     set_hma_shared_port as pull_set_hma_shared_port,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    sfa_replicate_k_block_ids as pull_sfa_replicate_k_block_ids,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -2904,53 +2919,17 @@ class MooncakeConnectorWorker:
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
     def _get_dcp_shard_pulls(self, remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size):
-        """Build group pulls from the selected ports of each DCP shard."""
-        mamba_num = prefill_tp_size // self.tp_size
-        attn_num = self._get_tp_num_need_pulls(prefill_tp_size)
-        attn_gids = [
-            g for g, (spec, li) in self.kv_group2layeridx.items() if li and spec["kv_cache_spec_type"] != "MambaSpec"
-        ]
-        mamba_gids = [
-            g for g, (spec, li) in self.kv_group2layeridx.items() if li and spec["kv_cache_spec_type"] == "MambaSpec"
-        ]
-        num_shards = len(remote_handshake_port_list)
-        result = []
-        for shard_idx, ports in enumerate(remote_handshake_port_list):
-            is_final = shard_idx == num_shards - 1
-            shard_pulls = []
-            for port_idx, port in enumerate(ports):
-                pulls = []
-                port_tp = (port - remote_base_port) % prefill_tp_size
-                pp_rank = (port - remote_base_port) // (prefill_tp_size * remote_pcp_size)
-                # Attention uses the leading ports selected for each DCP shard.
-                if port_idx < attn_num:
-                    pulls += [
-                        GroupPull(
-                            group_id=g,
-                            remote_tp_offset=port_idx,
-                            num_group_pulls=attn_num,
-                            prefill_pp_rank=pp_rank,
-                            is_group_transfer_end=port_idx == attn_num - 1,
-                        )
-                        for g in attn_gids
-                    ]
-                # Transfer Mamba state only on the final DCP shard, using the port's TP rank to derive its offset.
-                if is_final:
-                    m_off = port_tp - self.tp_rank * mamba_num
-                    if 0 <= m_off < mamba_num:
-                        pulls += [
-                            GroupPull(
-                                group_id=g,
-                                remote_tp_offset=m_off,
-                                num_group_pulls=mamba_num,
-                                prefill_pp_rank=pp_rank,
-                                is_group_transfer_end=m_off == mamba_num - 1,
-                            )
-                            for g in mamba_gids
-                        ]
-                shard_pulls.append(pulls)
-            result.append(shard_pulls)
-        return result
+        """Thin delegate for transfer_plan.dcp_shard_pulls."""
+        return pull_dcp_shard_pulls(
+            remote_handshake_port_list=remote_handshake_port_list,
+            prefill_tp_size=prefill_tp_size,
+            remote_base_port=remote_base_port,
+            remote_pcp_size=remote_pcp_size,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            kv_group2layeridx=self.kv_group2layeridx,
+            get_tp_num_need_pulls=self._get_tp_num_need_pulls,
+        )
 
     def _get_group_pulls_metadata(
         self,
@@ -2961,85 +2940,22 @@ class MooncakeConnectorWorker:
         remote_pcp_size: int = 1,
         remote_dcp_size: int = 1,
     ) -> list[list[list[GroupPull]]]:
-        """Build per-port KV cache group pull descriptors.
-
-        Args:
-            req_id: Remote request id used to reproduce hybrid-attention rank
-                selection for the same request.
-            remote_handshake_port_list: Output from ``_get_kv_split_metadata``.
-                Each outer item is one transfer shard; each inner item is a
-                remote P worker handshake port.
-            prefill_tp_size: Effective remote prefill TP size. This may come
-                from ``meta.remote_ptp_size`` when P and D use different TP
-                sizes.
-            remote_base_port: Remote P-side handshake base port. A remote
-                worker rank is ``remote_handshake_port - remote_base_port``.
-
-        Returns:
-            A three-level list aligned with ``remote_handshake_port_list``:
-            ``result[shard_idx][remote_port_idx]`` is the list of ``GroupPull``
-            entries for that remote port. Each ``GroupPull`` identifies the KV
-            cache group, the remote TP offset to read, the number of pulls
-            needed to assemble that group, the prefill PP rank, and whether
-            this pull is the final pull for the group. The final-pull flag is
-            used by the receiver to decide when group reformatting can run.
-        """
-        if self._is_hma_required:
-            if remote_dcp_size == 1:
-                # The table uses TP/PP ranks without PCP replica offsets.
-                # Undo the offset added by _get_kv_split_metadata, keeping the PP stage.
-                # E.g. TP2/PP1, PCP rank 1: port base + 3 maps back to rank 3 - 2 = 1.
-                _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-                pcp_offset = self._get_selected_pcp_rank(req_id, remote_pcp_size) * prefill_tp_size
-                return [
-                    [rank_group_pulls[p - remote_base_port - pcp_offset] for p in ports]
-                    for ports in remote_handshake_port_list
-                ]
-
-            # The DCP path has already selected the source ports for each shard.
-            return self._get_dcp_shard_pulls(
-                remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size
-            )
-
-        tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
-        group_ids = [group_id for group_id, (_, layer_indices) in self.kv_group2layeridx.items() if layer_indices]
-
-        def make_group_pulls(remote_tp_offset: int, prefill_pp_rank: int) -> list[GroupPull]:
-            return [
-                GroupPull(
-                    group_id=group_id,
-                    remote_tp_offset=remote_tp_offset,
-                    num_group_pulls=tp_num_need_pulls,
-                    prefill_pp_rank=prefill_pp_rank,
-                    is_group_transfer_end=remote_tp_offset == tp_num_need_pulls - 1,
-                )
-                for group_id in group_ids
-            ]
-
-        group_pulls_list = []
-        for shard_idx, remote_ports in enumerate(remote_handshake_port_list):
-            if len(remote_ports) == 1:
-                remote_tp_offsets = [shard_idx % tp_num_need_pulls]
-                prefill_pp_ranks = [
-                    ((remote_ports[0] - remote_base_port) % (prefill_tp_size * self._prefill_pp_size))
-                    // prefill_tp_size
-                ]
-            else:
-                assert len(remote_ports) % tp_num_need_pulls == 0, (
-                    f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}"
-                )
-                remote_tp_offsets = [rank_idx % tp_num_need_pulls for rank_idx in range(len(remote_ports))]
-                prefill_pp_ranks = [
-                    ((remote_port - remote_base_port) % (prefill_tp_size * self._prefill_pp_size)) // prefill_tp_size
-                    for remote_port in remote_ports
-                ]
-            group_pulls_list.append(
-                [
-                    make_group_pulls(remote_tp_offset, prefill_pp_rank)
-                    for remote_tp_offset, prefill_pp_rank in zip(remote_tp_offsets, prefill_pp_ranks)
-                ]
-            )
-        return group_pulls_list
+        """Thin delegate for transfer_plan.group_pulls_metadata."""
+        return pull_group_pulls_metadata(
+            req_id=req_id,
+            remote_handshake_port_list=remote_handshake_port_list,
+            prefill_tp_size=prefill_tp_size,
+            remote_base_port=remote_base_port,
+            remote_pcp_size=remote_pcp_size,
+            remote_dcp_size=remote_dcp_size,
+            is_hma_required=self._is_hma_required,
+            prefill_pp_size=self._prefill_pp_size,
+            kv_group2layeridx=self.kv_group2layeridx,
+            get_tp_num_need_pulls=self._get_tp_num_need_pulls,
+            get_selected_pcp_rank=self._get_selected_pcp_rank,
+            get_hybrid_remote_rank_group_pulls=self._get_hybrid_remote_rank_group_pulls,
+            get_dcp_shard_pulls=self._get_dcp_shard_pulls,
+        )
 
     def _get_hybrid_remote_rank_group_pulls(
         self,
@@ -3047,85 +2963,19 @@ class MooncakeConnectorWorker:
         prefill_tp_size: int,
         tp_rank: int | None = None,
     ) -> tuple[list[int], dict[int, list[GroupPull]]]:
-        if tp_rank is None:
-            tp_rank = self.tp_rank
-
-        rank_group_pulls: OrderedDict[int, list[GroupPull]] = OrderedDict()
-        has_mamba_group = any(
-            layer_indices and group_spec["kv_cache_spec_type"] == "MambaSpec"
-            for group_spec, layer_indices in self.kv_group2layeridx.values()
+        """Thin delegate for transfer_plan.hybrid_remote_rank_group_pulls."""
+        return pull_hybrid_remote_rank_group_pulls(
+            req_id=req_id,
+            prefill_tp_size=prefill_tp_size,
+            tp_rank=tp_rank,
+            default_tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            prefill_pp_size=self._prefill_pp_size,
+            kv_group2layeridx=self.kv_group2layeridx,
+            get_attention_group_num_need_pulls=self._get_attention_group_num_need_pulls,
+            get_attention_group_num_key_value_heads=self._get_attention_group_num_key_value_heads,
+            get_attention_group_remote_rank=self._get_attention_group_remote_rank,
         )
-        mamba_num_group_pulls = 0
-        if has_mamba_group:
-            if prefill_tp_size % self.tp_size != 0:
-                raise ValueError(
-                    f"Hybrid Mamba prefill tp size({prefill_tp_size}) must be divisible by "
-                    f"decode tp size({self.tp_size})."
-                )
-            mamba_num_group_pulls = prefill_tp_size // self.tp_size
-
-        def add_group_pull(remote_rank: int, group_pull: GroupPull) -> None:
-            rank_group_pulls.setdefault(remote_rank, []).append(group_pull)
-
-        for group_id, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if not layer_indices:
-                continue
-
-            if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                num_group_pulls = mamba_num_group_pulls
-                for pp_rank in range(self._prefill_pp_size):
-                    pp_rank_offset = pp_rank * prefill_tp_size
-                    local_tp_offset = tp_rank * num_group_pulls
-                    for remote_tp_offset in range(num_group_pulls):
-                        remote_rank = pp_rank_offset + local_tp_offset + remote_tp_offset
-                        add_group_pull(
-                            remote_rank,
-                            GroupPull(
-                                group_id=group_id,
-                                remote_tp_offset=remote_tp_offset,
-                                num_group_pulls=num_group_pulls,
-                                prefill_pp_rank=pp_rank,
-                                is_group_transfer_end=remote_tp_offset == num_group_pulls - 1,
-                            ),
-                        )
-                continue
-
-            num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
-            num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
-            if has_mamba_group and num_key_value_heads == 1 and num_group_pulls == 1:
-                # Keep a replicated single-head attention cache inside this
-                # D rank's Mamba owner group so only its owner can signal that
-                # all request state has finished transferring.
-                replica_offset = random.Random(string_to_int64_hash(req_id)).randrange(mamba_num_group_pulls)
-                chosen_rank_list = [
-                    pp_rank * prefill_tp_size + tp_rank * mamba_num_group_pulls + replica_offset
-                    for pp_rank in range(self._prefill_pp_size)
-                ]
-            else:
-                chosen_rank_list = self._get_attention_group_remote_rank(
-                    req_id,
-                    group_spec,
-                    prefill_tp_size,
-                    tp_rank,
-                )
-            assert len(chosen_rank_list) == num_group_pulls * self._prefill_pp_size, (
-                f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
-                f"and prefill pp size({self._prefill_pp_size})."
-            )
-            for rank_idx, remote_rank in enumerate(chosen_rank_list):
-                prefill_pp_rank = rank_idx // num_group_pulls
-                add_group_pull(
-                    remote_rank,
-                    GroupPull(
-                        group_id=group_id,
-                        remote_tp_offset=rank_idx % num_group_pulls,
-                        num_group_pulls=num_group_pulls,
-                        prefill_pp_rank=prefill_pp_rank,
-                        is_group_transfer_end=rank_idx % num_group_pulls == num_group_pulls - 1,
-                    ),
-                )
-
-        return list(rank_group_pulls), dict(rank_group_pulls)
 
     def _get_hybrid_remote_port_send_num(
         self,
@@ -3234,82 +3084,15 @@ class MooncakeConnectorWorker:
             use_mla=self._group_use_mla_rank_routing(group_spec),
         )[tp_rank]
 
-    def _get_sfa_replicate_k_block_ids(
-        self,
-        meta: ReqMeta,
-    ) -> tuple[BlockIds, BlockIds]:
-        remote_uses_replicated_indexer = self.use_sfa_sparse and meta.remote_dcp_size > 1
-        if not (self.enable_sfa_dcp_replicated_indexer or remote_uses_replicated_indexer):
-            return tuple(), tuple()
-        if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
-            return tuple(), tuple()
-
-        if len(meta.remote_block_ids) != 1 or len(meta.local_block_ids) != 1:
-            raise AssertionError(
-                "SFA replicate-K currently expects exactly one KV cache group. "
-                f"Got remote groups={len(meta.remote_block_ids)}, local groups={len(meta.local_block_ids)}."
-            )
-
-        remote_cp_size = meta.remote_dcp_size
-        local_cp_size = self.dcp_size
-        if (
-            local_cp_size <= 0
-            or remote_cp_size <= 0
-            or (remote_cp_size % local_cp_size != 0 and local_cp_size % remote_cp_size != 0)
-        ):
-            raise AssertionError(
-                f"SFA replicate-K requires positive P/D CP sizes with one divisible by the other, "
-                f"got P CP={remote_cp_size}, D CP={local_cp_size}."
-            )
-        num_prefix_cached_blocks = min(meta.num_computed_tokens // self.block_size, meta.num_prompt_blocks)
-        num_external_blocks = meta.num_prompt_blocks - num_prefix_cached_blocks
-        num_external_blocks_from_tokens = math.ceil(meta.num_external_tokens / self.block_size)
-        if num_external_blocks < num_external_blocks_from_tokens:
-            raise AssertionError(
-                f"num_external_blocks({num_external_blocks}) derived from num_computed_tokens "
-                f"must cover num_external_blocks_from_tokens({num_external_blocks_from_tokens})."
-            )
-
-        if num_prefix_cached_blocks > 0 and not meta.local_full_block_ids:
-            raise AssertionError("SFA replicate-K requires full local block ids when prefix cache is used.")
-
-        remote_blocks = list(meta.remote_block_ids[0])
-        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
-        if not local_full_blocks:
-            return tuple(), tuple()
-
-        local_block_ids: list[int] = []
-        remote_block_ids: list[int] = []
-        for global_block_idx in range(num_prefix_cached_blocks, meta.num_prompt_blocks):
-            remote_local_idx = global_block_idx // remote_cp_size
-            local_local_idx = global_block_idx // local_cp_size
-            if remote_local_idx >= len(remote_blocks) or local_local_idx >= len(local_full_blocks):
-                break
-            remote_block_ids.append(
-                int(remote_blocks[remote_local_idx]) * remote_cp_size + global_block_idx % remote_cp_size
-            )
-            local_block_ids.append(
-                int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
-            )
-
-        local_block_ids = local_block_ids[:num_external_blocks]
-        remote_block_ids = remote_block_ids[: len(local_block_ids)]
-        local_block_ids = local_block_ids[: len(remote_block_ids)]
-
-        logger.debug(
-            "Mooncake SFA replicate-K block ids prepared from aligned full blocks. "
-            "remote_cp_size=%s local_cp_size=%s num_prompt_blocks=%s num_computed_tokens=%s "
-            "num_external_blocks=%s local_len=%s remote_len=%s",
-            remote_cp_size,
-            local_cp_size,
-            meta.num_prompt_blocks,
-            meta.num_computed_tokens,
-            num_external_blocks,
-            len(local_block_ids),
-            len(remote_block_ids),
+    def _get_sfa_replicate_k_block_ids(self, meta: ReqMeta) -> tuple[BlockIds, BlockIds]:
+        """Thin delegate for transfer_plan.sfa_replicate_k_block_ids."""
+        return pull_sfa_replicate_k_block_ids(
+            meta=meta,
+            use_sfa_sparse=self.use_sfa_sparse,
+            enable_sfa_dcp_replicated_indexer=self.enable_sfa_dcp_replicated_indexer,
+            dcp_size=self.dcp_size,
+            block_size=self.block_size,
         )
-
-        return (local_block_ids,), (remote_block_ids,)
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
@@ -3546,58 +3329,22 @@ class MooncakeConnectorWorker:
         tp_num_need_pulls: int | None = None,
         use_mla: bool | None = None,
     ) -> list[list[int]]:
-        if prefill_tp_size is None:
-            prefill_tp_size = self._prefill_tp_size
-        if num_key_value_heads is None:
-            if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
-                num_key_value_heads = 1
-            else:
-                num_key_value_heads = self.num_key_value_heads
-        if tp_num_need_pulls is None:
-            tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
-        if use_mla is None:
-            use_mla = self.vllm_config.model_config.is_deepseek_mla
-
-        # Divide the ports according to the TP within the PP
-        sampled_nums = []
-        if prefill_tp_size == self._decode_tp_size:
-            sampled_nums = list(
-                map(
-                    lambda tp: [tp + pp * prefill_tp_size for pp in range(self._prefill_pp_size)],
-                    range(prefill_tp_size),
-                )
-            )
-            return sampled_nums
-        num_kv_head = num_key_value_heads
-        ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
-        seed = string_to_int64_hash(req_id)
-        rand = random.Random(seed)
-        # random split prefill tp list
-        ori_data_2d = ori_data.reshape(self._prefill_pp_size, -1)
-        num_groups = max(
-            1, len(ori_data_2d[0]) // num_kv_head
-        )  # The number of redundant copies for each KV head within the PP stage
-        rand_group_index = rand.sample(
-            range(num_groups), (max(self._decode_tp_size // num_kv_head, 1))
-        )  # random choose a group
-        all_results = [
-            self._get_remote_tp_ranks(
-                ori_data_2d[pp_index],
-                rand_group_index,
-                num_groups,
-                prefill_tp_size,
-                num_key_value_heads,
-                tp_num_need_pulls,
-                use_mla,
-            )
-            for pp_index in range(self._prefill_pp_size)
-        ]
-        for group_index in range(len(all_results[0])):
-            group = []
-            for pp_index in range(self._prefill_pp_size):
-                group.extend(all_results[pp_index][group_index])
-            sampled_nums.append(group)
-        return sampled_nums
+        """Thin delegate for transfer_plan.remote_ranks_for_req."""
+        return pull_remote_ranks_for_req(
+            req_id=req_id,
+            prefill_tp_size=prefill_tp_size,
+            num_key_value_heads=num_key_value_heads,
+            tp_num_need_pulls=tp_num_need_pulls,
+            use_mla=use_mla,
+            default_prefill_tp_size=self._prefill_tp_size,
+            decode_tp_size=self._decode_tp_size,
+            prefill_pp_size=self._prefill_pp_size,
+            default_num_key_value_heads=self.num_key_value_heads,
+            use_sparse=self.use_sparse,
+            model_is_deepseek_mla=self.vllm_config.model_config.is_deepseek_mla,
+            get_tp_num_need_pulls=self._get_tp_num_need_pulls,
+            get_remote_tp_ranks=self._get_remote_tp_ranks,
+        )
 
 
 def transfer_groups_need_independent_block_ids(
