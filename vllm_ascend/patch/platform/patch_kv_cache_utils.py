@@ -27,6 +27,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     is_prefix_cacheable,
 )
+from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout, serialize_layerwise_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -218,9 +222,9 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     if any(spec != first_mamba_spec for spec in mamba_specs.values()):
         return None
 
-    # Insert target attention first. generate_scheduler_kv_cache_config unwraps a
-    # UniformType group to its first spec, and this representative is registered
-    # with the FullAttentionManager needed by both target and draft attention.
+    # Insert target attention first. Cache managers use the first spec for
+    # scheduling geometry while the config retains every layer's spec. This
+    # representative selects FullAttentionManager for target and draft attention.
     mixed_attention_specs = {**target_attention_specs, **draft_attention_specs}
     mixed_attention_spec = UniformTypeKVCacheSpecs.from_specs(mixed_attention_specs)
     if mixed_attention_spec is None:
@@ -835,15 +839,19 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    # Model placement may already have applied the common planner. Only plan
+    # unconverted configurations; the planner itself handles disabled reuse.
+    if get_layerwise_layout(kv_cache_config) is None:
+        apply_layerwise_kv_cache_plan(kv_cache_config, vllm_config)
+    kv_cache_config = serialize_layerwise_config(kv_cache_config)
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
         from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
 
-        # Upstream scheduler conversion keeps only the first spec in a uniform
-        # group, losing draft residency when target and draft share block IDs.
-        # Preserve the worker-derived ownership through that deepcopy. Remove
-        # this bridge once upstream KVCacheConfig carries per-layer ownership.
+        # Publish group roles derived from the complete per-layer specs so
+        # scheduler lookup retains draft residency, including PP-local groups
+        # without layer names.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         draft_only_group_ids = []
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):

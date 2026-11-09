@@ -18,6 +18,7 @@
 import queue
 import threading
 import unittest
+from dataclasses import replace
 from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -31,6 +32,7 @@ import torch
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import cache as original_cache
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     create_kv_pool_worker,
@@ -39,6 +41,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
     LayerTransferTask,
@@ -176,6 +181,10 @@ def make_worker(
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
+    if kv_cache_config is not None and use_layerwise and extra_config and extra_config.get("backend") == "memcache":
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = True
+        apply_layerwise_kv_cache_plan(kv_cache_config, config)
     return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
@@ -217,7 +226,7 @@ class TestPCPPoolWorker(unittest.TestCase):
             for name in names
         }
         cases = [
-            (True, {"backend": "memcache", "layerwise_num_shared_buffers": 1}, True),
+            (True, {"backend": "memcache", "layerwise_num_shared_buffers": 2}, True),
             (True, {"backend": "memcache"}, False),
             (True, {"backend": "memcache", "layerwise_num_shared_buffers": 6}, False),
             (True, {"backend": "memcache", "layerwise_independent_layers": "all"}, False),
@@ -226,6 +235,13 @@ class TestPCPPoolWorker(unittest.TestCase):
         ]
         for use_layerwise, extra_config, reuse in cases:
             with self.subTest(use_layerwise=use_layerwise, extra_config=extra_config):
+                requested = extra_config.get("layerwise_independent_layers") != "all"
+                specs = {
+                    **{name: replace(target, reuse=requested and name != target_names[0]) for name in target_names},
+                    **dict.fromkeys(draft_names, draft),
+                }
+                config = original_cache(specs, [target_names, draft_names], n=2)
+                config.dspark_draft_layer_names = tuple(draft_names)
                 worker = make_worker(
                     self,
                     num_layers=4,
@@ -236,14 +252,11 @@ class TestPCPPoolWorker(unittest.TestCase):
                 )
                 self.assertEqual(worker.cacheable_group_ids, [0])
                 self.assertEqual(getattr(worker, "layerwise_offload", False), reuse)
-                self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {2: 1, 3: 2} if reuse else {})
+                self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {3: 1} if reuse else {})
                 if reuse:
-                    self.assertEqual(set(worker._layerwise_reuse_layout.layer_cache_specs), set(range(4)))
-                    self.assertTrue(
-                        all(
-                            item.main.spec is target
-                            for item in worker._layerwise_reuse_layout.layer_cache_specs.values()
-                        )
+                    self.assertEqual(
+                        {name for slot in worker._layerwise_layout.buffer_slots for name in slot},
+                        set(target_names[1:]),
                     )
                 worker._transfer_threads_started = True
                 worker.register_kv_caches(caches)
@@ -253,9 +266,8 @@ class TestPCPPoolWorker(unittest.TestCase):
 
         # Adding same-spec draft layers must not turn a non-reused target
         # layout into scratch reuse: allocation keeps those draft pages private.
-        config.kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=target_names + draft_names, kv_cache_spec=target),
-        ]
+        config = original_cache(dict.fromkeys(target_names + draft_names, target), [target_names, draft_names], n=2)
+        config.dspark_draft_layer_names = tuple(draft_names)
         worker = make_worker(
             self,
             num_layers=4,
@@ -934,24 +946,30 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             head_size=4,
             dtype=torch.float16,
         )
-        worker.kv_cache_config = SimpleNamespace(
-            kv_cache_groups=[
-                SimpleNamespace(
-                    layer_names=[
-                        *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
-                        "model.mtp.0.self_attn.attn",
-                    ],
-                    kv_cache_spec=main_spec,
-                ),
-                SimpleNamespace(
-                    layer_names=[
-                        *(f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in range(4)),
-                    ],
-                    kv_cache_spec=indexer_spec,
-                ),
-            ]
-        )
+        main_names = [*(f"model.layers.{layer}.self_attn.attn" for layer in range(4)), "model.mtp.0.self_attn.attn"]
+        indexer_names = [f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in range(4)]
+        specs = {
+            name: replace(spec, reuse=name != names[0])
+            for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
+            for name in names
+        }
+        worker.kv_cache_config = original_cache(specs, [main_names, indexer_names])
+        worker.kv_cache_config.kv_cache_groups = [
+            KVCacheGroupSpec(
+                names, UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs={name: specs[name] for name in names})
+            )
+            for names in (main_names, indexer_names)
+        ]
 
+        runtime = SimpleNamespace(
+            model_config=SimpleNamespace(get_num_layers=lambda _: 4),
+            parallel_config=None,
+            kv_transfer_config=SimpleNamespace(
+                kv_connector="AscendStoreConnector",
+                kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, **worker._extra_config},
+            ),
+        )
+        apply_layerwise_kv_cache_plan(worker.kv_cache_config, runtime)
         worker._init_layerwise_config()
 
         self.assertEqual(worker.num_layers, 5)

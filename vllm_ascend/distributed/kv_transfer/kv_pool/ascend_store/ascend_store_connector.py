@@ -176,6 +176,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
+            if self.layerwise_data_plane == "gva":
+                kv_cache_config = getattr(kv_cache_config, "layerwise_scheduler_config", kv_cache_config)
             self.connector_scheduler = create_kv_pool_scheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = create_kv_pool_worker(

@@ -39,11 +39,15 @@ from zmq.error import ZMQError
 from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from tests.ut.distributed.ascend_store.test_layerwise_cache_layout import cache as original_cache
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map, get_backend_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -188,7 +192,7 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0,)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
-    assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
+    assert scheduler_config.kv_cache_groups[1].kv_cache_spec.kv_cache_specs == layer_specs
     assert result.kv_cache_groups == original_groups
 
 
@@ -908,11 +912,23 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config = self._make_config(
             extra_config={
                 "backend": "memcache",
-                "layerwise_num_shared_buffers": 1,
+                "layerwise_num_shared_buffers": 2,
             },
             num_layers=4,
         )
-        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = True
+        specs = {
+            f"model.layers.{i}.attn": FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16, reuse=i > 0
+            )
+            for i in range(4)
+        }
+        kv_config = original_cache(specs)
+        apply_layerwise_kv_cache_plan(kv_config, config)
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=kv_config)
+        scheduler._block_pool = MagicMock()
+        scheduler._block_pool.blocks = list(range(8))
         self._set_running_chunk(scheduler)
 
         meta = scheduler.build_connector_meta(self._make_running_chunk_output([]))
@@ -930,11 +946,23 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config = self._make_config(
             extra_config={
                 "backend": "memcache",
-                "layerwise_num_shared_buffers": 1,
+                "layerwise_num_shared_buffers": 2,
             },
             num_layers=4,
         )
-        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+        config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+        config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = True
+        specs = {
+            f"model.layers.{i}.attn": FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16, reuse=i > 0
+            )
+            for i in range(4)
+        }
+        kv_config = original_cache(specs)
+        apply_layerwise_kv_cache_plan(kv_config, config)
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=kv_config)
+        scheduler._block_pool = MagicMock()
+        scheduler._block_pool.blocks = list(range(8))
         request = MagicMock()
         request.num_computed_tokens = 32
         request.num_prompt_tokens = 32

@@ -60,6 +60,10 @@ def register_connector():
     # torch.npu streams and the Ascend batched memcpy op.
     from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
+    from vllm_ascend.patch.patch_layerwise_connector_specs import register_layerwise_connector_patches
+
+    register_layerwise_connector_patches()
+
     for name, class_name in (
         ("CPUOffloadingSpec", "NPUOffloadingSpec"),
         ("TieringOffloadingSpec", "NPUTieringOffloadingSpec"),

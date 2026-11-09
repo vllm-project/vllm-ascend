@@ -306,6 +306,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             compression_ratio = get_kv_cache_compression_ratio(spec)
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
+                reuse=spec.reuse,
                 block_size=spec.block_size,
                 # ``num_heads`` describes physical cache head slots, not query
                 # heads. Kimi K3 publishes one latent KV slot per token; using
@@ -339,6 +340,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
             head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
+                reuse=spec.reuse,
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,

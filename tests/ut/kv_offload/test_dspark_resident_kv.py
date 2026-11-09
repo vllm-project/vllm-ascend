@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -255,6 +262,7 @@ def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_c
     worker._get_layerwise_kv_cache_memory_info = Mock(return_value=(1, 1, 1.0))
     with (
         patch.object(module, "get_layerwise_reuse_config", return_value={}),
+        patch.object(module, "get_kv_cache_groups", return_value=[]),
         patch.object(module.KVPPConfig, "from_vllm_config", return_value=SimpleNamespace(size=1)),
         patch.object(
             module,
@@ -263,6 +271,8 @@ def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_c
         ),
     ):
         assert worker.get_kv_cache_spec() is specs
+        worker._get_layerwise_kv_cache_memory_info.assert_not_called()
+        assert worker._scale_kv_cache_memory_for_multi_group(1024) == 1024
     excluded = {"draft.attn"} if method == "dspark" else set()
     worker._get_layerwise_kv_cache_memory_info.assert_called_once_with(specs, {}, excluded_layer_names=excluded)
 
@@ -505,7 +515,15 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
     layer_bytes = 3 * spec.page_size_bytes
     config = KVCacheConfig(
         num_blocks=3,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=spec.block_size,
+                    kv_cache_specs={name: replace(spec, reuse=name in target_names[1:]) for name in names},
+                ),
+            )
+        ],
         kv_cache_tensors=[
             KVCacheTensor(
                 size=len(names) * layer_bytes,
@@ -521,11 +539,11 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
         parallel_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
-            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 1},
+            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 2},
         ),
     )
     apply_layerwise_kv_cache_plan(config, runtime, excluded_layer_names=set(draft_names))
-    assert len(config.kv_cache_tensors) == 4  # Independent target 0, shared targets 1..4, two draft layers.
+    assert len(config.kv_cache_tensors) == 5  # Target 0, two rotating target buffers, two draft layers.
     for name in draft_names:
         descriptor = next(tensor for tensor in config.kv_cache_tensors if name in tensor.layers)
         assert descriptor.layers == [name]

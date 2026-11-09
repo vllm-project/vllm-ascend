@@ -3,8 +3,9 @@
 """Physical cache-pool accounting for Ascend layouts."""
 
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder, get_kv_cache_groups_from_builder
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -13,6 +14,11 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
 )
+
+
+def get_kv_cache_groups_for_profiling(vllm_config: VllmConfig, specs: dict[str, KVCacheSpec]) -> list[KVCacheGroupSpec]:
+    """Use the same model grouping contract for profiling and engine planning."""
+    return get_kv_cache_groups_from_builder(get_kv_cache_config_builder(vllm_config), vllm_config, specs)
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):

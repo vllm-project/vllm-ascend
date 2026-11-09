@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -45,7 +46,13 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)
+            KVCacheGroupSpec(
+                layer_names=names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=spec.block_size,
+                    kv_cache_specs={name: replace(spec, reuse=reuse and name != main_names[0]) for name in names},
+                ),
+            )
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
     )
