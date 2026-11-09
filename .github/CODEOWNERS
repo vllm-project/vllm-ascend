@@ -88,7 +88,7 @@
 /vllm_ascend/ops @zzzzwwjj
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
-/vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA
+/vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
@@ -101,7 +101,7 @@
 /vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137 @zhenwenqi2024
 
 # spec decode
-/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman @zhenwenqi2024
+/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman @zhenwenqi2024 @yiz-liu
 /vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
 
 # scheduler
@@ -110,30 +110,26 @@
 /vllm_ascend/core/scheduler_profiling_chunk.py @weiguihua2
 
 # kv cache
-/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024
-/vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024
-/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024
-/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024
+/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
+/vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
+/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 
 # Core framework
 /vllm_ascend/__init__.py @wangxiyuan
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
-/vllm_ascend/ascend_forward_context.py @zzzzwwjj
+/vllm_ascend/ascend_forward_context.py @zzzzwwjj @yiz-liu
 /vllm_ascend/batch_invariant.py @Ronald1995
-# TODO(owner): /vllm_ascend/config_utils.py
-# /vllm_ascend/config_utils.py
+/vllm_ascend/config_utils.py @wxsIcey
 /vllm_ascend/cpu_binding.py @zouyida2052
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
-# TODO(owner): /vllm_ascend/logger.py
-# /vllm_ascend/logger.py
-# TODO(owner): /vllm_ascend/meta_registration.py
-# /vllm_ascend/meta_registration.py
+/vllm_ascend/logger.py @wangxiyuan
+/vllm_ascend/meta_registration.py @ZT-AIA
 /vllm_ascend/mrv2_utils.py @yzeyu71
 /vllm_ascend/platform.py @wxsIcey @Tflowers-0129
 # TODO(owner): /vllm_ascend/profiling_config.py
 # /vllm_ascend/profiling_config.py
-# TODO(owner): /vllm_ascend/utils.py
-# /vllm_ascend/utils.py
+/vllm_ascend/utils.py @wxsIcey
 
 # Patch
 /vllm_ascend/patch @wxsIcey
@@ -151,15 +147,12 @@
 # /vllm_ascend/worker/kvpp_cache.py
 # TODO(owner): /vllm_ascend/worker/npu_input_batch.py
 # /vllm_ascend/worker/npu_input_batch.py
-# TODO(owner): /vllm_ascend/worker/spec_decode_utils.py
-# /vllm_ascend/worker/spec_decode_utils.py
+/vllm_ascend/worker/spec_decode_utils.py @wxsIcey
+/vllm_ascend/worker/utils.py @wxsIcey
 
 # Worker V2
-# TODO(owner): /vllm_ascend/worker/v2/*.py
-# /vllm_ascend/worker/v2/*.py
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
-# TODO(owner): /vllm_ascend/worker/v2/aclgraph_utils.py
-# /vllm_ascend/worker/v2/aclgraph_utils.py
+/vllm_ascend/worker/v2/aclgraph_utils.py @yiz-liu
 /vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj @zhenwenqi2024
 /vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
 /vllm_ascend/worker/v2/eplb.py @freyfwt
