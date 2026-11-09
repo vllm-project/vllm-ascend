@@ -243,10 +243,17 @@ def _group_rank(group: Any, src: int = 0) -> int:
         ) from None
 
 
-def _cpu_gate(group: Any) -> Any | None:
+def _require_cpu_group(group: Any) -> Any:
+    """Return ``group.cpu_group`` for due-bit collectives (Gloo / CPU tensors).
+
+    vLLM ``GroupCoordinator`` always builds ``cpu_group``. There is no
+    ``device_group`` / HCCL fallback — NPU would contend with forward.
+    """
     gate = getattr(group, "cpu_group", None)
     if gate is None:
-        gate = getattr(group, "device_group", None)
+        raise RuntimeError(
+            "[runtime_config] due-bit collective requires group.cpu_group (Gloo/CPU); device_group/HCCL is not used"
+        )
     return gate
 
 
@@ -256,7 +263,7 @@ def sync_due_bits_from_src(
     *,
     wave_idx: int | None = None,
 ) -> list[bool]:
-    """Agree on a due bit-vector via one ``broadcast`` from rank 0 of ``group``.
+    """Agree on a due bit-vector via one CPU/Gloo ``broadcast`` from rank 0.
 
     Bits are computed once by ``rank_in_group == 0`` and pushed to peers (dump
     jobs and periodic config reload are source-owned). Empirically this removes
@@ -265,6 +272,7 @@ def sync_due_bits_from_src(
 
     ``wave_idx`` rides in the payload and is asserted on receivers so a rank
     that skipped a wave fails fast instead of consuming a crossed payload.
+    Requires ``group.cpu_group`` (no HCCL/NPU path).
     """
     bits = [bool(x) for x in due_locals]
     if not bits:
@@ -274,13 +282,8 @@ def sync_due_bits_from_src(
 
     import torch
 
-    gate = _cpu_gate(group)
-    if gate is None:
-        return bits
-
-    # HCCL device_group only accepts NPU tensors; Gloo cpu_group accepts CPU.
-    device = "npu" if gate == getattr(group, "device_group", None) else "cpu"
-    payload = torch.zeros(len(bits) + 1, dtype=torch.float32, device=device)
+    gate = _require_cpu_group(group)
+    payload = torch.zeros(len(bits) + 1, dtype=torch.float32, device="cpu")
     if _group_rank(group, 0) == 0:
         payload[0] = float(int(wave_idx) % _WAVE_IDX_MOD) if wave_idx is not None else -1.0
         for i, b in enumerate(bits):
