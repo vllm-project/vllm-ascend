@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -46,6 +46,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.patch.worker import patch_qwen3_5
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -1934,3 +1935,143 @@ def test_adaptive_fused_descriptors_keep_prepared_conv_indices():
     assert spec.spec_causal_conv1d.cache_indices.data_ptr() == prepared_conv_indices.data_ptr()
     assert spec.spec_causal_conv1d.query_start_loc is metadata.spec_query_start_loc
     assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 1]
+
+
+def _with_cpu_metadata(values):
+    tensor = torch.tensor(values, dtype=torch.int64)
+    tensor._cpu_list = list(values)
+    tensor._has_valid = any(value >= 0 for value in values)
+    return tensor
+
+
+def test_common_metadata_carries_mamba_checkpoint_fields():
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[6, 7], query_lens=[2, 3]),
+        block_size=4,
+        device=torch.device("cpu"),
+    )
+    common = replace(
+        common,
+        mamba_prefix_producer_indices=_with_cpu_metadata([-1, 0]),
+        mamba_checkpoint_positions=_with_cpu_metadata([4, 4]),
+        mamba_checkpoint_source_block_ids=_with_cpu_metadata([-1, 10]),
+    )
+
+    assert common.mamba_prefix_producer_indices.tolist() == [-1, 0]
+    assert common.mamba_checkpoint_positions.tolist() == [4, 4]
+    assert common.mamba_checkpoint_source_block_ids.tolist() == [-1, 10]
+    unpadded = common.unpadded(num_actual_tokens=2, num_actual_reqs=1)
+    assert unpadded.mamba_prefix_producer_indices.tolist() == [-1]
+    assert unpadded.mamba_checkpoint_positions.tolist() == [4]
+    assert unpadded.mamba_checkpoint_source_block_ids.tolist() == [-1]
+
+
+def test_grouped_prefill_builds_producer_consumer_phases(monkeypatch: pytest.MonkeyPatch):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[4, 6, 7, 2], query_lens=[4, 2, 3, 2]),
+        block_size=4,
+        device=torch.device("cpu"),
+    )
+    common.block_table_tensor = torch.tensor([[10, 11], [20, 21], [30, 31], [40, 41]], dtype=torch.int32)
+    common.mamba_prefix_producer_indices = _with_cpu_metadata([-1, 0, 0, -1])
+    common.mamba_checkpoint_source_block_ids = _with_cpu_metadata([-1, -1, -1, -1])
+    common.mamba_checkpoint_positions = _with_cpu_metadata([4, 4, 4, -1])
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        mamba_cache_mode="align",
+        block_size=4,
+    )
+
+    metadata = builder.build(0, common)
+
+    assert metadata.prefix_producer_ranges.tolist() == [[0, 4]]
+    assert metadata.consumer_ranges.tolist() == [[4, 6], [6, 9], [9, 11]]
+    assert metadata.producer_query_start_loc.tolist() == [0, 4]
+    assert metadata.consumer_query_start_loc.tolist() == [0, 2, 5, 7]
+    assert metadata.producer_slice == slice(0, 4)
+    assert metadata.consumer_slice == slice(4, 11)
+    assert metadata.shared_state_destinations.tolist() == [10]
+    assert metadata.consumer_shared_state_sources.tolist() == [10, 10, NULL_BLOCK_ID]
+    assert metadata.private_final_state_destination.tolist() == [21, 31, 40]
+    assert metadata.producer_chunk_metadata.cu_seqlens_host == (0, 4)
+    assert metadata.consumer_chunk_metadata.cu_seqlens_host == (0, 2, 5, 7)
+
+
+def test_checkpoint_only_consumers_read_shared_state_without_changing_destination(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[6, 7], query_lens=[2, 3]),
+        block_size=4,
+        device=torch.device("cpu"),
+    )
+    common.block_table_tensor = torch.tensor([[20, 21], [30, 31]], dtype=torch.int32)
+    common.mamba_prefix_producer_indices = _with_cpu_metadata([-1, -1])
+    common.mamba_checkpoint_source_block_ids = _with_cpu_metadata([10, -1])
+    common.mamba_checkpoint_positions = _with_cpu_metadata([4, 4])
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        mamba_cache_mode="align",
+        block_size=4,
+    )
+
+    metadata = builder.build(0, common)
+
+    assert metadata.prefix_producer_ranges is None
+    assert metadata.consumer_shared_state_sources.tolist() == [10, 31]
+    assert metadata.private_final_state_destination.tolist() == [21, 31]
+    assert metadata.checkpoint_source_block_ids.tolist() == [10, -1]
+
+
+def test_convolution_state_io_preserves_shared_checkpoint(monkeypatch: pytest.MonkeyPatch):
+    layer = AscendGatedDeltaNetAttention.__new__(AscendGatedDeltaNetAttention)
+    conv_state = torch.ones(32, 2, 3)
+    layer.kv_cache = (conv_state, torch.empty(0))
+    layer.conv1d = SimpleNamespace(bias=None)
+    layer.activation = "silu"
+    source = torch.tensor([10], dtype=torch.int32)
+    destination = torch.tensor([21], dtype=torch.int32)
+    has_initial = torch.tensor([True])
+
+    def gather(state, indices, _has_initial, **_kwargs):
+        return state[indices].clone()
+
+    def scatter(state, indices, values):
+        state[indices] = values
+
+    def conv(mixed_qkv, _weights, _bias, *, conv_states, cache_indices, **_kwargs):
+        assert cache_indices.tolist() == [21]
+        conv_states.index_add_(0, cache_indices, torch.full_like(conv_states[cache_indices], 5))
+        return mixed_qkv
+
+    monkeypatch.setattr(ascend_gdn, "gather_ssm_states", gather)
+    monkeypatch.setattr(ascend_gdn, "scatter_ssm_states_", scatter)
+    monkeypatch.setattr(ascend_gdn, "causal_conv1d_fn", conv)
+    mixed_qkv = torch.zeros(2, 4)
+
+    output = layer._causal_conv1d_with_state_io(
+        mixed_qkv,
+        torch.tensor([0, 2], dtype=torch.int32),
+        source,
+        destination,
+        has_initial,
+        torch.ones(4, 3),
+        conv_head_num=0,
+    )
+
+    assert output is mixed_qkv
+    assert torch.all(conv_state[10] == 1)
+    assert torch.all(conv_state[21] == 6)
+
+
+def test_qwen3_5_patch_installs_grouped_prefill_helpers():
+    target = patch_qwen3_5._GDN_PATCH_TARGET
+
+    assert target._forward_core_grouped_prefill is AscendGatedDeltaNetAttention._forward_core_grouped_prefill
+    assert target._causal_conv1d_with_state_io is AscendGatedDeltaNetAttention._causal_conv1d_with_state_io

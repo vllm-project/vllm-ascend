@@ -36,7 +36,7 @@ from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -456,6 +456,210 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             output[:num_tokens] = out
         return out
 
+    def _causal_conv1d_with_state_io(
+        self,
+        mixed_qkv: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        source_indices: torch.Tensor,
+        destination_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        conv_weights: torch.Tensor,
+        conv_head_num: int,
+    ) -> torch.Tensor:
+        conv_state = self.kv_cache[0]
+        initial_state = gather_ssm_states(conv_state, source_indices, has_initial_state)
+        scatter_ssm_states_(conv_state, destination_indices, initial_state)
+        return causal_conv1d_fn(
+            mixed_qkv,
+            conv_weights,
+            self.conv1d.bias,
+            conv_states=conv_state,
+            query_start_loc=query_start_loc,
+            cache_indices=destination_indices,
+            has_initial_state=has_initial_state,
+            activation="silu" if self.activation else None,
+            pad_slot_id=PAD_SLOT_ID,
+            null_block_id=0,
+            head_num=conv_head_num,
+        )
+
+    def _forward_core_grouped_prefill(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> None:
+        producer_ranges = attn_metadata.prefix_producer_ranges
+        producer_tokens = attn_metadata.producer_token_indices
+        producer_qsl = attn_metadata.producer_query_start_loc
+        consumer_ranges = attn_metadata.consumer_ranges
+        consumer_tokens = attn_metadata.consumer_token_indices
+        consumer_qsl = attn_metadata.consumer_query_start_loc
+        initial_sources = attn_metadata.shared_initial_state_source
+        shared_destinations = attn_metadata.shared_state_destinations
+        consumer_sources = attn_metadata.consumer_shared_state_sources
+        private_destinations = attn_metadata.private_final_state_destination
+        required = (
+            producer_ranges,
+            producer_tokens,
+            producer_qsl,
+            consumer_ranges,
+            consumer_tokens,
+            consumer_qsl,
+            initial_sources,
+            shared_destinations,
+            consumer_sources,
+            private_destinations,
+        )
+        if any(value is None for value in required):
+            raise ValueError("grouped GDN requires packed producer and consumer metadata")
+        assert producer_ranges is not None
+        assert consumer_ranges is not None
+        assert shared_destinations is not None
+        assert consumer_sources is not None
+        assert private_destinations is not None
+        if producer_ranges.ndim != 2 or producer_ranges.shape[1] != 2:
+            raise ValueError("prefix_producer_ranges must have shape [N, 2]")
+        if consumer_ranges.ndim != 2 or consumer_ranges.shape[1] != 2:
+            raise ValueError("consumer_ranges must have shape [N, 2]")
+        if shared_destinations.numel() != producer_ranges.shape[0]:
+            raise ValueError("one shared destination is required per producer")
+        if consumer_sources.numel() != consumer_ranges.shape[0]:
+            raise ValueError("one shared source is required per consumer")
+        if private_destinations.numel() != consumer_ranges.shape[0]:
+            raise ValueError("one private destination is required per consumer")
+
+        conv_weights = _get_packed_conv_weights(self)
+        conv_head_num = 0
+        if self.head_k_dim == self.head_v_dim and self.head_k_dim % 16 == 0:
+            conv_head_num = (2 * self.num_k_heads + self.num_v_heads) // self.tp_size
+        ssm_state = self.kv_cache[1]
+
+        def run_phase(
+            token_indices: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            sources: torch.Tensor,
+            destinations: torch.Tensor,
+            chunk_metadata,
+            token_slice: slice | None,
+        ) -> None:
+            if destinations.numel() == 0:
+                return
+            if sources.numel() == 1 and destinations.numel() > 1:
+                sources = sources.expand_as(destinations)
+            if sources.numel() != destinations.numel():
+                raise ValueError("one initial source is required per destination")
+            source_indices = sources.to(torch.int32).contiguous()
+            destination_indices = destinations.to(torch.int32).contiguous()
+            has_initial_state = source_indices > NULL_BLOCK_ID
+            if token_slice is not None:
+                packed_mixed_qkv = mixed_qkv[token_slice]
+                packed_a = a[token_slice]
+                packed_b = b[token_slice]
+            else:
+                packed_mixed_qkv = mixed_qkv.index_select(0, token_indices)
+                packed_a = a.index_select(0, token_indices)
+                packed_b = b.index_select(0, token_indices)
+
+            conv_output = self._causal_conv1d_with_state_io(
+                packed_mixed_qkv,
+                query_start_loc,
+                source_indices,
+                destination_indices,
+                has_initial_state,
+                conv_weights,
+                conv_head_num,
+            )
+            if conv_head_num:
+                query, key, value = _split_head_first_conv_output(
+                    conv_output,
+                    self.num_k_heads // self.tp_size,
+                    self.num_v_heads // self.tp_size,
+                )
+            else:
+                query, key, value = self.rearrange_mixed_qkv(conv_output)
+            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, packed_a, packed_b, self.dt_bias)
+            supports_fused_dtype = query.dtype == torch.bfloat16
+            use_fla_gdn_prefill = supports_fused_dtype and get_current_hardware_profile().supports(
+                HardwareCapability.FLA_GDN_PREFILL
+            )
+            fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
+            use_fused_chunk = (
+                fla_gdn_prefill_op is None
+                and supports_fused_dtype
+                and query.device.type != "cpu"
+                and AscendGatedDeltaNetAttention._probe_fused_chunk()
+            )
+            initial_state = gather_ssm_states(
+                ssm_state,
+                source_indices,
+                has_initial_state,
+                output_dtype=torch.bfloat16 if use_fused_chunk else None,
+            )
+            if fla_gdn_prefill_op is not None:
+                phase_output, final_state = DeviceOperator.fla_gdn_prefill(
+                    q=query,
+                    k=key,
+                    v=value,
+                    g=g,
+                    beta=beta,
+                    initial_state=initial_state,
+                    scale=key.shape[-1] ** -0.5,
+                    prebuilt_meta=chunk_metadata,
+                    fused_fwd=fla_gdn_prefill_op,
+                )
+                final_state = final_state.to(ssm_state.dtype).contiguous()
+            elif use_fused_chunk:
+                phase_output, final_state = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
+                    q=query,
+                    k=key,
+                    v=value,
+                    g=g,
+                    beta=beta,
+                    initial_state=initial_state,
+                    cu_seqlens=query_start_loc,
+                    scale=key.shape[-1] ** -0.5,
+                )
+            else:
+                phase_output, final_state = chunk_gated_delta_rule(
+                    q=query,
+                    k=key,
+                    v=value,
+                    g=g,
+                    beta=beta,
+                    initial_state=initial_state.transpose(-1, -2).contiguous(),
+                    output_final_state=True,
+                    cu_seqlens=query_start_loc,
+                    prebuilt_meta=chunk_metadata,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                final_state = final_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            scatter_ssm_states_(ssm_state, destination_indices, final_state)
+            if token_slice is not None:
+                core_attn_out[token_slice] = phase_output.squeeze(0)
+            else:
+                core_attn_out.index_copy_(0, token_indices, phase_output.squeeze(0))
+
+        run_phase(
+            producer_tokens,
+            producer_qsl,
+            initial_sources,
+            shared_destinations,
+            getattr(attn_metadata, "producer_chunk_metadata", None),
+            attn_metadata.producer_slice,
+        )
+        run_phase(
+            consumer_tokens,
+            consumer_qsl,
+            consumer_sources,
+            private_destinations,
+            getattr(attn_metadata, "consumer_chunk_metadata", None),
+            attn_metadata.consumer_slice,
+        )
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -496,6 +700,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
+
+        if attn_metadata.prefix_producer_ranges is not None and attn_metadata.prefix_producer_ranges.numel() > 0:
+            self._forward_core_grouped_prefill(mixed_qkv, b, a, core_attn_out, attn_metadata)
+            maybe_save_kv_layer_to_connector("", [])
+            return
 
         # 1. Convolution sequence transformation
         conv_weights_T = _get_packed_conv_weights(self)
@@ -627,19 +836,32 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         cache_indices_opt = cache_indices_opt[num_decodes:]
                         if initial_state_mode_opt is not None:
                             initial_state_mode_opt = initial_state_mode_opt[num_decodes:]
-                    mixed_qkv_non_spec_output = causal_conv1d_fn(
-                        mixed_qkv_non_spec,
-                        conv_weights_T,
-                        self.conv1d.bias,
-                        conv_states=self_kv_cache[0],
-                        query_start_loc=query_start_loc_opt,
-                        cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
-                        has_initial_state=initial_state_mode_opt,
-                        activation="silu" if self.activation else None,
-                        pad_slot_id=PAD_SLOT_ID,
-                        null_block_id=0,
-                        head_num=conv_head_num,
-                    )
+                    consumer_sources = attn_metadata.consumer_shared_state_sources
+                    if consumer_sources is not None:
+                        assert initial_state_mode_opt is not None
+                        mixed_qkv_non_spec_output = self._causal_conv1d_with_state_io(
+                            mixed_qkv_non_spec,
+                            query_start_loc_opt,
+                            consumer_sources,
+                            _normalize_causal_cache_indices(cache_indices_opt),
+                            initial_state_mode_opt,
+                            conv_weights_T,
+                            conv_head_num,
+                        )
+                    else:
+                        mixed_qkv_non_spec_output = causal_conv1d_fn(
+                            mixed_qkv_non_spec,
+                            conv_weights_T,
+                            self.conv1d.bias,
+                            conv_states=self_kv_cache[0],
+                            query_start_loc=query_start_loc_opt,
+                            cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
+                            has_initial_state=initial_state_mode_opt,
+                            activation="silu" if self.activation else None,
+                            pad_slot_id=PAD_SLOT_ID,
+                            null_block_id=0,
+                            head_num=conv_head_num,
+                        )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
@@ -796,6 +1018,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_query_start_loc is not None
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
+            consumer_sources = attn_metadata.consumer_shared_state_sources
+            prefill_read_indices = consumer_sources if consumer_sources is not None else prefill_state_indices
             assert g_non_spec is not None
             assert beta_non_spec is not None
             if split_non_spec:
@@ -830,7 +1054,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if fla_gdn_prefill_op is not None:
                 initial_state = gather_ssm_states(
                     ssm_state,
-                    prefill_state_indices,
+                    prefill_read_indices,
                     prefill_has_initial_state,
                 )
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
@@ -855,7 +1079,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # batch stride under the hybrid KV-cache manager.
                 initial_state = gather_ssm_states(
                     ssm_state,
-                    prefill_state_indices,
+                    prefill_read_indices,
                     prefill_has_initial_state,
                     output_dtype=torch.bfloat16,
                 )
@@ -885,11 +1109,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 if padded_state:
                     initial_state = gather_ssm_states(
                         ssm_state,
-                        prefill_state_indices,
+                        prefill_read_indices,
                         prefill_has_initial_state,
                     )
                 else:
-                    initial_state = ssm_state[prefill_state_indices]
+                    initial_state = ssm_state[prefill_read_indices]
                     clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,

@@ -1341,3 +1341,57 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
     )
 
     assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+def test_prepare_attn_propagates_mamba_checkpoint_metadata(mock_build_attn_metadata):
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=0, parallel_config=SimpleNamespace()),
+        max_model_len=1024,
+        device=torch.device("cpu"),
+        _mamba_checkpoint_positions={"consumer": 4},
+        _mamba_checkpoint_source_block_ids={"consumer": (10,)},
+        _mamba_prefix_producer_ids={"consumer": "producer"},
+        _get_mamba_group_info=MagicMock(return_value=([0], _mamba_spec())),
+    )
+    input_batch = SimpleNamespace(
+        req_ids=["consumer", "other"],
+        is_dummy=False,
+        num_reqs=2,
+        num_reqs_after_padding=2,
+        num_tokens=4,
+        num_tokens_after_padding=4,
+        is_prefilling_np=np.array([True, True]),
+        prefill_runs_as_decode_np=None,
+        num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
+        max_query_len=2,
+        query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
+        query_start_loc_np=np.array([0, 2, 4], dtype=np.int32),
+        seq_lens=torch.tensor([6, 2], dtype=torch.int32),
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.array([6, 2], dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+
+    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+        for_capture=False,
+        use_pcp_padding=False,
+    )
+
+    metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
+    assert metadata.mamba_prefix_producer_indices.tolist() == [-1, -1]
+    assert metadata.mamba_checkpoint_positions.tolist() == [4, -1]
+    assert metadata.mamba_checkpoint_source_block_ids[0].tolist() == [10, -1]
+    common_kwargs = metadata.get_extra_common_attn_kwargs(0, 2)
+    assert common_kwargs["mamba_checkpoint_source_block_ids"].tolist() == [10, -1]
+    assert state._mamba_checkpoint_source_block_ids == {}
+    assert state._mamba_prefix_producer_ids == {}
+    assert state._mamba_checkpoint_positions == {"consumer": 4}

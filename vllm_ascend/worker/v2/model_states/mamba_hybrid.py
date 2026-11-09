@@ -476,10 +476,65 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        mamba_prefix_producer_indices = None
+        mamba_checkpoint_positions = None
+        mamba_checkpoint_source_block_ids = None
+        checkpoint_positions_by_req = getattr(self, "_mamba_checkpoint_positions", {})
+        source_blocks_by_req = getattr(self, "_mamba_checkpoint_source_block_ids", {})
+        producers_by_req = getattr(self, "_mamba_prefix_producer_ids", {})
+        has_pending_records = bool(checkpoint_positions_by_req or source_blocks_by_req or producers_by_req)
+        if has_pending_records and not for_capture:
+            has_checkpoint_reqs = any(
+                req_id in checkpoint_positions_by_req or req_id in source_blocks_by_req or req_id in producers_by_req
+                for req_id in input_batch.req_ids
+            )
+            if has_checkpoint_reqs:
+                req_id_to_batch_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
+                producer_indices = np.full(num_reqs, -1, dtype=np.int64)
+                checkpoint_positions = np.full(num_reqs, -1, dtype=np.int64)
+                mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+                source_block_ids_per_group = {gid: np.full(num_reqs, -1, dtype=np.int64) for gid in mamba_group_ids}
+
+                for batch_idx, req_id in enumerate(input_batch.req_ids):
+                    producer_id = producers_by_req.get(req_id)
+                    if producer_id is not None and producer_id in req_id_to_batch_idx:
+                        producer_indices[batch_idx] = req_id_to_batch_idx[producer_id]
+                    position = checkpoint_positions_by_req.get(req_id)
+                    if position is not None:
+                        checkpoint_positions[batch_idx] = position
+                    source_blocks = source_blocks_by_req.get(req_id)
+                    if source_blocks:
+                        for group_idx, group_id in enumerate(mamba_group_ids):
+                            if group_idx < len(source_blocks):
+                                source_block_ids_per_group[group_id][batch_idx] = source_blocks[group_idx]
+                        del source_blocks_by_req[req_id]
+                        producers_by_req.pop(req_id, None)
+
+                mamba_prefix_producer_indices = torch.from_numpy(producer_indices).to(
+                    device=self.device, non_blocking=True
+                )
+                mamba_prefix_producer_indices._cpu_list = producer_indices.tolist()  # type: ignore[attr-defined]
+                mamba_prefix_producer_indices._has_valid = bool(  # type: ignore[attr-defined]
+                    np.any(producer_indices >= 0)
+                )
+                mamba_checkpoint_positions = torch.from_numpy(checkpoint_positions).to(
+                    device=self.device, non_blocking=True
+                )
+                mamba_checkpoint_positions._cpu_list = checkpoint_positions.tolist()  # type: ignore[attr-defined]
+                mamba_checkpoint_source_block_ids = {}
+                for group_id, source_block_ids in source_block_ids_per_group.items():
+                    tensor = torch.from_numpy(source_block_ids).to(device=self.device, non_blocking=True)
+                    tensor._cpu_list = source_block_ids.tolist()  # type: ignore[attr-defined]
+                    tensor._has_valid = bool(np.any(source_block_ids >= 0))  # type: ignore[attr-defined]
+                    mamba_checkpoint_source_block_ids[group_id] = tensor
+
         model_specific_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            mamba_prefix_producer_indices=mamba_prefix_producer_indices,
+            mamba_checkpoint_positions=mamba_checkpoint_positions,
+            mamba_checkpoint_source_block_ids=mamba_checkpoint_source_block_ids,
         )
         # Varlen graphs capture evenly split dummy rows (possibly one token
         # each), but must allow the descriptor's full K+1 replay query bound.
