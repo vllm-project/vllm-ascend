@@ -180,6 +180,18 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
+    def support_large_page_kv_cache(cls) -> bool:
+        """Whether the NPU worker and attention backends handle large-page caches.
+
+        vLLM's large-page allocator (RFC vllm-project/vllm#64401, PR #57) binds
+        one strided view per layer over a single KV pool and identifies a block
+        as ``(group_id, block_id)``. Only the Ascend attention backends ported
+        in this change do that, and the allocator still rejects the combinations
+        listed in :meth:`NPUPlatform._reject_large_page_combinations`.
+        """
+        return True
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
 
@@ -569,6 +581,30 @@ class NPUPlatform(Platform):
                         has_topk = True
 
     @classmethod
+    def _reject_large_page_combinations(cls, vllm_config: VllmConfig) -> None:
+        """Reject features the Ascend large-page port does not cover.
+
+        The allocator itself is upstream's; this is the Ascend entry of the
+        support matrix declared by :meth:`support_large_page_kv_cache`. Each
+        entry stays until it is verified on hardware.
+        """
+        from vllm_ascend.core.kv_cache_interface import uses_large_page_allocator
+
+        if not uses_large_page_allocator(vllm_config.cache_config):
+            return
+        parallel_config = vllm_config.parallel_config
+        unsupported = {
+            "decode context parallelism": parallel_config.decode_context_parallel_size > 1,
+            "prefill context parallelism": parallel_config.prefill_context_parallel_size > 1,
+            "KV transfer": vllm_config.kv_transfer_config is not None,
+        }
+        rejected = [name for name, hit in unsupported.items() if hit]
+        if rejected:
+            raise ValueError(
+                "kv_cache_allocator='large_page' is not supported on Ascend with " + ", ".join(rejected) + " yet."
+            )
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
@@ -600,6 +636,8 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        cls._reject_large_page_combinations(vllm_config)
 
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads

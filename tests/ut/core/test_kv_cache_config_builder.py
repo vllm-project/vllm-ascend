@@ -111,3 +111,16 @@ def test_turboquant_groups_use_packed_pool_bytes():
     pool_bytes = builder._get_pool_bytes_per_block(make_runtime(), groups)
     assert pool_bytes == tq_cache.pool_bytes_per_block(groups)
     assert pool_bytes >= sum(spec.page_size_bytes for spec in uniform.kv_cache_specs.values())
+
+
+def test_large_page_allocator_bypasses_ascend_grouping(monkeypatch):
+    runtime = make_runtime()
+    runtime.cache_config = SimpleNamespace(kv_cache_allocator="large_page")
+    ascend_mock = Mock(side_effect=AssertionError("Ascend grouping must not run under large_page"))
+    monkeypatch.setattr(builder_module, "is_deepseek_v41_cache", lambda spec: True)
+    monkeypatch.setattr(builder_module, "make_cache_groups", ascend_mock)
+
+    groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, generic_specs())
+
+    ascend_mock.assert_not_called()
+    assert [len(group.layer_names) for group in groups] == [2]
