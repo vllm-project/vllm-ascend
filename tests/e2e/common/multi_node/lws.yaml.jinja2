@@ -1,3 +1,9 @@
+{# NPU resource the containers request: huawei.com/ascend-1980 (a2/a3, 910B3), huawei.com/npu (a5, 950DT/950PR). #}
+{# npu-scheduler (ARCSync) ignores container requests and rebuilds the resource name from the #}
+{# ascend-ci.com/npu-resource-* labels below, then looks it up on every node: if the labels name a #}
+{# resource no node registers, the whole pod group stays pending with "No node has enough available #}
+{# NPU slots". Keep labels and requests derived from this one value. #}
+{% set npu_resource = npu_resource_name if npu_resource_name else "huawei.com/ascend-1980" %}
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
@@ -13,8 +19,8 @@ spec:
         labels:
           role: leader
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
-          ascend-ci.com/npu-resource-domain: "huawei.com"
-          ascend-ci.com/npu-resource-model: "ascend-1980"
+          ascend-ci.com/npu-resource-domain: "{{ npu_resource.split('/')[0] }}"
+          ascend-ci.com/npu-resource-model: "{{ npu_resource.split('/')[1] }}"
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -114,11 +120,11 @@ spec:
 {% elif soc == "a5" %}
             resources:
               limits:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                {{ npu_resource }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                {{ npu_resource }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
 {% endif %}
@@ -153,8 +159,8 @@ spec:
       metadata:
         labels:
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
-          ascend-ci.com/npu-resource-domain: "huawei.com"
-          ascend-ci.com/npu-resource-model: "ascend-1980"
+          ascend-ci.com/npu-resource-domain: "{{ npu_resource.split('/')[0] }}"
+          ascend-ci.com/npu-resource-model: "{{ npu_resource.split('/')[1] }}"
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -248,11 +254,11 @@ spec:
 {% elif soc == "a5" %}
             resources:
               limits:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                {{ npu_resource }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
+                {{ npu_resource }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
 {% endif %}
