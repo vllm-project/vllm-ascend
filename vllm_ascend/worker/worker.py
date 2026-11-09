@@ -143,8 +143,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 torch.npu.config.allow_internal_format = True
 
 
-
-
 class NPUWorker(WorkerBase):
     def __init__(
         self,
