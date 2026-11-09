@@ -1,0 +1,13 @@
+pr: 00000  # rename to the actual PR number when opening
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in compact target-token-scoring fast path for reranker /
+      relevance-scoring workloads on Ascend. When
+      `VLLM_ASCEND_TARGET_TOKEN_SCORING=1` and a wave's requests only need
+      scores for a small fixed candidate set (via `logprob_token_ids`, greedy,
+      `max_tokens=1`), the LM Head projection is replaced by an `index_select`
+      of the K candidate weight rows and a compact `[B, K]` linear, skipping the
+      full-vocab `[B, V]` matmul and sampler gather. Ineligible waves fall back
+      to the native path unchanged.
+    highlight: false
