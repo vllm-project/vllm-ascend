@@ -45,6 +45,18 @@ buffer_type = ctypes.c_void_p
 hcclDataType_t = ctypes.c_int
 
 
+class HcclSendRecvItem(ctypes.Structure):
+    """HCCL's descriptor for one operation in a batch of paired sends and receives."""
+
+    _fields_ = [
+        ("send_recv_type", ctypes.c_int),
+        ("buffer", buffer_type),
+        ("count", ctypes.c_uint64),
+        ("datatype", hcclDataType_t),
+        ("remote_rank", ctypes.c_uint32),
+    ]
+
+
 class hcclDataTypeEnum:
     hcclInt8 = 0
     hcclInt16 = 1
@@ -251,6 +263,22 @@ class HCCLLibrary:
 
     def hcclCommDestroy(self, comm: hcclComm_t) -> None:
         self.HCCL_CHECK(self._funcs["HcclCommDestroy"](comm))
+
+    def require_batch_send_recv(self) -> None:
+        """Load the optional symbol only for backends that use it."""
+        if "HcclBatchSendRecv" not in self._funcs:
+            try:
+                function = self.lib.HcclBatchSendRecv
+            except AttributeError as exc:
+                raise RuntimeError("hccl_m2n requires HcclBatchSendRecv in the HCCL library") from exc
+            function.restype = hcclResult_t
+            function.argtypes = [ctypes.POINTER(HcclSendRecvItem), ctypes.c_uint32, hcclComm_t, aclrtStream_t]
+            self._funcs["HcclBatchSendRecv"] = function
+
+    def hcclBatchSendRecv(self, items: list[HcclSendRecvItem], comm: hcclComm_t, stream: aclrtStream_t) -> None:
+        self.require_batch_send_recv()
+        batch = (HcclSendRecvItem * len(items))(*items)
+        self.HCCL_CHECK(self._funcs["HcclBatchSendRecv"](batch, len(items), comm, stream))
 
 
 __all__ = [
