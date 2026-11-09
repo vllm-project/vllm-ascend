@@ -212,6 +212,10 @@ def initialize_kv_cache(
         for tensor in (cache if isinstance(cache, (tuple, list)) else (cache,))
         if tensor is not None and tensor.device == self.device
     ]
+    if hasattr(upstream, "get_replayssm_block_copy_tensors"):
+        self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
+            self.compilation_config.static_forward_context
+        )
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:
