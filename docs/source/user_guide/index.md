@@ -23,6 +23,8 @@ This section provides comprehensive documentation for using vLLM Ascend in produ
 
 ## Feature Guide
 
+- **[Experimental Dynamic PP Prefill](../developer_guide/Design_Documents/dynamic_pp_prefill.md)** — Buffer activations and move DSV4 stage boundaries using completed device feedback
+
 - **[Runtime Guard](feature_guide/runtime_guard.md)** — Online anomaly detect / report / optional KV dump
 
 Explore other guides for graph mode, CPU binding, quantization, sleep mode, structured output, LoRA, expert parallelism load balancing, and more.
