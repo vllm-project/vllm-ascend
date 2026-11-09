@@ -10,6 +10,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops import layernorm as ascend_layernorm
 from vllm_ascend.ops.layernorm import (
     AscendFusedRMSNormGated,
+    AscendRMSNorm,
     AscendRMSNormGated,
     LayerNormFn,
 )
@@ -265,3 +266,60 @@ def test_norm_bias_lookup_handles_empty_description(clean_norm_bias_cache):
     assert ascend_layernorm._quant_description_has_norm_bias({}) is False
     assert ascend_layernorm._quant_description_has_norm_bias(None) is False
     assert not ascend_layernorm._NORM_BIAS_IN_QUANT_DESCRIPTION
+
+
+def _build_ascend_rms_norm(with_bias: bool) -> AscendRMSNorm:
+    layer = AscendRMSNorm(hidden_size=8, eps=1e-6)
+    if with_bias:
+        layer.bias = torch.nn.Parameter(torch.full((8,), 0.25))
+    return layer
+
+
+@pytest.mark.parametrize("with_bias", [False, True])
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", side_effect=mock_add_rms_norm_bias, create=True)
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm, create=True)
+@patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=False)
+def test_ascend_rms_norm_residual_falls_back_to_native_when_custom_ops_disabled(
+    mock_enable, mock_native, mock_fused, with_bias, default_vllm_config
+):
+    """Regression guard for #16139: with custom ops disabled (batch-invariant
+    mode), the residual path must route through native npu_add_rms_norm — the
+    exact call site batch_invariant.py monkey-patches — instead of the fused
+    custom op, which does not support batch invariance."""
+    default_vllm_config.quant_config = None
+    layer = _build_ascend_rms_norm(with_bias)
+    x = torch.randn(4, 8)
+    residual = torch.randn(4, 8)
+
+    out_x, out_residual = layer.forward_oot(x, residual)
+
+    expected_x, _, expected_residual = mock_add_rms_norm(x, residual, layer.weight, layer.variance_epsilon)
+    if with_bias:
+        expected_x = expected_x + layer.bias
+    mock_enable.assert_called_once()
+    mock_fused.assert_not_called()
+    mock_native.assert_called_once()
+    assert torch.allclose(out_x, expected_x)
+    assert torch.allclose(out_residual, expected_residual)
+
+
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", side_effect=mock_add_rms_norm_bias, create=True)
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm, create=True)
+@patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
+def test_ascend_rms_norm_residual_uses_fused_op_when_custom_ops_enabled(
+    mock_enable, mock_native, mock_fused, default_vllm_config
+):
+    """With custom ops enabled, the residual path goes through the fused
+    npu_add_rms_norm_bias call site with the exact argument order."""
+    default_vllm_config.quant_config = None
+    layer = _build_ascend_rms_norm(with_bias=False)
+    x = torch.randn(4, 8)
+    residual = torch.randn(4, 8)
+
+    out_x, out_residual = layer.forward_oot(x, residual)
+
+    mock_enable.assert_called_once()
+    mock_fused.assert_called_once_with(x, residual, layer.weight, layer.bias, layer.variance_epsilon)
+    mock_native.assert_not_called()
+    assert torch.allclose(out_x, 2 * x)
+    assert torch.allclose(out_residual, 2 * residual)
