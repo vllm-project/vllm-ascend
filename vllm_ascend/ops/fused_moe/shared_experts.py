@@ -239,6 +239,10 @@ class AscendSharedExperts:
         # Parameterized activations of the same class but different params
         # (or an unbounded shared SiluAndMul under a clamped routed swiglu)
         # must keep the separate shared-expert forward.
+        # TODO(ZT-AIA): The MegaMoe operator currently executes one activation
+        # for both routed and shared experts, so it cannot represent configs
+        # where the two differ. Remove this activation-signature equality check
+        # once the operator supports distinct routed/shared activations.
         routed_activation = self._routed_megamoe_activation_signature()
         shared_activation = self._shared_megamoe_activation_signature()
         if shared_activation is None or shared_activation != routed_activation:
