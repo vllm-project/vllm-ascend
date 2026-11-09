@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -556,6 +557,7 @@ def _get_ascend_kv_cache_groups(
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
     if groups is not None:
         return groups
+    kv_cache_spec = align_hybrid_kv_cache_specs(kv_cache_spec)
     return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 

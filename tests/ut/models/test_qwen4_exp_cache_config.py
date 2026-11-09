@@ -805,6 +805,28 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     )
 
 
+def test_v2_qwen_page_alignment_is_owned_by_planning() -> None:
+    specs = _ungrouped_qwen_specs()
+    original = specs.copy()
+    state_page = max(spec.page_size_bytes for spec in specs.values() if isinstance(spec, MambaSpec))
+    captured = {}
+
+    def upstream(_config, planned):
+        captured.update(planned)
+        return [KVCacheGroupSpec([name], spec) for name, spec in planned.items()]
+
+    groups = get_qwen4_exp_kv_cache_groups(SimpleNamespace(), specs, upstream)
+    assert groups is not None
+    for name, spec in specs.items():
+        if isinstance(spec, MambaSpec):
+            assert captured[name] is spec
+        else:
+            assert captured[name].page_size_bytes == max(spec.page_size_bytes, state_page)
+            assert captured[name].block_size == spec.block_size
+    assert specs == original
+    assert all(spec.page_size_padded is None for spec in specs.values())
+
+
 def test_platform_builder_uses_qwen_pool_accounting() -> None:
     pytest.importorskip("vllm.v1.core.kv_cache_planning")
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder

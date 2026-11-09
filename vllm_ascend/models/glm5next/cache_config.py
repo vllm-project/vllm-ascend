@@ -8,7 +8,7 @@ Physical storage uses standard unpacked KV cache descriptors with two page-size
 classes: main MLA/KDA pages and compressed-indexer/tail pages.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import lcm
 
 from vllm.config import VllmConfig
@@ -133,10 +133,11 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         )
         small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
-    for spec in main_candidates:
-        object.__setattr__(spec, "page_size_padded", main_page_size)
-    for spec in small_candidates:
-        object.__setattr__(spec, "page_size_padded", small_page_size)
+    for name, spec in kv_cache_spec.items():
+        if _is_glm5_next_main_spec(spec) or isinstance(spec, MambaSpec):
+            kv_cache_spec[name] = replace(spec, page_size_padded=main_page_size)
+        elif _is_glm5_next_indexer_spec(spec) or _is_glm5_next_tail_spec(spec):
+            kv_cache_spec[name] = replace(spec, page_size_padded=small_page_size)
 
 
 def _create_glm5_next_attention_groups(
@@ -381,6 +382,9 @@ def get_glm5_next_kv_cache_groups(
     if getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False):
         raise ValueError("GLM-Next's paired MLA/indexer and fixed tail layout requires the hybrid KV cache manager.")
 
+    # Each pool owns its padding. An indexer/tail page must not inflate the
+    # independent main/KDA pool. Keep the owners' original specs unchanged.
+    kv_cache_spec = dict(kv_cache_spec)
     _align_glm5_next_cache_specs(kv_cache_spec)
     mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
     attention_specs = {name: spec for name, spec in kv_cache_spec.items() if not isinstance(spec, MambaSpec)}
