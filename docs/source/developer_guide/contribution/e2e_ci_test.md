@@ -48,8 +48,8 @@ to a logical partition, which selects an exact runner label from `runner_label.j
 
 | Path pattern | Hardware | Runner |
 |---|---|---|
-| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-800t-2` |
-| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-800t-4` |
+| `two_card` in path | two_card A3 NPU (560T) | `linux-aarch64-a3-800i-2` |
+| `four_card` in path | four_card A3 NPU (560T) | `linux-aarch64-a3-800i-4` |
 | `_310p` in filename under one_card | Ascend 310P x1 | `linux-aarch64-310p-1` |
 | `_310p` in filename under two_card | Ascend 310P x2 | `linux-aarch64-310p-2` |
 | `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-4` |
