@@ -169,6 +169,11 @@ On Ascend A5, set `"selective_offload": true` inside the Decode server's
 Shared layers store their main KV in host memory. Full layers and the indexer
 keep their KV on the device. Use `SfaRemoteD2HConnector` for P/D transfer.
 
+When a full layer produces its TopK indices, a separate stream prefetches the
+missing historical KV rows for the shared layers in its group. Each shared
+layer waits for its own prefetch before attention and loads the current
+token's KV after that layer writes it.
+
 This mode requires TP=1 and DP=1 without speculative decoding. Use
 `--max-num-seqs 1` and either `--enforce-eager` or the following Decode graph
 configuration:

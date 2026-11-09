@@ -20,6 +20,7 @@ from vllm.distributed import (
     get_tp_group,
 )
 from vllm.logger import logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
@@ -831,10 +832,24 @@ class SparseKVOffloadManager:
         if getattr(getattr(self, "sparse_kv_offload_config", None), "selective_offload", False):
             device = self.topk_buffers_k[0].device
             # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
-            self.selective_copy_src = torch.empty(2 * self.topk, dtype=torch.int64, device=device)
+            descriptor_shape = (self.num_layers, 2 * self.topk)
+            self.selective_copy_src = torch.empty(descriptor_shape, dtype=torch.int64, device=device)
             self.selective_copy_dst = torch.empty_like(self.selective_copy_src)
-            self.selective_copy_lengths = torch.empty(2 * self.topk, dtype=torch.int32, device=device)
+            self.selective_copy_lengths = torch.empty(descriptor_shape, dtype=torch.int32, device=device)
             self.selective_copy_count = torch.full((), 2 * self.topk, dtype=torch.int32, device=device)
+            self.selective_physical = torch.empty((self.num_layers, 1, 1, self.topk), dtype=torch.int32, device=device)
+            self.selective_current = torch.empty((self.num_layers, self.topk), dtype=torch.bool, device=device)
+            self.selective_prefetch_topk = torch.empty(self.topk, dtype=torch.int64, device=device)
+            self.selective_prefetch_stream = torch_npu.npu.Stream(device=device)
+            self.selective_prefetch_ready = [torch_npu.npu.Event() for _ in self.offload_layer_names]
+            host_layers = {extract_layer_index(name): name for name in self.offload_layer_names}
+            self.selective_followers: dict[int, list[str]] = {}
+            leader = 0
+            for index, role in enumerate(self.sparse_kv_offload_config.indexer_types):
+                if role == "full":
+                    leader = index
+                else:
+                    self.selective_followers.setdefault(leader, []).append(host_layers[index])
             hot_blocks = cdiv(self.topk_buffer_size, self.block_size)
             self.selective_hot_block_table = torch.arange(hot_blocks, dtype=torch.int32, device=device).view(1, -1)
             self.selective_query_len = torch.ones(1, dtype=torch.int32, device=device)

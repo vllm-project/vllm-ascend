@@ -32,6 +32,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import CpuGpuBuffer
@@ -1571,19 +1572,15 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager.wait_for_current_kv_writeback(bool(_EXTRA_CTX.capturing))
         return attn_output
 
-    def _execute_selective_host_attention(
-        self,
-        query: torch.Tensor,
-        query_rope: torch.Tensor,
+    @staticmethod
+    def _prepare_selective_kv(
+        manager,
+        layer_id: int,
         topk_indices: torch.Tensor,
         metadata: AscendSFAOffloadMetadata,
         seq_lengths: torch.Tensor,
-    ) -> torch.Tensor:
-        if metadata.num_decodes != 1 or metadata.num_decode_tokens != 1 or metadata.num_prefills:
-            raise RuntimeError("Selective Host KV attention requires one decode request and no prefill")
-
-        manager = get_sparse_kv_offload_manager()
-        layer_id = manager._get_offload_layer_id(self._offload_layer_name())
+        prefetch: bool,
+    ) -> None:
         block_size = manager.block_size
         logical = topk_indices.reshape(-1).to(torch.int64)
         topk = logical.numel()
@@ -1599,10 +1596,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         valid &= (physical_blocks >= 0) & (physical_blocks < host_blocks)
         source_slots = physical_blocks.clamp(0, host_blocks - 1) * block_size + logical.clamp_min(0) % block_size
 
-        hot_blocks = cdiv(manager.topk_buffer_size, block_size)
-        hot_tokens = hot_blocks * block_size
-        k_hot = manager.topk_buffers_k[layer_id][0, :hot_tokens].view(hot_blocks, block_size, 1, self.kv_lora_rank)
-        v_hot = manager.topk_buffers_v[layer_id][0, :hot_tokens].view(hot_blocks, block_size, 1, self.qk_rope_head_dim)
         if metadata.req_ids_tensor is None:
             raise RuntimeError("Selective Host KV requires request identity metadata")
         request = metadata.req_ids_tensor[:1]
@@ -1613,31 +1606,96 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             source_slots,
             valid,
         )
+        if prefetch:
+            # This layer has not produced the current token's KV yet.
+            current = valid & (logical == seq_lengths.reshape(-1)[0] - 1)
+            manager.selective_current[layer_id].copy_(current)
+            misses &= ~current
+        src = manager.selective_copy_src[layer_id]
+        dst = manager.selective_copy_dst[layer_id]
+        lengths = manager.selective_copy_lengths[layer_id]
         for i, (host, hot, row_bytes) in enumerate(
             (
-                (host_k, k_hot, manager.token_size_bytes_k),
-                (manager.v_caches_cpu[layer_id], v_hot, manager.token_size_bytes_v),
+                (host_k, manager.topk_buffers_k[layer_id], manager.token_size_bytes_k),
+                (manager.v_caches_cpu[layer_id], manager.topk_buffers_v[layer_id], manager.token_size_bytes_v),
             )
         ):
             rows = slice(i * topk, (i + 1) * topk)
-            manager.selective_copy_src[rows].copy_(host.data_ptr() + source_slots * row_bytes)
-            manager.selective_copy_dst[rows].copy_(hot.data_ptr() + destinations * row_bytes)
-            manager.selective_copy_lengths[rows].copy_(misses.to(torch.int32) * row_bytes)
-        manager.copy_sfa_kv(
-            manager.selective_copy_src,
-            manager.selective_copy_dst,
-            manager.selective_copy_lengths,
-            manager.selective_copy_count,
-        )
+            src[rows].copy_(host.data_ptr() + source_slots * row_bytes)
+            dst[rows].copy_(hot.data_ptr() + destinations * row_bytes)
+            lengths[rows].copy_(misses.to(torch.int32) * row_bytes)
+        manager.copy_sfa_kv(src, dst, lengths, manager.selective_copy_count)
         manager.selective_hot_keys[layer_id].copy_(updated_keys)
         manager.selective_hot_requests[layer_id].copy_(request)
+        manager.selective_physical[layer_id].copy_(torch.where(valid, destinations, -1).view(1, 1, topk))
 
-        physical = torch.where(valid, destinations, -1).to(torch.int32).view(1, 1, topk)
+    def _prefetch_selective_followers(self, topk_indices, metadata) -> None:
+        if metadata.num_decodes != 1 or metadata.num_decode_tokens != 1 or metadata.num_prefills:
+            return
+        manager = get_sparse_kv_offload_manager()
+        followers = manager.selective_followers.get(extract_layer_index(self._offload_layer_name()))
+        if not followers:
+            return
+        context = get_forward_context()
+        ready_layers = getattr(context, "_selective_prefetched_layers", None)
+        if ready_layers is None:
+            ready_layers = context._selective_prefetched_layers = set()
+        # The indexer's temporary output can be released before the copy stream reads it.
+        manager.selective_prefetch_topk.copy_(topk_indices.reshape(-1))
+        stream = manager.selective_prefetch_stream
+        stream.wait_stream(torch_npu.npu.current_stream())
+        with torch_npu.npu.stream(stream):
+            for name in followers:
+                layer_id = manager._get_offload_layer_id(name)
+                follower = context.attn_metadata[name]
+                self._prepare_selective_kv(
+                    manager, layer_id, manager.selective_prefetch_topk, follower, follower.seq_lens, prefetch=True
+                )
+                manager.selective_prefetch_ready[layer_id].record()
+                ready_layers.add(layer_id)
+
+    def _execute_selective_host_attention(
+        self,
+        query: torch.Tensor,
+        query_rope: torch.Tensor,
+        topk_indices: torch.Tensor,
+        metadata: AscendSFAOffloadMetadata,
+        seq_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        if metadata.num_decodes != 1 or metadata.num_decode_tokens != 1 or metadata.num_prefills:
+            raise RuntimeError("Selective Host KV attention requires one decode request and no prefill")
+        manager = get_sparse_kv_offload_manager()
+        layer_id = manager._get_offload_layer_id(self._offload_layer_name())
+        ready_layers = (
+            getattr(get_forward_context(), "_selective_prefetched_layers", ()) if is_forward_context_available() else ()
+        )
+        if layer_id in ready_layers:
+            torch_npu.npu.current_stream().wait_event(manager.selective_prefetch_ready[layer_id])
+            ready_layers.remove(layer_id)
+            # exec_kv has written the current token to Host on this stream.
+            current = manager.selective_current[layer_id]
+            lengths = manager.selective_copy_lengths[layer_id]
+            lengths[: manager.topk].copy_(current * manager.token_size_bytes_k)
+            lengths[manager.topk :].copy_(current * manager.token_size_bytes_v)
+            manager.copy_sfa_kv(
+                manager.selective_copy_src[layer_id],
+                manager.selective_copy_dst[layer_id],
+                lengths,
+                manager.selective_copy_count,
+            )
+        else:
+            AscendSFAKVOffloadImpl._prepare_selective_kv(
+                manager, layer_id, topk_indices, metadata, seq_lengths, prefetch=False
+            )
+
+        hot_shape = (manager.selective_hot_block_table.numel(), manager.block_size, 1)
+        k_hot = manager.topk_buffers_k[layer_id][0].view(*hot_shape, self.kv_lora_rank)
+        v_hot = manager.topk_buffers_v[layer_id][0].view(*hot_shape, self.qk_rope_head_dim)
         output = torch_npu.npu_sparse_flash_attention(
             query=query.contiguous(),
             key=k_hot,
             value=k_hot,
-            sparse_indices=physical,
+            sparse_indices=manager.selective_physical[layer_id],
             scale_value=self.scale,
             sparse_block_size=1,
             block_table=manager.selective_hot_block_table,
@@ -1667,6 +1725,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         offload_cfg = get_ascend_config().sparse_kv_offload_config
         if offload_cfg.selective_offload:
             if not offload_cfg.is_host_layer(self._offload_layer_name()):
+                self._prefetch_selective_followers(topk_indices, attn_metadata)
                 return super()._execute_sparse_flash_attention_process(
                     ql_nope,
                     q_pe,
