@@ -1,0 +1,7 @@
+pr: 21326
+entries:
+  - category: bugfix
+    text: >-
+      Fixed EPLB load-counter initialization under a meta default device during
+      encoder-only model construction by allocating the counter directly on NPU.
+    model: deepseek-v4.1
