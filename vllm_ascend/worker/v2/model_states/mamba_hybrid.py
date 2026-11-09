@@ -25,7 +25,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -34,9 +33,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
 )
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
-    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
-    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -215,28 +212,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
-        if self._mamba_ctx is None:
-            if self._mamba_state_copy_funcs is None:
-                mamba_groups = get_mamba_groups(kv_cache_config)
-                mamba_types = {spec.mamba_type for spec in mamba_groups}
-                copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
-                validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
-                self._mamba_state_copy_funcs = copy_funcs
-            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
-                max_num_reqs=self.max_num_reqs,
-                kv_cache_config=kv_cache_config,
-                copy_funcs=self._mamba_state_copy_funcs,
-                device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
-            )
+        # Initialization binds persistent request-slot tables. Rebuilding from
+        # gathered batch tables would change the copy kernel's indexing contract.
         ctx = self._mamba_ctx
-        if not ctx.is_initialized:
-            ctx.initialize_from_forward_context(
-                kv_cache_config,
-                self.vllm_config.compilation_config.static_forward_context,
-                self._mamba_state_copy_funcs,
-                [block_tables[gid] for gid in mamba_group_ids],
-            )
+        if ctx is None or not ctx.is_initialized:
+            raise RuntimeError("Mamba state must be initialized before preprocessing")
         return ctx
 
     def preprocess_state(

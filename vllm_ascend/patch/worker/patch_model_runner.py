@@ -208,6 +208,9 @@ def initialize_kv_cache(
         for tensor in (cache if isinstance(cache, (tuple, list)) else (cache,))
         if tensor is not None and tensor.device == self.device
     ]
+    # Initialize model-owned state before connector registration, matching
+    # the upstream Model Runner V2 lifecycle.
+    self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:

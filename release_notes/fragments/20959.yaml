@@ -1,0 +1,5 @@
+pr: 20959
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Model Runner V2 cache-state initialization and Mamba state copies for sparse or reordered request slots.

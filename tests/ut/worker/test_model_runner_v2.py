@@ -1243,7 +1243,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         kv_cache_groups=[],
     )
 
-    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
+    def _super(self, kv_cache_config, is_profiling=False, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
@@ -1287,7 +1287,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
-def test_initialize_kv_cache_forwards_allocation_context():
+@pytest.mark.parametrize("is_profiling", [False, True])
+def test_initialize_kv_cache_forwards_allocation_context(is_profiling):
     """Forward allocation context before preparing KDA state-copy plans."""
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -1333,11 +1334,14 @@ def test_initialize_kv_cache_forwards_allocation_context():
             return_value="kvpp",
         ),
     ):
-        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
+        runner.initialize_kv_cache(
+            kv_cache_config, is_profiling=is_profiling, kv_cache_allocation_context=allocation_context
+        )
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+    assert captured_kwargs["is_profiling"] is is_profiling
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])

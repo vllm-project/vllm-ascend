@@ -389,6 +389,7 @@ class NPUModelRunner(GPUModelRunner):
     def _initialize_kv_cache_upstream(
         self,
         kv_cache_config: KVCacheConfig,
+        is_profiling: bool,
         kv_cache_allocation_context: AbstractContextManager | None,
     ) -> None:
         # Upstream initialize_kv_cache builds the attention metadata builders
@@ -403,12 +404,14 @@ class NPUModelRunner(GPUModelRunner):
         with window:
             super().initialize_kv_cache(
                 kv_cache_config,
+                is_profiling=is_profiling,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
 
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
@@ -440,7 +443,7 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            self._initialize_kv_cache_upstream(kv_cache_config, is_profiling, kv_cache_allocation_context)
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
@@ -491,7 +494,8 @@ class NPUModelRunner(GPUModelRunner):
 
         copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
         if (
-            callable(copy_mamba_state)
+            not is_profiling
+            and callable(copy_mamba_state)
             and has_kv_transfer_group()
             and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
         ):
