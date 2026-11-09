@@ -1,0 +1,42 @@
+pr: 20122
+entries:
+  - category: performance
+    hardware: [A2, A3]
+    text: >-
+      Accelerated small-batch AttnResFwd with residual-row parallel scoring,
+      full-hidden output ownership, one readiness barrier, UB padding, and
+      double-buffered output reads. Larger rows retain the H-split fallback.
+  - category: bugfix
+    hardware: [A2, A3]
+    text: >-
+      Fixed broadcast scratch sizing and reduction tail initialization, and
+      rejected unsafe metadata, non-finite normalization epsilon, and writable
+      bank storage aliases before launching AttnResFwd.
+  - category: feature
+    hardware: [A5]
+    text: >-
+      Added a RegBase cooperative AttnResFwd path with residual-row parallel
+      scoring, one readiness barrier for full-row outputs, double-buffered
+      output reads, and a UB-budgeted H-split fallback.
+  - category: bugfix
+    hardware: [A5]
+    text: >-
+      Fixed AttnResFwd softmax handling for large candidate banks, broadcast
+      repeat overflow, and extreme-negative score padding in legacy paths.
+  - category: performance
+    hardware: [A5]
+    text: >-
+      Fused output RMSNorm conversion and statistics in RegBase for the
+      complete-row AttnResFwd path, reducing small-batch kernel latency
+      while retaining the BF16 mixture boundary and one readiness barrier.
+  - category: performance
+    hardware: [A2, A3, A5]
+    text: >-
+      Extended AttnResFwd cooperative dispatch to batches using at most half
+      the available AIV cores, enabling row-parallel scoring for B=16 while
+      retaining full-row output ownership and existing UB checks.
+  - category: bugfix
+    hardware: [A2, A3, A5]
+    text: >-
+      Reject oversized zero-token bank views before stride arithmetic and
+      validate BF16 dtypes before the empty-output fast return in AttnResFwd.

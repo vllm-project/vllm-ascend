@@ -10,9 +10,11 @@
 
 /*!
  * \file attn_res_fwd_tiling.cpp
- * \brief AttnResFwd host tiling — CanResidentAllBlocks → RESIDENT / RELOAD；无 FP32-v WS
+ * \brief AttnResFwd host tiling: cooperative small batches or token-local RESIDENT / RELOAD.
  */
 #include "attn_res_fwd_tiling.h"
+#include "attn_res_fwd_parallel_plan.h"
+#include "../attn_res_fwd_validation.h"
 
 #include <algorithm>
 #include <cstring>
@@ -47,8 +49,10 @@ constexpr uint32_t UB_AVAIL_BYTES = 192U * 1024U; // DAV_2201 按 192KB 估算
 constexpr uint32_t UB_OVERHEAD_BYTES = 32U * 1024U;
 constexpr uint32_t ELEM_PER_BLK_BF16 = 16U;
 constexpr uint32_t ELEM_PER_BLK_FP32 = 8U;
+constexpr uint32_t ELEM_PER_REP_FP32 = 64U;
 constexpr uint32_t SCALAR_LOCAL_ELEMS = 8U;
 constexpr uint32_t STAGING_ALIGN_BYTES = 512U;
+constexpr uint32_t COOPERATIVE_BATCH_MODE = 1U;
 
 static inline uint32_t AlignUpU32(uint32_t val, uint32_t align)
 {
@@ -76,6 +80,10 @@ void AttnResFwdTiling::InitCompileInfo()
     const auto &ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
+    const auto socVersion = ascendcPlatform.GetSocVersion();
+    compileInfo_.regBase = socVersion == platform_ascendc::SocVersion::ASCEND950;
+    compileInfo_.supportsCooperative = socVersion == platform_ascendc::SocVersion::ASCEND910B ||
+        socVersion == platform_ascendc::SocVersion::ASCEND910_93 || compileInfo_.regBase;
     if (compileInfo_.aivNum <= 0) {
         OP_LOGE(context_->GetNodeName(), "aivNum <= 0");
         return;
@@ -85,6 +93,10 @@ void AttnResFwdTiling::InitCompileInfo()
 
 ge::graphStatus AttnResFwdTiling::GetPlatformInfo()
 {
+    OP_CHECK_IF(compileInfo_.aivNum == 0 || compileInfo_.aivNum > std::numeric_limits<uint32_t>::max() ||
+                    compileInfo_.ubSize == 0,
+                OP_LOGE(context_->GetNodeName(), "Missing or invalid AIV/UB platform information"),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -157,8 +169,13 @@ uint64_t AttnResFwdTiling::EstimateUbComputeBytes(bool resident) const
         ub += static_cast<uint64_t>(1) * HAlignBf16 * sizeof(uint16_t); // outQue
     }
     ub += static_cast<uint64_t>(3) * HAlignFp32 * sizeof(float); // scoreWeight + vRow + outFp32
-    ub += static_cast<uint64_t>(metaAlign) * sizeof(float); // vecMeta
-    ub += static_cast<uint64_t>(metaAlign) * sizeof(float); // metaSoftmax
+    // A5's generic softmax loads complete registers, including the masked tail.
+    const uint32_t scoreElems = compileInfo_.regBase && B > 2U * ELEM_PER_REP_FP32 ?
+        AlignUpU32(metaAlign, ELEM_PER_REP_FP32) : metaAlign;
+    ub += static_cast<uint64_t>(scoreElems) * sizeof(float); // vecMeta
+    const uint32_t scratchElems = compileInfo_.supportsCooperative && !compileInfo_.regBase ?
+        std::max(metaAlign, ELEM_PER_REP_FP32) : metaAlign;
+    ub += static_cast<uint64_t>(scratchElems) * sizeof(float); // metaSoftmax; arch22 Brcb needs 256B.
     ub += static_cast<uint64_t>(metaAlign) * ELEM_PER_BLK_FP32 * sizeof(float); // metaBrc[n*8] after Softmax Brcb
     ub += static_cast<uint64_t>(SCALAR_LOCAL_ELEMS) * sizeof(float);
     if (tilingData_.needBackward != 0) {
@@ -198,7 +215,8 @@ ge::graphStatus AttnResFwdTiling::DoOpTiling()
         return ge::GRAPH_FAILED;
     }
     tilingData_.usedCoreNum = coreNum;
-    tilingData_.tokensPerCore = Ops::Base::CeilDiv(tilingData_.numTokens, coreNum);
+    tilingData_.tokensPerCore = static_cast<uint32_t>(
+        (static_cast<uint64_t>(tilingData_.numTokens) + coreNum - 1U) / coreNum);
     tilingData_.blockCount = tilingData_.numBlocks + 1U;
     tilingData_.invHiddenSize =
         (tilingData_.hiddenSize > 0) ? (1.0f / static_cast<float>(tilingData_.hiddenSize)) : 0.0f;
@@ -209,7 +227,37 @@ ge::graphStatus AttnResFwdTiling::DoOpTiling()
 
 ge::graphStatus AttnResFwdTiling::DoLibApiTiling()
 {
-    if (CanResidentAllBlocks(tilingData_.blockCount, tilingData_.hiddenSize)) {
+    tilingData_.outputSplits = 0;
+    tilingData_.scoreSplits = 0;
+    tilingData_.cooperativeTileElems = 0;
+    tilingData_.residentGroup = 0;
+    cooperativeWorkspaceBytes_ = 0;
+    if (fusedChain_ && tilingData_.mix != 0 && tilingData_.needBackward == 0) {
+        const auto plan = AttnResFwd::MakeParallelPlan(
+            tilingData_.numTokens, tilingData_.blockCount, tilingData_.hiddenSize,
+            static_cast<uint32_t>(compileInfo_.aivNum), compileInfo_.ubSize,
+            tilingData_.outputNormEps > 0.0f, compileInfo_.supportsCooperative, compileInfo_.regBase);
+        if (plan.usedCores != 0) {
+            tilingData_.usedCoreNum = plan.usedCores;
+            tilingData_.outputSplits = plan.outputSplits;
+            tilingData_.scoreSplits = plan.scoreSplits;
+            tilingData_.cooperativeTileElems = plan.tileElems;
+            tilingData_.residentGroup = plan.residentGroup;
+            cooperativeWorkspaceBytes_ = plan.workspaceBytes;
+            tilingData_.cacheOutputNorm = 0;
+            tilingKey_ = TILING_KEY_BF16_COOPERATIVE;
+            OP_LOGI(context_->GetNodeName(),
+                    "Select cooperative rows/output: T=%u R=%u H=%u cores=%u "
+                    "scoreSplits=%u outputSplits=%u tile=%u residentGroup=%u rowParallel=%u",
+                    tilingData_.numTokens, tilingData_.blockCount, tilingData_.hiddenSize,
+                    plan.usedCores, plan.scoreSplits, plan.outputSplits, plan.tileElems,
+                    plan.residentGroup, plan.rowParallel);
+            return FillStagingFields();
+        }
+    }
+    const bool residentFits = CanResidentAllBlocks(tilingData_.blockCount, tilingData_.hiddenSize) &&
+        (!compileInfo_.supportsCooperative || EstimateUbComputeBytes(true) <= compileInfo_.ubSize);
+    if (residentFits) {
         tilingKey_ = TILING_KEY_BF16_RESIDENT;
         OP_LOGI(context_->GetNodeName(),
                 "Select TK-RESIDENT (%lu): B=%u H=%u N_ub_max=%u needBackward=%u",
@@ -227,6 +275,9 @@ ge::graphStatus AttnResFwdTiling::DoLibApiTiling()
     const uint64_t outputNormBytes =
         static_cast<uint64_t>(AlignUpU32(tilingData_.hiddenSize, ELEM_PER_BLK_BF16)) * sizeof(uint16_t);
     const bool resident = tilingKey_ == TILING_KEY_BF16_RESIDENT;
+    OP_CHECK_IF(compileInfo_.supportsCooperative && EstimateUbComputeBytes(resident) > compileInfo_.ubSize,
+                OP_LOGE(context_->GetNodeName(), "Full-row buffers exceed available UB: H=%u", tilingData_.hiddenSize),
+                return ge::GRAPH_FAILED);
     // Repeated tokens share gamma. Preserve the safety allowance included in
     // the explicit buffer estimate; never infer available UB from a chip name.
     tilingData_.cacheOutputNorm = optimizePrefill_ && tilingData_.outputNormEps > 0.0f &&
@@ -246,14 +297,22 @@ uint64_t AttnResFwdTiling::GetTilingKey() const
 
 ge::graphStatus AttnResFwdTiling::GetWorkspaceSize()
 {
-    // 仅系统 16MB 预留，不追加 FP32-v
-    workspaceSize_ = static_cast<uint64_t>(SYS_WORKSPACE_SIZE);
+    // No full FP32 residual workspace: only optional scalar slots plus the
+    // runtime's system reservation. GetUserWorkspace selects the user region.
+    workspaceSize_ = static_cast<uint64_t>(SYS_WORKSPACE_SIZE) + cooperativeWorkspaceBytes_;
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus AttnResFwdTiling::PostTiling()
 {
-    context_->SetBlockDim(tilingData_.usedCoreNum);
+    const auto blockStatus = context_->SetBlockDim(tilingData_.usedCoreNum);
+    OP_CHECK_IF(blockStatus != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "SetBlockDim failed"),
+                return ge::GRAPH_FAILED);
+    if (tilingKey_ == TILING_KEY_BF16_COOPERATIVE) {
+        const auto status = context_->SetScheduleMode(COOPERATIVE_BATCH_MODE);
+        OP_CHECK_IF(status != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "SetScheduleMode failed"),
+                    return ge::GRAPH_FAILED);
+    }
 
     auto rawTilingData = context_->GetRawTilingData();
     OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
@@ -265,8 +324,7 @@ ge::graphStatus AttnResFwdTiling::PostTiling()
                         rawTilingData->GetCapacity(), tilingDataSize),
                 return ge::GRAPH_FAILED);
 
-    errno_t ret = memcpy_s(rawTilingData->GetData(), rawTilingData->GetCapacity(),
-                           reinterpret_cast<void *>(&tilingData_), tilingDataSize);
+    errno_t ret = memcpy_s(rawTilingData->GetData(), rawTilingData->GetCapacity(), &tilingData_, tilingDataSize);
     if (ret != EOK) {
         OP_LOGE(context_->GetNodeName(), "memcpy_s failed, ret=%d", ret);
         return ge::GRAPH_FAILED;
@@ -292,6 +350,16 @@ ge::graphStatus AttnResFwdTiling::CheckContext()
     OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(NORM_WEIGHT_INDEX));
     OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetOutputShape(HIDDEN_STATES_INDEX));
     OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetOutputDesc(HIDDEN_STATES_INDEX));
+    if (fusedChain_) {
+        for (const size_t index : {size_t{4}, size_t{5}}) {
+            OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputShape(index));
+            OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(index));
+        }
+        for (const size_t index : {size_t{1}, size_t{2}}) {
+            OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetOutputShape(index));
+            OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetOutputDesc(index));
+        }
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -313,6 +381,14 @@ ge::graphStatus AttnResFwdTiling::AnalyzeDtype()
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(outDtype != ge::DT_BF16, OP_LOGE(context_->GetNodeName(), "hidden_states dtype must be BF16"),
                 return ge::GRAPH_FAILED);
+    if (fusedChain_) {
+        OP_CHECK_IF(context_->GetInputDesc(4)->GetDataType() != ge::DT_BF16 ||
+                        context_->GetInputDesc(5)->GetDataType() != ge::DT_BF16 ||
+                        context_->GetOutputDesc(1)->GetDataType() != ge::DT_BF16 ||
+                        context_->GetOutputDesc(2)->GetDataType() != ge::DT_BF16,
+                    OP_LOGE(context_->GetNodeName(), "Fused optional inputs and outputs must be BF16"),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -330,6 +406,11 @@ ge::graphStatus AttnResFwdTiling::AnalyzeShapes()
                 OP_LOGE(context_->GetNodeName(), "block_residual dim num must be %zu", BLOCK_RESIDUAL_DIM),
                 return ge::GRAPH_FAILED);
 
+    OP_CHECK_IF(!AttnResFwd::AreShapeFieldsRepresentable(
+                    prefixShape.GetDim(0), blockShape.GetDim(1), prefixShape.GetDim(1)),
+                OP_LOGE(context_->GetNodeName(), "Shape exceeds supported tiling or buffer field widths"),
+                return ge::GRAPH_FAILED);
+
     tilingData_.numTokens = static_cast<uint32_t>(prefixShape.GetDim(0));
     tilingData_.hiddenSize = static_cast<uint32_t>(prefixShape.GetDim(1));
     tilingData_.numBlocks = static_cast<uint32_t>(blockShape.GetDim(1));
@@ -343,22 +424,57 @@ ge::graphStatus AttnResFwdTiling::AnalyzeShapes()
     tilingData_.cacheOutputNorm = 0U;
     if (fusedChain_) {
         const auto *attrs = context_->GetAttrs();
-        const int64_t valid = *attrs->GetAttrPointer<int64_t>(2);
-        const int64_t stride = *attrs->GetAttrPointer<int64_t>(3);
-        const int64_t writeIdx = *attrs->GetAttrPointer<int64_t>(4);
-        OP_CHECK_IF(valid < 0 || valid > blockShape.GetDim(1) ||
-                    stride < blockShape.GetDim(1) * blockShape.GetDim(2) ||
-                    writeIdx < -1 || writeIdx >= blockShape.GetDim(1),
-                    OP_LOGE(context_->GetNodeName(), "Invalid bank extent or write index"),
+        OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
+        const auto *valid = attrs->GetAttrPointer<int64_t>(2);
+        const auto *stride = attrs->GetAttrPointer<int64_t>(3);
+        const auto *writeIdx = attrs->GetAttrPointer<int64_t>(4);
+        const auto *outputEps = attrs->GetAttrPointer<float>(5);
+        const auto *saveMaterialized = attrs->GetAttrPointer<bool>(6);
+        const auto *mix = attrs->GetAttrPointer<bool>(7);
+        const auto *fusedAdd = attrs->GetAttrPointer<bool>(8);
+        const auto *optimizePrefill = attrs->GetAttrPointer<bool>(9);
+        OP_CHECK_IF(!valid || !stride || !writeIdx || !outputEps || !saveMaterialized || !mix ||
+                        !fusedAdd || !optimizePrefill,
+                    OP_LOGE(context_->GetNodeName(), "Missing fused-chain attributes"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(!AttnResFwd::IsValidBankExtent(prefixShape.GetDim(0), blockShape.GetDim(1),
+                        prefixShape.GetDim(1), *valid, *stride, *writeIdx),
+                    OP_LOGE(context_->GetNodeName(), "Invalid bank extent, stride or write index"),
                     return ge::GRAPH_FAILED);
-        tilingData_.numBlocks = static_cast<uint32_t>(valid);
-        tilingData_.blockTokenStride = static_cast<uint64_t>(stride);
-        tilingData_.blockWriteIdx = static_cast<int32_t>(writeIdx);
-        tilingData_.outputNormEps = *attrs->GetAttrPointer<float>(5);
-        tilingData_.saveMaterialized = *attrs->GetAttrPointer<bool>(6) ? 1U : 0U;
-        tilingData_.mix = *attrs->GetAttrPointer<bool>(7) ? 1U : 0U;
-        tilingData_.fusedAdd = *attrs->GetAttrPointer<bool>(8) ? 1U : 0U;
-        optimizePrefill_ = *attrs->GetAttrPointer<bool>(9);
+        OP_CHECK_IF(!AttnResFwd::IsValidNormEpsilon(*outputEps, true),
+                    OP_LOGE(context_->GetNodeName(), "output_norm_eps must be finite and nonnegative"),
+                    return ge::GRAPH_FAILED);
+        tilingData_.numBlocks = static_cast<uint32_t>(*valid);
+        tilingData_.blockTokenStride = static_cast<uint64_t>(*stride);
+        tilingData_.blockWriteIdx = static_cast<int32_t>(*writeIdx);
+        tilingData_.outputNormEps = *outputEps;
+        tilingData_.saveMaterialized = *saveMaterialized ? 1U : 0U;
+        tilingData_.mix = *mix ? 1U : 0U;
+        tilingData_.fusedAdd = *fusedAdd ? 1U : 0U;
+        optimizePrefill_ = *optimizePrefill;
+    }
+
+    if (fusedChain_) {
+        if (tilingData_.fusedAdd != 0) {
+            const auto &addendShape = context_->GetInputShape(4)->GetOriginShape();
+            OP_CHECK_IF(addendShape.GetDimNum() != 2 ||
+                            addendShape.GetDim(0) != prefixShape.GetDim(0) ||
+                            addendShape.GetDim(1) != prefixShape.GetDim(1),
+                        OP_LOGE(context_->GetNodeName(), "addend shape must match prefix_sum"),
+                        return ge::GRAPH_FAILED);
+        }
+        if (tilingData_.outputNormEps > 0.0f) {
+            const auto &outputNormShape = context_->GetInputShape(5)->GetOriginShape();
+            OP_CHECK_IF(outputNormShape.GetDimNum() != 1 || outputNormShape.GetDim(0) != prefixShape.GetDim(1),
+                        OP_LOGE(context_->GetNodeName(), "output_norm shape must be [H]"),
+                        return ge::GRAPH_FAILED);
+        }
+        for (const size_t index : {size_t{0}, size_t{1}, size_t{2}}) {
+            const auto &outputShape = context_->GetOutputShape(index)->GetOriginShape();
+            OP_CHECK_IF(outputShape.GetDimNum() != 2 || outputShape.GetDim(0) != prefixShape.GetDim(0) ||
+                            outputShape.GetDim(1) != prefixShape.GetDim(1),
+                        OP_LOGE(context_->GetNodeName(), "Fused output shape must match prefix_sum"),
+                        return ge::GRAPH_FAILED);
+        }
     }
 
     OP_CHECK_IF(blockShape.GetDim(0) != static_cast<int64_t>(tilingData_.numTokens),
@@ -367,13 +483,16 @@ ge::graphStatus AttnResFwdTiling::AnalyzeShapes()
     OP_CHECK_IF(blockShape.GetDim(2) != static_cast<int64_t>(tilingData_.hiddenSize),
                 OP_LOGE(context_->GetNodeName(), "H mismatch between prefix_sum and block_residual"),
                 return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!AttnResFwd::AreCandidateRowsRepresentable(tilingData_.numBlocks),
+                OP_LOGE(context_->GetNodeName(), "Candidate rows exceed supported metadata buffer widths"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(tilingData_.numBlocks < 1 && !fuseAdd_,
                 OP_LOGE(context_->GetNodeName(), "num_blocks must be >= 1, got %u", tilingData_.numBlocks),
                 return ge::GRAPH_FAILED);
 
-    int64_t projHidden = projShape.GetDim(projShape.GetDimNum() - 1);
-    OP_CHECK_IF(projHidden != static_cast<int64_t>(tilingData_.hiddenSize),
-                OP_LOGE(context_->GetNodeName(), "proj_weight hidden dim mismatch"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(projShape.GetDimNum() != 2 || projShape.GetDim(0) != 1 ||
+                    projShape.GetDim(1) != static_cast<int64_t>(tilingData_.hiddenSize),
+                OP_LOGE(context_->GetNodeName(), "proj_weight shape must be [1,H]"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(normShape.GetDimNum() != 1 || normShape.GetDim(0) != static_cast<int64_t>(tilingData_.hiddenSize),
                 OP_LOGE(context_->GetNodeName(), "norm_weight shape must be [H]"), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
@@ -385,7 +504,7 @@ ge::graphStatus AttnResFwdTiling::GetNormEps()
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
     const float *normEpsPtr = attrs->GetAttrPointer<float>(ATTR_NORM_EPS_INDEX);
     tilingData_.normEps = (normEpsPtr != nullptr) ? *normEpsPtr : 1e-5f;
-    OP_CHECK_IF(tilingData_.normEps <= 0.0f, OP_LOGE(context_->GetNodeName(), "norm_eps must be > 0"),
+    OP_CHECK_IF(!AttnResFwd::IsValidNormEpsilon(tilingData_.normEps), OP_LOGE(context_->GetNodeName(), "norm_eps must be finite and > 0"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }

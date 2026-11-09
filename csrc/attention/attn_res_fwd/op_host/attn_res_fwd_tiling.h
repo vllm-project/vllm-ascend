@@ -27,6 +27,8 @@ namespace optiling {
 struct AttnResFwdCompileInfo {
     uint64_t aivNum{0UL};
     uint64_t ubSize{0UL};
+    bool supportsCooperative{false};
+    bool regBase{false};
 };
 
 struct AttnResFwdInfo {
@@ -69,10 +71,11 @@ protected:
     uint32_t GetMinStagingBytes() const;
 
     AttnResFwdCompileInfo compileInfo_;
-    AttnResFwd::AttnResFwdTilingData tilingData_;
+    AttnResFwd::AttnResFwdTilingData tilingData_{};
     AttnResFwdInfo inputParams_;
     uint64_t tilingKey_{TILING_KEY_BF16_RELOAD};
     uint64_t workspaceSize_{0UL};
+    uint64_t cooperativeWorkspaceBytes_{0UL};
     bool fuseAdd_{false};
     bool fusedChain_{false};
     bool optimizePrefill_{false};
