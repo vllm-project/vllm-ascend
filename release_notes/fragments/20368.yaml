@@ -6,4 +6,7 @@ entries:
       than prefill TP: attention groups becoming ready in separate pull tasks
       no longer overwrite each other's pending reformat state, which previously
       left multi-KV-head (GQA) draft KV unreorganized and silently degraded
-      speculative decoding acceptance once KV blocks were reused.
+      speculative decoding acceptance once KV blocks were reused. The pending
+      reformat consumer now dispatches one reformat per group pull count, so a
+      shard whose groups complete with different pull counts still satisfies
+      the uniform-pull precondition of the non-hybrid reformat path.
