@@ -275,7 +275,9 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         skip_tokens = 0 if self.layerwise_offload else num_computed_tokens
         hits_per_group = [
             hit_tokens
-            for hit_tokens, _, _ in self._scan_contiguous_group_hits(request, token_len, self.grouped_block_size, skip_tokens)
+            for hit_tokens, _, _ in self._scan_contiguous_group_hits(
+                request, token_len, self.grouped_block_size, skip_tokens
+            )
         ]
 
         if not hits_per_group:

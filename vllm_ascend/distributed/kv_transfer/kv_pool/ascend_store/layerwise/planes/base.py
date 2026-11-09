@@ -24,7 +24,7 @@ class LayerwiseDataPlane(ABC):
     """
 
     @abstractmethod
-    def prepare_sessions(self, requests: list["ReqMeta"]) -> dict[int, list["ReqMeta"]]:
+    def prepare_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
         """Open pool sessions for the step, before the per-layer save loop.
 
         Returns the per-group request views the save/load loops consume; an
@@ -32,11 +32,11 @@ class LayerwiseDataPlane(ABC):
         """
 
     @abstractmethod
-    def prepare_load_gvas(self, requests: list["ReqMeta"]) -> None:
+    def prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
         """Prepare load transfer targets once the save loop is planned."""
 
     @abstractmethod
-    def alloc_save_gvas(self, requests: list["ReqMeta"]) -> None:
+    def alloc_save_gvas(self, requests: list[ReqMeta]) -> None:
         """Allocate save transfer targets once the save loop is planned."""
 
     @abstractmethod

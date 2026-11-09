@@ -38,7 +38,7 @@ __all__ = [
 ]
 
 
-def make_data_plane(worker: "LayerwiseKVPoolWorker") -> LayerwiseDataPlane:
+def make_data_plane(worker: LayerwiseKVPoolWorker) -> LayerwiseDataPlane:
     """Bind the data-plane strategy matching the selected backend."""
     plane = worker.layerwise_data_plane
     if plane == "block_key":

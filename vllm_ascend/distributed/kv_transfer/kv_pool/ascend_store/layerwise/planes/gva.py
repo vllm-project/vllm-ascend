@@ -28,7 +28,7 @@ class GvaDataPlane(LayerwiseDataPlane):
     worker's helpers unchanged.
     """
 
-    def __init__(self, worker: "LayerwiseKVPoolWorker"):
+    def __init__(self, worker: LayerwiseKVPoolWorker):
         self._worker = worker
 
     def prepare_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
