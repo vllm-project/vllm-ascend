@@ -427,6 +427,31 @@ test coverage and validation evidence the change needs. See the preceding
 sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
 for PR CI.
 
+### CODEOWNERS approval gate
+
+Alongside `DCO` and the CI gate, every changed file must be approved by at
+least one of its [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+owners before the PR can merge. Key points:
+
+- Any owner listed in `.github/CODEOWNERS` counts as an approver, regardless of
+  their repository role — owners without org membership are intentional.
+- The PR author does not count as an approver even when listed as an owner.
+- Submitting or dismissing a review re-evaluates the gate without re-running
+  the heavy CI jobs; previously green CI results on the same commit are kept.
+- The gate also runs a CODEOWNERS health check: a tracked file without any
+  owner entry, or an entry pointing at a deleted/renamed path, fails the gate
+  for everyone. If your change adds, removes, or renames files, update
+  `.github/CODEOWNERS` in the same PR.
+- Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
+  deliberately unowned and do not require an owner approval.
+- If an owner is unresponsive, contact the module's other owners or a
+  maintainer; maintainers can merge with an admin override in exceptional
+  cases.
+
+The check logic lives in
+`.github/workflows/scripts/codeowner_gate.py` (unit tests in
+`tests/ut/tools/test_codeowner_gate.py`).
+
 ### Choose coverage for the change
 
 Run the affected tests and required repository checks. Expand coverage when the
