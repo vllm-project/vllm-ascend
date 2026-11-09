@@ -8,11 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from tools.kv_pool.analyze_recv_trace import summarize
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
-from tools.kv_pool.analyze_recv_trace import summarize
 
 
 @pytest.mark.parametrize("result", [[0], [1], None])
