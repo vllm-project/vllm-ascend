@@ -146,6 +146,110 @@ def _reference_gdn_recurrent(q, k, v, g, beta, state, slots, lengths, accepted):
     return output
 
 
+def test_fixed_gdn_graph_replay_matches_unpadded_decode():
+    """Replay the Qwen3.6 TP2 verification shape with seven drafts per request."""
+    torch.manual_seed(1234)
+    device = torch.device("npu:0")
+    rows, live_rows, width = 4, 3, 8
+    tokens, live_tokens = rows * width, live_rows * width
+    key_heads, value_heads, head_size = 8, 24, 128
+    channels = (2 * key_heads + value_heads) * head_size
+    conv_width = 4
+    dtype = torch.bfloat16
+
+    slots = torch.arange(1, tokens + 1, dtype=torch.int32, device=device).view(rows, width)
+    boundaries = torch.arange(0, tokens + 1, width, dtype=torch.int32, device=device)
+    lengths = _build_actual_seq_lengths(boundaries, rows)
+    accepted = torch.ones(rows, dtype=torch.int32, device=device)
+    conv = torch.randn((tokens + 1, conv_width + width - 2, channels), dtype=dtype, device=device) * 0.01
+    state = torch.randn((tokens + 1, value_heads, head_size, head_size), device=device) * 0.01
+    initial_conv, initial_state = conv.clone(), state.clone()
+
+    x = torch.randn((tokens, channels), dtype=dtype, device=device)
+    weight = torch.randn((conv_width, channels), dtype=dtype, device=device) * 0.01
+    q, k = (
+        torch.nn.functional.normalize(torch.randn((tokens, key_heads, head_size), device=device), dim=-1).to(dtype)
+        for _ in range(2)
+    )
+    v = torch.randn((tokens, value_heads, head_size), dtype=dtype, device=device)
+    g = -torch.rand((tokens, value_heads), device=device)
+    beta = torch.rand((tokens, value_heads), dtype=dtype, device=device)
+
+    def run(conv_state, ssm_state, table, query, seq_lengths, counts, num_tokens):
+        conv_input = x[:num_tokens]
+        conv_output = causal_conv1d_update(
+            conv_input,
+            conv_state,
+            weight,
+            activation="silu",
+            conv_state_indices=table[:, 0].contiguous(),
+            num_accepted_tokens=counts,
+            query_start_loc=query,
+            max_query_len=width,
+            null_block_id=0,
+            out=torch.empty_like(conv_input),
+        )
+        recurrent_output = native_recurrent_gated_delta_rule(
+            q[:num_tokens],
+            k[:num_tokens],
+            v[:num_tokens],
+            ssm_state,
+            g=g[:num_tokens],
+            beta=beta[:num_tokens],
+            scale=head_size**-0.5,
+            actual_seq_lengths=seq_lengths,
+            ssm_state_indices=table.flatten(),
+            num_accepted_tokens=counts,
+        )
+        return conv_output, recurrent_output
+
+    run(conv, state, slots, boundaries, lengths, accepted, tokens)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        replay_conv, replay_recurrent = run(conv, state, slots, boundaries, lengths, accepted, tokens)
+
+    conv.copy_(initial_conv)
+    state.copy_(initial_state)
+    slots[live_rows:].zero_()
+    boundaries[live_rows + 1 :].fill_(live_tokens)
+    _build_actual_seq_lengths(boundaries, rows, out=lengths)
+    previous_accepted = [1, 4, 8]
+    accepted[:live_rows].copy_(torch.tensor(previous_accepted, dtype=torch.int32, device=device))
+    graph.replay()
+
+    expected_conv, expected_recurrent = run(
+        initial_conv,
+        initial_state.clone(),
+        slots[:live_rows],
+        boundaries[: live_rows + 1],
+        lengths[: live_rows + 1],
+        accepted[:live_rows],
+        live_tokens,
+    )
+    reference_recurrent = _reference_gdn_recurrent(
+        q[None, :live_tokens],
+        k[None, :live_tokens],
+        v[None, :live_tokens],
+        g[None, :live_tokens],
+        beta[None, :live_tokens],
+        initial_state,
+        slots,
+        [width] * live_rows,
+        previous_accepted,
+    )
+
+    torch.testing.assert_close(replay_conv[:live_tokens], expected_conv, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(conv, initial_conv, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(replay_recurrent[:live_tokens], expected_recurrent, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(replay_recurrent[:live_tokens], reference_recurrent[0], rtol=1e-2, atol=1e-3)
+    torch.testing.assert_close(state, initial_state, rtol=1e-3, atol=1e-3)
+    for actual, reference in ((conv, initial_conv), (state, initial_state)):
+        # Padding must never mutate the null block or the captured dummy row.
+        torch.testing.assert_close(actual[0], reference[0], rtol=0, atol=0)
+        torch.testing.assert_close(actual[live_tokens + 1 :], reference[live_tokens + 1 :], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "states",
     [4, 9, 10, (10, torch.bfloat16)],
