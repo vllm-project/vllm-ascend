@@ -1,4 +1,4 @@
-pr: 0  # Replace with the real PR number before submission.
+pr: 21040
 entries:
   - category: feature
-    text: Added experimental opt-in gdn internal prefill checkpoints.
+    text: Added experimental opt-in GDN internal prefill checkpoints for eligible layers. Enable with the additional configuration option gdn_internal_prefill_checkpoints.

@@ -379,9 +379,11 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 ## GDN internal prefill checkpoints
 
-Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`
-and prefix caching in align mode. Requires vLLM with #60050. The option is
-experimental and disabled by default. Eligible GDN layers require BF16,
+Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
+The option remains disabled by default pending numerical and performance
+qualification of the alternate prefill recurrence on supported NPUs.
+Requires prefix caching in align mode and vLLM with #60050. The optimization is
+experimental. Eligible GDN layers require BF16,
 K=V=128, PCP=1 and no ubatching. The upstream all-layer capability check preserves split
 prefill when another recurrent layer cannot export checkpoints.
 KV transfer configurations and legacy EAGLE/MTP block dropping without
@@ -403,4 +405,4 @@ with the same VllmConfig, device and state shape share it; ubatching is excluded
 A raw pre-convolution copy is also needed during checkpoint-bearing prefill.
 Small prefix match units can increase checkpoint traffic.
 
-Validate correctness, quality and performance on the deployment hardware before enabling in production.
+Validate correctness, quality and performance on the deployment hardware before deploying in production.

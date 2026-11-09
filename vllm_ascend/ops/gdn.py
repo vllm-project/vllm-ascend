@@ -521,7 +521,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
 
-        checkpoint = getattr(attn_metadata, "ascend_checkpoint", None)
+        checkpoint = attn_metadata.checkpoint
         raw_prefill_qkv = None
         if checkpoint is not None:
             assert mixed_qkv_non_spec is not None
@@ -859,7 +859,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     g_non_spec,
                     beta_non_spec,
                     initial_state,
-                    prefill_query_start_loc,
                 )
                 scatter_ssm_states_(ssm_state, prefill_state_indices, last_recurrent_state.to(ssm_state.dtype))
             elif fla_gdn_prefill_op is not None:

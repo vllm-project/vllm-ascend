@@ -645,6 +645,8 @@ class AscendConfig:
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
+    # This switches the prefill recurrence; keep opt-in until cold/cache-hit
+    # numerical equivalence and performance are qualified on supported NPUs.
     gdn_internal_prefill_checkpoints: bool = False
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False

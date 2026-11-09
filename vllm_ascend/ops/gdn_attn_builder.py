@@ -404,10 +404,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
         )
         if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
-            from vllm_ascend.ascend_config import get_ascend_config
-
-            if get_ascend_config().gdn_internal_prefill_checkpoints:
-                raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
+            raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -835,11 +832,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
-        ascend_checkpoint = None
+        checkpoint = None
         if num_prefills and self._ascend_gdn_checkpoints:
-            from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoints
-
-            ascend_checkpoint = build_gdn_checkpoints(self, m, spec_sequence_masks_cpu, num_decodes)
+            if spec_sequence_masks_cpu is None:
+                non_spec_rows = list(range(m.num_reqs))
+            else:
+                non_spec_rows = [i for i, is_spec in enumerate(spec_sequence_masks_cpu.tolist()) if not is_spec]
+            # Kernel inputs contain only non-spec prefill rows, excluding decodes.
+            checkpoint = self.checkpoint_builder.build(m, non_spec_rows[num_decodes:])
         if runtime_batch and num_actual_reqs > 0 and not (self._ascend_gdn_checkpoints and num_prefills):
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
@@ -1049,6 +1049,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            checkpoint=checkpoint,
         )
         if (
             self.use_full_cuda_graph
@@ -1072,8 +1073,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
-        if ascend_checkpoint is not None:
-            attn_metadata.ascend_checkpoint = ascend_checkpoint
         return self._finalize_metadata(attn_metadata)
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:

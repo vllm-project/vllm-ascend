@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Opt-in GDN checkpoint export from FP32 chunk-start recurrent states."""
+"""GDN checkpoint export from FP32 chunk-start recurrent states."""
 
 import torch
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.gdn_checkpoint_plan import validate_checkpoint_plan
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
 
 GDN_CHECKPOINT_ALIGNMENT = 64
@@ -82,20 +81,9 @@ def ensure_gdn_checkpoint_workspace(layer, tensor):
         layer._ascend_checkpoint_workspace = tensor.new_empty(shape, dtype=torch.float32)
 
 
-def build_gdn_checkpoints(builder, common, spec_masks_cpu, num_decodes):
-    if spec_masks_cpu is None:
-        non_spec_rows = list(range(common.num_reqs))
-    else:
-        non_spec_rows = [i for i, is_spec in enumerate(spec_masks_cpu.tolist()) if not is_spec]
-    checkpoint = builder.checkpoint_builder.build(common, non_spec_rows[num_decodes:])
-    if checkpoint is None:
-        return
-    validate_checkpoint_plan(checkpoint.query_lens, checkpoint.offsets)
-    return checkpoint
-
-
-def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initial_state, cu_seqlens):
-    checkpoint = getattr(metadata, "ascend_checkpoint", None)
+def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initial_state):
+    checkpoint = metadata.checkpoint
+    cu_seqlens = metadata.prefill_query_start_loc
     states = None if checkpoint is None else layer._ascend_checkpoint_workspace[: initial_state.shape[0]]
     output, final_state = chunk_gated_delta_rule_checkpoint(
         q,
@@ -103,7 +91,7 @@ def run_gdn_checkpoint_prefill(layer, metadata, raw_qkv, q, k, v, g, beta, initi
         v,
         g,
         beta,
-        initial_state.transpose(-1, -2).contiguous(),
+        initial_state.transpose(-1, -2),
         cu_seqlens,
         metadata.non_spec_prefill_metadata.chunk,
         states,
