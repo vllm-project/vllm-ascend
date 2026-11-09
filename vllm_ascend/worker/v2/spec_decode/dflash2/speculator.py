@@ -127,7 +127,7 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
     # Native SWA masking remains upstream; this route retains complete KV history.
-    _dflash2_full_kv_reference = True
+    _dflash2_full_kv_retention = True
 
     def _score_candidates(
         self,
@@ -155,12 +155,6 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
             # Preserve the existing typed eager path and its independent owner.
             super().init_cudagraph_manager(CUDAGraphMode.NONE)
             return
-        from vllm_ascend import envs
-
-        # Window OFF bypasses the Window factory. It must retain the same
-        # explicit experimental gate before any DFlash2 Graph is captured.
-        if not envs.VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH:
-            raise ValueError("DFlash2 Graph requires the experimental Draft Graph gate, including Window OFF")
         if cudagraph_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
             raise NotImplementedError(
                 "DFlash2 Graph first admits FULL/FULL_DECODE_ONLY only; no implicit eager fallback"
@@ -168,7 +162,7 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
         if cudagraph_mode.decode_mode() is CUDAGraphMode.FULL:
             import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream_dflash2
 
-            from vllm_ascend.worker.v2.spec_decode.draft_window_dflash2_graph import validate_dflash2_graph_source
+            from vllm_ascend.worker.v2.spec_decode.draft_window.dflash2 import validate_dflash2_graph_source
 
             # Do not capture the unsupported CUDA selector accidentally. The
             # installed Ascend patch is already used by ordinary DFlash2 eager.

@@ -7,16 +7,64 @@ import math
 import pytest
 import torch
 
-pytest.importorskip("torch_npu")
+torch_npu = pytest.importorskip("torch_npu")
 
-from vllm_ascend.worker.v2.spec_decode.draft_window_dense import (  # noqa: E402
+from vllm_ascend.worker.v2.spec_decode.draft_window.dense import (  # noqa: E402
     dense_draft_attention,
+    gather_dense_draft_kv,
     prepare_dense_draft_read,
 )
 
 pytestmark = pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
 # Preserve the existing dtype tolerances; the reference does not use read slots/masks.
 TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
+
+
+@torch.inference_mode()
+def test_wide_kv_gather_preserves_fp32_strides_and_nan_tail():
+    # GLM DSpark TP4 has 16 local KV heads of width 192: a 4096-channel tile.
+    block, heads, dim = 128, 16, 192
+    generator = torch.Generator().manual_seed(4317)
+    key_cpu = torch.full((4, block, heads, dim), torch.nan, dtype=torch.bfloat16)
+    value_cpu = torch.full_like(key_cpu, torch.nan)
+    for cache in (key_cpu, value_cpu):
+        cache[1, 0] = torch.randn(heads, dim, generator=generator)
+        cache[2, :2] = torch.randn(2, heads, dim, generator=generator)
+    key_backing = torch.full((4, 2, block, heads, dim), torch.nan, dtype=torch.bfloat16, device="npu")
+    value_backing = torch.full((4, 3, block, heads, dim), torch.nan, dtype=torch.bfloat16, device="npu")
+    # ND storage must exercise the fused gather rather than the format-aware fallback.
+    key_backing = torch_npu.npu_format_cast(key_backing, 2)
+    value_backing = torch_npu.npu_format_cast(value_backing, 2)
+    keys, values = key_backing[:, 1], value_backing[:, 2]
+    keys.copy_(key_cpu)
+    values.copy_(value_cpu)
+    key_before, value_before = key_backing.cpu(), value_backing.cpu()
+    table_cpu = torch.tensor([[3, 1], [0, 2]], dtype=torch.int32)
+    table = table_cpu.npu()
+    read = prepare_dense_draft_read(
+        table,
+        (2, 2),
+        block,
+        exact_cpu=torch.tensor([129, 130], dtype=torch.int32),
+        query_ends_cpu=torch.tensor([129, 130], dtype=torch.int32),
+        upper_cpu=torch.tensor([129, 130], dtype=torch.int32),
+        frozen_starts=torch.tensor([128, 128], dtype=torch.int32),
+        full_rows_cpu=torch.zeros(2, dtype=torch.bool),
+        query_width=1,
+        causal=True,
+        retain=lambda *objects: None,
+    )
+    assert keys.stride(0) != values.stride(0) and keys.storage_offset() and values.storage_offset()
+    assert torch_npu.get_npu_format(keys) in (0, 2) and torch_npu.get_npu_format(values) in (0, 2)
+    for cache, actual in zip((key_cpu, value_cpu), gather_dense_draft_kv(read, keys, values)):
+        expected = torch.stack(
+            (cache[1, 0].expand(32, -1, -1), torch.cat((cache[2, :2], cache[2, 1].expand(30, -1, -1))))
+        ).float()
+        assert actual.dtype == torch.float32 and actual.isfinite().all()
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(table.cpu(), table_cpu, rtol=0, atol=0)
+    torch.testing.assert_close(key_backing.cpu(), key_before, rtol=0, atol=0, equal_nan=True)
+    torch.testing.assert_close(value_backing.cpu(), value_before, rtol=0, atol=0, equal_nan=True)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

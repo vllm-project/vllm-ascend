@@ -67,7 +67,9 @@ def test_init_draft_decode_graph():
         ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
-        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=1)
+        manager = AutoRegressiveAclGraphManager(
+            SimpleNamespace(speculative_config=None), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=1
+        )
     assert manager.is_draft_model_prefill is False
     set_decode.assert_called_once_with([4, 8])
     set_prefill.assert_not_called()

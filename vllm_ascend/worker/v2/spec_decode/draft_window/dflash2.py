@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""DFlash2's fixed selector inputs and native-resident Graph source contract.
-
-Only Host metadata is inspected here. Dispatch, request reordering and metadata
-preparation remain outside capture. The inherited DFlash forward captures the
-convolution, candidate TopK, selector, NPU walk and probability-cache writes;
-this module neither clones those algorithms nor creates another Graph owner.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -41,13 +33,13 @@ def validate_dflash2_graph_source(owner: Any, group: Any = None) -> None:
     )
     _require(
         topology == (2, 1, 1, 1, 1) and getattr(draft_parallel, "tensor_parallel_size", None) == 2,
-        "first Graph qualification requires actual Target/Draft TP2, DP1/PP1/PCP1/DCP1",
+        "supported Graph execution requires actual Target/Draft TP2, DP1/PP1/PCP1/DCP1",
     )
     _require(
         config.num_speculative_tokens == 7
         and not config.uses_dynamic_speculative_decoding()
         and not config.enable_adaptive_verification,
-        "first Graph qualification requires static nonadaptive K7/Q8",
+        "supported Graph execution requires static nonadaptive K7/Q8",
     )
     additional = vllm_config.additional_config or {}
     _require(
@@ -55,7 +47,7 @@ def validate_dflash2_graph_source(owner: Any, group: Any = None) -> None:
         and additional.get("enable_flashcomm1", False) is False
         and getattr(parallel, "use_sequence_parallel_moe", None) is False
         and getattr(draft_parallel, "use_sequence_parallel_moe", None) is False,
-        "first Graph qualification excludes FlashComm, SP and legacy DSA-CP",
+        "supported Graph execution excludes FlashComm, SP and legacy DSA-CP",
     )
     _require(
         tuple(owner.draft_model_config.architectures) == ("DFlash2DraftModel",), "actual DFlash2 architecture required"
@@ -65,7 +57,7 @@ def validate_dflash2_graph_source(owner: Any, group: Any = None) -> None:
     # selector/sampler top-k, per-layer convolution blocks and tensor storage.
     _require(0 < owner.top_k <= owner.vocab_size, "selector top-k exceeds the actual vocabulary")
     _require(
-        getattr(owner, "_dflash2_full_kv_reference", False) is True,
+        getattr(owner, "_dflash2_full_kv_retention", False) is True,
         "the actual DFlash2 full-retention loader contract is missing",
     )
     # Real set_attn qualified loaded implementations and native mask bindings

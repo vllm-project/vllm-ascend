@@ -410,7 +410,7 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        from vllm_ascend.worker.v2.spec_decode.dflash2.resident_kv import apply_dflash2_reference_kv_specs
+        from vllm_ascend.worker.v2.spec_decode.dflash2.resident_kv import apply_dflash2_resident_kv_specs
 
         specs = apply_dspark_resident_kv_specs(
             super().get_kv_cache_spec(),
@@ -420,7 +420,7 @@ class NPUModelRunner(GPUModelRunner):
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
-        return apply_dflash2_reference_kv_specs(specs, self.speculator)
+        return apply_dflash2_resident_kv_specs(specs, self.speculator)
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
@@ -837,12 +837,12 @@ class NPUModelRunner(GPUModelRunner):
         # Qualified Eagle/Full8 Graph shapes exclude preempted requests,
         # including resumption before the first output token.
         owner = getattr(self, "speculator", None)
-        if getattr(owner, "_draft_graph_review_limit", None) is not None:
-            from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import (
-                note_eagle_single_request_review_lifecycle,
+        if getattr(owner, "_draft_window_graph_support", None) is not None:
+            from vllm_ascend.worker.v2.spec_decode.draft_window.config import (
+                note_graph_request_lifecycle,
             )
 
-            note_eagle_single_request_review_lifecycle(owner, scheduler_output)
+            note_graph_request_lifecycle(owner, scheduler_output)
         return super().finish_requests(scheduler_output)
 
     def _prepare_inputs_impl(
@@ -1099,10 +1099,10 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=attn_state,
         )
         # Validate original prompt/output limits before Target attention writes.
-        if getattr(self.speculator, "_draft_graph_review_limit", None) is not None:
-            from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import validate_draft_graph_request_bounds
+        if getattr(self.speculator, "_draft_window_graph_support", None) is not None:
+            from vllm_ascend.worker.v2.spec_decode.draft_window.config import validate_graph_request_bounds
 
-            validate_draft_graph_request_bounds(self.speculator, input_batch)
+            validate_graph_request_bounds(self.speculator, input_batch)
         # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:

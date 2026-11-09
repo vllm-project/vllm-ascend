@@ -20,7 +20,7 @@
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
@@ -2210,14 +2210,16 @@ _BUILD_ATTN_METADATA_MODULE = _speculator
 
 
 @contextmanager
-def build_attn_metadata_wrapper():
+def build_attn_metadata_wrapper(*, proposal_scope=None):
     """Context manager to override attention metadata building for Ascend NPUs."""
-    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
-    try:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
-        yield
-    finally:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
+    # Reuse the existing proposal boundary, including failed preparation/forward.
+    with nullcontext() if proposal_scope is None else proposal_scope:
+        original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+        try:
+            _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+            yield
+        finally:
+            _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
 
 
 @contextmanager

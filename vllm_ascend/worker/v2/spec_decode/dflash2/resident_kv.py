@@ -7,8 +7,8 @@ from typing import Any
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, SlidingWindowSpec, replace_as
 
 
-def apply_dflash2_reference_kv_specs(specs: dict[str, KVCacheSpec], speculator: Any) -> dict[str, KVCacheSpec]:
-    if not getattr(speculator, "_dflash2_full_kv_reference", False):
+def apply_dflash2_resident_kv_specs(specs: dict[str, KVCacheSpec], speculator: Any) -> dict[str, KVCacheSpec]:
+    if not getattr(speculator, "_dflash2_full_kv_retention", False):
         return specs
     result = specs.copy()
     for name in speculator.draft_attn_layer_names:

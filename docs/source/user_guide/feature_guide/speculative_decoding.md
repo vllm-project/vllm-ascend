@@ -671,24 +671,18 @@ For Draft eager execution, use the example above with
 `VLLM_USE_V2_MODEL_RUNNER=1` and speculative `enforce_eager=true`. This does
 not disable Target Graph. Only resident, supported Draft KV layouts are
 admitted; transferred, offloaded, and sharded Draft KV require other readers.
-This feature does not change the official Target/Draft CP configuration.
-GLM Target DCP16 with a replicated Draft needs separate admission and metadata
-compatibility; an ordinary replicated MLA Draft under that Target also needs
-a separate topology policy and vLLM compatibility. These prerequisites are not
-part of the Window patch. A rejected combination is not qualified by disabling
-its applicable features.
+This feature requires an officially supported Target/Draft parallel
+configuration and does not add general context-parallel support. Disabling
+other applicable features does not qualify a rejected combination.
 
-Draft Graph is a separate, default-off experimental entry:
-
-```shell
-export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH=1
-```
-
-Use speculative `enforce_eager=false` and a compatible Target Graph mode
-and capture sizes. Capture capacity must cover both Target query tokens
-and the method's Draft query geometry. Unsupported models, buckets, and
-request shapes fail explicitly; the entry does not select an eager fallback.
+With `VLLM_USE_V2_MODEL_RUNNER=1`, speculative `enforce_eager=true`, an eager
+Draft model, or `cudagraph_mode=NONE` selects Draft eager execution. Draft Graph
+requires `enforce_eager=false`, a non-eager Draft model and compatible Target
+Graph mode/capture sizes; no additional environment switch is needed. Capture
+capacity must cover both Target query tokens and the method's Draft query
+geometry.
+Unsupported models, buckets, and request shapes fail explicitly; the window
+does not select an eager fallback.
 Admission currently covers the GLM DSpark/DFlash parallel consumers,
 the qualified Qwen Full-attention DFlash and Eagle3 consumers at TP4 with
 DP1 local capacity 1/2 or DP2 local capacity 1, and Qwen DFlash2 at TP2 with

@@ -1,24 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Eager proposal integration for resident direct-prefix Draft KV reads.
-
-An enabled runtime is installed only after the actual Draft consumers have
-been checked. Target graph selection and Full write/query operands are owned
-by the existing runner. Window projections and built Draft metadata remain owned
-until the next existing blocking exact copy completes earlier stream readers.
-"""
+from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import numpy as np
 import torch
 
-from vllm_ascend.worker.v2.spec_decode.draft_window_plan import (
+from vllm_ascend.worker.v2.spec_decode.draft_window.config import draft_uses_eager
+from vllm_ascend.worker.v2.spec_decode.draft_window.read import (
     compute_draft_window_start,
-)
-from vllm_ascend.worker.v2.spec_decode.draft_window_read import (
     materialize_draft_read,
 )
 
@@ -48,6 +41,48 @@ def continuing_prefill_rows(input_batch: Any, num_reqs: int) -> np.ndarray:
     return computed + scheduled < prompt
 
 
+def parallel_proposal_scope(owner, input_batch, dummy_run=False, is_profile=False, *, num_speculative_tokens=None):
+    """Choose exactly one existing proposal owner at the Ascend boundary."""
+    runtime = getattr(owner, "_draft_window_runtime", None)
+    graph_runtime = getattr(owner, "_draft_window_graph_binding_provider", None)
+    limit = getattr(owner, "_draft_window_graph_support", None)
+    context_kv_only = num_speculative_tokens == 0
+    if limit is not None:
+        from vllm_ascend.worker.v2.spec_decode.draft_window.config import validate_graph_requests
+
+        # Original request limits apply before either owner is changed.
+        # The core's zero-draft branch writes only context K/V; its Target padding
+        # is not a Draft query shape. The real request identity is still checked.
+        validate_graph_requests(
+            owner,
+            input_batch,
+            dummy_run=dummy_run,
+            is_profile=is_profile,
+            context_kv_only=context_kv_only,
+        )
+    if runtime is not None and graph_runtime is not None:
+        raise RuntimeError("Draft Window eager and Graph owners cannot share one proposal")
+    if graph_runtime is not None:
+        from vllm_ascend.worker.v2.spec_decode.draft_window.graph import parallel_graph_proposal_scope
+
+        if graph_runtime.proposal is not None:
+            raise RuntimeError("A Draft Window proposal scope is already active")
+        if num_speculative_tokens is not None and (
+            type(num_speculative_tokens) is not int or num_speculative_tokens not in (0, owner.num_speculative_steps)
+        ):
+            raise RuntimeError("Draft Window Graph cannot change its captured static K")
+        effective_dummy = dummy_run or getattr(input_batch, "is_dummy", False)
+        if context_kv_only and not (effective_dummy or is_profile):
+            # The fixed K0 branch writes context KV but executes no attention.
+            # Fence its first write; the empty shared scope owns exceptions.
+            graph_runtime.require_reusable()
+            return graph_runtime.proposal_scope(())
+        return parallel_graph_proposal_scope(owner, input_batch, dummy_run=effective_dummy, is_profile=is_profile)
+    if runtime is not None:
+        return runtime.proposal_context(input_batch, dummy_run, is_profile, context_kv_only=context_kv_only)
+    return nullcontext()
+
+
 class DraftWindowRuntime:
     """One speculator's bounded ownership and fresh metadata projection seam."""
 
@@ -62,7 +97,7 @@ class DraftWindowRuntime:
         # The model config inherits the Target flag. All three Ascend
         # speculators also force their graph managers to NONE for the explicit
         # speculative override, allowing Target Graph with Draft eager.
-        if not (speculator.draft_model_config.enforce_eager or speculator.speculative_config.enforce_eager):
+        if not draft_uses_eager(speculator.vllm_config):
             raise ValueError("Draft Window requires an eager Draft model; Target graph mode is independent")
         self.window_size = policy
         self.native_swa_causal: dict[int, bool] = {}
@@ -86,7 +121,7 @@ class DraftWindowRuntime:
         # Imported lazily: provider inventory depends on the installed NPU
         # backends, while phase/owner tests need no device import boundary.
         from vllm_ascend.ascend_config import get_ascend_config
-        from vllm_ascend.worker.v2.spec_decode.draft_window_backends import (
+        from vllm_ascend.worker.v2.spec_decode.draft_window.backends import (
             DraftWindowProviderStatus,
             require_direct_prefix_routes,
         )
@@ -382,7 +417,7 @@ class DraftWindowRuntime:
                     if bool((exact - read_starts < self.speculator.num_query_per_req).any()):
                         raise ValueError("Extra Window must cover every native query")
                 elif dense:
-                    from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
+                    from vllm_ascend.worker.v2.spec_decode.draft_window.dense import prepare_dense_draft_read
 
                     boundaries = common.query_start_loc_cpu[: num_reqs + 1]
                     widths = boundaries.diff()
@@ -457,3 +492,29 @@ class DraftWindowRuntime:
         if self._owner is None:
             raise RuntimeError("Draft Window metadata has no active proposal")
         self._owner.append(metadata)
+
+
+def initialize_draft_window_owner(owner) -> None:
+    """Install the resolved read owner once, after actual Draft attention exists."""
+    from vllm_ascend.worker.v2.spec_decode.draft_window.backends import report_owner_draft_native_attention
+
+    report_owner_draft_native_attention(owner)
+    graph = getattr(owner, "_draft_window_policy", None)
+    eager = getattr(owner, "draft_window_policy", None)
+    if graph is not None and eager is not None:
+        raise RuntimeError("Draft Window eager and Graph owners must be mutually exclusive")
+    if graph is not None or eager is not None:
+        if hasattr(owner, "_draft_window_runtime") or hasattr(owner, "_draft_window_graph_binding_provider"):
+            raise RuntimeError("Draft Window ownership is already initialized")
+        if graph is not None:
+            from vllm_ascend.worker.v2.spec_decode.draft_window.graph import create_draft_window_graph_provider
+
+            owner._draft_window_graph_binding_provider = create_draft_window_graph_provider(owner)
+            if owner.method == "eagle3":
+                from vllm_ascend.worker.v2.spec_decode.draft_window.eagle import EagleDraftWindow
+
+                owner._draft_window_eagle = EagleDraftWindow(owner, owner._draft_window_graph_binding_provider)
+            else:
+                owner._draft_window_dp_dummy_active = False
+        else:
+            owner._draft_window_runtime = DraftWindowRuntime(owner, eager)

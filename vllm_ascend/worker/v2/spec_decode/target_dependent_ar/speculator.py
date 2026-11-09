@@ -310,6 +310,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self.decode_cudagraph_manager.speculator = self
         self.prefill_cudagraph_manager.update_stream = self.update_stream
         self.decode_cudagraph_manager.update_stream = self.update_stream
+        window = getattr(self, "_draft_window_eagle", None)
+        if window is not None:
+            window.install()
 
     def set_eplb_state(self, eplb_state: Any) -> None:
         super().set_eplb_state(eplb_state)
@@ -365,9 +368,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         generate_draft.
         """
         if getattr(self, "method", None) == "eagle3":
-            from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import validate_draft_graph_review_requests
+            from vllm_ascend.worker.v2.spec_decode.draft_window.config import validate_graph_requests
 
-            validate_draft_graph_review_requests(self, input_batch, dummy_run=dummy_run, is_profile=bool(is_profile))
+            validate_graph_requests(self, input_batch, dummy_run=dummy_run, is_profile=bool(is_profile))
         self.input_batch = input_batch
         self._eplb_dummy_run = dummy_run
         # Replicated drafts use global tokens, unlike the PCP-local target.
@@ -376,11 +379,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         runtime = getattr(self, "_draft_window_runtime", None)
-        graph_scope = None
-        if getattr(self, "_draft_window_graph_binding_provider", None) is not None:
-            graph_scope = getattr(self, "_eagle3_draft_window_proposal_scope", None)
-            if not callable(graph_scope):
-                raise RuntimeError("Eagle3 Graph has no proposal owner")
+        window = getattr(self, "_draft_window_eagle", None)
+        graph_scope = window.proposal_scope if window is not None else None
         with (
             graph_scope(
                 input_batch,
@@ -459,9 +459,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
-        from vllm_ascend.worker.v2.spec_decode import initialize_draft_window_owner
+        if getattr(self, "method", None) == "eagle3":
+            from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import initialize_draft_window_owner
 
-        initialize_draft_window_owner(self)
+            initialize_draft_window_owner(self)
 
     def capture(self) -> None:
         self._eplb_dummy_run = True
@@ -530,6 +531,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Override the upstream AR speculator._run_model for Ascend NPUs."""
+        window = getattr(self, "_draft_window_eagle", None)
+        if window is not None:
+            attn_metadata = window.capture_metadata(attn_metadata, cudagraph_runtime_mode)
         last_hidden_states, hidden_states = super()._run_model(
             num_tokens,
             attn_metadata,
@@ -585,6 +589,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         ``_multi_step_decode`` which iterates over steps and calls
         ``_generate_draft`` per step.
         """
+        window = getattr(self, "_draft_window_eagle", None)
+        if window is not None:
+            window.prepare_decode(num_reqs, skip_attn, batch_desc, num_speculative_steps)
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
@@ -619,6 +626,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
+        window = getattr(self, "_draft_window_eagle", None)
+        if window is not None and window.active():
+            attn_metadata, slot_mappings = window.native_metadata(
+                self.input_batch, attn_metadata, slot_mappings, cudagraph_runtime_mode
+            )
         if window_active and not self.replicated_pcp:
             assert self.input_batch is not None
             attn_metadata = self._build_attn_metadata(

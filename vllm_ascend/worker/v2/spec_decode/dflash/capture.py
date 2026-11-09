@@ -11,7 +11,7 @@ from typing import Any
 import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as cudagraph_module
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
-from vllm_ascend.worker.v2.spec_decode.draft_window_graph import (
+from vllm_ascend.worker.v2.spec_decode.draft_window.graph import (
     DraftWindowGraphBindingProvider,
     DraftWindowGraphBucket,
 )

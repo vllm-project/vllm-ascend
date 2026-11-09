@@ -5,6 +5,8 @@
 from vllm.triton_utils import tl, triton
 
 GATHER_TOKEN_BLOCK_SIZE = 8
+# Bound address/conversion scratch for wide local KV heads on Ascend UB.
+GATHER_MAX_TILE_ELEMENTS = 16384
 
 
 @triton.jit

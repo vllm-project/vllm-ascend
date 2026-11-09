@@ -1,4 +1,0 @@
-pr: 21231
-entries:
-  - category: feature
-    text: Added optional Draft KV sliding windows for Model Runner V2 speculative decoding, including supported EAGLE3, DFlash/DFlash2, and DSpark consumers, while preserving Full KV writes and native attention semantics.

@@ -1347,7 +1347,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             device_read = getattr(attn_metadata, "_draft_window_device_read", None)
             if device_read is not None:
-                from vllm_ascend.worker.v2.spec_decode.draft_window_dense import dense_draft_attention
+                from vllm_ascend.worker.v2.spec_decode.draft_window.dense import dense_draft_attention
 
                 if _EXTRA_CTX.capturing:
                     raise RuntimeError("Device exact Draft reads require eager execution")

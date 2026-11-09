@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Prepared exact reads for ordinary dense, parallel eager proposals.
-
-Capacity controls allocation only. Gather only valid KV tokens, repeating the
-last valid token into masked scratch padding: masking uninitialized cache tail
-directly is unsafe because zero attention weights can still multiply NaNs.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -206,7 +199,11 @@ def gather_dense_draft_kv(
         import torch_npu
         from vllm.triton_utils import triton
 
-        from vllm_ascend.ops.triton.spec_decode.draft_window import GATHER_TOKEN_BLOCK_SIZE, _gather_draft_kv_fp32
+        from vllm_ascend.ops.triton.spec_decode.draft_window import (
+            GATHER_MAX_TILE_ELEMENTS,
+            GATHER_TOKEN_BLOCK_SIZE,
+            _gather_draft_kv_fp32,
+        )
 
         # Raw Triton addresses require an ND physical layout. Other formats
         # retain the existing format-aware PyTorch gather/conversion path.
@@ -221,7 +218,9 @@ def gather_dense_draft_kv(
                 read._attention_workspaces[workspace_key] = buffers
             keys, values = buffers
             read.retain(read.slots, key_cache, value_cache, keys, values)
-            _gather_draft_kv_fp32[(triton.cdiv(read.slots.numel(), GATHER_TOKEN_BLOCK_SIZE),)](
+            channel_block = triton.next_power_of_2(token_size)
+            token_block = min(GATHER_TOKEN_BLOCK_SIZE, max(1, GATHER_MAX_TILE_ELEMENTS // channel_block))
+            _gather_draft_kv_fp32[(triton.cdiv(read.slots.numel(), token_block),)](
                 read.slots,
                 key_cache,
                 value_cache,
@@ -231,9 +230,9 @@ def gather_dense_draft_kv(
                 value_cache.stride(0),
                 key_cache.shape[1],
                 token_size,
-                -read.slots.numel() % GATHER_TOKEN_BLOCK_SIZE,
-                GATHER_TOKEN_BLOCK_SIZE,
-                triton.next_power_of_2(token_size),
+                -read.slots.numel() % token_block,
+                token_block,
+                channel_block,
             )
             return keys, values
     slots = read.slots.reshape(-1)

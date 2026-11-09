@@ -1,29 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Persistent Draft Graph read banks and runtime binding validation.
-
-Startup capture fixes addresses. Each proposal updates only its private read
-banks and metadata; canonical Full write tables, slots, and absolute positions
-remain unchanged. One proposal scope owns preparation and UPDATE, retaining
-capture banks across failure and until the original stream can reuse them.
-"""
+"""Capture-owned read banks and bindings through the original Graph managers."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch
 
-from vllm_ascend.worker.v2.spec_decode.draft_window_backends import DraftWindowGroupRoute
-from vllm_ascend.worker.v2.spec_decode.draft_window_plan import (
-    compute_draft_window_start,
-    window_capacity_tokens,
+from vllm_ascend.worker.v2.spec_decode.draft_window.backends import (
+    DraftWindowGroupRoute,
+    DraftWindowProviderStatus,
+    inventory_draft_window_groups,
 )
+from vllm_ascend.worker.v2.spec_decode.draft_window.read import compute_draft_window_start, window_capacity_tokens
+from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import continuing_prefill_rows
 
 
 def draft_window_all_continuing(owner: Any) -> bool:
@@ -298,3 +297,109 @@ class DraftWindowGraphBindingProvider:
     def finish_update(self) -> None:
         """Drop staged Host bindings after UPDATE; actual streams still own reuse."""
         self._pending.clear()
+
+
+def copy_draft_attention_metadata(metadata: Mapping[str, Any], layers: tuple[str, ...]) -> dict[str, Any]:
+    """Copy the admitted single Draft group's header, keeping its layer aliases.
+
+    The real builder publishes one header for the already inventoried group.
+    Both callers replace read fields; inherited Full/query operands stay read-only.
+    """
+    layer = copy(metadata[layers[0]])
+    return dict.fromkeys(layers, layer)
+
+
+def bind_draft_window_read(layer: Any, bank: Any) -> None:
+    """FIA1 reads Host exact lengths; keep builder-owned Full GPU/shape fields."""
+    layer.block_tables = bank.window_block_table
+    layer.seq_lens_cpu = bank.cpu_window_exact
+    layer.seq_lens_list = bank.cpu_window_exact.tolist()
+
+
+def install_parallel_graph(owner: Any) -> None:
+    """Install one provider and register every real startup capture bucket."""
+    provider = getattr(owner, "_draft_window_graph_binding_provider", None)
+    if provider is None:
+        return
+    if provider._carriers:
+        raise RuntimeError("Draft Window Graph capture buckets are already installed")
+    capture_descs = owner.query_cudagraph_manager._capture_descs
+    descriptors = tuple(
+        descriptor
+        for mode_descriptors in capture_descs.values()
+        for descriptor in mode_descriptors
+        if descriptor.cg_mode is CUDAGraphMode.FULL
+    )
+    if not descriptors:
+        raise RuntimeError("Draft Window Graph manager has no capture descriptors")
+    for descriptor in descriptors:
+        provider.register_capture_identity(
+            descriptor=descriptor,
+        )
+
+
+def create_draft_window_graph_provider(owner: Any) -> DraftWindowGraphBindingProvider:
+    """Build source geometry after the caller validates its real Graph executor.
+
+    Executor features do not turn a dense Draft cache into a sharded provider.
+    Check the actual source layout directly, without constructing an
+    artificial eager capability decision.
+    """
+    policy = owner._draft_window_policy
+    block_tables = owner.block_tables
+    if policy is None:
+        raise ValueError("Graph source requires an eligible Window policy")
+    dflash2 = getattr(owner, "_speculator_name", None) == "DFlash2"
+    groups = inventory_draft_window_groups(owner)
+    if len(groups) != 1:
+        raise NotImplementedError(f"Draft Graph requires one executable consumer group, found {len(groups)}")
+    group = groups[0]
+    if not dflash2 and (group.status is not DraftWindowProviderStatus.DIRECT_DENSE or group.native_window is not None):
+        raise NotImplementedError("Draft Graph requires its supported dense or DFlash2 native reader")
+    if dflash2:
+        from vllm_ascend.worker.v2.spec_decode.draft_window.dflash2 import validate_dflash2_graph_source
+
+        validate_dflash2_graph_source(owner, group)
+    return DraftWindowGraphBindingProvider(policy=policy, group=group, block_tables=block_tables)
+
+
+@contextmanager
+def parallel_graph_proposal_scope(owner: Any, input_batch: InputBatch, dummy_run: bool, is_profile: bool):
+    provider = owner._draft_window_graph_binding_provider
+    rows = (
+        () if dummy_run or is_profile else tuple(map(bool, continuing_prefill_rows(input_batch, input_batch.num_reqs)))
+    )
+    with provider.proposal_scope(rows):
+        owner._draft_window_dp_dummy_active = (
+            dummy_run and not is_profile and getattr(owner, "dp_size", 1) > 1 and bool(provider._carriers)
+        )
+        try:
+            yield
+        finally:
+            owner._draft_window_dp_dummy_active = False
+
+
+def prepare_parallel_graph_read(owner: Any, batch_desc: Any, num_reqs: int, step: int) -> bool:
+    """Prepare the bank at the actual metadata boundary, without replacing its caller."""
+    provider = getattr(owner, "_draft_window_graph_binding_provider", None)
+    rows = None if provider is None else provider.proposal
+    if provider is not None and rows is None:
+        raise RuntimeError("Draft Window metadata build has no active proposal")
+    if provider is None or not rows or all(rows):
+        return False
+    padded = batch_desc.num_reqs or num_reqs
+    if (
+        step != owner.num_query_per_req
+        or batch_desc.cg_mode != CUDAGraphMode.FULL
+        or batch_desc.num_tokens != padded * owner.num_query_per_req
+        or (getattr(owner, "_draft_window_graph_support", None) is not None and padded != num_reqs)
+    ):
+        raise RuntimeError("Draft Window requires its actual uniform FULL dispatch; no eager fallback")
+    batch = owner.input_batch
+    if num_reqs != batch.num_reqs or num_reqs != len(rows) or padded < num_reqs:
+        raise RuntimeError("metadata request count does not match the current padded proposal")
+    selected = provider.capture_identity_for(descriptor=batch_desc)
+    # This completed snapshot covers real rows; the bank initializes padding.
+    exact = owner.input_buffers.seq_lens[:num_reqs].to(device="cpu", dtype=torch.int32, copy=True)
+    provider.prepare(selected, cpu_full_exact=exact, idx_mapping_np=batch.idx_mapping_np)
+    return True

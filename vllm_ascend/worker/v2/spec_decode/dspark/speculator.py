@@ -48,11 +48,10 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
-    _draft_window_owner_scope,
     prepare_dflash_inputs_factory,
 )
-from vllm_ascend.worker.v2.spec_decode.draft_window_eager import DraftWindowGraphInputMixin
-from vllm_ascend.worker.v2.spec_decode.draft_window_graph_runtime import install_parallel_graph
+from vllm_ascend.worker.v2.spec_decode.draft_window.graph import install_parallel_graph, prepare_parallel_graph_read
+from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import parallel_proposal_scope
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -60,7 +59,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 )
 
 
-class AscendDSparkSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMixin, DSparkSpeculator):
+class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin sample_draft alignment is not used; instead load_draft_model
@@ -270,7 +269,7 @@ class AscendDSparkSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
                 block_tables,
             )
 
-        from vllm_ascend.worker.v2.spec_decode import initialize_draft_window_owner
+        from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import initialize_draft_window_owner
 
         initialize_draft_window_owner(self)
 
@@ -349,6 +348,8 @@ class AscendDSparkSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata through the upstream attention hook."""
+        if prepare_parallel_graph_read(self, batch_desc, num_reqs, step):
+            return None
         runtime = getattr(self, "_draft_window_runtime", None)
         if self.attn_architecture not in ("GQA", "MLA"):
             return super()._build_attn_metadata(
@@ -460,7 +461,7 @@ class AscendDSparkSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         # Check checkpoint admission/static K before replacing proposal state.
-        owner_scope = _draft_window_owner_scope(
+        owner_scope = parallel_proposal_scope(
             self, input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens
         )
         self.input_batch = input_batch
@@ -487,8 +488,7 @@ class AscendDSparkSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
                 input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
-            owner_scope,
-            build_attn_metadata_wrapper(),
+            build_attn_metadata_wrapper(proposal_scope=owner_scope),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
                 self.max_num_tokens,

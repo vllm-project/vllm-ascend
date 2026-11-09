@@ -38,7 +38,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.draft_window_graph import draft_window_all_continuing
+from vllm_ascend.worker.v2.spec_decode.draft_window.graph import draft_window_all_continuing
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -51,10 +51,6 @@ def _eagle_ar_capture_config(vllm_config: VllmConfig, cudagraph_mode: CUDAGraphM
     explicitly enabled TP4 Eagle Graph route gets an independent descriptor.
     Target/first-pass configs, topology and computation remain unchanged.
     """
-    from vllm_ascend import envs
-
-    if not envs.VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH:
-        return vllm_config
     if (
         decode_query_len != 1
         or not isinstance(cudagraph_mode, CUDAGraphMode)
@@ -63,11 +59,9 @@ def _eagle_ar_capture_config(vllm_config: VllmConfig, cudagraph_mode: CUDAGraphM
         or vllm_config.speculative_config.method != "eagle3"
     ):
         return vllm_config
-    from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import resolve_draft_graph_review_limit
+    from vllm_ascend.worker.v2.spec_decode.draft_window.config import resolve_graph_support
 
-    scope = resolve_draft_graph_review_limit(
-        vllm_config, experimental_graph_review=envs.VLLM_ASCEND_EXPERIMENTAL_DRAFT_WINDOW_GRAPH
-    )
+    scope = resolve_graph_support(vllm_config)
     if scope is None:
         return vllm_config
     # The qualified startup contract already checks every admitted first Q4
@@ -145,7 +139,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     desc = args[2]
                     n = desc.num_reqs or min(desc.num_tokens, self.max_num_reqs)
                     tokens = desc.num_tokens
-                with self.speculator._eagle3_capture_scope(n=n, tokens=tokens):
+                with self.speculator._draft_window_eagle.capture_scope(n=n, tokens=tokens):
                     return actual_forward(*args, **kwargs)
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
@@ -202,26 +196,23 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""
-        provider = getattr(self.speculator, "_draft_window_graph_binding_provider", None)
-        if provider is not None and self.speculator._eagle3_window_is_active():
+        window = getattr(self.speculator, "_draft_window_eagle", None)
+        if window is not None and window.active():
             if self.is_draft_model_prefill:
-                capture = provider.capture_banks_for(num_reqs=desc.num_reqs, num_tokens=desc.num_tokens)[0]
-                self.speculator._materialize_eagle3_step(capture, 0)
-                provider.bind_current(capture.descriptor)
-                self.speculator._eagle3_window_next_step = 1
-            ret = self._updatable_graph_replay(desc, (), window_source=provider)
-            provider.finish_update()
+                window.prepare_first_graph(desc)
+            ret = self._updatable_graph_replay(desc, ())
+            window.provider.finish_update()
             return ret
         # Without an active Window proposal the ordinary graph still needs the finite
         # admitted consumer shape. Target input padding alone does not
         # constrain the AR graph bucket selected by the fixed core dispatcher.
         # Source-created dummy/profile batches retain their original behavior.
         if getattr(getattr(self.speculator, "input_batch", None), "is_dummy", False) is not True:
-            from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import (
-                validate_eagle_single_request_graph_descriptor,
+            from vllm_ascend.worker.v2.spec_decode.draft_window.config import (
+                validate_eagle_graph_descriptor,
             )
 
-            validate_eagle_single_request_graph_descriptor(
+            validate_eagle_graph_descriptor(
                 self.speculator, first=self.is_draft_model_prefill, n=desc.num_reqs, tokens=desc.num_tokens
             )
         num_tokens = desc.num_tokens
@@ -286,8 +277,9 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc, draft_attn_metadatas, *, window_source=None):
-        dp_dummy = getattr(self.speculator, "_eagle3_graph_dp_dummy_active", False)
+    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
+        window = getattr(self.speculator, "_draft_window_eagle", None)
+        dp_dummy = window is not None and window.dp_dummy
         if dp_dummy:
             self.speculator._draft_window_graph_binding_provider.require_reusable()
             if (
@@ -299,14 +291,16 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 raise RuntimeError("Eagle DP dummy lost its real first Q4 or two AR Q1 consumer/update-stream identity")
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        if window_source is None:
+        if window is not None and window.active():
+            source = window.provider
+        else:
             fia_params = self.speculator.build_fia_params(
                 desc.num_reqs,
                 draft_attn_metadatas[0],
                 self.is_draft_model_prefill,
             )
-            window_source = SharedSource(fia_params)
-        resolved_tasks = graph.resolve_tasks(window_source)
+            source = SharedSource(fia_params)
+        resolved_tasks = graph.resolve_tasks(source)
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         if dp_dummy:

@@ -27,7 +27,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.spec_decode.dflash.capture import draft_window_dflash_capture_scope
-from vllm_ascend.worker.v2.spec_decode.draft_window_graph import draft_window_all_continuing
+from vllm_ascend.worker.v2.spec_decode.draft_window.graph import draft_window_all_continuing
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -144,11 +144,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             window_provider.bind_current(desc)
             draft_attn_metadatas = None
         if use_updatable_graph(attn_backend):
-            ret = self._updatable_graph_replay(
-                desc,
-                draft_attn_metadatas,
-                window_source=window_provider,
-            )
+            ret = self._updatable_graph_replay(desc, draft_attn_metadatas)
             if window_provider is not None:
                 window_provider.finish_update()
             return ret
@@ -187,12 +183,15 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc, draft_attn_metadatas, *, window_source=None):
+    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        resolved_tasks = graph.resolve_tasks(
-            ContextSource(draft_attn_metadatas[0]) if window_source is None else window_source
+        source = (
+            self.speculator._draft_window_graph_binding_provider
+            if draft_attn_metadatas is None
+            else ContextSource(draft_attn_metadatas[0])
         )
+        resolved_tasks = graph.resolve_tasks(source)
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)

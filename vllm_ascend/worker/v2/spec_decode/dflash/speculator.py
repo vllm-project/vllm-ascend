@@ -21,8 +21,11 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import get_rotation_path, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.spec_decode.draft_window_eager import DraftWindowGraphInputMixin
-from vllm_ascend.worker.v2.spec_decode.draft_window_graph_runtime import install_parallel_graph
+from vllm_ascend.worker.v2.spec_decode.draft_window.graph import (
+    install_parallel_graph,
+    prepare_parallel_graph_read,
+)
+from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import parallel_proposal_scope
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -130,47 +133,7 @@ def prepare_dflash_inputs_factory(
     return prepare_with_block_size
 
 
-def _draft_window_owner_scope(owner, input_batch, dummy_run=False, is_profile=False, *, num_speculative_tokens=None):
-    """Choose exactly one existing proposal owner at the Ascend boundary."""
-    runtime = getattr(owner, "_draft_window_runtime", None)
-    graph_runtime = getattr(owner, "_draft_window_graph_binding_provider", None)
-    limit = getattr(owner, "_draft_graph_review_limit", None)
-    context_kv_only = num_speculative_tokens == 0
-    if limit is not None:
-        from vllm_ascend.worker.v2.spec_decode.draft_graph_review_limits import validate_draft_graph_review_requests
-
-        # Original request limits apply before either owner is changed.
-        # The core's zero-draft branch writes only context K/V; its Target padding
-        # is not a Draft query shape. The real request identity is still checked.
-        validate_draft_graph_review_requests(
-            owner,
-            input_batch,
-            dummy_run=dummy_run,
-            is_profile=is_profile,
-            context_kv_only=context_kv_only,
-        )
-    if runtime is not None and graph_runtime is not None:
-        raise RuntimeError("Draft Window eager and Graph owners cannot share one proposal")
-    if graph_runtime is not None:
-        if graph_runtime.proposal is not None:
-            raise RuntimeError("A Draft Window proposal scope is already active")
-        if num_speculative_tokens is not None and (
-            type(num_speculative_tokens) is not int or num_speculative_tokens not in (0, owner.num_speculative_steps)
-        ):
-            raise RuntimeError("Draft Window Graph cannot change its captured static K")
-        effective_dummy = dummy_run or getattr(input_batch, "is_dummy", False)
-        if context_kv_only and not (effective_dummy or is_profile):
-            # The fixed K0 branch writes context KV but executes no attention.
-            # Fence its first write; the empty shared scope owns exceptions.
-            graph_runtime.require_reusable()
-            return graph_runtime.proposal_scope(())
-        return owner._draft_window_proposal_scope(input_batch, dummy_run=effective_dummy, is_profile=is_profile)
-    if runtime is not None:
-        return runtime.proposal_context(input_batch, dummy_run, is_profile, context_kv_only=context_kv_only)
-    return nullcontext()
-
-
-class AscendDFlashSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
+class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     if not vllm_version_is("0.32.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
@@ -301,7 +264,7 @@ class AscendDFlashSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
             block_tables,
         )
 
-        from vllm_ascend.worker.v2.spec_decode import initialize_draft_window_owner
+        from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import initialize_draft_window_owner
 
         initialize_draft_window_owner(self)
 
@@ -316,6 +279,8 @@ class AscendDFlashSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
         dcp_local_seq_lens: torch.Tensor | None = None,
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
+        if prepare_parallel_graph_read(self, batch_desc, num_reqs, step):
+            return None
         runtime = getattr(self, "_draft_window_runtime", None)
         with (
             build_attn_metadata_factory(
@@ -362,7 +327,7 @@ class AscendDFlashSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         # Check checkpoint admission/static K before replacing proposal state.
-        owner_scope = _draft_window_owner_scope(
+        owner_scope = parallel_proposal_scope(
             self, input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens
         )
         self.input_batch = input_batch
@@ -374,10 +339,7 @@ class AscendDFlashSpeculator(DraftWindowGraphInputMixin, LmheadTPDraftSamplingMi
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
-        with (
-            owner_scope,
-            build_attn_metadata_wrapper(),
-        ):
+        with build_attn_metadata_wrapper(proposal_scope=owner_scope):
             return super().propose(
                 input_batch,
                 attn_metadata,
