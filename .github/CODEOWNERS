@@ -116,6 +116,7 @@
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024
 
 # Core framework
+/vllm_ascend/__init__.py @wangxiyuan
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/ascend_forward_context.py @zzzzwwjj
 /vllm_ascend/batch_invariant.py @Ronald1995
@@ -222,6 +223,9 @@
 
 # EC manager
 /vllm_ascend/ec_manager @wangxiyuan
+
+# Benchmark
+/benchmarks @wangxiyuan
 
 # Model executor
 # TODO(owner): /vllm_ascend/model_executor
