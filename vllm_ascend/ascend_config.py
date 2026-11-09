@@ -32,7 +32,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import is_950, uses_native_int8_sparse_adaptor
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -891,7 +891,16 @@ class AscendConfig:
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
-        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        ) = self._parse_sparse_li_layers_from_quant_config(
+            quant_config,
+            # Some ModelSlim checkpoints describe only the INT8 projection,
+            # not indexer.quant_type. Treat it as C8 only when explicitly
+            # requested; W8A8 projection alone does not imply a C8 cache.
+            ("INT8_DYNAMIC", "W8A8_MXFP8", "W8A8_DYNAMIC")
+            if uses_native_int8_sparse_adaptor(get_current_hardware_profile())
+            and vllm_config.attention_config.indexer_kv_dtype == "int8"
+            else ("INT8_DYNAMIC", "W8A8_MXFP8"),
+        )
         (
             self._sparse_li_c4_layer_ids,
             self._sparse_li_c4_layer_names,
@@ -1174,6 +1183,7 @@ class AscendConfig:
     def _parse_sparse_li_layers_from_quant_config(
         cls, quant_config: Any, valid_quant_types: tuple[str, ...]
     ) -> tuple[set[int], set[str]]:
+        """Prefer explicit indexer cache types over projection-type fallback."""
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return set(), set()
@@ -1188,10 +1198,20 @@ class AscendConfig:
             if not isinstance(key, str):
                 continue
             matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
-            if matched_suffix is None or value not in valid_quant_types:
+            if matched_suffix is None:
                 continue
             layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
+                continue
+            # A projection's quantization does not override an explicit
+            # indexer cache rollback, such as quant_type="FLOAT".
+            if (
+                uses_native_int8_sparse_adaptor(get_current_hardware_profile())
+                and matched_suffix == ".indexer.wq_b.weight"
+                and f"{layer_name}.indexer.quant_type" in quant_description
+            ):
+                continue
+            if value not in valid_quant_types:
                 continue
             layer_names.add(layer_name)
             layer_ids.add(extract_layer_index(layer_name))

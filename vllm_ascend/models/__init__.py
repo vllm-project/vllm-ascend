@@ -33,6 +33,10 @@ def register_model():
         "vllm_ascend.models.kimi_k3:AscendKimiK3ForConditionalGeneration",
     )
     ModelRegistry.register_model(
+        "KimiK31ForConditionalGeneration",
+        "vllm_ascend.models.kimi_k3:AscendKimiK3ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
         "KimiK3MTPModel",
         "vllm_ascend.models.kimi_k3_mtp:AscendKimiK3MTP",
     )
