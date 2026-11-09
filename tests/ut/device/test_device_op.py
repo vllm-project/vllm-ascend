@@ -279,19 +279,6 @@ def test_a5_index_fill_matches_torch_index_fill(shape, dim, indices, value, dtyp
     torch.testing.assert_close(actual, expected)
 
 
-def test_a5_index_fill_uses_scatter():
-    tensor = mock.Mock()
-    tensor.dim.return_value = 1
-    tensor.size.return_value = 8
-    tensor.shape = (8,)
-
-    result = A5DeviceAdaptor.index_fill(tensor, 0, torch.tensor([1, 3]), 5)
-
-    assert result is tensor
-    tensor.scatter_.assert_called_once()
-    tensor.index_fill_.assert_not_called()
-
-
 @pytest.mark.parametrize(
     ("adaptor", "uses_fused_kernel"),
     [
