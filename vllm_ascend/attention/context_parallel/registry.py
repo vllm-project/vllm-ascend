@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from vllm_ascend.attention.context_parallel.attn_hooks import AttnMetadataHooks
     from vllm_ascend.attention.context_parallel.topology import CPTopology
 
 
@@ -58,6 +59,8 @@ class CPBackendProvider:
     # Optional per-backend hook for spec-decode drafting metadata; returns True
     # when it handled the update, False to fall back to the shared spec checks.
     spec_decode_drafting_updater: Callable[..., bool] | None = None
+    # Optional assembly hooks for ``build_attn_metadata``; None keeps the plain path.
+    attn_metadata_hooks: AttnMetadataHooks | None = None
 
     def uses_cp(self, topology: CPTopology) -> bool:
         """Whether a CP specialization should be selected for this topology."""

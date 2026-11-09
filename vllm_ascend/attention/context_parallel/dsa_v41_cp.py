@@ -10,6 +10,7 @@ import torch
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend.attention.context_parallel.attn_hooks import DSA_V41_METADATA_HOOKS
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
@@ -376,5 +377,6 @@ DSA_V41_CP_BACKEND = register_cp_backend(
         cp_impl_cls=AscendDSAV41PCPImpl,
         supports_pcp=True,
         supports_dcp=False,
+        attn_metadata_hooks=DSA_V41_METADATA_HOOKS,
     )
 )

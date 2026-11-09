@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import dcp_metadata
+from vllm_ascend.attention.context_parallel.attn_hooks import SFA_METADATA_HOOKS
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
@@ -1511,5 +1512,6 @@ SFA_CP_BACKEND = register_cp_backend(
         supports_dcp=True,
         cp_resolver=_resolve_sfa_cp_classes,
         spec_decode_drafting_updater=_update_sfa_spec_decode_drafting_metadata,
+        attn_metadata_hooks=SFA_METADATA_HOOKS,
     )
 )

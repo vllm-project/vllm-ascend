@@ -131,10 +131,17 @@ def test_builtin_providers_are_registered() -> None:
         "validate",
         "cp_resolver",
         "spec_decode_drafting_updater",
+        "attn_metadata_hooks",
     ]
     # The optional drafting hook defaults to None; only the SFA provider uses it.
     assert registry.CPBackendProvider(name="probe").spec_decode_drafting_updater is None
     assert registry.get_cp_backend("sfa").spec_decode_drafting_updater is not None
+    # The optional assembly hooks default to None; DSA/V4.1/SFA declare them.
+    assert registry.CPBackendProvider(name="probe").attn_metadata_hooks is None
+    for backend_name in ("dsa", "dsa_v41", "sfa"):
+        assert registry.get_cp_backend(backend_name).attn_metadata_hooks is not None
+    for backend_name in ("gqa", "mla"):
+        assert registry.get_cp_backend(backend_name).attn_metadata_hooks is None
 
 
 @pytest.mark.parametrize(

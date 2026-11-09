@@ -13,6 +13,7 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
+from vllm_ascend.attention.context_parallel.attn_hooks import DSA_METADATA_HOOKS
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.dsa_attn_kv_plan import (
@@ -761,5 +762,6 @@ DSA_CP_BACKEND = register_cp_backend(
         cp_impl_cls=AscendDSAPCPImpl,
         supports_pcp=True,
         supports_dcp=False,
+        attn_metadata_hooks=DSA_METADATA_HOOKS,
     )
 )
