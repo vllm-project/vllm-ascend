@@ -264,8 +264,11 @@ class AscendMistralMLAAttention(MistralMLAAttention):
             if spec.has_indexer
             else None
         )
+        # Upstream fills these with an aux CUDA stream and its events; neither
+        # exists on NPU, so they stay empty and the two run serially. Annotated
+        # because nothing here ever puts an element in to infer from.
         self.indexer_stream = None
-        self.indexer_events = []
+        self.indexer_events: list[Any] = []
 
         kv_sharing_target_layer_name = None
         if spec.shares_kv:

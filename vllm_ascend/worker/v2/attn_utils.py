@@ -224,6 +224,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+    # Annotated, so the arity does not come from whichever branch runs first.
+    sfa_indexer_cache_types: tuple[type, ...]
     try:
         from vllm.models.mistral.amd.indexer import MistralIndexerCache
 

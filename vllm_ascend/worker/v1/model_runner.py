@@ -6664,9 +6664,12 @@ class NPUModelRunner(GPUModelRunner):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+        # Annotated, so the arity does not come from whichever branch runs first.
+        sfa_indexer_cache_types: tuple[type, ...]
         try:
             from vllm.models.mistral.amd.indexer import MistralIndexerCache
         except ImportError:
+            # The supported vLLM release pin does not yet ship Mistral Large 4.
             sfa_indexer_cache_types = (DeepseekV32IndexerCache,)
         else:
             sfa_indexer_cache_types = (DeepseekV32IndexerCache, MistralIndexerCache)
