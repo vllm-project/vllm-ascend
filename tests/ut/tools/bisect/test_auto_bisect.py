@@ -113,6 +113,46 @@ def test_resolve_good_explicit_commit_skips_table_lookup(tmp_path: Path):
     assert bisector._resolve_good() == "explicit-good"
 
 
+@pytest.mark.parametrize(
+    "config_yaml,unrelated_path",
+    [
+        ("alpha/model.yaml", "configs/beta/model.yaml"),
+        ("alpha/model.yaml", "configs/notalpha/model.yaml"),
+        ("model.yaml", "configs/alpha/other-model.yaml"),
+    ],
+)
+def test_resolve_good_matches_complete_config_path_components(tmp_path: Path, config_yaml: str, unrelated_path: str):
+    table = tmp_path / "good_table.csv"
+    table.write_text(
+        "name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time\n"
+        "target,configs/alpha/model.yaml,,success,vllm-target,asc-target,a3,single_node,2026-01-01 01:00:00\n"
+        f"other,{unrelated_path},,success,vllm-other,asc-other,a3,single_node,2026-01-02 01:00:00\n",
+        encoding="utf-8",
+    )
+    bisector = _bisector_with_good_table(str(table), soc="a3")
+    bisector.inp.config_yaml = config_yaml
+
+    assert bisector._resolve_good() == "asc-target"
+    assert bisector.inp.good_vllm_commit == "vllm-target"
+
+
+@pytest.mark.parametrize("config_yaml", ["model.yaml", "alpha/model.yaml", "configs/alpha/model.yaml"])
+def test_resolve_good_config_path_selects_latest_matching_success(tmp_path: Path, config_yaml: str):
+    table = tmp_path / "good_table.csv"
+    table.write_text(
+        "name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time\n"
+        "target,configs/alpha/model.yaml,,success,vllm-old,asc-old,a3,single_node,2026-01-01 01:00:00\n"
+        "target,configs/alpha/model.yaml,,success,vllm-new,asc-new,a3,single_node,2026-01-02 01:00:00\n"
+        "target,configs/alpha/model.yaml,,failure,vllm-bad,asc-bad,a3,single_node,2026-01-03 01:00:00\n",
+        encoding="utf-8",
+    )
+    bisector = _bisector_with_good_table(str(table), soc="a3")
+    bisector.inp.config_yaml = config_yaml
+
+    assert bisector._resolve_good() == "asc-new"
+    assert bisector.inp.good_vllm_commit == "vllm-new"
+
+
 def test_resolve_good_raises_when_no_matching_success_row(tmp_path: Path):
     table = tmp_path / "good_table.csv"
     table.write_text(

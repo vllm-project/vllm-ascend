@@ -182,9 +182,9 @@ class GoodTable:
         if name and entry.name != name:
             return False
         if config_yaml:
-            p = entry.path.rstrip("/")
-            q = config_yaml.rstrip("/")
-            if not (p.endswith(q) or Path(p).name == Path(q).name):
+            p = Path(entry.path).parts
+            q = Path(config_yaml).parts
+            if not q or p[-len(q) :] != q:
                 return False
         return bool(name or config_yaml)
 
