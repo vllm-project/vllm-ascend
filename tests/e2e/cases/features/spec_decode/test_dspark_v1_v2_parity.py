@@ -294,6 +294,30 @@ def test_compare_allows_different_remote_endpoints():
     assert _compare_outputs(left, right)[0]["identical"] is True
 
 
+def test_compare_handles_mixed_comparison_levels_within_one_dump():
+    # _validate_comparable only rejects a *per-prompt* token/char mismatch between v1 and v2 (see
+    # test_compare_rejects_one_sided_token_ids below). Two different prompts within the same dump are
+    # allowed to use different comparison levels: one may have token ids on both sides (token-level row)
+    # while another has none on either side (char-level row).
+    left = _minimal_dump(output_count=2)
+    right = _minimal_dump(output_count=2)
+    for dump in (left, right):
+        dump["outputs"][0]["token_ids"] = [1, 2, 3]
+        dump["outputs"][0]["text"] = ""
+    rows = _compare_outputs(left, right)
+    assert {row["comparison_level"] for row in rows} == {"token", "char"}
+    report, _ = _markdown(left, right, rows)
+    assert "both token- and character-level rows" in report
+
+
+def test_compare_rejects_one_sided_token_ids():
+    left = _minimal_dump()
+    right = _minimal_dump()
+    right["outputs"][0]["token_ids"] = [1, 2, 3]
+    with pytest.raises(SystemExit, match="token ids exist on only one side"):
+        _compare_outputs(left, right)
+
+
 def test_compare_rejects_empty_token_ids_with_nonempty_text():
     left = _minimal_dump()
     right = _minimal_dump()
