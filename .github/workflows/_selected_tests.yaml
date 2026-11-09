@@ -104,7 +104,6 @@ jobs:
       # TEMPORARY (fork smoke validation only, do not merge): bypass squid/CDN
       # for GitHub and force HTTP/1.1 on offline FED members (wlcb-001 / karc).
       NO_PROXY: "0.0.0.0,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.buildkitd,.svc.cluster.local,.cluster.local,.actions.githubusercontent.com,.blob.core.windows.net,api.github.com,100.100.100.200,stats.vllm.ai,metadata.google.internal,169.254.169.254,api.siliconflow.cn,api.deepseek.com,github.com,.github.com,codeload.github.com"
-      no_proxy: "0.0.0.0,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.buildkitd,.svc.cluster.local,.cluster.local,.actions.githubusercontent.com,.blob.core.windows.net,api.github.com,100.100.100.200,stats.vllm.ai,metadata.google.internal,169.254.169.254,api.siliconflow.cn,api.deepseek.com,github.com,.github.com,codeload.github.com"
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: "http.version"
       GIT_CONFIG_VALUE_0: "HTTP/1.1"
