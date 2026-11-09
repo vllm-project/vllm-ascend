@@ -1,0 +1,59 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+
+name: Presmoke Trigger
+# pull_request_target 才能在 fork PR 上拿到 SWR 凭据（pull_request 事件对 fork
+# 不注入任何 secret）。workflow 文件本身取自目标分支，因此需要先合入 main 生效。
+# 安全前提：只有维护者打上 presmoke 标签才会进入，构建的是 PR head 的代码，
+# 也就是说打到标签等于允许该提交使用 SWR 写凭据。
+on:
+  pull_request_target:
+    types: [labeled]
+  # 同仓分支上也可手动触发，用于不带 PR 的构建留档。
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build target'
+        type: choice
+        options: ['a2', 'a3', 'a5', '310p']
+        default: 'a2'
+      dockerfile:
+        description: 'Root Dockerfile used to build the runtime image'
+        type: string
+        default: 'Dockerfile'
+      soc:
+        description: 'Ascend SoC type'
+        type: string
+        default: '910b'
+
+permissions:
+  contents: read
+
+jobs:
+  run-presmoke-pipeline:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'presmoke' }}
+    uses: ./.github/workflows/schedule_nightly_image_build_with_base_presmoke.yaml
+    with:
+      os: "ubuntu"
+      soc: ${{ github.event.inputs.soc || '910b' }}
+      target: ${{ github.event.inputs.target || 'a2' }}
+      dockerfile: ${{ github.event.inputs.dockerfile || 'Dockerfile' }}
+      suffix: "presmoke"
+      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || github.ref_name }}
+      base_image_branch: ${{ github.event.pull_request.base.ref || github.ref_name }}
+      should_push: true
+      run_presmoke: true
+      build_from_raw_base: true
+    secrets: inherit
