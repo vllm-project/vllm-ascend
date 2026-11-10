@@ -58,7 +58,6 @@
 /vllm_ascend/_cann_ops_custom @ZT-AIA
 
 # attention
-# /vllm_ascend/attention/kvcomp_attn
 /vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/attention/attention_c8_mxfp.py @kunpengW-code
 # /vllm_ascend/attention/attention_mask.py
@@ -74,6 +73,7 @@
 # /vllm_ascend/attention/sfa_kv_offload.py
 /vllm_ascend/attention/sfa_v1.py @lijiahang226
 /vllm_ascend/attention/sparse_flash_mla.py @kunpengW-code 
+# /vllm_ascend/attention/utils.py
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
@@ -139,7 +139,6 @@
 /vllm_ascend/meta_registration.py @ZT-AIA
 /vllm_ascend/mrv2_utils.py @yzeyu71
 /vllm_ascend/platform.py @wxsIcey @Tflowers-0129
-# TODO(owner): /vllm_ascend/profiling_config.py
 # /vllm_ascend/profiling_config.py
 /vllm_ascend/utils.py @wxsIcey
 
@@ -152,13 +151,9 @@
 /vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/worker/worker.py @wxsIcey @Ronald1995
 /vllm_ascend/worker/device_metadata.py @linfeng-yuan
-# TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
-# /vllm_ascend/worker/dspark_utils.py @wxsIcey
+/vllm_ascend/worker/dspark_utils.py @wxsIcey
 /vllm_ascend/worker/encoder_acl_graph.py @yiz-liu
-# TODO(owner): /vllm_ascend/worker/kvpp_cache.py
 # /vllm_ascend/worker/kvpp_cache.py
-# TODO(owner): /vllm_ascend/worker/npu_input_batch.py
-# /vllm_ascend/worker/npu_input_batch.py
 /vllm_ascend/worker/spec_decode_utils.py @wxsIcey
 /vllm_ascend/worker/utils.py @wxsIcey
 
@@ -173,14 +168,15 @@
 /vllm_ascend/worker/v2/kvpp.py @recky-c
 /vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024 @drslark
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2 @pisceskkk
-# TODO(owner): /vllm_ascend/worker/v2/pp_transport.py
 # /vllm_ascend/worker/v2/pp_transport.py
 /vllm_ascend/worker/v2/states.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/utils.py @zzzzwwjj
 
 # Models
-# TODO(owner): /vllm_ascend/models
-# /vllm_ascend/models
+# /vllm_ascend/models/__init__.py
+# /vllm_ascend/models/common/
+# /vllm_ascend/models/layer/
+# /vllm_ascend/models/qwen4_exp/
 /vllm_ascend/models/minimax_m3 @realliujiaxu
 /vllm_ascend/models/deepseek_v4 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
@@ -190,6 +186,13 @@
 /vllm_ascend/models/kimi_k3.py @Dawn952
 /vllm_ascend/models/kimi_k3_mtp.py @Dawn952
 /vllm_ascend/models/kimi_k3_dspark.py @Dawn952
+# /vllm_ascend/models/d3.py
+# /vllm_ascend/models/gemma4_mm.py
+# /vllm_ascend/models/llama_eagle3.py
+# /vllm_ascend/models/llama_eagle3_vwn.py
+# /vllm_ascend/models/qwen3_5_vl.py
+# /vllm_ascend/models/qwen3_dflash2.py
+# /vllm_ascend/models/qwen3_dspark.py
 
 # 310P
 /vllm_ascend/_310p @Tflowers-0129 @YangShuai52
@@ -212,21 +215,17 @@
 /vllm_ascend/eplb @freyfwt
 
 # observability
-# TODO(owner): /vllm_ascend/observability
 # /vllm_ascend/observability
 /vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
 /vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
 
 # profiler
-# TODO(owner): /vllm_ascend/profiler
 # /vllm_ascend/profiler
 
 # model executor
-# TODO(owner): /vllm_ascend/model_executor
 # /vllm_ascend/model_executor
 
 # weight switch
-# TODO(owner): /vllm_ascend/weight_switch
 # /vllm_ascend/weight_switch
 
 # EC manager
@@ -240,6 +239,6 @@
 /vllm_ascend/model_loader @yilunh998
 /vllm_ascend/model_loader/rfork/ @yangsonglin13
 
-# ==================== Deliberately unowned (no entry needed) ====================
+# Files/modules not owned by any person(No need to be approved)
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
