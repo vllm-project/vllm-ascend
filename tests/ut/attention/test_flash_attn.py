@@ -343,6 +343,23 @@ def test_a2_a3_fa3_rejects_other_targets(dflash2_fa3_runtime, hardware, architec
     assert runtime.select() == "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
 
+@pytest.mark.parametrize("hardware", ["A2", "A3", "A5"])
+@pytest.mark.parametrize("kv_dtype", ["auto", "bfloat16", "fp8"])
+def test_qwen_target_uses_device_lengths_only_on_supported_hardware_and_cache(
+    monkeypatch, dflash2_fa3_runtime, hardware, kv_dtype
+):
+    runtime = dflash2_fa3_runtime
+    runtime.hardware = hardware
+    runtime.selector = runtime.selector._replace(kv_cache_dtype=kv_dtype)
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", "backbone")
+    expected = (
+        "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
+        if hardware in ("A2", "A3") and kv_dtype != "fp8"
+        else "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+    )
+    assert runtime.select() == expected
+
+
 @pytest.mark.parametrize(
     "query_dtype,cache_dtype,selected",
     [

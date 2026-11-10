@@ -334,6 +334,8 @@ class NPUPlatform(Platform):
 
         if _validate_flash_attn_npu_3(backend_key, attn_selector_config):
             return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+        if _validate_flash_attn_npu_3(backend_key, attn_selector_config, model_tag="backbone"):
+            return "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
 
         backend_map = {
             (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
@@ -1754,8 +1756,8 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
     )
 
 
-def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Use A2/A3 FA3 for V2 DFlash2 with the audited Qwen3.5 target architecture."""
+def _validate_flash_attn_npu_3(backend_key, selector, model_tag="dflash_head") -> bool:
+    """Use A2/A3 FA3 for the audited Qwen3.5 target and V2 DFlash2 draft."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1778,7 +1780,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
         or getattr(spec.target_model_config, "architecture", None) != "Qwen3_5ForConditionalGeneration"
         or spec.draft_model_config is None
         or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
-        or backends.model_tag != "dflash_head"
+        or backends.model_tag != model_tag
     ):
         return False
 

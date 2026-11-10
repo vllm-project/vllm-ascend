@@ -70,6 +70,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
+from vllm_ascend.attention.flash_attention_v3 import AscendQwenFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -1313,8 +1314,8 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         ):
             # Qwen's GDN state updates use device counts; its host metadata
-            # needs only length upper bounds. Parallel-drafting FIA reads the
-            # exact device seq_lens itself (its tolist is still independent).
+            # needs only length upper bounds. FA3 consumes device lengths;
+            # fallback FIA materializes its own exact device seq_lens.
             # Require the initialized FA3 draft and audited target backends,
             # so both the snapshot producer and consumer can skip together.
             draft_backends = getattr(self.speculator, "attn_backends", {})
@@ -1325,10 +1326,16 @@ class NPUModelRunner(GPUModelRunner):
                 and isinstance(self.model_state, MambaHybridModelState)
                 and bool(draft_backends)
                 and all(backend is AscendFA3Backend for backend in draft_backends.values())
-                and AscendAttentionBackend in backends
+                and any(backend in (AscendAttentionBackend, AscendQwenFlashAttentionBackend) for backend in backends)
                 and AscendGDNFusedAttentionBackend in backends
                 and all(
-                    backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend, AscendFA3Backend)
+                    backend
+                    in (
+                        AscendAttentionBackend,
+                        AscendQwenFlashAttentionBackend,
+                        AscendGDNFusedAttentionBackend,
+                        AscendFA3Backend,
+                    )
                     for backend in backends
                 )
                 and parallel.pipeline_parallel_size == 1

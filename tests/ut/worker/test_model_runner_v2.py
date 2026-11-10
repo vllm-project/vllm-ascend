@@ -27,6 +27,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
+from vllm_ascend.attention.flash_attention_v3 import AscendQwenFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.utils import vllm_version_is
@@ -2024,8 +2025,10 @@ def _qwen_dflash2_device_length_runner():
         "pp_exact_counts",
     ],
 )
-def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(unsupported):
+@pytest.mark.parametrize("target_backend", [AscendAttentionBackend, AscendQwenFlashAttentionBackend])
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(unsupported, target_backend):
     runner, output, batch = _qwen_dflash2_device_length_runner()
+    runner.attn_groups[0][0].backend = target_backend
     if unsupported == "no_draft_backends":
         del runner.speculator.attn_backends
     elif unsupported == "mixed_draft_backends":

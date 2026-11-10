@@ -63,7 +63,10 @@ REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("hardware", ["A2", "A3", "A5"])
 @pytest.mark.parametrize("target_family", ["qwen", "glm"])
-def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail, hardware, target_family):
+@pytest.mark.parametrize("target_kv_dtype", ["auto", "fp8"])
+def test_v2_loader_selects_flash_attn_and_restores_target_context(
+    monkeypatch, causal, fail, hardware, target_family, target_kv_dtype
+):
     from vllm.compilation import backends
     from vllm.config import AttentionConfig, CacheConfig, set_current_vllm_config
     from vllm.v1.attention import selector as selector_module
@@ -98,7 +101,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
         "model_config": target_config,
         "speculative_config": spec,
         "attention_config": AttentionConfig(),
-        "cache_config": CacheConfig(cache_dtype="fp8"),
+        "cache_config": CacheConfig(cache_dtype=target_kv_dtype),
         "load_config": object(),
         "parallel_config": SimpleNamespace(
             pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
@@ -130,13 +133,20 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     monkeypatch.setattr(selector_module, "resolve_obj_by_qualname", lambda path: path)
     select = selector_module._cached_get_attn_backend
     target_selector = AttentionSelectorConfig(
-        head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="fp8", use_mla=is_glm, use_sparse=is_glm
+        head_size=256,
+        block_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=target_kv_dtype,
+        use_mla=is_glm,
+        use_sparse=is_glm,
     )
     target_backend = (
         "vllm_ascend.attention.sfa_v1.AscendSFABackend"
         if is_glm
         else "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
     )
+    if not is_glm and hardware in ("A2", "A3") and target_kv_dtype == "auto":
+        target_backend = "vllm_ascend.attention.flash_attention_v3.AscendQwenFlashAttentionBackend"
     if is_glm and hardware == "A5":
         draft_backend = "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
     elif not is_glm and hardware in ("A2", "A3"):
@@ -152,7 +162,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
         assert vllm_config.attention_config.use_non_causal is (not causal)
         assert backends.model_tag == "dflash_head"
         selector = target_selector._replace(
-            use_mla=False, use_sparse=False, kv_cache_dtype="auto", use_non_causal=not causal
+            head_size=128, use_mla=False, use_sparse=False, kv_cache_dtype="auto", use_non_causal=not causal
         )
         with set_current_vllm_config(vllm_config):
             assert select(None, selector) == draft_backend
@@ -173,7 +183,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
             assert backends.model_tag == initial_tag
             assert select(None, target_selector) == target_backend
         assert config.model_config is target_config
-        assert config.cache_config.cache_dtype == "fp8"
+        assert config.cache_config.cache_dtype == target_kv_dtype
         assert not config.attention_config.use_non_causal
         assert select.cache_info().currsize == 2
     finally:
