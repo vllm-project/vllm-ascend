@@ -12,6 +12,8 @@ Parallel coverage is TP4+EP with PCP=1 and DCP=1.
 import hashlib
 import json
 import os
+from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -26,7 +28,7 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
 NUM_LAYERS = 9
 NUM_MTP_LAYERS = 1
@@ -249,8 +251,53 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             assert warm.outputs[0].token_ids == cold.outputs[0].token_ids
 
 
+CASE_NAME = "glm53flash_tp4_pool_watch"
+
+
+@contextmanager
+def _pool_leg(use_pool: bool, case_name: str, model):
+    """Leg A enables the memcache pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs = dict(
+            load_format=LOADER,
+            worker_extension_cls=f"{__name__}.FlashWorker",
+            dtype="bfloat16",
+            tensor_parallel_size=TP_SIZE,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            enable_expert_parallel=True,
+            quantization="ascend",
+            distributed_executor_backend="mp",
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=4,
+            max_num_batched_tokens=4096,  # H3 is off; only H1/H2/R4 are asserted
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            block_size=128,
+            enable_chunked_prefill=True,
+            # Hybrid keeps the local prefix cache on in both legs (align requires it).
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+            use_replayssm=False,  # RecoverSSM conflicts with align + prefix caching
+            disable_log_stats=False,
+            gpu_memory_utilization=0.9,
+            seed=1024,
+            enforce_eager=True,
+            speculative_config={
+                "method": "deepseek_mtp",
+                "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
+                "enforce_eager": True,
+            },
+            additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(str(model), **kwargs))
+
+
 def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
-    """Structural pool witness for GLM-5.3-Flash (dummy functional weights).
+    """Structural A/B witness for GLM-5.3-Flash (dummy functional weights).
 
     Covers the hybrid linear-attention + MLA cache layout, mamba align state
     copy-after-load and the AscendStore connector. It is NOT an accuracy or
@@ -266,46 +313,12 @@ def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
     model = tmp_path / "model"
     _write_model(model)
 
-    pool_config = _build_memcache_pool_config()
-    with (
-        SingleNodeMemcacheManager(pool_config, "glm53flash_tp4_pool_watch") as pool,
-        patch.dict(os.environ, pool.server_envs),
-        VllmRunner(
-            str(model),
-            load_format=LOADER,
-            worker_extension_cls=f"{__name__}.FlashWorker",
-            dtype="bfloat16",
-            tensor_parallel_size=TP_SIZE,
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
-            enable_expert_parallel=True,
-            quantization="ascend",
-            distributed_executor_backend="mp",
-            max_model_len=POOL_MAX_MODEL_LEN,
-            max_num_seqs=4,
-            max_num_batched_tokens=4096,
-            limit_mm_per_prompt={"image": 0, "video": 0},
-            block_size=128,
-            enable_chunked_prefill=True,
-            # Hybrid + pool requires align, which requires prefix caching.
-            enable_prefix_caching=True,
-            mamba_cache_mode="align",
-            use_replayssm=False,  # RecoverSSM conflicts with align + prefix caching
-            disable_log_stats=False,
-            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
-            gpu_memory_utilization=0.9,
-            seed=1024,
-            enforce_eager=True,
-            speculative_config={
-                "method": "deepseek_mtp",
-                "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
-                "enforce_eager": True,
-            },
-            additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0},
-        ) as runner,
-    ):
+    def _accuracy(runner) -> None:
+        # Both legs only check structure; dummy weights carry no accuracy claim.
         assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
-        run_pool_hit_sequence(
+
+    def _hit(runner) -> dict:
+        return run_pool_hit_sequence(
             runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
@@ -318,3 +331,13 @@ def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
             check_output=False,
             tag="glm53flash-tp4-memcache",
         )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=partial(_pool_leg, model=model),
+        accuracy=_accuracy,
+        hit=_hit,
+        token_identity=False,  # dummy weights do not compare tokens
+        perf_reset_local=True,  # hybrid pooled leg also keeps a local cache
+        gate=False,  # P11 only records the A/B comparison
+    )

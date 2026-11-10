@@ -35,9 +35,12 @@ public so a test can build a custom sequence when the shared one does not fit.
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable
 
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 QUERIES_METRIC = "vllm:external_prefix_cache_queries"
@@ -374,6 +377,9 @@ def run_pool_hit_sequence(
         "expected_hits": float(expected_hits),
         "expected_hits_total": float(expected_total),
         "load_keys": snap4.load_keys,
+        # A/B 对照用：R1 冷输出与 R3 命中轮输出
+        "cold_outputs": cold,
+        "hit_outputs": hit_2,
     }
     if lcm_block_size:
         detail = f"hit_tokens R2={ratio_r2:.0f} R3={ratio_r3:.0f}"
@@ -385,3 +391,237 @@ def run_pool_hit_sequence(
         flush=True,
     )
     return summary
+
+
+# --- A/B two-leg runner -----------------------------------------------------
+
+AB_TTFT_LIMIT = 1.08
+AB_THROUGHPUT_LIMIT = 0.92
+AB_SAMPLES = 10
+AB_WARMUP = 2
+# Leave time for worker processes and NPU memory to be reclaimed between legs.
+AB_LEG_GAP_SECONDS = 10
+AB_ARTIFACT = os.environ.get("KV_POOL_AB_ARTIFACT", "pool_ab_report.json")
+# Default 16K-class load for the performance segment; every PR case passes its
+# own prompt_tokens explicitly.
+POOL_PROMPT_TOKENS = 16388
+PREFIX_HITS_METRIC = "vllm:prefix_cache_hits"
+
+
+def _preflight_probe() -> str | None:
+    """Return a reason string when the environment cannot run the A/B legs.
+
+    CI replaces this with real probes (fabric-mem export, hugepages, loop,
+    cross-node links, ports); the default does not block.
+    """
+    return None
+
+
+@dataclass
+class LegResult:
+    acc: bool
+    hit_tokens: float
+    outputs: list[list[int]]
+    ttft_p50: float
+    ttft_p95: float
+    throughput: float
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class PoolABReport:
+    case: str
+    a: LegResult
+    b: LegResult
+    verdict: str
+    label: str
+
+    @property
+    def delta_ttft(self) -> float:
+        return (self.a.ttft_p50 / self.b.ttft_p50 - 1.0) if self.b.ttft_p50 else 0.0
+
+    @property
+    def delta_throughput(self) -> float:
+        return (self.a.throughput / self.b.throughput - 1.0) if self.b.throughput else 0.0
+
+    def emit(self) -> None:
+        for leg, result in (("A", self.a), ("B", self.b)):
+            print(
+                f"[kv_pool_ab] case={self.case} leg={leg} acc={int(result.acc)} "
+                f"hit_tokens={result.hit_tokens:.0f} ttft_p50={result.ttft_p50:.2f} "
+                f"ttft_p95={result.ttft_p95:.2f} throughput={result.throughput:.1f} "
+                f"delta_ttft={self.delta_ttft:+.4f} delta_throughput={self.delta_throughput:+.4f} "
+                f"verdict={self.verdict} label={self.label}",
+                flush=True,
+            )
+        payload = asdict(self)
+        payload["delta_ttft"] = self.delta_ttft
+        payload["delta_throughput"] = self.delta_throughput
+        with open(AB_ARTIFACT, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+
+
+def _prefix_cache_hits(source: Any) -> float:
+    """Local prefix-cache hit tokens, used to prove the B leg really hits."""
+    metrics = source.get_metrics()
+    if isinstance(metrics, dict):
+        return float(metrics.get(PREFIX_HITS_METRIC, 0.0))
+    for metric in metrics:
+        if metric.name == PREFIX_HITS_METRIC and getattr(metric, "value", None) is not None:
+            return float(metric.value)
+    return 0.0
+
+
+def _env_fingerprint() -> dict[str, str]:
+    return {
+        "ascend_rt_visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", ""),
+        "vllm_use_v2_model_runner": os.environ.get("VLLM_USE_V2_MODEL_RUNNER", ""),
+        "kv_pool_ab_mode": os.environ.get("KV_POOL_AB_MODE", "record"),
+    }
+
+
+def _percentile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    return ordered[min(len(ordered) - 1, int(round(q * (len(ordered) - 1))))]
+
+
+def _collect_perf(
+    runner: Any, prompt_tokens: int, *, reset_local_cache: bool = False
+) -> tuple[float, float, float]:
+    """Sample the hit state; end-to-end latency with max_tokens=1 proxies TTFT.
+
+    Hybrid legs keep the local prefix cache on. Only the pooled leg must drop
+    the local KV before every sample (``reset_connector=False``), otherwise
+    every sample after the first measures a local hit instead of the pool. The
+    control leg intentionally keeps its warm local cache.
+    """
+    prompt, _ = build_pool_prompts(prompt_tokens)
+    ttft: list[float] = []
+    produced = 0
+    started = time.perf_counter()
+    for index in range(AB_WARMUP + AB_SAMPLES):
+        if reset_local_cache:
+            try:
+                runner.model.reset_prefix_cache(reset_connector=False)
+            except RuntimeError:
+                pass  # DPVllmRunner does not expose `.model`
+        begin = time.perf_counter()
+        runner.generate_greedy([prompt], 1)
+        elapsed = (time.perf_counter() - begin) * 1000.0
+        if index >= AB_WARMUP:
+            ttft.append(elapsed)
+            produced += prompt_tokens
+    wall = time.perf_counter() - started
+    return _percentile(ttft, 0.50), _percentile(ttft, 0.95), produced / wall
+
+
+def _control_hit_outputs(runner: Any, prompt_tokens: int, max_tokens: int) -> list[list[int]]:
+    """B leg: one cold round to fill the local cache, then one hit round.
+
+    A missing local hit is a control defect, not a pool defect.
+    """
+    prompt, _ = build_pool_prompts(prompt_tokens)
+    runner.generate_greedy([prompt], max_tokens)
+    before = _prefix_cache_hits(runner)
+    outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    after = _prefix_cache_hits(runner)
+    assert after > before, (
+        f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{after - before:.0f})"
+    )
+    return outputs
+
+
+def _classify(a_err: str | None, b_err: str | None, token_diff: bool, perf_bad: bool) -> str:
+    if a_err and b_err:
+        return "TEST_DEFECT"
+    if b_err:
+        return "CONTROL_DEFECT"
+    if a_err or token_diff or perf_bad:
+        return "POOL_DEFECT"
+    return "PASS"
+
+
+def run_pool_ab(
+    case_name: str,
+    build_leg: Callable[[bool, str], Any],
+    accuracy: Callable[[Any], None],
+    hit: Callable[[Any], dict[str, Any]] | None = None,
+    *,
+    prompt_tokens: int = POOL_PROMPT_TOKENS,
+    max_tokens: int = POOL_MAX_TOKENS,
+    token_identity: bool = True,
+    perf_reset_local: bool = False,
+    gate: bool = True,
+) -> PoolABReport:
+    """Run leg A (pool on, local cache off) then leg B (pool off, local cache on).
+
+    Legs run serially in the same pytest process: HCCL/torch.distributed groups
+    are process-wide singletons. The original assertions of both legs always
+    fail the test; ``record`` mode only records the pool-side labels
+    (``POOL_DEFECT`` / ``CONTROL_DEFECT``).
+    """
+    mode = os.environ.get("KV_POOL_AB_MODE", "record")
+    blocked = _preflight_probe()
+    if blocked is not None:
+        empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
+        report = PoolABReport(case_name, empty, empty, "FAIL", "ENV_BLOCKED")
+        report.emit()
+        raise AssertionError(f"ENV_BLOCKED: {blocked}")
+
+    def _run(use_pool: bool, leg: str) -> tuple[LegResult | None, str | None, bool]:
+        """Return ``(result, error, original_assertion_failed)``.
+
+        The third value keeps the original case assertions non-degradable: an
+        engine that cannot start or an ``accuracy()`` failure must fail in both
+        ``record`` and ``gate`` modes.
+        """
+        accuracy_ok = False
+        try:
+            with build_leg(use_pool, f"{case_name}_{leg}") as runner:
+                accuracy(runner)
+                accuracy_ok = True
+                if use_pool:
+                    summary = hit(runner) if hit is not None else {}
+                    outputs = summary.get("hit_outputs", [])
+                    hits = float(summary.get("r3", 0.0))
+                else:
+                    outputs = _control_hit_outputs(runner, prompt_tokens, max_tokens)
+                    # The control leg owns local cache hits, not pool hits.
+                    hits = 0.0
+                p50, p95, throughput = _collect_perf(
+                    runner, prompt_tokens, reset_local_cache=perf_reset_local and use_pool
+                )
+                result = LegResult(True, hits, outputs, p50, p95, throughput, _env_fingerprint())
+                return result, None, False
+        except AssertionError as exc:
+            return None, str(exc), not accuracy_ok
+
+    a, a_err, a_fatal = _run(True, "a")
+    # Wait until worker processes and NPU memory are reclaimed, then run B.
+    time.sleep(AB_LEG_GAP_SECONDS)
+    b, b_err, b_fatal = _run(False, "b")
+    empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
+    a_result = a or empty
+    b_result = b or empty
+    token_diff = token_identity and a_err is None and b_err is None and a_result.outputs != b_result.outputs
+    perf_bad = (
+        a_err is None
+        and b_err is None
+        and (
+            a_result.ttft_p50 > b_result.ttft_p50 * AB_TTFT_LIMIT
+            or a_result.ttft_p95 > b_result.ttft_p95 * AB_TTFT_LIMIT
+            or a_result.throughput < b_result.throughput * AB_THROUGHPUT_LIMIT
+        )
+    )
+    label = _classify(a_err, b_err, token_diff, perf_bad)
+    report = PoolABReport(case_name, a_result, b_result, "PASS" if label == "PASS" else "FAIL", label)
+    report.emit()
+    if a_fatal or b_fatal:
+        raise AssertionError(
+            f"[{case_name}] {label}: original assertions failed (A={a_err or 'ok'}; B={b_err or 'ok'})"
+        )
+    if gate and mode == "gate" and label != "PASS":
+        raise AssertionError(f"[{case_name}] {label}: A/B comparison failed")
+    return report

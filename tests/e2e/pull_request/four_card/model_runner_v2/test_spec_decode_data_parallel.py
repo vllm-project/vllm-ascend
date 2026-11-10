@@ -17,6 +17,7 @@
 """DSpark speculative decoding under DP with Model Runner V2."""
 
 import os
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -25,7 +26,7 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
 DEEPSEEK_V4_DSPARK_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",
@@ -75,6 +76,49 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
     )
 
 
+CASE_NAME = "dsv4_dp2_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the memcache pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs = dict(
+            data_parallel_size=DATA_PARALLEL_SIZE,
+            tensor_parallel_size=2,
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=2,
+            max_num_batched_tokens=POOL_BATCHED_TOKENS,
+            enable_expert_parallel=True,
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            distributed_executor_backend="mp",
+            gpu_memory_utilization=0.93,
+            quantization="ascend",
+            enforce_eager=False,
+            async_scheduling=True,
+            # A leg disables the local cache; B leg turns it on.
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            speculative_config={
+                "method": "dspark",
+                "num_speculative_tokens": 5,
+                "enforce_eager": True,
+            },
+            attention_config={"indexer_kv_dtype": "int8"},
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [6, 12],
+            },
+            additional_config={"enable_fused_mc2": 0},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(DPVllmRunner(DEEPSEEK_V4_DSPARK_MODEL, **kwargs))
+
+
 @pytest.mark.e2e_model(DEEPSEEK_V4_DSPARK_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -96,49 +140,17 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
-    pool_config = _build_memcache_pool_config()
-    with (
-        SingleNodeMemcacheManager(pool_config, "dsv4_dp2_pool_watch") as pool,
-        patch.dict(os.environ, pool.server_envs),
-        DPVllmRunner(
-            DEEPSEEK_V4_DSPARK_MODEL,
-            data_parallel_size=DATA_PARALLEL_SIZE,
-            tensor_parallel_size=2,
-            max_model_len=POOL_MAX_MODEL_LEN,
-            max_num_seqs=2,
-            max_num_batched_tokens=POOL_BATCHED_TOKENS,
-            enable_expert_parallel=True,
-            tokenizer_mode="deepseek_v4",
-            block_size=128,
-            distributed_executor_backend="mp",
-            gpu_memory_utilization=0.93,
-            quantization="ascend",
-            enforce_eager=False,
-            async_scheduling=True,
-            enable_prefix_caching=False,
-            disable_log_stats=False,
-            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
-            speculative_config={
-                "method": "dspark",
-                "num_speculative_tokens": 5,
-                "enforce_eager": True,
-            },
-            attention_config={"indexer_kv_dtype": "int8"},
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [6, 12],
-            },
-            additional_config={
-                "enable_fused_mc2": 0,
-            },
-        ) as vllm_model,
-    ):
-        outputs = vllm_model.generate_greedy(PROMPTS, max_tokens=32)
+    def _accuracy(runner) -> None:
+        # Both legs keep the original non-empty output assertion; DSpark does
+        # not compare tokens here.
+        outputs = runner.generate_greedy(PROMPTS, max_tokens=32)
         assert len(outputs) == len(PROMPTS)
         assert all(output_ids and output_text.strip() for output_ids, output_text in outputs)
 
-        run_pool_hit_sequence(
-            vllm_model,
+    def _hit(runner) -> dict:
+        # Only leg A; the helper runs the cold + local-hit rounds for leg B.
+        return run_pool_hit_sequence(
+            runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
             replicas=DATA_PARALLEL_SIZE,
@@ -146,3 +158,11 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
             check_output=False,  # DSpark cold/hit differ deterministically; H3 stays on #6
             tag="dsv4-dp2-memcache",
         )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        token_identity=False,  # DSpark cold/hit tokens are not comparable
+    )

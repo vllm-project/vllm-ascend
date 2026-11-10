@@ -30,6 +30,7 @@ case.
 from __future__ import annotations
 
 import os
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -40,7 +41,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
 # A3 mooncake ascend store uses the fabric-mem direct-transfer path. Keep an
 # explicit escape hatch for environments that need to probe the legacy path.
@@ -55,7 +56,7 @@ DEEPSEEK_V4_MODEL = os.environ.get(
 # zero reusable tokens; the 4-token tail keeps exactly 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
-POOL_BATCHED_TOKENS = 4096
+POOL_BATCHED_TOKENS = POOL_LCM_BLOCK_SIZE  # H3 precondition: budget = reusable whole blocks
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
@@ -123,6 +124,44 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
     assert num_accepted > 0, "Speculative decoding did not accept any draft tokens"
 
 
+CASE_NAME = "dsv4_pp2_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the mooncake pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs = dict(
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=2,
+            max_num_batched_tokens=POOL_BATCHED_TOKENS,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            enable_expert_parallel=True,
+            distributed_executor_backend="mp",
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enforce_eager=True,
+            # A leg disables the local cache; B leg turns it on.
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            attention_config={"indexer_kv_dtype": "int8"},
+            speculative_config={
+                "method": "dspark",
+                "num_speculative_tokens": 5,
+                "enforce_eager": True,
+            },
+            additional_config={"enable_fused_mc2": 0},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(DEEPSEEK_V4_MODEL, **kwargs))
+
+
 @pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -144,51 +183,28 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_pp_accuracy() -> None:
-    pool_config = _build_mooncake_pool_config()
-    with (
-        SingleNodeMooncakeManager(pool_config, "dsv4_pp2_pool_watch") as pool,
-        patch.dict(os.environ, pool.server_envs),
-        VllmRunner(
-            DEEPSEEK_V4_MODEL,
-            max_model_len=POOL_MAX_MODEL_LEN,
-            max_num_seqs=2,
-            max_num_batched_tokens=POOL_BATCHED_TOKENS,
-            tensor_parallel_size=2,
-            pipeline_parallel_size=2,
-            enable_expert_parallel=True,
-            distributed_executor_backend="mp",
-            gpu_memory_utilization=0.9,
-            quantization="ascend",
-            tokenizer_mode="deepseek_v4",
-            block_size=128,
-            enforce_eager=True,
-            enable_prefix_caching=False,
-            disable_log_stats=False,
-            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
-            attention_config={
-                "indexer_kv_dtype": "int8",
-            },
-            speculative_config={
-                "method": "dspark",
-                "num_speculative_tokens": 5,
-                "enforce_eager": True,
-            },
-            additional_config={
-                "enable_fused_mc2": 0,
-            },
-        ) as runner,
-    ):
+    def _accuracy(runner) -> None:
+        # Both legs run the GSM8K answer and draft/acceptance checks.
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
         metrics = runner.model.get_metrics()
+        _assert_speculative_accuracy(outputs, metrics)
 
-        # DSpark is speculative decoding: assert the exact external hit-token
-        # delta (16,384), never a loose 0.9 full-text ratio.
-        run_pool_hit_sequence(
+    def _hit(runner) -> dict:
+        # Only leg A: DSpark asserts the exact 16,384 hit tokens. cold/hit token
+        # identity is not comparable under DSpark (see P3 / §13.3), so H3 is off.
+        return run_pool_hit_sequence(
             runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            check_output=False,
             tag="dsv4-pp2-mooncake",
         )
 
-    _assert_speculative_accuracy(outputs, metrics)
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        token_identity=False,  # DSpark cold/hit tokens are not comparable
+    )

@@ -17,6 +17,7 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -25,7 +26,7 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -71,6 +72,38 @@ def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
     )
 
 
+CASE_NAME = "dsv4_tp4_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the mooncake pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs = dict(
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=16,
+            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            dtype="auto",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            # A leg disables the local cache; B leg turns it on.
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            attention_config={"indexer_kv_dtype": "int8"},
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+            speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(POOL_MODEL, **kwargs))
+
+
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -89,54 +122,31 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         "What is the meaning of life?",
     ]
     max_tokens = 5
+    expected_token_ids = [
+        [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
+        [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
+    ]
 
-    pool_config = _build_mooncake_pool_config()
-    with (
-        SingleNodeMooncakeManager(pool_config, "dsv4_tp4_pool_watch") as pool,
-        patch.dict(os.environ, pool.server_envs),
-        VllmRunner(
-            POOL_MODEL,
-            max_model_len=POOL_MAX_MODEL_LEN,
-            max_num_seqs=16,
-            max_num_batched_tokens=POOL_PROMPT_TOKENS,
-            dtype="auto",
-            tensor_parallel_size=4,
-            enable_expert_parallel=True,
-            gpu_memory_utilization=0.9,
-            quantization="ascend",
-            tokenizer_mode="deepseek_v4",
-            block_size=128,
-            # KV pool watch: local prefix cache must be explicitly disabled,
-            # and pool metrics require log stats.
-            enable_prefix_caching=False,
-            disable_log_stats=False,
-            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
-            attention_config={"indexer_kv_dtype": "int8"},
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
-            speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
-        ) as vllm_model,
-    ):
-        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        expected_token_ids = [
-            [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
-            [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
-        ]
+    def _accuracy(runner) -> None:
+        # Both legs run the original greedy assertion.
+        outputs = runner.generate_greedy(example_prompts, max_tokens)
         assert len(outputs) == len(example_prompts)
         for i, (output_ids, output_str) in enumerate(outputs):
             assert len(output_str) > 0
             assert len(output_ids) > 0
             assert output_ids == expected_token_ids[i]
 
-        # MTP: assert exact hit tokens (16,384), not a 0.9 ratio.
-        run_pool_hit_sequence(
-            vllm_model,
+    def _hit(runner) -> dict:
+        # Only leg A: R1 cold write -> R2/R3 exact 16,384 hits -> R4 disjoint key.
+        return run_pool_hit_sequence(
+            runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
             tag="dsv4-tp4-layerwise",
         )
+
+    run_pool_ab(case_name=CASE_NAME, build_leg=_leg, accuracy=_accuracy, hit=_hit)
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")

@@ -4,6 +4,7 @@
 """Regress deferred PP Mamba state copies with a real Qwen3.8-27B model."""
 
 import os
+from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
@@ -14,7 +15,7 @@ from vllm import SamplingParams
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
@@ -110,6 +111,43 @@ class MambaAlignWorker:
         return result
 
 
+CASE_NAME = "qwen38_pp2_mtp_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the memcache pool; leg B keeps everything else identical.
+
+    Hybrid keeps the local prefix cache on in both legs (align requires it);
+    the only A/B difference is ``kv_transfer_config``.
+    """
+    with ExitStack() as stack:
+        kwargs = dict(
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            worker_extension_cls=f"{__name__}.MambaAlignWorker",
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=4,
+            max_num_batched_tokens=4096,
+            gpu_memory_utilization=0.9,
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+            disable_log_stats=False,
+            enable_chunked_prefill=True,
+            async_scheduling=True,
+            seed=1024,
+            speculative_config={"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True},
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(MODEL, **kwargs))
+
+
 @pytest.mark.e2e_model("Qwen/Qwen3.8-27B")
 @pytest.mark.e2e_coverage(
     arch="dense",
@@ -123,34 +161,13 @@ class MambaAlignWorker:
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 @wait_until_npu_memory_free()
 def test_qwen38_pp_mtp_prefix_cache():
-    pool_config = _build_memcache_pool_config()
-    with (
-        SingleNodeMemcacheManager(pool_config, "qwen38_pp2_mtp_pool_watch") as pool,
-        patch.dict(os.environ, pool.server_envs),
-        VllmRunner(
-            MODEL,
-            dtype="bfloat16",
-            tensor_parallel_size=2,
-            pipeline_parallel_size=2,
-            distributed_executor_backend="mp",
-            worker_extension_cls=f"{__name__}.MambaAlignWorker",
-            max_model_len=POOL_MAX_MODEL_LEN,
-            max_num_seqs=4,
-            max_num_batched_tokens=4096,
-            gpu_memory_utilization=0.9,
-            enable_prefix_caching=True,
-            mamba_cache_mode="align",
-            disable_log_stats=False,
-            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
-            enable_chunked_prefill=True,
-            async_scheduling=True,
-            seed=1024,
-            speculative_config={"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True},
-            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
-        ) as runner,
-    ):
+    state: dict[str, int] = {}
+
+    def _accuracy(runner) -> None:
+        # Original align probe, two generation rounds and 5959 assertion.
         block_sizes = runner.model.collective_rpc("install_align_probe")
         block_size = next(size for size in block_sizes if size is not None)
+        state["block_size"] = block_size
         tokenizer = runner.model.get_tokenizer()
         prompts, params = [], []
         for index in range(NUM_REQUESTS):
@@ -185,14 +202,21 @@ def test_qwen38_pp_mtp_prefix_cache():
         answer = runner.model.generate([prompt], SamplingParams(temperature=0, max_tokens=32), use_tqdm=False)
         assert answer[0].outputs[0].text.strip() == "5959", answer
 
-        # Hybrid keeps the local prefix cache on, so each pool round must drop
-        # local KV only and keep pool content. run_pool_hit_sequence does that
-        # before R1/R2/R3 when reset_local_cache=True.
-        run_pool_hit_sequence(
+    def _hit(runner) -> dict:
+        # Only leg A; hybrid rounds drop local KV only and keep pool content.
+        return run_pool_hit_sequence(
             runner,
-            block_size=block_size,
+            block_size=state["block_size"],
             prompt_tokens=POOL_PROMPT_TOKENS,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
             reset_local_cache=True,
             tag="qwen38-pp2-mtp-memcache",
         )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        perf_reset_local=True,  # the pooled leg also keeps a local cache
+    )
