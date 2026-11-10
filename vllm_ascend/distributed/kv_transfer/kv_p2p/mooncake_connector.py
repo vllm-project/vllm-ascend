@@ -96,7 +96,6 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
-KV_HANDLE_EXPIRY_MARGIN_S = 5.0
 # Retention window for per-request remote-KV state entries after their handle
 # deadline has passed; stale entries are pruned on the next capture.
 KV_HANDLE_STATE_RETENTION_S = 600.0
@@ -816,7 +815,7 @@ class KVCacheRecvingThread(threading.Thread):
             return
 
         handle_deadline = req_meta.get("handle_deadline", 0.0)
-        if handle_deadline > 0.0 and time.time() > handle_deadline + KV_HANDLE_EXPIRY_MARGIN_S:
+        if handle_deadline > 0.0 and time.time() > handle_deadline:
             raise RuntimeError(
                 f"Mooncake KV handle expired: request_id={remote_request_id}, "
                 f"handle_deadline={handle_deadline:.3f}, now={time.time():.3f}; "
@@ -2139,7 +2138,7 @@ class MooncakeConnectorScheduler:
         handle_deadline, local_block_ids = state
         if not any(block_id in invalid_block_ids for group in local_block_ids for block_id in group):
             return None
-        if handle_deadline > 0.0 and time.time() > handle_deadline + KV_HANDLE_EXPIRY_MARGIN_S:
+        if handle_deadline > 0.0 and time.time() > handle_deadline:
             return KV_LOAD_FAILURE_REASON_EXPIRED
         return KV_LOAD_FAILURE_REASON_GENERIC
 
