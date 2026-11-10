@@ -160,7 +160,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             if self.tid2eid is not None or self.bias_vl is not None:
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
-                input_ids = input_ids.to(torch.int64)
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
@@ -173,7 +172,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     # ids. Apply the identical TP chunk only when communication
                     # has not already aligned ids with local router rows.
                     input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
-                input_ids = torch.where(input_ids == -1, 0, input_ids)
             else:
                 input_ids = None
                 tid2eid_ones = None
@@ -181,6 +179,10 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 HardwareCapability.MOE_GATING_TOP_K_HASH_VISION
             )
             if self.bias_vl is not None and input_ids is not None and not fused_vision_hash:
+                # The PyTorch vision route indexes the table itself. The fused
+                # kernel accepts INT32/INT64 IDs and maps -1 to zero on load.
+                input_ids = input_ids.to(torch.int64)
+                input_ids = torch.where(input_ids == -1, 0, input_ids)
                 topk_weights, topk_ids = select_deepseek_v4_vision_experts(
                     router_logits=router_logits,
                     input_ids=input_ids,
