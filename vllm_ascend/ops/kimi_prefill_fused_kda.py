@@ -68,31 +68,36 @@ class PrefillKDAMetadataContext:
             if signature != self.signature:
                 raise RuntimeError("FlashKDA metadata cannot be shared across different layouts or operators")
             return self.metadata
-        required = workspace.capacity(initial_state.shape[0], q.shape[0], is_packed=True)
-        if required > workspace.buffer.numel():
+        capacity_upper_bound = workspace.capacity(initial_state.shape[0], q.shape[0], is_packed=True)
+        if capacity_upper_bound > workspace.buffer.numel():
             raise RuntimeError(
-                f"FlashKDA metadata needs {required} words but its fixed buffer has {workspace.buffer.numel()}; "
+                f"FlashKDA metadata capacity upper bound is {capacity_upper_bound} words "
+                f"but its fixed buffer has {workspace.buffer.numel()}; "
                 "check max_num_seqs/max_num_batched_tokens"
             )
         with torch.npu.stream(workspace.stream):
             workspace.stream.wait_event(workspace.inputs_ready)
             self.query_start_loc.record_stream(workspace.stream)
             metadata = operator.metadata(q, v, initial_state, layout_qkv="TND", cu_seqlens=self.query_start_loc)
+            metadata_words = metadata.numel()
             if (
-                metadata.numel() != required
+                metadata_words > capacity_upper_bound
                 or metadata.dtype != workspace.buffer.dtype
                 or metadata.device != workspace.buffer.device
             ):
                 raise RuntimeError(
                     "FlashKDA metadata does not match its capacity/dtype/device contract: "
-                    f"actual(shape={tuple(metadata.shape)}, numel={metadata.numel()}, "
+                    f"actual(shape={tuple(metadata.shape)}, numel={metadata_words}, "
                     f"dtype={metadata.dtype}, device={metadata.device}); "
-                    f"expected(numel={required}, dtype={workspace.buffer.dtype}, device={workspace.buffer.device}); "
+                    f"expected(numel<={capacity_upper_bound}, dtype={workspace.buffer.dtype}, "
+                    f"device={workspace.buffer.device}); "
                     f"buffer_capacity={workspace.buffer.numel()}, q_shape={tuple(q.shape)}, "
                     f"v_shape={tuple(v.shape)}, initial_state_shape={tuple(initial_state.shape)}, "
                     f"cu_seqlens_shape={tuple(self.query_start_loc.shape)}"
                 )
-            view = workspace.buffer[:required]
+            # The capacity helper returns a bound, not the operator's exact
+            # output length. Preserve that length for both copy and consumption.
+            view = workspace.buffer[:metadata_words]
             view.copy_(metadata)
             del metadata
             metadata = view

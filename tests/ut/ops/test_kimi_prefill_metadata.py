@@ -131,6 +131,52 @@ def test_ten_layers_and_next_forward_refresh_metadata(runtime):
     assert first_finish < last_ready
 
 
+def test_metadata_shorter_than_upper_bound_keeps_actual_length(runtime):
+    # Reproduce the reported 219-token, 12-head request. The capacity helper
+    # reports 5242 words while the operator returns only 1096 words.
+    capacity = MagicMock(side_effect=[165419, 5242, 5242])
+    workspace = runtime["PrefillKDAMetadataWorkspace"]("cpu", capacity=capacity, max_batch=128, max_tokens=16384)
+    workspace.buffer.fill_(-1)
+    buffer_ptr = workspace.buffer.data_ptr()
+    starts = torch.tensor([0, 219], dtype=torch.int32)
+    q, k, v, gate = (torch.zeros(219, 12, 128, dtype=torch.bfloat16) for _ in range(4))
+    beta = torch.zeros(219, 12, dtype=torch.bfloat16)
+    state = torch.zeros(1, 12, 128, 128)
+    a_log = torch.zeros(12)
+    dt_bias = torch.zeros(12, 128)
+    results = [torch.arange(1096, dtype=torch.int32), torch.arange(512, dtype=torch.int32) + 1]
+    operator = runtime["PrefillFusedKDAOperators"](
+        MagicMock(side_effect=lambda q, k, v, **kwargs: (v, kwargs["initial_state"])),
+        MagicMock(side_effect=results),
+    )
+    for step, expected in enumerate(results):
+        context = workspace.new_context(starts)
+        for _ in range(10):
+            runtime["run_prefill_fused_kda"](
+                operator,
+                q,
+                k,
+                v,
+                gate,
+                beta,
+                state,
+                starts,
+                a_log,
+                dt_bias,
+                scale=128**-0.5,
+                lower_bound=-5.0,
+                metadata_context=context,
+            )
+            passed_metadata = operator.prefill.call_args.kwargs["metadata"]
+            assert passed_metadata.shape == expected.shape
+            assert passed_metadata.data_ptr() == buffer_ptr
+            torch.testing.assert_close(passed_metadata, expected)
+        assert operator.metadata.call_count == step + 1
+    assert operator.prefill.call_count == 20
+    assert capacity.call_count == 3  # One allocation and one bound check per forward.
+    torch.testing.assert_close(workspace.buffer[1096:], torch.full_like(workspace.buffer[1096:], -1))
+
+
 @pytest.mark.parametrize("compact", [False, True])
 def test_layers_keep_gather_scatter_and_share_compacted_boundaries(runtime, compact):
     workspace = _workspace(runtime)
@@ -213,7 +259,13 @@ def test_capacity_exhaustion_fails_before_launch(runtime):
 
 
 @pytest.mark.parametrize(
-    "bad_result", [torch.zeros(7), torch.zeros(6, dtype=torch.int32), torch.zeros(8, dtype=torch.int32)]
+    "bad_result",
+    [
+        torch.zeros(7),
+        torch.zeros(8, dtype=torch.int32),
+        torch.zeros(21, dtype=torch.int32),
+        torch.zeros(7, dtype=torch.int32, device="meta"),
+    ],
 )
 def test_metadata_contract_is_checked_before_consumer(runtime, bad_result):
     context = _workspace(runtime).new_context(torch.tensor([0, 2, 5], dtype=torch.int32))
@@ -224,10 +276,10 @@ def test_metadata_contract_is_checked_before_consumer(runtime, bad_result):
         _invoke(runtime, operator, context)
     message = str(error.value)
     assert (
-        f"actual(shape={tuple(bad_result.shape)}, numel={bad_result.numel()}, dtype={bad_result.dtype}, device=cpu)"
-        in message
+        f"actual(shape={tuple(bad_result.shape)}, numel={bad_result.numel()}, "
+        f"dtype={bad_result.dtype}, device={bad_result.device})" in message
     )
-    assert "expected(numel=7, dtype=torch.int32, device=cpu)" in message
+    assert "expected(numel<=7, dtype=torch.int32, device=cpu)" in message
     assert "buffer_capacity=20" in message
     assert "q_shape=(5, 2, 4)" in message
     assert "initial_state_shape=(2, 2, 4, 4)" in message

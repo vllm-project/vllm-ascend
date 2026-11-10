@@ -45,31 +45,38 @@ GUARD_BYTES = 64
 
 
 @torch.inference_mode()
-def test_flash_kda_metadata_reuse_across_layers_and_forwards(record_property):
+@pytest.mark.parametrize("num_requests,tokens,num_heads", [(1, 219, 12), (2, 194, NUM_HEADS)])
+def test_flash_kda_metadata_reuse_across_layers_and_forwards(record_property, num_requests, tokens, num_heads):
     """Real NPU gate: different layer payloads share only the schedule."""
     operator = load_prefill_fused_kda_operator()
     assert operator is not None, "Install the reference ops.flash_kda package"
-    counted = PrefillFusedKDAOperators(operator.prefill, MagicMock(wraps=operator.metadata))
-    tokens = 194
+    metadata_shapes = []
+
+    def build_metadata(*args, **kwargs):
+        metadata = operator.metadata(*args, **kwargs)
+        metadata_shapes.append(metadata.shape)
+        return metadata
+
+    counted = PrefillFusedKDAOperators(operator.prefill, MagicMock(side_effect=build_metadata))
     num_layers = 3
     vc = SimpleNamespace(
         compilation_config=SimpleNamespace(
             static_forward_context={"kimi": SimpleNamespace(_prefill_fused_kda_operator=counted)}
         ),
-        scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=tokens),
+        scheduler_config=SimpleNamespace(max_num_seqs=num_requests, max_num_batched_tokens=tokens),
     )
     workspace = create_prefill_kda_metadata_workspace(vc, ["kimi"], torch.device("npu"))
     address = workspace.buffer.data_ptr()
-    starts = torch.tensor([0, 65, tokens], dtype=torch.int32, device="npu")
-    a_log = torch.zeros(NUM_HEADS, dtype=torch.float32, device="npu")
-    dt_bias = torch.zeros(NUM_HEADS, HEAD_DIM, dtype=torch.float32, device="npu")
+    starts = torch.tensor([0, tokens] if num_requests == 1 else [0, 65, tokens], dtype=torch.int32, device="npu")
+    a_log = torch.zeros(num_heads, dtype=torch.float32, device="npu")
+    dt_bias = torch.zeros(num_heads, HEAD_DIM, dtype=torch.float32, device="npu")
     inputs = []
     for _ in range(num_layers):
         q, k, v, gate = (
-            torch.randn(tokens, NUM_HEADS, HEAD_DIM, device="npu", dtype=torch.bfloat16) * 0.1 for _ in range(4)
+            torch.randn(tokens, num_heads, HEAD_DIM, device="npu", dtype=torch.bfloat16) * 0.1 for _ in range(4)
         )
-        beta = torch.randn(tokens, NUM_HEADS, device="npu", dtype=torch.bfloat16)
-        state = torch.randn(2, NUM_HEADS, HEAD_DIM, HEAD_DIM, device="npu") * 0.1
+        beta = torch.randn(tokens, num_heads, device="npu", dtype=torch.bfloat16)
+        state = torch.randn(num_requests, num_heads, HEAD_DIM, HEAD_DIM, device="npu") * 0.1
         inputs.append((q, k, v, gate, beta, state))
 
     def run_layer(op, args, context=None):
@@ -84,13 +91,15 @@ def test_flash_kda_metadata_reuse_across_layers_and_forwards(record_property):
             metadata_context=context,
         )
 
-    for middle in (65, 129):
+    for middle in (None, None) if num_requests == 1 else (65, 129):
         # Keep the boundaries' address, but change their contents each forward.
-        starts[1] = middle
+        if middle is not None:
+            starts[1] = middle
         context = workspace.new_context(starts)
         for args in inputs:
             expected = run_layer(operator, args)
             actual = run_layer(counted, args, context)
+            assert context.metadata.shape == metadata_shapes[-1]
             torch.npu.synchronize()
             torch.testing.assert_close(actual[0], expected[0], rtol=OUTPUT_RTOL, atol=OUTPUT_ATOL)
             torch.testing.assert_close(actual[1], expected[1], rtol=STATE_RTOL, atol=STATE_ATOL)
