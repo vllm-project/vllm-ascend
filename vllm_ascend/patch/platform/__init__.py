@@ -57,6 +57,8 @@ import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 import vllm_ascend.patch.platform.patch_example_connector  # noqa
 
+import vllm_ascend.patch.platform.patch_preload  # noqa: F401
+
 # ** File: platform/patch_example_connector.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.ec_transfer.ec_connector.example_connector.ECExampleConnector.start_load_caches`
