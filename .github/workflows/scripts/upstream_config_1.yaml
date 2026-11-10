@@ -601,11 +601,11 @@ e2e-upstream_singlecard:
 e2e-upstream_a2_2:
   - name: tests/watermarking/test_parallel_compatibility.py
     estimated_time: 20
+  - name: tests/model_executor/model_loader/test_weight_cache.py
+    estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py
     estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/entrypoints/pooling/basic/test_tiling_engine.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/test_weight_cache.py
     estimated_time: 20
