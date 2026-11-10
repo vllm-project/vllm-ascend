@@ -22,7 +22,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
-    has_cross_layer_kv_topology,
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -122,11 +123,6 @@ def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = No
     """
     if kv_transfer_config is None:
         return None
-    if vllm_config is not None and has_cross_layer_kv_topology(vllm_config):
-        # Sharing model KV sources is independent of reusing physical buffers
-        # between layers. The latter requires the physical-layer save hooks.
-        return None
-
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
     root_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
     if connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
@@ -154,6 +150,12 @@ def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = No
         if backend_class is None or backend_class.layerwise_data_plane != "gva":
             continue
         if extra_config.get("use_layerwise", False):
+            if (
+                vllm_config is not None
+                and resolve_kv_pool_transfer_mode(vllm_config, extra_config=extra_config)
+                is KVPoolTransferMode.CROSS_LAYER_KV
+            ):
+                continue
             return extra_config
     return None
 

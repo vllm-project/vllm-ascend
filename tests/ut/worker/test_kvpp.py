@@ -121,6 +121,25 @@ def test_detects_layerwise_store_configuration(composite, enabled):
     assert kvpp._uses_layerwise_store(transfer) is enabled
 
 
+@pytest.mark.parametrize("backend", ["memcache", "mooncake"])
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+def test_shared_source_detection_keeps_mooncake_layerwise_hooks(backend, composite, shared):
+    extra = {"backend": backend, "use_layerwise": True}
+    connector = {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": extra}
+    transfer = SimpleNamespace(
+        kv_connector="MultiConnector" if composite else "AscendStoreConnector",
+        kv_connector_extra_config={"connectors": [connector]} if composite else extra,
+    )
+    config = SimpleNamespace(
+        kv_transfer_config=transfer,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9] if shared else None)
+        ),
+    )
+    assert kvpp._uses_layerwise_store(transfer, vllm_config=config) is (backend == "mooncake" or not shared)
+
+
 def test_prefetch_sequence_across_forwards(scheduler_device):
     events, compute, transfer = scheduler_device
     transport = Mock()

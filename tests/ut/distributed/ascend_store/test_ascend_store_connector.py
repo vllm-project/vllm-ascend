@@ -34,6 +34,39 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import As
 
 
 class TestKVPoolWorkerConstruction(unittest.TestCase):
+    def test_backend_layerwise_and_topology_routing_matrix(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
+
+        for backend in ("memcache", "mooncake"):
+            for enabled in (False, True):
+                for sources in (None, [1, 5, 9], list(range(16))):
+                    with self.subTest(backend=backend, enabled=enabled, sources=sources):
+                        config, cache = MagicMock(), MagicMock()
+                        config.kv_transfer_config.kv_connector_extra_config = {
+                            "backend": backend,
+                            "use_layerwise": enabled,
+                        }
+                        config.model_config.hf_text_config = types.SimpleNamespace(
+                            num_hidden_layers=16, kv_source_layer_ids=sources
+                        )
+                        with (
+                            patch.object(connector, "KVPoolWorker") as bulk,
+                            patch.object(connector, "LayerwiseKVPoolWorker") as layerwise,
+                            patch.object(connector, "CrossLayerKVPoolWorker") as cross,
+                        ):
+                            selected = (
+                                bulk
+                                if not enabled
+                                else (cross if backend == "memcache" and sources == [1, 5, 9] else layerwise)
+                            )
+                            self.assertIs(
+                                connector.create_kv_pool_worker(config, enabled, cache), selected.return_value
+                            )
+                            selected.assert_called_once_with(config, enabled, cache)
+                            for factory in (bulk, layerwise, cross):
+                                if factory is not selected:
+                                    factory.assert_not_called()
+
     def test_cross_layer_kv_plan_is_bound_before_start_load_kv(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import (
             CrossLayerKVPoolWorker,
@@ -62,6 +95,7 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
 
         config, cache = MagicMock(), MagicMock()
+        config.kv_transfer_config.kv_connector_extra_config = {"backend": "memcache", "use_layerwise": True}
         config.model_config.hf_text_config = types.SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9])
         with patch.object(connector, "CrossLayerKVPoolWorker", autospec=True) as worker:
             self.assertIs(connector.create_kv_pool_worker(config, True, cache), worker.return_value)

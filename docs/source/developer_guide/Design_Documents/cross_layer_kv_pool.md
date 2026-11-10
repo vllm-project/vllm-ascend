@@ -1,230 +1,159 @@
 # Cross-layer shared KV pool transfers
 
-`cross_layer_kv` overlaps pooled KV transfers with model execution for models
-whose consumer layers share KV sources. It retains the existing group keys
-and object layout while transferring dependency slices before their consumers.
-The only public opt-in is `kv_connector_extra_config.use_layerwise`.
+`cross_layer_kv` extends the existing Memcache GVA layerwise path for models
+whose consumer layers share KV sources. The public switch remains
+`kv_connector_extra_config.use_layerwise`.
 
-## One switch, two layerwise strategies
+## Routing and reuse
 
-| Configuration and topology | Scheduler | Worker strategy |
+Resolve the backend and the existing layerwise switch before considering the
+model topology. Mooncake block-key and Memcache GVA remain separate protocols.
+
+| Backend / switch / topology | Scheduler | Worker |
 | --- | --- | --- |
-| `use_layerwise=false` | `KVPoolScheduler` | Existing bulk transfers |
-| `use_layerwise=true`, independent layer KV, such as DS4 | `LayerwiseKVPoolScheduler` | Existing physical-layer transfers |
-| `use_layerwise=true`, shared KV sources, such as DS4.1 | `LayerwiseKVPoolScheduler` | `CrossLayerKVPoolWorker` |
+| Any backend, `use_layerwise=false` | `KVPoolScheduler` | Existing bulk worker |
+| Mooncake, `use_layerwise=true` | `LayerwiseKVPoolScheduler` | Existing block-key worker |
+| Memcache, `use_layerwise=true`, independent KV | `LayerwiseKVPoolScheduler` | Existing GVA worker |
+| Memcache, `use_layerwise=true`, shared KV sources | `LayerwiseKVPoolScheduler` | `CrossLayerKVPoolWorker(LayerwiseKVPoolWorker)` |
 
-The scheduler and connector use the same topology resolver. The cross-layer
-strategy uses group-object hit queries and synchronous request admission;
-ordinary layerwise retains its backend-bound key protocol and behavior.
-Sharing an object does not require copying it as one operation: the worker
-builds dependency units from the registered producer/consumer layout.
+Both GVA strategies use `_get_layerwise_hit_tokens`, the existing coordinator,
+`MemcacheBackend.bind_layerwise_keys`, readability probes and the same key
+namespace. The shared-source strategy does not query the bulk lookup server.
+For multiple groups, full keys retain `model@group@hash@rank`; the single-group
+compatibility format remains `model@hash@rank`.
 
-Cross-layer saves retain in-flight state blocks until all workers report
-completion, and reset refuses to discard outstanding save work. Physical-layer
-offload snapshots and buffer reuse are disabled for this strategy, including
-allocator, memory-budget, V1/V2 state-copy and KVPP hook selection. These checks
-receive model context explicitly; the user's config is not rewritten.
-Both layerwise strategies normalize `load_async` to false. The cross-layer
-pipeline overlaps within a scheduled forward and never reports early receive
-completion to the scheduler.
+Readers and writers must use the same GVA protocol. Existing bulk-format
+objects are not queried by this strategy. Physical buffer reuse and offload
+snapshots remain disabled for shared-source models: source sharing does not
+imply that its physical HBM buffers can be reused by other layers.
 
-## Model topology and SWA retention
+## Topology and SWA
 
-The source layers come from the text model's `kv_source_layer_ids`, validated
-against `num_hidden_layers`. There is no model-name allowlist, fixed source
-count, layer interval, or dependency on layers 2/8/14/20. Flat configs and
-nested text configs use the same resolver. For example, a compatible 16-layer
-model with sources `[1, 5, 9]` gets three source units and a cut at layer 9.
-Registered bulk descriptors determine each unit's actual byte range.
+`kv_source_layer_ids` and `num_hidden_layers` determine source ownership and
+the replay cut. No model-name allowlist, source count or interval is hardcoded.
+Flat and nested text configurations use the same resolver.
 
-Compatible model implementations expose `supports_cross_layer_kv_transfer_hooks=true`
-on every backbone attention layer registered in `static_forward_context`.
-This means both ordinary forward and cache-only writes enforce the dependency
-gate before accessing caches. Models that reuse the existing attention class
-inherit the capability. A new attention implementation must implement that
-hook contract; a similar config alone cannot make asynchronous loads safe.
-Missing hooks or incompatible cache layouts retain bulk transfers.
+The inherited physical-to-group mapping and `LayerBatchBuilder` use registered
+descriptor boundaries, including scales and segmented kernel views. Layers
+without a persistent cache member generate no transfer task. Changed source
+positions/counts require no parallel address-offset implementation.
 
 SWA storage follows the existing coordinator's block masks:
 
-- With `swa_bounded_replay=true`, target SWA is not prefix-cacheable and is
-  excluded from pool saves and loads. Replay reconstructs the needed window.
-- With bounded replay off, saves retain the SWA blocks needed at reusable
-  prefix boundaries. The window comes from `sliding_window`; 128 is not a
-  hardcoded transfer limit. Copies still use complete registered blocks.
-- With default retention, tails are retained at every transfer-aligned
-  boundary. For a 128-token window, 128-token SWA blocks and 128-token
-  alignment, every block is eligible: pool coverage can span the full saved
-  prefix, rather than just its last 128 tokens. Saved offsets, existing hits,
-  and the current step's valid blocks still determine actual writes.
+- With bounded replay enabled, target SWA is not prefix-cacheable and is
+  excluded from pool saves and loads. Replay reconstructs its window.
+- Otherwise, retain the SWA blocks required at reusable prefix boundaries.
+  The window comes from `sliding_window`, not a hardcoded transfer limit.
+- With a 128-token window, 128-token blocks and default 128-token retention
+  alignment, every block is eligible. Coverage can span the saved prefix,
+  rather than only its final 128 tokens. Saved offsets, existing hits and
+  valid blocks still limit the actual writes.
 - Sparse retention can keep fewer boundary windows, including the required
-  replay checkpoint. Keeping only the final request window would discard
-  shorter reusable prefixes and requires coordinated lookup/load changes.
+  replay checkpoint. Keeping only the request's final window would discard
+  shorter reusable prefixes and require coordinated lookup/load changes.
 
-## Producer and consumer scheduling
+## Request scheduling and load overlap
 
-A step plan is bound in `bind_connector_metadata`, before any model hooks.
-It must not be initialized in `start_load_kv`: save-only steps can call that
-method after the target forward.
+The common GVA scheduler queries readable group objects, applies the existing
+reachability/alignment policy, allocates target blocks and builds `ReqMeta`.
+Both strategies use synchronous admission (`load_async=false`). Copies can
+still overlap computation within the admitted forward.
 
-The plan uses the registered bulk descriptor boundaries, including separate
-index K, scale, folded views, and segmented kernel pages. Resource-name
-positions and physical page strides are not object byte offsets.
-`chunk_member_transfer` delegates address and size calculations to the
-existing `prepare_value` implementation.
+`bind_connector_metadata` calls `prepare_cross_layer_kv_step` before model
+hooks, including save-only steps. This wraps the inherited
+`prepare_layerwise_step` and `process_layer_data`: request snapshots use the
+adopted hit length, and existing GVA code builds masks, leases, arrays and
+`LayerTransferTask` objects. No cross-layer allocation/session plane is added.
 
-| Configuration | Incremental-save units | Pipelined-load units |
-| --- | --- | --- |
-| Bounded replay on | Four KV-source slices in the typical backbone | Four source dependencies |
-| Bounded replay off | Four source slices and ten SWA groups | Four sources and forty SWA members |
+`start_load_kv` restores draft and unknown cacheable groups synchronously with
+the GVA receiver's copy routine, then queues target source/SWA tasks in first
+consumer order. Requests with the same first consumer share a batch. The
+background thread is the existing `KVCacheStoreLayerRecvingThread`.
 
-These counts describe the typical 40-layer topology; registration and
-effective cacheability determine the actual maps.
+Before attention or a cache-only write, `wait_for_cross_layer_kv_load` waits
+for the physical owner's completion event. A completed SDK copy opens the
+gate; queue submission never reports early `finished_recving`. Hooks visit
+public `MultiConnector.sub_connectors` so composition cannot bypass a gate.
 
-The load path keeps synchronous external-hit admission
-(`load_async=false`). Before forward, it queues copy tasks in first-consumer
-order, interleaving requests instead of loading one request completely first.
-The attention gate waits for its dependencies and checks a step-local error.
-It never signals `finished_recving` merely because work was queued.
+Reads reuse lease acquisition and GVA refresh. Shared-source loads additionally
+check object size against the registered GVA layout. Forward completion drains
+target copies before DSpark prepares context, and releases leases only after
+target writes have stopped.
 
-Reads acquire leases, refresh GVA metadata under those leases, check object
-sizes, copy the requested descriptor ranges, and release leases after every
-unit has settled. Missing or empty ranges still settle their gates.
-The cache-only cut-layer operation also waits before updating its caches.
-Attention hooks traverse the public `MultiConnector.sub_connectors` hierarchy
-so composing the pool with another connector cannot bypass a load gate.
+## Save overlap and publication
 
-For incremental saves, a producer event permits background copying after the
-last write. Early slices overlap subsequent layers. The final step event seals
-missing hooks and conservatively handles the replay cut, which can be written
-again after its cache-only pass. The usual previous-batch fence covers early
-slices, the seal, and all fallback bulk puts.
+The sender is the existing `KVCacheStoreLayerSendingThread`. The inherited
+`process_layer_data` prepares full-group allocations and per-layer ranges;
+`_submit_attention_save` records the producer event and submits a layer's
+copy. Later model layers can compute while earlier source ranges are copied.
+Saving a complete group object does not require copying all its bytes at once.
 
-## Memcache release/1.3 contract audit
+The existing GVA sender publishes with `batch_write_finish(WRITE_OK)` after
+all planned copies. Its final publication task is deferred to step end, so
+it cannot overtake delayed sources. `wait_for_save` submits remaining tasks
+and reuses `_wait_for_final_layer_save` to drain the sender before the step
+returns. There is no separate cross-layer save session or completion tracker.
 
-The reviewed source snapshots are:
+- Bounded replay can write its cut source again; that source uses a final-step
+  event instead of its first attention/cache-only boundary.
+- Missing hooks and unmapped groups also save at step end.
+- DSpark saves are deferred until the runner finalizes after draft context
+  preparation, preserving final target/draft cache contents.
+- The final publication task remains deferred even when its attention callback
+  runs: earlier replay-cut tasks may not have been submitted yet.
 
-- [memcache release/1.3](https://gitcode.com/Ascend/memcache/tree/release%2F1.3/src):
-  `e8d3b81a79108cb915223647ad94add9f8b1d566`.
-- [memfabric_hybrid release/1.3](https://gitcode.com/Ascend/memfabric_hybrid/tree/release%2F1.3/src):
-  `69ea3667fab4542689475a84409d632426d2393d`.
+## Memcache 1.3 contract
 
-The relevant memcache implementation paths are:
+The reviewed [memcache release/1.3](https://gitcode.com/Ascend/memcache/tree/release%2F1.3/src)
+commit is `e8d3b81a79108cb915223647ad94add9f8b1d566`; the
+[memfabric_hybrid release/1.3](https://gitcode.com/Ascend/memfabric_hybrid/tree/release%2F1.3/src)
+commit is `69ea3667fab4542689475a84409d632426d2393d`.
 
-- `src/memcache/csrc/client/mmc_client_default.cpp`:
-  `BatchMalloc`, `BatchWriteFinish`, `BatchDataOperation`,
-  and `ExecuteConcurrently`.
-- `src/memcache/csrc/meta_service/mmc_meta_manager.cpp`:
-  `Alloc`, `UpdateState`, and `AddLease`.
-- `src/memcache/csrc/entities/mmc_blob_state.cpp`:
-  `MMC_REPEAT_ALLOC` transitions.
-- `src/memcache/csrc/client/mmc_client_local_gva_blob_tracker.cpp`:
-  local write/read lease tracking.
+Duplicate `batch_alloc` calls can return a shared GVA, including for ALLOCATED
+objects. Positive addresses and existence probes do not establish exclusive
+ownership. `WRITE_FAIL` can remove a key unconditionally.
 
-`BatchMalloc` sets `ALLOC_FLAGS_GVA_MALLOC_MASK`. On duplicate keys,
-`Alloc` returns the existing object's descriptors and grants another lease,
-including while the object is ALLOCATED. Thus a positive GVA does **not**
-establish exclusive write ownership. An existence probe cannot remove this
-race. Additionally, `UpdateState(MMC_WRITE_FAIL)` removes the key before
-checking the ordinary blob state transition.
+These facts do not prohibit ranged GVA copies. This strategy reuses ordinary
+GVA allocation/publication and its failure policy: no independent exclusive
+writer session, no deleting shared keys to compensate failed copies, and no
+compensating WRITE_FAIL after an uncertain publication response. The change
+adds no cross-writer transaction or rollback protocol; concurrent prefix
+writers still require integration validation.
 
-Consequently Memcache keeps
-`Backend.supports_exclusive_allocation=false`, and this SDK uses **atomic
-bulk saves plus pipelined loads**. The incremental sender requires that
-explicit backend guarantee. No configuration flag overrides it. A future
-backend implementation must prove exclusive allocation, complete-object
-visibility, and safe cleanup before enabling the session-save plane.
+## Runtime and lifetime boundaries
 
-The sender marks commit as attempted before the publication RPC. A failed
-or missing reply never causes a compensating WRITE_FAIL. Successful SDK
-WRITE_OK consumes the write lease; the sender does not remove an unrelated
-read lease afterward.
+The initial worker supports Memcache TP deployments. PP, PCP, DCP and KVPP
+are rejected rather than changing key/layout protocols. Eager and PIECEWISE
+support target prefetch; the V2 `DeepseekV41DSparkModel` drafter is supported.
+Other speculative configurations, unsupported graph modes, SP, microbatching,
+missing hooks and unknown layouts retain synchronous GVA restoration. No
+fallback switches to bulk keys.
 
-The copy path uses the SDK's normal flag-zero GVA validation and synchronous
-copy operations. `ExecuteConcurrently` collects every future, including after
-one fails. The memfabric path goes through `SmemBmEntry::DataCopyBatch` and
-`hybm_data_batch_copy`; NPU execution still requires validation against the
-deployed driver and transport.
+PIECEWISE reuses ordinary layerwise graph negotiation and platform splitting
+operations. DS4.1 attention, cache-only writes and bounded decoder replay run
+between graph segments, so host gates execute on every replay. Bounded replay
+uses caller-owned output buffers. V2 refreshes Engram lookup buffers before
+PIECEWISE dispatch and retires device metadata after its consumers.
 
-## Failure and lifetime boundaries
+Use `--enforce-eager` for eager execution. For PIECEWISE, omit that flag and
+select `compilation_config.cudagraph_mode=PIECEWISE`. V2 requires a compiled
+model or the existing `VLLM_USE_BREAKABLE_CUDAGRAPH=1` option. This does not
+imply FULL graph support.
 
-The step retains immutable request/block snapshots and independent task
-events. Task errors survive collection of request-level failure notifications.
-The next bind, forward completion, reset, and shutdown drain load work before
-replacing gates or reusing target buffers.
+A fatal load error drains or stops the receiver before lease release. The
+error survives collection of request failure notifications and prevents later
+metadata from reusing partially restored state. Automatic hybrid state
+rollback/retry is not implemented.
 
-A load error after computation begins fails the step and drains queued
-transfers. It does not claim to roll back SWA/compressor state or automatically
-reschedule a partially executed hybrid request. Distributed failure handling
-and worker restart behavior need hardware validation before production use.
+## Validation
 
-The runtime gate supports eager and PIECEWISE Memcache loads with full blocks. With the
-V2 model runner, DeepSeek V4.1 DSpark also supports pipelined target loads.
-The target topology remains configuration-derived; this speculative extension
-requires the registered `DeepseekV41DSparkModel` drafter. Other speculative
-methods and drafters retain bulk transfers.
+CPU tests exercise the actual GVA sender/receiver and registered tensor
+addresses: key parity, source/SWA round trips, segmented views, changed source
+positions, early-consumer overlap, replay-cut publication order, missing or
+wrong-sized objects, failed copies, lease cleanup and DSpark final contents.
+Existing Memcache GVA and Mooncake block-key regressions are also required.
 
-Load eligibility is per cache group: compatible target groups use consumer
-gates, while draft groups and other cacheable unmapped groups are restored
-synchronously before target forward. Noncacheable private state is excluded.
-Request metadata and load specs are copied for each path. Synchronous bulk
-exceptions and failed status results drain pending target copies and abort
-before forward; step-local errors survive consumed failure notifications. The existing
-`finish_forward` fence drains target writes before DSpark prepares context or
-proposes tokens. The next metadata bind cannot replace live gates.
-
-Speculative saves always retain bulk publication, even with an exclusive
-backend. The V2 runner finalizes those saves after draft context preparation;
-no incremental producer callback publishes provisional draft/verify state.
-The pool coordinator's existing masks and trailing-block recomputation policy
-still determine which complete committed blocks can be reused.
-
-Both strategies reuse the connector's existing PIECEWISE negotiation and
-platform splitting operations. DS4.1 attention, cache-only writes and bounded
-decoder replay execute between graph segments, so consumer waits and KV hooks
-run for each replay. Bounded replay uses caller-owned output buffers, including
-during NONE warmup, rather than specializing on the warmup's replay rows.
-The V2 runner refreshes Engram's persistent lookup buffers before PIECEWISE
-dispatch and retires host-submitted device metadata after its consumers.
-
-Use `--enforce-eager` for eager execution. For PIECEWISE, omit that flag and set
-`compilation_config.cudagraph_mode` to `PIECEWISE`. The V2 runner requires a
-torch-compiled model or the existing `VLLM_USE_BREAKABLE_CUDAGRAPH=1` setting;
-the platform's default opt-in policy is unchanged. DSpark and bounded replay
-ON/OFF use the same graph boundaries; FULL graph support is not implied.
-
-PP, PCP, DCP, KVPP, SP, microbatching, unsupported graph modes and partial
-objects retain bulk behavior. Unknown layouts retain bulk at the group
-boundary. KV-event publication also keeps saves on the bulk path.
-
-## Verification
-
-CPU regression tests cover:
-
-- Shared/independent topology routing under the same switch, synchronous
-  admission, group lookup, source-block retention, and hook dispatch.
-- Physical-layer buffer reuse remains enabled only for the original strategy.
-- Real registered K/scale descriptor boundaries and the 369,280-byte payload
-  of the BF16/INT8 example, independently of its 540,928-byte physical capacity.
-- New-save/new-load round trips and existing bulk descriptor equivalence.
-- Unknown and incomplete layouts, empty dependencies, and fallback groups.
-- Commit success followed by a lost reply, duplicate callbacks, and step sealing.
-- Read-lease acquisition, GVA refresh, partial-lease cleanup, and persistent errors.
-- First-consumer ordering and a real background-thread test where an early
-  consumer proceeds while a later source is still copying.
-- DSpark target/draft group partitioning, restored draft bytes while a later
-  target source is copying, metadata isolation, repeated load calls and draining
-  in-flight target writes when synchronous draft restoration raises or returns
-  missing, failed or malformed status results.
-- Eager/PIECEWISE load eligibility and unsupported-mode fallbacks, existing
-  graph-cut registration, fixed replay buffers, changing bounded replay
-  metadata, NONE-first compilation, and V2 Engram/metadata lifecycle.
-
-Native NPU PIECEWISE capture/replay, memory use across graph sizes, and
-request/logit equivalence with DSpark and bounded replay ON/OFF require
-hardware validation; CPU tests do not establish these results.
-
-NPU E2E (including DSpark), actual SDK execution, cross-rank failures, Graph/MTP extensions, and
-performance traces remain required before promoting this draft. Measure copy
-start/end, producer events, consumer arrival, gate wait, TTFT, throughput,
-and HBM/NIC contention; no fixed speedup is claimed.
+Before readiness, validate Ascend NPU capture/replay and precision, bounded
+replay ON/OFF, DSpark ordering, concurrent writers, worker failure/restart,
+TTFT/throughput/HBM/network measurements. CPU simulations do not establish
+device correctness or performance.

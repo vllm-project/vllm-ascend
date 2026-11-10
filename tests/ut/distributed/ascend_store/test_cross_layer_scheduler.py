@@ -21,8 +21,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_sch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import KVPoolTransferMode
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
-    AscendStoreKVConnectorWorkerMetadata,
-    ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 # isort: on
@@ -64,61 +62,45 @@ def _config(*, shared=True):
 
 
 class TestCrossLayerScheduler(unittest.TestCase):
+    def test_shared_sources_keep_gva_decode_save_role_validation(self):
+        config = _config()
+        config.kv_transfer_config.kv_role = "kv_consumer"
+        config.kv_transfer_config.kv_connector_extra_config["save_decode_cache"] = True
+        with self.assertRaisesRegex(ValueError, "save_decode_cache"):
+            AscendStoreConnector(config, KVConnectorRole.WORKER)
+
     def _scheduler(self):
         config = _config()
         backend = get_backend_class("memcache")
         with (
             patch.object(backend, "create_scheduler_client"),
-            patch.object(backend, "bind_layerwise_keys") as bind_keys,
+            patch.object(backend, "bind_layerwise_keys", wraps=backend.bind_layerwise_keys) as bind_keys,
             patch.object(LayerwiseKVPoolScheduler, "_init_layerwise_offload") as init_offload,
         ):
             scheduler = create_kv_pool_scheduler(config, True)
-        bind_keys.assert_not_called()
+        bind_keys.assert_called_once()
         init_offload.assert_not_called()
         return scheduler
 
-    def test_layerwise_scheduler_uses_group_lookup_and_synchronous_admission(self):
+    def test_layerwise_scheduler_reuses_gva_lookup_and_synchronous_admission(self):
         scheduler = self._scheduler()
         self.assertIsInstance(scheduler, LayerwiseKVPoolScheduler)
         self.assertIs(scheduler.transfer_mode, KVPoolTransferMode.CROSS_LAYER_KV)
         self.assertTrue(scheduler.use_layerwise)
         self.assertFalse(scheduler.load_async)
         self.assertFalse(scheduler.layerwise_offload)
-        scheduler.client = MagicMock(closed=False)
-        scheduler.client.lookup.return_value = 48
+        scheduler.store_scheduler.batch_is_readable.return_value = [True, False]
         request = SimpleNamespace(
             request_id="r", prompt_token_ids=list(range(64)), num_tokens=64, block_hashes=[b"h"] * 4
         )
         self.assertEqual(scheduler.get_num_new_matched_tokens(request, 32), (16, False))
-        scheduler.client.lookup.assert_called_once_with(64, request.block_hashes, [0], hbm_hit_tokens=32)
+        self.assertIsNone(scheduler.client)
+        expected_key = "shared-kv-model@" + b"h".hex() + "@0"
+        scheduler.store_scheduler.batch_is_readable.assert_called_once_with([expected_key] * 2)
         self.assertFalse(scheduler.load_specs["r"].can_load)
         self.assertIsNone(scheduler._running_load_spec(MagicMock(), 32))
-        scheduler.client.lookup.return_value = 32
+        scheduler.store_scheduler.batch_is_readable.return_value = [False, False]
         self.assertEqual(scheduler.get_num_new_matched_tokens(request, 32), (0, False))
-
-    def test_pending_saves_pin_blocks_until_every_worker_completes(self):
-        scheduler = self._scheduler()
-        scheduler.use_hybrid = True
-        scheduler.num_speculative_blocks_by_group = {0: 1}
-        pool = MagicMock()
-        pool.blocks = [object() for _ in range(4)]
-        scheduler.bind_gpu_block_pool(pool)
-        request = ReqMeta("r", block_ids_by_group=[[0, 1, 2, 3]], block_hashes=[b"h"], can_save=True)
-        scheduler.retain_blocks_for_save(request)
-        pool.touch.assert_called_once_with(pool.blocks[1:3])
-        self.assertTrue(scheduler.has_pending_push_work())
-        self.assertFalse(scheduler.reset_store())
-        output = SimpleNamespace(
-            finished_recving=None, kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 1})
-        )
-        scheduler.update_connector_output(output)
-        pool.free_blocks.assert_not_called()
-        scheduler.update_connector_output(output)
-        pool.free_blocks.assert_called_once_with([pool.blocks[2], pool.blocks[1]])
-        self.assertFalse(scheduler.has_pending_push_work())
-        scheduler._async_loading_req_ids = {"other"}
-        scheduler.update_connector_output(SimpleNamespace(finished_recving={"other"}, kv_connector_worker_meta=None))
-        self.assertFalse(scheduler._async_loading_req_ids)
 
     def test_shared_sources_never_enable_physical_buffer_reuse(self):
         config = _config()
@@ -150,7 +132,7 @@ class TestCrossLayerScheduler(unittest.TestCase):
         self.assertTrue(connector.use_layerwise)
         self.assertTrue(connector.use_cross_layer_kv)
         self.assertFalse(connector.use_classic_layerwise)
-        lookup.assert_called_once()
+        lookup.assert_not_called()
         metadata = AscendConnectorMetadata(set())
         connector.bind_connector_metadata(metadata)
         worker.prepare_cross_layer_kv_step.assert_called_once_with(metadata)

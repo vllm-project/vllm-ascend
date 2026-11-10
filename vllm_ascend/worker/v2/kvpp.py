@@ -10,14 +10,15 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
-    has_cross_layer_kv_topology,
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
 )
 from vllm_ascend.distributed.kvpp import BroadcastKVPPTransport
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
 
 
-def _uses_layerwise_store(transfer: Any) -> bool:
+def _uses_layerwise_store(transfer: Any, *, vllm_config: Any = None) -> bool:
     if transfer is None:
         return False
     extra_config = getattr(transfer, "kv_connector_extra_config", None) or {}
@@ -29,6 +30,11 @@ def _uses_layerwise_store(transfer: Any) -> bool:
     return any(
         connector.get("kv_connector") == "AscendStoreConnector"
         and (connector.get("kv_connector_extra_config") or {}).get("use_layerwise", False)
+        and (
+            vllm_config is None
+            or resolve_kv_pool_transfer_mode(vllm_config, extra_config=connector.get("kv_connector_extra_config") or {})
+            is KVPoolTransferMode.PHYSICAL_LAYER
+        )
         for connector in connectors
     )
 
@@ -77,9 +83,7 @@ class KVPPRuntime:
         scheduler = KVPPScheduler(
             transport=BroadcastKVPPTransport(group, plan.layer_owner_ranks, layer_buffers),
             attention_layer_names=tuple(layer_buffers),
-            layerwise=(
-                _uses_layerwise_store(vllm_config.kv_transfer_config) and not has_cross_layer_kv_topology(vllm_config)
-            ),
+            layerwise=(_uses_layerwise_store(vllm_config.kv_transfer_config, vllm_config=vllm_config)),
         )
         for name in layer_buffers:
             static_forward_context[name].impl.layerwise_kv_cache_hook = scheduler

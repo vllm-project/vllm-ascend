@@ -949,11 +949,13 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
-    **Automatic layerwise strategy selection:** `use_layerwise=true` keeps
-    the existing physical-layer path for models such as DeepSeek-V4 and
-    selects `cross_layer_kv` for models with shared KV sources, such as
-    DeepSeek-V4.1. Both use `LayerwiseKVPoolScheduler`; no additional public
-    switch is required. `use_layerwise=false` retains ordinary bulk transfers.
+    **Automatic layerwise strategy selection:** resolve the backend first.
+    Mooncake with `use_layerwise=true` retains its block-key path. Memcache
+    with `use_layerwise=true` selects `cross_layer_kv` for shared KV sources,
+    such as DeepSeek-V4.1, and retains ordinary GVA for independent-layer
+    models such as DeepSeek-V4. Both use `LayerwiseKVPoolScheduler` and the
+    existing backend key builder; no additional public switch is required.
+    `use_layerwise=false` retains ordinary bulk transfers.
 
     The cross-layer strategy derives source positions/count and the replay
     cut from `kv_source_layer_ids` and `num_hidden_layers`. It validates the
@@ -982,21 +984,24 @@ Expected output: MetaService starts successfully with no errors.
     keeping only the final 128 tokens of the request. The configured window,
     block size, and retention interval determine how many blocks are saved.
 
-    Memcache release/1.3 returns shared GVAs for duplicate allocations, so
-    **saves remain on the existing atomic bulk path**. Incremental session
-    saves require a backend that guarantees exclusive allocation. On such a
-    backend, producer slices can overlap later computation, and publication
-    waits for all slices. The replay cut uses the final step write event.
+    Cross-layer reuses the existing Memcache GVA key namespace, allocations,
+    leases, descriptor builders and layerwise sender/receiver. Source-ready
+    ranges can save while later layers compute; the final step fence submits
+    replay-cut/missing-hook tasks and publishes after all planned copies.
+    Positive `batch_alloc` addresses do not imply exclusive ownership, so the
+    strategy adds no independent writer session or destructive failure cleanup.
+    Existing bulk-format pool objects are not queried by the GVA strategy.
 
     With the V2 model runner, DeepSeek V4.1 DSpark can use pipelined target
     loads. Draft KV and other unmapped cacheable groups load synchronously
     before forward, and all target loads drain before drafting. Speculative
-    saves retain bulk publication after draft context preparation. Other
-    speculative methods or draft architectures retain bulk transfers.
+    saves use final-step GVA events after draft context preparation. Other
+    speculative methods or draft architectures restore synchronously with GVA.
 
-    Unsupported backends, PP/PCP/DCP/KVPP, sequence parallelism, microbatching,
-    unsupported graph modes, partial objects, or missing
-    consumer hooks retain group-object bulk transfers within this strategy.
+    The initial shared-source worker supports TP; PP/PCP/DCP/KVPP are rejected.
+    Sequence parallelism, microbatching, unsupported graph modes, partial
+    objects or missing hooks use synchronous GVA restoration without changing
+    the key protocol.
     A load failure after computation begins fails the step; automatic state
     rollback/retry is not supported. NPU correctness and performance evidence
     are required before production use. See the

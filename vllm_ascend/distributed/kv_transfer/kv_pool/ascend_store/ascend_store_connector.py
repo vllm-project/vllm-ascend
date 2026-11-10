@@ -146,9 +146,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_cross_layer_kv = self.transfer_mode is KVPoolTransferMode.CROSS_LAYER_KV
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
-        self.backend_class = get_backend_class(self.backend_name) if self.use_classic_layerwise else None
+        self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
-        self.use_block_key_layerwise = self.use_classic_layerwise and self.layerwise_data_plane == "block_key"
+        self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         logger.info("KV pool transfer mode: %s", self.transfer_mode.value)
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
@@ -158,7 +158,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self.kv_role == "kv_consumer"
             and self.save_decode_cache
             and not self.consumer_is_to_put
-            and self.use_classic_layerwise
+            and self.use_layerwise
         ):
             raise ValueError(
                 "save_decode_cache on a kv_consumer does not support use_layerwise "
@@ -202,7 +202,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
             )
             assert self.connector_worker is not None
-            if not self.use_classic_layerwise and vllm_config.parallel_config.rank == 0:
+            if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     @property
@@ -513,7 +513,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         assert self.connector_worker is not None
-        cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
+        self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""

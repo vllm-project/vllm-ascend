@@ -66,6 +66,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     get_partial_block_index,
     masked_block_runs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
@@ -124,6 +128,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
+        self.use_cross_layer_kv = (
+            resolve_kv_pool_transfer_mode(vllm_config, use_layerwise) is KVPoolTransferMode.CROSS_LAYER_KV
+        )
         backend_name = extra_config.get("backend", "mooncake").lower()
         self.layerwise_backend = get_backend_class(backend_name)
         self.layerwise_data_plane = (
@@ -135,7 +142,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
-            set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
+            set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+            if self.use_layerwise_transfer and not self.use_cross_layer_kv
+            else set()
         )
         if (
             self.backend_name != "memcache"
@@ -228,7 +237,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "num_hidden_layers",
                 self.num_layers,
             )
-            if self.use_layerwise_transfer:
+            if self.use_layerwise_transfer and not getattr(self, "use_cross_layer_kv", False):
                 self._layerwise_reuse_layout = build_layerwise_reuse_layout(
                     target_specs,
                     base_layers,
@@ -305,7 +314,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layerwise_offload = False
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, int] = {}
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer and not getattr(self, "use_cross_layer_kv", False):
             if self._layerwise_reuse_layout is None:
                 cache_layout = build_layerwise_cache_layout(
                     self.num_layers,
@@ -1975,6 +1984,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         key_indices.setdefault(key, index)
                     for key, info in zip(leased_keys, leased_infos, strict=True):
                         index = key_indices[key]
+                        if getattr(self, "use_cross_layer_kv", False) and (
+                            info is None or info.size() != self._global_group_alloc_size(group_id)
+                        ):
+                            return False
                         gvas[index] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )

@@ -10,7 +10,7 @@ entries:
     text: >-
       Experimental cross-layer target KV loads can run with DeepSeek-V4.1
       DSpark on the V2 model runner. Draft cache groups restore synchronously,
-      and speculative saves retain bulk publication after draft preparation.
+      and speculative saves use final-step GVA publication after draft preparation.
     model: deepseek-v4.1
   - category: other
     text: >-
@@ -20,6 +20,7 @@ entries:
     model: deepseek-v4.1
   - category: other
     text: >-
-      Memcache 1.3 retains atomic bulk saves because incremental saves require
-      exclusive allocation. Source layers derive from model parameters, and
-      registered consumer hooks are validated before enabling pipelined loads.
+      Shared-source scheduling reuses Memcache GVA keys, hit queries,
+      descriptor builders and layerwise transfer threads, including ranged
+      saves with final-step publication. Mooncake retains its block-key path.
+      Source layers derive from model parameters; no new public switch is added.

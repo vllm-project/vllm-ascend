@@ -336,28 +336,6 @@ class BaseKVPoolScheduler(ABC):
     def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
         """Return the external cache hit using the selected transfer mode."""
 
-    def _lookup_group_object_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
-        prompt_token_len = len(request.prompt_token_ids)
-        if len(self.cacheable_group_ids) != len(self.original_block_size):
-            # Private compressor state is rebuilt from a whole token page.
-            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
-        else:
-            token_len = (
-                self._floor_to_cache_transfer_granularity(prompt_token_len)
-                if self._discard_partial_chunks
-                else prompt_token_len
-            )
-        if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
-            return None
-        if self.client is None or self.client.closed:
-            self.client = LookupKeyClient(self.vllm_config)
-        return self.client.lookup(
-            token_len,
-            request.block_hashes,
-            self.kv_cache_group_ids,
-            hbm_hit_tokens=num_computed_tokens,
-        )
-
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
         Update KVConnector state after temporary buffer alloc.
@@ -815,4 +793,23 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
-        return self._lookup_group_object_hit_tokens(request, num_computed_tokens)
+        prompt_token_len = len(request.prompt_token_ids)
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
+            # Private compressor state is rebuilt from a whole token page.
+            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+        else:
+            token_len = (
+                self._floor_to_cache_transfer_granularity(prompt_token_len)
+                if self._discard_partial_chunks
+                else prompt_token_len
+            )
+        if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
+            return None
+        if self.client is None or self.client.closed:
+            self.client = LookupKeyClient(self.vllm_config)
+        return self.client.lookup(
+            token_len,
+            request.block_hashes,
+            self.kv_cache_group_ids,
+            hbm_hit_tokens=num_computed_tokens,
+        )

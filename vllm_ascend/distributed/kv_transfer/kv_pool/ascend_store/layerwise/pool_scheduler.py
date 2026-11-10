@@ -5,14 +5,12 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -24,9 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer
     resolve_kv_pool_transfer_mode,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
-    ReqMeta,
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
@@ -45,32 +41,22 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.transfer_mode = resolve_kv_pool_transfer_mode(vllm_config, use_layerwise)
         self.use_cross_layer_kv = self.transfer_mode is KVPoolTransferMode.CROSS_LAYER_KV
-        physical_layerwise = use_layerwise and not self.use_cross_layer_kv
         backend_name, self.layerwise_backend = resolve_backend(extra_config)
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
-        if physical_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
+        if use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
             raise ValueError(
                 f"Backend {backend_name!r} does not support layerwise KV pooling: "
                 f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
             )
-        self.use_block_key_layerwise = physical_layerwise and self.layerwise_data_plane == "block_key"
-        self.use_layerwise_transfer = physical_layerwise and self.layerwise_data_plane == "gva"
+        self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
+        self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.load_async = False
-        if self.use_cross_layer_kv:
-            # Shared KV uses complete group keys and worker-side dependency
-            # gates. Physical-layer key binding and offload snapshots do not
-            # describe this topology, including when it falls back to bulk.
-            self.block_key_hybrid = False
-            self.layerwise_keys = None
-            self.layerwise_max_transfer_blocks = 0
-            self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
-            return
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer and not self.use_cross_layer_kv:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
@@ -98,26 +84,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return not getattr(self, "use_cross_layer_kv", False) and store_skip_tokens > 0
-
-    def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        if getattr(self, "use_cross_layer_kv", False) and self.use_hybrid:
-            self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
-
-    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        super().update_connector_output(connector_output)
-        if getattr(self, "use_cross_layer_kv", False) and self._block_pool is not None:
-            meta = connector_output.kv_connector_worker_meta
-            if isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
-                self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
-
-    def has_pending_push_work(self) -> bool:
-        return getattr(self, "use_cross_layer_kv", False) and self._in_flight_save_blocks.has_pending_work()
-
-    def reset_store(self) -> bool:
-        if getattr(self, "use_cross_layer_kv", False) and self._in_flight_save_blocks.has_tracked_blocks():
-            logger.error("Cross-layer KV reset refused while saves retain source blocks.")
-            return False
-        return super().reset_store()
 
     def _async_load_enabled(self) -> bool:
         return False
@@ -167,8 +133,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         )
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
-        if getattr(self, "use_cross_layer_kv", False):
-            return self._lookup_group_object_hit_tokens(request, num_computed_tokens)
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
