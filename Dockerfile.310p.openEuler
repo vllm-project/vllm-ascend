@@ -31,11 +31,8 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
-# 绕开 github 直连限流（502）：GITHUB_PROXY 走内部 git-cdn（insteadOf 重写 https://github.com/）
-ARG GITHUB_PROXY=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-RUN if [ -n "$GITHUB_PROXY" ]; then git config --global url."${GITHUB_PROXY}".insteadOf "https://github.com/"; fi && \
-    if [ -n "$VLLM_COMMIT" ]; then \
+RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
