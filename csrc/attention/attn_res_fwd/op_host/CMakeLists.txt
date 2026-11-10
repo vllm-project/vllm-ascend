@@ -19,6 +19,7 @@ if (BUILD_OPEN_PROJECT)
         add_ops_compile_options(
             OP_NAME AttnResFwd
             OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
+                    -g
                     --cce-auto-sync=off
                     -Wno-deprecated-declarations
                     -Werror
@@ -29,6 +30,7 @@ if (BUILD_OPEN_PROJECT)
         add_ops_compile_options(
             OP_NAME AttnResFwd
             OPTIONS -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
+                    -g
                     --cce-auto-sync=off
                     -Wno-deprecated-declarations
                     -Werror

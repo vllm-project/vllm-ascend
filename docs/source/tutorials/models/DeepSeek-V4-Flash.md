@@ -844,7 +844,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 --enable-expert-parallel \
                 --seed 1024 \
                 --served-model-name dsv4 \
-                --max-model-len 1048576 \
+                --max-model-len 512000 \
                 --max-num-batched-tokens 16384 \
                 --max-num-seqs 16 \
                 --no-disable-hybrid-kv-cache-manager \
@@ -911,7 +911,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 --enable-expert-parallel \
                 --seed 1024 \
                 --served-model-name dsv4 \
-                --max-model-len 1048576 \
+                --max-model-len 512000 \
                 --max-num-batched-tokens 480 \
                 --max-num-seqs 60 \
                 --async-scheduling \
@@ -1527,7 +1527,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
     | Decode | 16 | 1 | 1 | 16 | 7100-7115 |
 
     The deployment follows the same Memcache service setup as
-    [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#531-prepare-the-memcache-services),
+    [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#5321-prepare-the-memcache-services),
     while all non-pooling options and the parallel layout follow the
     [A3 series](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
     continues to transfer KV
@@ -1720,7 +1720,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
-            --max-model-len 1048576 \
+            --max-model-len 512000 \
             --max-num-batched-tokens 16384 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
@@ -1825,7 +1825,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
-            --max-model-len 1048576 \
+            --max-model-len 512000 \
             --max-num-batched-tokens 480 \
             --max-num-seqs 60 \
             --async-scheduling \
@@ -2583,7 +2583,18 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
+#### Table 1: Detailed Node Configuration
+
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | PCP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Short Sequence | Prefill Pool | 16 (1 A3 node) | 1 | 2 | 16 | 16384 | 512000 | PCP=8 |
+| Short Sequence | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 512000 | PCP=1 |
+| Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | PCP=1 |
+| Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | PCP=1 |
+
+> **Note**: **The configurations in the table and the following notes apply only to A3.** Except for the differences listed in the table, all settings remain identical between the short-sequence and long-context configurations. The long-context configuration is provided for reference.
 
 ### 9.2 Tuning Guidelines
 

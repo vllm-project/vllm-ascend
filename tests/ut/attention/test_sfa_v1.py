@@ -83,7 +83,7 @@ class TestAscendSFABackend(TestBase):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -91,7 +91,7 @@ class TestAscendSFABackend(TestBase):
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -480,6 +480,19 @@ class TestAscendSFACacheComposition(TestBase):
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
+    @patch("torch_npu.npu_dynamic_block_quant", create=True)
+    @patch("torch_npu.npu_interleave_rope", create=True)
+    @patch("torch_npu.npu_rms_norm", create=True)
+    def test_native_nope_keeps_key_tail_bytes(self, norm, rope, quant):
+        kv = torch.randn(2, 1, 1, 272, dtype=torch.bfloat16)
+        norm.return_value = kv[..., :256].contiguous(), None
+        quant.return_value = (torch.zeros(2, 1, 256, dtype=torch.int8), torch.ones(2, 1, 2))
+        tail, _, _ = custom_kv_rmsnorm_rope(
+            kv, torch.ones(256), None, None, 256, 16, dst_type=torch.int8, use_rope=False
+        )
+        rope.assert_not_called()
+        torch.testing.assert_close(tail.view(torch.bfloat16), kv[..., 256:])
+
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant", create=True)
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope", create=True)
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_rms_norm", create=True)
@@ -509,6 +522,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention_vllm(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.is_kimi_k31 = False
         impl.enable_sparse_sfa_c8 = True
         impl.enable_sparse_sfa_turboquant = False
         impl.scale = 0.125
@@ -553,6 +567,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def _check_prolog_v3_enables_packed_kv_cache(self, quant_type):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.use_rope = True
         impl._quant_type = quant_type
         impl.enable_sparse_sfa_c8 = True
         impl.enable_sparse_sfa_turboquant = False
@@ -598,6 +613,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
                 return_value=(torch.randn(2, 2, 128), torch.randn(2, 2, 16), None, torch.randn(2, 8), None),
             ) as mock_prolog,
         ):
+            impl._prolog_v3_op = mock_prolog
             impl._sfa_preprocess_prolog_v3(
                 hidden_states=torch.randn(2, 8),
                 kv_cache=(k_cache, dsa_k_cache),
@@ -624,6 +640,16 @@ class TestAscendSFAKPathFusion(TestBase):
         metadata = SimpleNamespace()
 
         self.assertIs(_int64_kv_slots(slots, metadata), slots)
+
+    def test_int64_kv_slots_reuses_equivalent_dcp_views(self):
+        slots = torch.tensor([127, -1, 128, -1], dtype=torch.int32)
+        metadata = SimpleNamespace()
+        converted = _int64_kv_slots(slots[:3], metadata)
+        self.assertIs(_int64_kv_slots(slots[:3], metadata), converted)
+        for view in (slots[1:], slots[::2], slots.view(2, 2)):
+            actual = _int64_kv_slots(view, metadata)
+            self.assertIsNot(actual, converted)
+            torch.testing.assert_close(actual, view.to(torch.int64))
 
     def test_int64_kv_slots_converts_and_caches_per_metadata(self):
         slots = torch.arange(4, dtype=torch.int32).view(-1, 1)
@@ -652,6 +678,7 @@ class TestAscendSFAKPathFusion(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_reuses_int64_slots_across_layers(self, mock_kv_cache_op):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.pcp_enabled = False
         impl.enable_sparse_sfa_c8 = False
         impl.enable_sparse_sfa_turboquant = False
         impl.num_kv_heads = 1
@@ -702,6 +729,8 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer.use_pcp = False
         indexer._use_fused_cache_store = False
+        indexer._sharded_dcp = False
+        indexer._local_topk = False
         indexer.write_cache = MagicMock()
 
         hidden_states = torch.randn(num_tokens, head_dim + weights_dim)
@@ -711,6 +740,9 @@ class TestAscendSFAKPathFusion(TestBase):
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
+            cache_scatter_indices=torch.stack(
+                (torch.zeros(num_tokens, dtype=torch.int64), torch.arange(num_tokens)), dim=-1
+            ),
             actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
             actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
         )
@@ -1128,12 +1160,8 @@ class TestAscendSFAImpl(TestBase):
             num_actual_tokens=2,
             num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
-        )
-        context = SimpleNamespace(
-            actual_seq_lengths_query=[1, 2],
-            actual_seq_lengths_key=[1, 2],
-            kv_slot_mapping=metadata.slot_mapping,
-            topk_num_tokens=2,
+            cum_query_lens=[1, 2],
+            seq_lens=[1, 2],
         )
         cases = (
             (PreprocessType.NATIVE, True, False),
@@ -1162,7 +1190,6 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
-                self.impl._get_parallel_forward_context = lambda *_args: context
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(
@@ -1174,8 +1201,7 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
-                self.impl._record_query_gather_context = lambda *_args: None
-                self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)
+                self.impl._on_query_ready = lambda *_args: record_event("query_gather", None)
                 self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
                     "cache", (hidden, hidden, hidden, hidden)
                 )
@@ -1194,7 +1220,7 @@ class TestAscendSFAImpl(TestBase):
                     self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)
                     self.assertTrue(torch.all(output == 1))
                     expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
-                    expected.extend([("wait", "layer"), "cache"])
+                    expected.extend([("wait", "layer"), "cache", "query_gather"])
                     # Static shared-index layers own no runtime indexer cache;
                     # only MTP skip_topk layers still write one.
                     if self.impl.runtime_has_indexer:
@@ -1299,13 +1325,8 @@ class TestAscendSFAImpl(TestBase):
     ):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
-        only while shape, dtype and device still match. The hand-rolled
-        ``copy_`` it replaced was unconditional, so a re-derived value that
-        stopped being compatible aborted the whole weight-update transaction
-        with a ``RuntimeError``. That failure mode is the only behaviour this
-        change alters, so it is the part of the contract the unit tests have to
-        pin down.
+        v0.33.0 rebinds an incompatible value; main can copy a smaller value
+        into the parameter's existing storage. Both must accept the new shape.
         """
         layer = self._setup_kv_b_proj()
         mock_format_cast.return_value = layer.weight
@@ -1326,7 +1347,7 @@ class TestAscendSFAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             # A re-derived value that no longer fits rebinds the parameter.
             self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         else:
@@ -1371,6 +1392,32 @@ class TestAscendSFAImpl(TestBase):
 
     def test_process_weights_for_fused_prolog_v3_mxfp(self):
         self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+
+    def test_prolog_v3_binding_follows_rope_mode(self):
+        cann = MagicMock()
+        self.impl.is_kimi_k31 = True
+        with (
+            patch.dict(sys.modules, {"cann_ops_transformer": cann}),
+            patch("torch_npu.npu_mla_prolog_v3", create=True) as standard,
+        ):
+            for use_rope in (False, True):
+                with self.subTest(use_rope=use_rope):
+                    self.impl.use_rope = use_rope
+                    self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+                    expected = standard if use_rope else cann.mla_prolog
+                    self.assertIs(self.impl._prolog_v3_op, expected)
+
+    def test_prolog_v3_with_rope_does_not_require_cann_extension(self):
+        self.impl.use_rope = True
+        with (
+            patch.dict(sys.modules, {"cann_ops_transformer": None}),
+            patch("torch_npu.npu_mla_prolog_v3", create=True) as standard,
+        ):
+            for is_kimi_k31 in (False, True):
+                with self.subTest(is_kimi_k31=is_kimi_k31):
+                    self.impl.is_kimi_k31 = is_kimi_k31
+                    self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+                    self.assertIs(self.impl._prolog_v3_op, standard)
 
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)
@@ -1688,6 +1735,13 @@ class TestAscendSFAImpl(TestBase):
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.MLAPO)
         self.assertTrue(any("sparse C8" in r for r in reasons))
 
+    def test_nope_preserves_learned_query_tail(self):
+        self.impl.use_rope = False
+        tail = torch.randn(3, 2, 192)[..., 128:]
+        with patch("torch_npu.npu_interleave_rope", create=True) as rope:
+            self.assertIs(self.impl.rope_single(tail, None, None), tail)
+        rope.assert_not_called()
+
     # ============ _sfa_preprocess_prolog_v3: MXFP runtime ============
 
     def test_sfa_preprocess_prolog_v3_mxfp(self):
@@ -1717,13 +1771,40 @@ class TestAscendSFAImpl(TestBase):
         impl.weight_dkv_kr_scale = torch.randn(16, 1)
         impl.sfa_qsfa_kr_cache_dummy = torch.empty(0)
 
-        # Verify MXFP runtime attributes are correctly wired.
-        # (Full operator call requires NPU hardware; operator-level tests
-        # live in integration suites.)
-        self.assertTrue(hasattr(impl, "weight_dq_scale"))
-        self.assertTrue(hasattr(impl, "weight_uq_qr_scale"))
-        self.assertTrue(hasattr(impl, "weight_dkv_kr_scale"))
-        self.assertIs(impl._quant_type, AscendW8A8MXFP8DynamicLinearMethod)
+        hidden = torch.randn(3, 32, dtype=torch.bfloat16)
+        token_x = torch.empty_like(hidden, dtype=torch.float8_e4m3fn)
+        mx_scale = torch.ones(3, 1, dtype=torch.uint8)
+        query = torch.randn(3, 2, 128, dtype=torch.bfloat16)
+        tail = torch.randn(3, 2, 16, dtype=torch.bfloat16)
+        query_norm = torch.empty(3, 8, dtype=torch.float8_e4m3fn)
+        query_scale = torch.ones(3, 1, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        impl._prolog_v3_op = MagicMock(return_value=(query, tail, None, query_norm, query_scale))
+        slots = torch.tensor([127, -1, 128], dtype=torch.int32)
+        metadata = SimpleNamespace()
+        cache = (torch.empty(2, 128, 1, 128), torch.empty(2, 128, 1, 16))
+        cos = torch.ones(3, 16)
+        sin = torch.zeros_like(cos)
+
+        for use_rope in (False, True):
+            with self.subTest(use_rope=use_rope):
+                impl.use_rope = use_rope
+                with patch("torch_npu.npu_dynamic_mx_quant", create=True, return_value=(token_x, mx_scale)):
+                    result = impl._sfa_preprocess_prolog_v3(hidden, cache, cos, sin, slots, attn_metadata=metadata)
+                call = impl._prolog_v3_op.call_args.kwargs
+                self.assertEqual(call["cache_mode"], "PA_BSND")
+                self.assertIs(call["kv_cache"], cache[0])
+                torch.testing.assert_close(call["cache_index"], slots.to(torch.int64))
+                if use_rope:
+                    torch.testing.assert_close(call["rope_cos"], cos)
+                    torch.testing.assert_close(call["rope_sin"], sin)
+                else:
+                    self.assertIsNone(call["rope_cos"])
+                    self.assertIsNone(call["rope_sin"])
+                self.assertIs(result[0], hidden)
+                torch.testing.assert_close(result[1], query)
+                torch.testing.assert_close(result[2], tail)
+                self.assertEqual(result[3][0].data_ptr(), query_norm.data_ptr())
+                self.assertEqual(result[3][1].data_ptr(), query_scale.data_ptr())
 
     # (MLAPO runtime path requires NPU hardware; covered by integration tests.)
 
@@ -1776,6 +1857,8 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
     def test_exec_kv_turboquant_uses_latent_helper(self, mock_native, mock_helper):
         """exec_kv with enable_sparse_sfa_turboquant delegates to the TQ4 helper."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.use_rope = True
+        impl.pcp_enabled = False
         impl.enable_sparse_sfa_turboquant = True
         impl.enable_sparse_sfa_c8 = False
         impl.kv_lora_rank = self.KV_LORA_RANK
@@ -1859,6 +1942,7 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
     def test_forward_initializes_transform_outside_graph_capture(self):
         """The transform tensors are built before any graph-captured dispatch."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl._parallel_o_proj = None
         impl.enable_sparse_sfa_turboquant = True
         impl.turboquant = MagicMock()
         hidden_states = torch.randn(2, 4)

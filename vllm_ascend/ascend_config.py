@@ -147,7 +147,7 @@ class AscendCompilationConfig:
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
-        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
@@ -357,6 +357,11 @@ class RejectionSamplerConfig:
 
     @model_validator(mode="after")
     def _validate(self):
+        if self.enable_block_verify:
+            raise ValueError(
+                "rejection_sampler_config.enable_block_verify is no longer supported: Block Verify was only "
+                "implemented in Model Runner V1. Use enable_entropy_verify instead."
+            )
         if not (0 < self.posterior_threshold <= 1):
             raise ValueError(
                 f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
@@ -400,6 +405,50 @@ class RlConfig:
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
+@config(config=ConfigDict(frozen=True))
+class QuantizedAllReduceConfig:
+    """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
+
+    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
+    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
+    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+
+    The wrapper is built for every parallel group, but only groups with at most
+    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
+    TP degree itself is validated here, so an unsupported TP fails at config
+    parsing time instead of when some parallel group is constructed.
+    """
+
+    enable: bool = False
+    min_numel: int = 16777216
+
+    @field_validator("min_numel")
+    @classmethod
+    def _check_min_numel(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
+        return value
+
+    def _validate_preconditions(self, vllm_config: Any) -> None:
+        if not self.enable:
+            return
+        # Imported lazily: the wrapper module imports torch_npu, which should not
+        # be pulled in from the config factory at module import time.
+        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+            _MAX_VALID_WORLD_SIZE,
+        )
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if tp_size > _MAX_VALID_WORLD_SIZE:
+            raise ValueError(
+                "additional_config.quantized_all_reduce_config supports "
+                f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
+                f"int8 bound leaves too few quantization levels beyond that), but "
+                f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
+            )
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -439,10 +488,9 @@ class AscendConfig:
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
-            "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 65536,
+            "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -481,7 +529,6 @@ class AscendConfig:
                 "stair_config": {}
             },
             "rejection_sampler_config": {
-                "enable_block_verify": false,
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4
@@ -491,6 +538,10 @@ class AscendConfig:
                 "sleep_mode_extra_cleanup": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
+            },
+            "quantized_all_reduce_config": {
+                "enable": false,
+                "min_numel": 16777216
             },
             "xlite_graph_config": {
                 "enabled": false,
@@ -535,10 +586,6 @@ class AscendConfig:
                     "long_req_block_threshold": 700,
                     "dynamic_max_step": 256
                 }
-            },
-            "dynamic_spec_config": {
-                "method": null,
-                "method_params": {}
             },
             "sparse_kv_offload_config": {
                 "enabled": false,
@@ -588,7 +635,6 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
-    draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -596,13 +642,16 @@ class AscendConfig:
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
-    # This is a reference value: if the actual per-rank received token
-    # count exceeds it, tokens may be truncated, causing precision
-    # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
-    mega_moe_max_tokens: int = 65536
+    # MegaMoe (enable_fused_mc2=2/3): passed as the symm buffer's
+    # max_recv_token_num. 0 (default) lets the operator auto-compute it as
+    # num_max_tokens_per_rank * ep_world_size * min(num_topk, expert_per_rank).
+    # A positive value is used as a reference capacity instead: if the actual
+    # per-rank received token count exceeds it, tokens may be truncated,
+    # causing precision degradation. Do not set it too large because
+    # workspace memory scales linearly with this value.
+    # Plain MC2 (enable_fused_mc2=1): the same value is passed as
+    # dispatch_ffn_combine's max_output_size; 0 falls back to 65536 there.
+    mega_moe_max_tokens: int = 0
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -615,6 +664,10 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Derived from enable_fused_mc2=3: MegaMoE runs the shared expert inside
+    # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
+    # keeps the shared expert separate. Internal flag, not user-settable.
+    megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -633,13 +686,13 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
     xlite_graph_config: XliteGraphConfig = dataclasses.field(default_factory=lambda: XliteGraphConfig())
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
     scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
-    dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
@@ -677,9 +730,22 @@ class AscendConfig:
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
+        elif self.enable_fused_mc2 in (2, 3):
+            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
+            # with the shared expert fused into the operator.
+            self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
             _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires the cann_ops_transformer package; "
+                    "MegaMoe (and its shared-expert fusion) will be disabled."
+                )
             self.enable_fused_mc2 = 1
+        else:
+            raise ValueError(
+                "enable_fused_mc2 must be one of 0, 1, 2 (MegaMoE) or 3 "
+                f"(MegaMoE + shared-expert fusion); got {self.enable_fused_mc2}"
+            )
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -718,6 +784,12 @@ class AscendConfig:
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
             max_batched = vc.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
@@ -767,6 +839,18 @@ class AscendConfig:
         else:
             logger.info_once("FlashComm1 is enabled.")
 
+        # quantized_all_reduce_config and FlashComm1/SP are mutually exclusive:
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the
+        # quantized all-reduce wrapper would never be invoked.
+        sp_active = effective_flashcomm and vc.parallel_config.use_sequence_parallel_moe
+        if sp_active and self.quantized_all_reduce_config.enable:
+            logger.warning_once(
+                "additional_config.quantized_all_reduce_config is enabled together "
+                "with FlashComm1/SP. Sequence parallelism replaces TP all-reduce "
+                "with all-gather/reduce-scatter, so the int8 quantized all-reduce "
+                "would never be used. Disabling quantized_all_reduce_config."
+            )
+            self.quantized_all_reduce_config = dataclasses.replace(self.quantized_all_reduce_config, enable=False)
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
@@ -888,23 +972,33 @@ class AscendConfig:
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
-        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        ) = self._parse_sparse_li_layers_from_quant_config(
+            quant_config,
+            # Some ModelSlim checkpoints describe only the INT8 projection,
+            # not indexer.quant_type. Treat it as C8 only when explicitly
+            # requested; W8A8 projection alone does not imply a C8 cache.
+            ("INT8_DYNAMIC", "W8A8_MXFP8", "W8A8_DYNAMIC")
+            if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+            and vllm_config.attention_config.indexer_kv_dtype == "int8"
+            else ("INT8_DYNAMIC", "W8A8_MXFP8"),
+        )
         (
             self._sparse_li_c4_layer_ids,
             self._sparse_li_c4_layer_names,
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
-        # (and `PassConfig.enable_sp`) in both v0.32.0 and verified main.
+        # (and `PassConfig.enable_sp`) in both v0.33.0 and verified main.
 
         enable_sp_by_pass = False
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
 
         self._validate_mc2_comm_alg(vc)
+        self._validate_megamoe_shared_expert_fusion(vc)
 
-        # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        # mega_moe_max_tokens range (0 = let the MegaMoe operator auto-compute)
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
@@ -941,7 +1035,7 @@ class AscendConfig:
         )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         hardware_profile = get_current_hardware_profile()
         if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(
@@ -970,6 +1064,36 @@ class AscendConfig:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication. "
                 "Please set additional_config.enable_fused_mc2 to 0."
+            )
+
+    def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
+        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+
+        The shared expert is fused into the routed A5 MegaMoe operator, so this
+        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        the shared expert and routed experts share the residual width. Latent-MoE
+        models (e.g. Kimi K3) project the residual stream before the routed FFN and
+        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
+        that layout. Fail fast instead of silently downgrading, because a silent
+        downgrade would change results without failing the launch.
+        """
+        if not self.megamoe_shared_expert_fusion:
+            return
+
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "the current hardware profile does not support it. "
+                "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
+            )
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        if getattr(hf_text_config, "routed_expert_hidden_size", None) is not None:
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) does not support latent-MoE models "
+                "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
@@ -1171,6 +1295,7 @@ class AscendConfig:
     def _parse_sparse_li_layers_from_quant_config(
         cls, quant_config: Any, valid_quant_types: tuple[str, ...]
     ) -> tuple[set[int], set[str]]:
+        """Prefer explicit indexer cache types over projection-type fallback."""
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return set(), set()
@@ -1185,10 +1310,20 @@ class AscendConfig:
             if not isinstance(key, str):
                 continue
             matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
-            if matched_suffix is None or value not in valid_quant_types:
+            if matched_suffix is None:
                 continue
             layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
+                continue
+            # A projection's quantization does not override an explicit
+            # indexer cache rollback, such as quant_type="FLOAT".
+            if (
+                get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+                and matched_suffix == ".indexer.wq_b.weight"
+                and f"{layer_name}.indexer.quant_type" in quant_description
+            ):
+                continue
+            if value not in valid_quant_types:
                 continue
             layer_names.add(layer_name)
             layer_ids.add(extract_layer_index(layer_name))
@@ -1250,7 +1385,7 @@ class AscendConfig:
         return
 
     def get_mc2_comm_alg(self) -> str:
-        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
         # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
@@ -1259,34 +1394,6 @@ class AscendConfig:
         ):
             return "fullmesh_v1"
         return self.mc2_comm_alg
-
-
-@config
-class DynamicSpecConfig:
-    """
-    Configuration Object for dynamic_spec_config from additional_config
-    """
-
-    # Dynamic speculative-length methods. "dspark" relies on the DSpark
-    # confidence head; models without such a head need another method.
-    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
-
-    # None disables the dynamic speculative-length path.
-    method: str | None = None
-    # Custom parameters of the selected dynamic method; the expected keys
-    # depend on `method` (e.g. dspark accepts
-    # initial_verify_budget_per_req, budget_update_interval and
-    # budget_threshold). Empty by default, in which case each method
-    # falls back to its own built-in defaults.
-    method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate(self):
-        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
-            )
-        return self
 
 
 @config
@@ -1923,6 +2030,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
+    new_config.quantized_all_reduce_config._validate_preconditions(vllm_config)
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)

@@ -13,7 +13,7 @@ def _next_power_of_2(n):
     # vLLM #58651's packed_qk_rope kernel evaluates
     # triton.next_power_of_2(rotary_dim) with a tl.constexpr argument.
     # The host helper only understands plain ints, so unwrap first.
-    if isinstance(n, tl.constexpr):
+    if HAS_TRITON and isinstance(n, tl.constexpr):
         n = n.value
     return next_power_of_2(n)
 

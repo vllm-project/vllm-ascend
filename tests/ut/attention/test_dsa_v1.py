@@ -1747,7 +1747,9 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
     pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
-    pcp_manager._local_batch = SimpleNamespace(num_tokens=local_common.num_actual_tokens)
+    pcp_manager._local_batch = SimpleNamespace(
+        num_tokens=local_common.num_actual_tokens, num_tokens_after_padding=local_common.num_input_tokens
+    )
     pcp_manager._local_gather_idx = torch.tensor([0, 4, -1], dtype=torch.int64)
     pcp_manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,

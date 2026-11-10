@@ -20,7 +20,14 @@ from typing import Any
 import torch
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kv_transfer import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import worker
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store":
+        raise
+    # Retain compatibility with vLLM revisions before the Store package split.
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
 
 
 @dataclass

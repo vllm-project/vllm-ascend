@@ -5,6 +5,7 @@ import threading
 from concurrent.futures import Future
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -44,6 +45,7 @@ from .helpers import (
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    thread.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     thread.tp_rank = 0
     thread.tp_size = 1
     thread.pcp_rank = 0
@@ -194,6 +196,7 @@ def test_pcp_dcp_selects_one_complete_replica_group() -> None:
         remote_block_size_scale=1,
         spec=make_full_spec(),
         selection_index=1,
+        remote_interleave_size=16,
     )
 
     assert result == [(2, [10], [20]), (3, [11], [20])]
@@ -225,6 +228,7 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
             remote_block_size_scale=1,
             spec=make_full_spec(),
             selection_index=0,
+            remote_interleave_size=16,
         )
 
         assert result == [(dcp_rank, [10], [20])]
@@ -401,6 +405,7 @@ def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica(
         remote_block_size_scale=1,
         spec=make_full_spec(),
         selection_index=1,
+        remote_interleave_size=16,
     )
 
     assert result == [(3, [10, 11], [21, 22])]
@@ -437,6 +442,7 @@ def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
         remote_block_size_scale=remote_scale,
         spec=make_sfa_indexer_spec(replication_size=2),
         selection_index=0,
+        remote_interleave_size=remote_block_size,
     )
 
     assert result == [(0, [20, 21, 22, 23], expected_remote_blocks)]
@@ -467,9 +473,56 @@ def test_compute_non_replicated_sfa_indexer_uses_dcp_sequence_shards() -> None:
         remote_block_size_scale=1,
         spec=make_sfa_indexer_spec(replication_size=1),
         selection_index=0,
+        remote_interleave_size=16,
     )
 
     assert result == [(3, [10], [20])]
+
+
+@pytest.mark.parametrize("rank", range(8))
+@pytest.mark.parametrize("computed", [0, 1536])
+def test_dcp8_sharded_indexer_pd_uses_interleave_not_kernel_multiplier(rank, computed):
+    thread = make_thread(tp_size=8, tp_rank=rank, dcp_size=8, dcp_rank=rank)
+    thread.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=768))
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[[0]],
+        remote_dcp_size=1,
+        spec_index=0,
+        local_block_size=1536,
+        remote_block_size=1536,
+        local_group_block_ids=[10, 11],
+        local_full_group_block_ids=[10, 11],
+        remote_group_block_ids=list(range(20, 28)),
+        local_num_prompt_tokens=12289,
+        remote_num_prompt_tokens=12288,
+        num_computed_tokens=computed,
+        local_block_size_scale=12,
+        remote_block_size_scale=12,
+        spec=make_sfa_indexer_spec(block_size=1536, replication_size=1),
+        selection_index=0,
+        remote_indexer_replication_size=1,
+        remote_interleave_size=1536,
+    )
+    tokens = [t for t in range(computed, 12288, 128) if (t // 768) % 8 == rank]
+    expected_local, expected_remote = [], []
+    for token in tokens:
+        local = (token // 6144) * 768 + token % 768
+        expected_local.append(10 * 12 + local // 128)
+        expected_remote.append((20 + token // 1536) * 12 + (token % 1536) // 128)
+    assert result == ([(0, expected_local, expected_remote)] if tokens else [])
+
+
+def test_explicit_sharded_handshake_does_not_confuse_12_kernel_blocks_with_replicas():
+    thread = make_thread(tp_size=8, tp_rank=3, dcp_size=8, dcp_rank=3)
+    remote = replace(make_pp_metadata(block_size_scales=[[12]]), indexer_replication_sizes=[1])
+    get_groups = MagicMock(return_value=[[0]])
+    thread._get_attention_remote_tp_rank_groups = get_groups
+    thread._get_layer_remote_tp_rank_groups(
+        0, 0, make_sfa_indexer_spec(replication_size=1), remote, remote_pcp_size=1, remote_tp_size=8, remote_dcp_size=1
+    )
+    assert get_groups.call_args.kwargs["local_dcp_size"] == 8
+    assert get_groups.call_args.kwargs["remote_dcp_size"] == 1
 
 
 @pytest.mark.parametrize(
@@ -501,7 +554,10 @@ def test_sfa_indexer_topology_uses_dcp_only_when_neither_side_replicates(
         dcp_size=local_dcp_size,
         block_size_scales=[[local_replication_size]],
     )
-    remote = make_pp_metadata(block_size_scales=[[remote_replication_size]])
+    remote = replace(
+        make_pp_metadata(block_size_scales=[[remote_replication_size]]),
+        indexer_replication_sizes=[remote_replication_size],
+    )
     get_remote_groups = MagicMock(return_value=[list(range(8))])
     thread._get_attention_remote_tp_rank_groups = get_remote_groups  # type: ignore[method-assign]
 
@@ -531,9 +587,9 @@ def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
         layer_block_sizes=[32],
         block_size_scales=[[2]],
     )
-    remote = make_pp_metadata(
-        layer_block_sizes=[64],
-        block_size_scales=[[4]],
+    remote = replace(
+        make_pp_metadata(layer_block_sizes=[64], block_size_scales=[[4]]),
+        indexer_replication_sizes=[4],
     )
 
     buckets, request_ids = thread._build_transfer_block_buckets(
@@ -620,6 +676,7 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
         1,
         make_sliding_spec(),
         0,
+        remote_interleave_size=16,
     )
 
     assert result == [(0, [10, 11], [20, 21])]
@@ -646,6 +703,7 @@ def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCach
         1,
         spec,
         2,
+        remote_interleave_size=16,
     )
 
     assert result == [(2, [10], [20])]
@@ -673,6 +731,7 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
             1,
             spec,
             0,
+            remote_interleave_size=16,
         )
 
     with pytest.raises(ValueError, match="equal P/D physical block counts"):
@@ -693,6 +752,7 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
             1,
             spec,
             0,
+            remote_interleave_size=16,
         )
 
 
@@ -722,6 +782,7 @@ def test_compute_mamba_state_selects_pre_speculative_local_block(
         1,
         replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
         0,
+        remote_interleave_size=16,
     )
 
     assert result == [(0, [checkpoint], [10])]
@@ -747,6 +808,7 @@ def test_compute_dcp_blocks_maps_local_shards_to_remote_dcp_ranks() -> None:
         1,
         make_full_spec(),
         0,
+        remote_interleave_size=16,
     )
 
     assert result == [(1, [10], [20]), (3, [11], [20])]
@@ -772,9 +834,76 @@ def test_compute_dcp_blocks_supports_different_logical_block_sizes() -> None:
         2,
         make_full_spec(),
         0,
+        remote_interleave_size=32,
     )
 
     assert result == [(5, [10, 11], [40, 42])]
+
+
+@pytest.mark.parametrize("rank", range(8))
+@pytest.mark.parametrize("computed", [0, 6144, 12345])
+def test_hybrid_dcp_mapping_uses_token_interleave_before_scheduler_pages(rank, computed):
+    thread = make_thread(dcp_size=8, dcp_rank=rank)
+    thread.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=768))
+    result = thread._compute_group_block_ids(
+        "request",
+        [[3]],
+        1,
+        0,
+        101376,
+        50688,
+        [10],
+        [10],
+        [20, 21],
+        65537,
+        65536,
+        computed,
+        792,
+        396,
+        make_full_spec(),
+        0,
+        remote_interleave_size=50688,
+    )
+    pairs = dict(zip(result[0][1], result[0][2])) if result else {}
+    # Independent per-token owner/address oracle, including the P page boundary.
+    expected = {}
+    for global_token in range((computed // 128) * 128, 65536, 128):
+        stripe, offset = divmod(global_token, 768)
+        if stripe % 8 != rank:
+            continue
+        local_token = (stripe // 8) * 768 + offset
+        source_page = 20 if global_token < 50688 else 21
+        expected[10 * 792 + local_token // 128] = source_page * 396 + (global_token % 50688) // 128
+    assert pairs == expected
+
+
+def test_pp_transfer_uses_producer_layer_group_and_separates_mapping_cache():
+    thread = make_thread(
+        layer_names=["layer.0", "layer.1"],
+        group_indices=[0, 0],
+        spec_indices=[0, 0],
+        layer_block_sizes=[16, 16],
+        block_size_scales=[[1], [1]],
+        block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
+    )
+    thread._compute_group_block_ids = MagicMock(return_value=[(0, [10], [20])])
+    remote = replace(
+        make_pp_metadata(layer_names=["layer.0", "layer.1"], layer_block_sizes=[16, 16]), group_indices=[1, 2]
+    )
+    request = make_req_meta(remote=([99], [20], [30]))
+    thread._build_transfer_block_buckets(
+        remote,
+        [(0, 0), (1, 1)],
+        {(0, 0): [[0]], (1, 1): [[0]]},
+        1,
+        1,
+        {"request": request},
+        {},
+    )
+    calls = thread._compute_group_block_ids.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args[8] == [20]
+    assert calls[1].args[8] == [30]
 
 
 def test_transfer_bucket_reuses_block_mapping_for_layers_of_same_spec() -> None:
@@ -1550,6 +1679,7 @@ def test_compute_same_block_size_dcp_matrix(
         dcp_rank=local_dcp_rank,
     )
 
+    prompt_tokens = min(32 * local_dcp_size, len(remote_blocks) * 16 * remote_dcp_size)
     result = thread._compute_group_block_ids(
         "request",
         [candidate_ranks],
@@ -1560,13 +1690,14 @@ def test_compute_same_block_size_dcp_matrix(
         [10, 11],
         [10, 11],
         remote_blocks,
-        128,
-        128,
+        prompt_tokens + 1,
+        prompt_tokens,
         0,
         1,
         1,
         make_full_spec(),
         0,
+        remote_interleave_size=16,
     )
 
     assert result == expected
@@ -1592,6 +1723,7 @@ def test_compute_dcp_stops_when_remote_prompt_has_fewer_blocks() -> None:
         1,
         make_full_spec(),
         0,
+        remote_interleave_size=16,
     )
 
     assert result == [(0, [10], [22])]
@@ -1940,6 +2072,8 @@ def test_compute_block_ids_across_equal_block_size_dcp_matrix(
         dcp_rank=local_dcp_rank,
     )
 
+    # Supply a complete prompt range covered by both block tables.
+    prompt_tokens = min(len(local_blocks) * 16 * local_dcp_size, len(remote_blocks) * 16 * remote_dcp_size)
     result = thread._compute_group_block_ids(
         request_id="request",
         remote_tp_rank_groups=[candidate_ranks],
@@ -1950,13 +2084,14 @@ def test_compute_block_ids_across_equal_block_size_dcp_matrix(
         local_group_block_ids=local_blocks,
         local_full_group_block_ids=local_blocks,
         remote_group_block_ids=remote_blocks,
-        local_num_prompt_tokens=256,
-        remote_num_prompt_tokens=256,
+        local_num_prompt_tokens=prompt_tokens + 1,
+        remote_num_prompt_tokens=prompt_tokens,
         num_computed_tokens=0,
         local_block_size_scale=1,
         remote_block_size_scale=1,
         spec=make_full_spec(),
         selection_index=0,
+        remote_interleave_size=16,
     )
 
     assert result == expected
@@ -2029,6 +2164,7 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
         dcp_rank=local_dcp_rank,
     )
 
+    thread.vllm_config.parallel_config.cp_kv_cache_interleave_size = local_block_size
     result = thread._compute_group_block_ids(
         request_id="request",
         remote_tp_rank_groups=[candidate_ranks],
@@ -2046,6 +2182,7 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
         remote_block_size_scale=remote_scale,
         spec=make_full_spec(local_block_size),
         selection_index=0,
+        remote_interleave_size=remote_block_size,
     )
 
     assert result == expected
@@ -2059,7 +2196,7 @@ def test_replicated_mamba_selects_one_complete_producer_replica(local_tp: int, r
     groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), remote_pcp, remote_tp, 1)
     assert groups == [list(range(remote_pcp * remote_tp))]
     transfers = thread._compute_group_block_ids(
-        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1
+        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1, remote_interleave_size=1
     )
     assert transfers == [(1, [2], [3])]
 
@@ -2107,3 +2244,252 @@ def test_replicated_short_conv_copies_complete_state_between_different_ranks(
         assert src == [1128]
         assert dst == [5320]
         assert lengths == [96]
+
+
+@pytest.mark.parametrize(
+    ("interleave", "message"),
+    [
+        (0, "positive multiple of the kernel block size"),
+        (-128, "positive multiple of the kernel block size"),
+        (192, "positive multiple of the kernel block size"),
+        (384, "must divide the local scheduler page size"),
+    ],
+)
+def test_interleaved_dcp_rejects_invalid_alignment(interleave, message) -> None:
+    thread = make_thread(
+        dcp_size=2,
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave)),
+    )
+    with pytest.raises(ValueError, match=message):
+        thread._compute_group_block_ids(
+            request_id="request",
+            spec_index=0,
+            spec=make_full_spec(block_size=512),
+            local_group_block_ids=[],
+            remote_dcp_size=1,
+            remote_tp_rank_groups=[[0]],
+            local_block_size=512,
+            remote_block_size=512,
+            local_full_group_block_ids=[10],
+            remote_group_block_ids=[20],
+            local_num_prompt_tokens=513,
+            remote_num_prompt_tokens=512,
+            num_computed_tokens=0,
+            local_block_size_scale=4,
+            remote_block_size_scale=4,
+            selection_index=0,
+            remote_interleave_size=512,
+        )
+
+
+def test_interleaved_dcp_does_not_copy_a_fully_cached_partial_block() -> None:
+    thread = make_thread(
+        dcp_size=2,
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128)),
+    )
+    assert (
+        thread._compute_group_block_ids(
+            request_id="request",
+            spec_index=0,
+            spec=make_full_spec(block_size=512),
+            local_group_block_ids=[],
+            remote_dcp_size=1,
+            remote_tp_rank_groups=[[0]],
+            local_block_size=512,
+            remote_block_size=512,
+            local_full_group_block_ids=[],
+            remote_group_block_ids=[],
+            local_num_prompt_tokens=124,
+            remote_num_prompt_tokens=123,
+            num_computed_tokens=123,
+            local_block_size_scale=4,
+            remote_block_size_scale=4,
+            selection_index=0,
+            remote_interleave_size=512,
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("computed", "local_ids", "remote_ids"),
+    [(0, [40, 41, 42, 43, 68, 69], [41, 47, 53, 59, 65, 71]), (1024, [68, 69], [65, 71])],
+)
+def test_interleaved_dcp_crosses_local_pages_using_full_block_table(computed, local_ids, remote_ids) -> None:
+    thread = make_thread(
+        dcp_size=2,
+        dcp_rank=1,
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128)),
+    )
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[[0]],
+        remote_dcp_size=1,
+        spec_index=0,
+        local_block_size=512,
+        remote_block_size=256,
+        local_group_block_ids=[17] if computed else [10, 17],
+        local_full_group_block_ids=[10, 17],
+        remote_group_block_ids=[20, 23, 26, 29, 32, 35],
+        local_num_prompt_tokens=1537,
+        remote_num_prompt_tokens=1536,
+        num_computed_tokens=computed,
+        local_block_size_scale=4,
+        remote_block_size_scale=2,
+        spec=make_full_spec(block_size=512),
+        selection_index=0,
+        remote_interleave_size=256,
+    )
+    assert result == [(0, local_ids, remote_ids)]
+
+
+@pytest.mark.parametrize(("local_dcp", "remote_dcp"), [(1, 4), (4, 1), (2, 4), (4, 2), (8, 8)])
+@pytest.mark.parametrize(
+    ("local_page", "remote_page", "local_interleave", "remote_interleave"),
+    [
+        (512, 768, 128, 256),
+        (768, 512, 384, 128),
+        (512, 512, 256, 128),
+        (768, 1536, 768, 1536),
+    ],
+)
+@pytest.mark.parametrize("computed", [0, 133, 1536])
+def test_dcp_mapping_uses_each_peers_interleave(
+    local_dcp, remote_dcp, local_page, remote_page, local_interleave, remote_interleave, computed
+) -> None:
+    kernel_size = 128
+    end_token = 3179
+    local_blocks = [10 + 3 * i for i in range(32)]
+    remote_blocks = [20 + 5 * i for i in range(32)]
+    # Two independent head pieces, each with two replicas of all P DCP shards.
+    rank_groups = [list(range(2 * remote_dcp)), list(range(100, 100 + 2 * remote_dcp))]
+    selection = 1
+    for local_rank in range(local_dcp):
+        thread = make_thread(
+            dcp_size=local_dcp,
+            dcp_rank=local_rank,
+            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=local_interleave)),
+        )
+        result = thread._compute_group_block_ids(
+            request_id="request",
+            remote_tp_rank_groups=rank_groups,
+            remote_dcp_size=remote_dcp,
+            spec_index=0,
+            local_block_size=local_page,
+            remote_block_size=remote_page,
+            local_group_block_ids=[],
+            local_full_group_block_ids=local_blocks,
+            remote_group_block_ids=remote_blocks,
+            local_num_prompt_tokens=end_token + 1,
+            remote_num_prompt_tokens=end_token,
+            num_computed_tokens=computed,
+            local_block_size_scale=local_page // kernel_size,
+            remote_block_size_scale=remote_page // kernel_size,
+            spec=make_full_spec(block_size=local_page),
+            selection_index=selection,
+            remote_interleave_size=remote_interleave,
+        )
+        # Independent slot-writer oracle: restart ownership at virtual pages,
+        # then index each peer's kernel block table using the local offset.
+        expected: dict[int, list[tuple[int, int]]] = {}
+        for token in range(computed // kernel_size * kernel_size, end_token, kernel_size):
+            lp, lo = divmod(token, local_page * local_dcp)
+            if local_dcp > 1:
+                if lo // local_interleave % local_dcp != local_rank:
+                    continue
+                lo = lo // (local_interleave * local_dcp) * local_interleave + lo % local_interleave
+            rp, ro = divmod(token, remote_page * remote_dcp)
+            owner = 0
+            if remote_dcp > 1:
+                owner = ro // remote_interleave % remote_dcp
+                ro = ro // (remote_interleave * remote_dcp) * remote_interleave + ro % remote_interleave
+            pair = (
+                local_blocks[lp] * (local_page // kernel_size) + lo // kernel_size,
+                remote_blocks[rp] * (remote_page // kernel_size) + ro // kernel_size,
+            )
+            for ranks in rank_groups:
+                rank = ranks[remote_dcp + owner]
+                expected.setdefault(rank, []).append(pair)
+        actual = {rank: list(zip(local_ids, remote_ids)) for rank, local_ids, remote_ids in result}
+        assert len(actual) == len(result)
+        assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("interleave", "message"),
+    [
+        (192, "positive multiple of the kernel block size"),
+        (384, "divide the remote scheduler page size"),
+    ],
+)
+def test_dcp_mapping_rejects_invalid_remote_interleave(interleave, message) -> None:
+    thread = make_thread(
+        dcp_size=2, vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
+    )
+    with pytest.raises(ValueError, match=message):
+        thread._compute_group_block_ids(
+            "request",
+            [[0, 1]],
+            2,
+            0,
+            512,
+            512,
+            [10],
+            [10],
+            [20],
+            513,
+            512,
+            0,
+            4,
+            4,
+            make_full_spec(block_size=512),
+            0,
+            remote_interleave_size=interleave,
+        )
+
+
+@pytest.mark.parametrize("missing_side", ["local", "remote"])
+def test_dcp_mapping_rejects_incomplete_block_tables(missing_side) -> None:
+    thread = make_thread(
+        dcp_size=2, vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
+    )
+    with pytest.raises(ValueError, match="do not cover"):
+        thread._compute_group_block_ids(
+            "request",
+            [[0, 1]],
+            2,
+            0,
+            512,
+            512,
+            [10],
+            [] if missing_side == "local" else [10],
+            [] if missing_side == "remote" else [20],
+            513,
+            512,
+            0,
+            4,
+            4,
+            make_full_spec(block_size=512),
+            0,
+            remote_interleave_size=256,
+        )
+
+
+def test_transfer_bucket_caches_remote_interleave_separately() -> None:
+    thread = make_thread()
+    thread._compute_group_block_ids = MagicMock(return_value=[(0, [10], [20])])
+    cache: dict[str, Any] = {}
+    for interleave in [8, 16]:
+        remote = replace(make_pp_metadata(), cp_kv_cache_interleave_size=interleave)
+        thread._build_transfer_block_buckets(
+            remote,
+            [(0, 0)],
+            {(0, 0): [[0]]},
+            1,
+            1,
+            {"request": make_req_meta()},
+            cache,
+        )
+    calls = thread._compute_group_block_ids.call_args_list
+    assert len(calls) == 2
+    assert [call.args[16] for call in calls] == [8, 16]

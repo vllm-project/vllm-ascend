@@ -12,7 +12,13 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed import mooncake_store
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import worker
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store":
+        raise
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
 
 
 @pytest.fixture

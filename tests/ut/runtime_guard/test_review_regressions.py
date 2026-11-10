@@ -206,7 +206,7 @@ def test_v5_bootstrap_invalid_content_falls_back_to_defaults(tmp_path: Path):
 
 def test_v8a_wave_tracker_discard():
     wt = WaveTracker()
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     wt.record_sample_waves(["r1"])
     assert wt.take_sample_wave("r1") == 1
     wt.record_sample_waves(["r1"])
@@ -218,9 +218,9 @@ def test_v8a_wave_tracker_discard():
 def test_v8a3_wave_tracker_fifo_under_async_lag():
     """W1-3: later record must not erase an untaken earlier stamp."""
     wt = WaveTracker()
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     wt.record_sample_waves(["r1"])  # wave 1
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     wt.record_sample_waves(["r1"])  # wave 2 (must queue, not overwrite)
     assert wt.take_sample_wave("r1") == 1
     assert wt.take_sample_wave("r1") == 2
@@ -230,7 +230,7 @@ def test_v8a3_wave_tracker_fifo_under_async_lag():
 
 def test_v8a2_wave_tracker_lock_record_take_concurrent():
     wt = WaveTracker()
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     errs: list[BaseException] = []
 
     def _record() -> None:
@@ -259,7 +259,7 @@ def test_v8a2_wave_tracker_lock_record_take_concurrent():
 def test_v8b_reap_discards_wave_stamps():
     p = _bare_processor()
     wt = WaveTracker()
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     wt.record_sample_waves(["r1", "r2"])
     p.wave_tracker = wt
     p.runtime_config = MagicMock()
@@ -279,7 +279,7 @@ def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
 
     p = _bare_processor()
     wt = WaveTracker()
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     p.wave_tracker = wt
     p.runner = SimpleNamespace(tp_rank=1)
     p.needs_sample_phase_hooks = lambda: True  # type: ignore[method-assign]
@@ -681,8 +681,8 @@ def test_v12e_logits_finite_skip_stopped_on_hot_path():
 
 def _quota_rc(max_times: int, cooldown: float) -> SimpleNamespace:
     return SimpleNamespace(
-        dump_max_times=lambda: max_times,
-        dump_cooldown_seconds=lambda: cooldown,
+        auto_dump_max_times=lambda: max_times,
+        auto_dump_cooldown_seconds=lambda: cooldown,
     )
 
 
@@ -2226,7 +2226,7 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
 
 
 def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
-    """dump_only path with dump inactive refunds unclaimed arms (not fully off)."""
+    """skip_config_bus path with dump inactive refunds unclaimed arms (not fully off)."""
     from vllm_ascend.observability.runtime_guard import processor_dump
 
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
@@ -2235,7 +2235,7 @@ def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
-    # Sync enters dump_only branch (detectors off, hot-reload off).
+    # Sync enters skip_config_bus (no detectors, no manual, hot-reload off).
     p.runtime_config.manual_trigger.return_value = False
     p.runtime_config.needs_sample_phase_hooks.return_value = False
     p.runtime_config.hot_reload_enabled = False
@@ -2245,8 +2245,8 @@ def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
     p._deferred_kv_dump_jobs = []
     p._end_of_wave_sync_if_no_sample = MagicMock()
 
-    RuntimeGuardProcessor.sync_for_step(p, allow_manual_dump=True)
-    p.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
+    RuntimeGuardProcessor.sync_for_step(p, has_scheduled_tokens=True)
+    p.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
 
@@ -2268,11 +2268,11 @@ def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):
     # Restore real end_of_wave_sync (bare_processor stubs it).
     p.end_of_wave_sync = RuntimeGuardProcessor.end_of_wave_sync.__get__(p)  # type: ignore[method-assign]
 
-    RuntimeGuardProcessor.sync_for_step(p, allow_manual_dump=True)
+    RuntimeGuardProcessor.sync_for_step(p, has_scheduled_tokens=True)
     p.wave_tracker.advance.assert_not_called()
     p.refresh_config.assert_not_called()
 
-    RuntimeGuardProcessor.end_of_wave_sync(p, allow_manual_dump=True)
+    RuntimeGuardProcessor.end_of_wave_sync(p, has_scheduled_tokens=True)
     p._drain_merged_bus.assert_not_called()
     p._maybe_fire_manual_local.assert_not_called()
 
@@ -2342,7 +2342,7 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
         store.mark_finished(["r2"], wave=1)
 
         wt = WaveTracker()
-        wt.advance(allow_manual_dump=True)
+        wt.advance(has_scheduled_tokens=True)
         wt.record_sample_waves(["r1", "r2"])
 
         p = _bare_processor()

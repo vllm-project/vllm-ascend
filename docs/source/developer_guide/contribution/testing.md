@@ -248,7 +248,7 @@ You can run tests with `pytest` as well. Typical examples:
 For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Qwen
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/Qwen
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
@@ -279,7 +279,7 @@ for the identity and failure contracts.
 
 ### PR selective testing (CI)
 
-The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag). PRs targeting a release branch (`releases/v*`) are tested against the matched vLLM release tag only.
 
 How tests are selected:
 

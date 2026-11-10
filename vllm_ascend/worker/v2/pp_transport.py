@@ -58,6 +58,7 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
                     "KimiLinearForCausalLM",
                     "KimiK3ForCausalLM",
                     "KimiK3ForConditionalGeneration",
+                    "KimiK31ForConditionalGeneration",
                 }
             ),
             needs_aux_hidden_states=True,

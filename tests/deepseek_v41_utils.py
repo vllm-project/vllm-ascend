@@ -314,7 +314,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
 
 
 def allocate_cache_views(config, device="cpu"):
-    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+    from vllm_ascend.worker.v2.attn_utils import _adjust_dsv4_kv_layout
 
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     backings, caches = [], {}
@@ -333,8 +333,7 @@ def allocate_cache_views(config, device="cpu"):
                 offset = specs[source_name].unpadded_page_size_bytes
                 shapes.append((config.num_blocks, get_storage_block_size(spec), spec.num_kv_heads, spec.scale_dim))
                 dtypes.append(spec.scale_dtype)
-            views = NPUModelRunner._adjust_kv_layout(
-                None,
+            views = _adjust_dsv4_kv_layout(
                 raw,
                 shapes,
                 dtypes,

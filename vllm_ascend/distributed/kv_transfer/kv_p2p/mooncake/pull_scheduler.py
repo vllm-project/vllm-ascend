@@ -191,7 +191,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 for tp_rank, worker_metadata in workers_by_tp_rank.items():
                     mismatched_fields = [
                         field_name
-                        for field_name in ("block_size", "num_blocks")
+                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
                         if getattr(worker_metadata, field_name) != getattr(reference, field_name)
                     ]
                     if mismatched_fields:
@@ -206,7 +206,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             # have been checked against the corresponding structural signature.
             layer_source_by_name: dict[str, tuple[MooncakeTransferMetadata, int]] = {}
             # layer_name -> (group index, block size, strides, lengths, shapes,
-            #                block-size scales).
+            #                block-size scales, indexer replication size).
             layer_signature_by_name: dict[str, tuple[object, ...]] = {}
             reference_layer_names: set[str] | None = None
             for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
@@ -232,6 +232,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                             worker_metadata.block_lens[local_layer_index],
                             worker_metadata.block_shapes[local_layer_index],
                             worker_metadata.block_size_scales[local_layer_index],
+                            worker_metadata.indexer_replication_sizes[local_layer_index],
                         )
                         previous_signature = layer_signature_by_name.get(layer_name)
                         if previous_signature is not None and previous_signature != layer_signature:
@@ -242,6 +243,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                                 "block_lens",
                                 "block_shapes",
                                 "block_size_scales",
+                                "indexer_replication_sizes",
                             )
                             mismatched_layer_fields = [
                                 field_name
@@ -264,6 +266,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
             block_size_scales: list[list[int]] = []
+            indexer_replication_sizes: list[int] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
@@ -272,6 +275,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
+                indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
             metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
@@ -298,6 +302,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
             merged[pp_rank] = MooncakePPTransferMetadata(
                 block_size=reference.block_size,
+                cp_kv_cache_interleave_size=reference.cp_kv_cache_interleave_size,
                 num_blocks=reference.num_blocks,
                 layer_names=layer_names,
                 layer_block_sizes=layer_block_sizes,
@@ -307,6 +312,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
+                indexer_replication_sizes=indexer_replication_sizes,
             )
         return merged
 
@@ -675,7 +681,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         request: "Request",
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Expose completed producer blocks for a remote READ transfer."""
+        """Release unstarted consumer transfers or expose completed producer blocks."""
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector request_finished: request_status=%s, kv_transfer_params=%s",
@@ -684,23 +690,22 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         )
 
         if params is not None and params.get("do_remote_prefill"):
-            required_remote_fields = (
-                "remote_host",
-                "remote_port",
-                "remote_request_id",
-            )
-            if all(field in params for field in required_remote_fields):
-                remote = (
-                    params["remote_host"],
-                    params["remote_port"],
-                    params["remote_request_id"],
-                )
-                if self._recving_thread is None:
-                    raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
-                self._recving_thread.add_request(*remote)
-            else:
-                logger.warning("Got invalid KVTransferParams. params=%s.", params)
-
+            # Allocation clears this flag before starting a READ. A rejected
+            # or cancelled request that still has it never started receiving,
+            # so notify P directly instead of leaving its blocks pinned.
+            if params.get("remote_block_ids"):
+                required_remote_fields = ("remote_host", "remote_port", "remote_request_id")
+                if all(field in params for field in required_remote_fields):
+                    if self._recving_thread is None:
+                        raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
+                    self._recving_thread.add_request(
+                        params["remote_host"], params["remote_port"], params["remote_request_id"]
+                    )
+                else:
+                    logger.warning("Got invalid KVTransferParams. params=%s.", params)
+            # Make repeated finish callbacks harmless, including zero-block
+            # requests. Transfers already handed to workers use their normal
+            # aggregated receive-completion notification instead.
             params["do_remote_prefill"] = False
             return False, None
 

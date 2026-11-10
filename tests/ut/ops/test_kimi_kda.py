@@ -219,6 +219,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
+    attention.pcp_size = 1
     attention.local_num_heads = 2
     attention.head_dim = 3
     hidden_states = torch.randn(4, 6)
@@ -507,8 +508,12 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
     )
 
 
-@pytest.mark.parametrize("mode", ["spec", "decode", "mixed"])
-def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
+@pytest.mark.parametrize(
+    "mode,source_layout",
+    [(mode, layout) for mode in ("spec", "decode", "mixed", "mixed_sparse") for layout in ("contiguous", "strided")]
+    + [("spec", "cast"), ("decode", "cast")],
+)
+def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
     state = torch.zeros(1)
     conv_meta = SimpleNamespace(
         query_start_loc=torch.tensor([0, 4]), cache_indices=torch.tensor([0]), num_accepted_tokens=None
@@ -519,8 +524,8 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         num_decodes=0 if mode == "spec" else 1,
         num_decode_tokens=4,
         spec_sequence_masks=None if mode == "decode" else torch.tensor([True]),
-        spec_token_indx=torch.tensor([0, 2, 4]),
-        non_spec_token_indx=torch.tensor([1, 3, 5]),
+        spec_token_indx=torch.tensor([0, 2] if mode == "mixed_sparse" else [0, 2, 4]),
+        non_spec_token_indx=torch.tensor([1, 3] if mode == "mixed_sparse" else [1, 3, 5]),
         spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
         non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
         spec_query_start_loc=torch.tensor([0, 2 if mode == "mixed" else 4]),
@@ -528,18 +533,37 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         spec_state_indices_tensor=torch.tensor([0]),
         non_spec_state_indices_tensor=torch.tensor([0]),
     )
-    values = torch.arange(1, 9, dtype=torch.float32).view(8, 1).repeat(1, 6)
+    values = (torch.arange(1, 9, dtype=torch.float32) / 7).view(8, 1).repeat(1, 6)
     values[4:] = torch.nan
     gate = torch.zeros(8, 1, 2)
     gate[4:] = torch.nan
 
     def recurrent(q, k, v, raw_gate, beta, recurrent_state, query_start_loc, state_indices, **kwargs):
         recurrent_state.add_(1)
+        if source_layout == "strided":
+            storage = torch.empty(*v.shape[:-1], v.shape[-1] * 2)
+            source = storage[..., ::2]
+            source.copy_(v)
+            return source
+        if source_layout == "cast":
+            return v.to(torch.bfloat16)
         return v.clone()
 
+    norm_inputs = []
+
     def norm_into(x, g, *, out):
-        assert out is x
-        out.copy_(x * torch.sigmoid(g))
+        norm_inputs.append(x)
+        assert x.dtype == out.dtype
+        if mode in ("spec", "decode") and source_layout == "contiguous":
+            # The fast path must not clear or copy into the destination first.
+            assert torch.isnan(out).all()
+            assert x.data_ptr() != out.data_ptr()
+        else:
+            assert x.data_ptr() == out.data_ptr()
+        if mode == "mixed_sparse":
+            torch.testing.assert_close(x[:, 4:6], torch.zeros_like(x[:, 4:6]))
+        out[:, : x.shape[1]].copy_(x * torch.sigmoid(g))
+        out[:, x.shape[1] :].zero_()
 
     attention = SimpleNamespace(
         prefix="kda",
@@ -567,6 +591,75 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
             torch.zeros(1, 8, 1),
             output,
         )
-    torch.testing.assert_close(output[0, :4, 0], values[:4, :2] * 0.5)
+    expected = values[:4, :2]
+    if source_layout == "cast":
+        expected = expected.to(torch.bfloat16).to(output.dtype)
+    torch.testing.assert_close(output[0, :4, 0], expected * 0.5)
     torch.testing.assert_close(output[:, 6:], torch.zeros_like(output[:, 6:]))
-    torch.testing.assert_close(state, torch.tensor([2.0 if mode == "mixed" else 1.0]))
+    torch.testing.assert_close(state, torch.tensor([2.0 if mode.startswith("mixed") else 1.0]))
+    assert len(norm_inputs) == 1
+
+
+@pytest.mark.parametrize("mode", ["prefill", "idle"])
+def test_kda_prefill_direct_norm_and_idle_output(mode):
+    tokens, capacity, heads, dim = 3, 4, 2, 128
+    core = torch.randn(1, tokens, heads, dim)
+    before = core.clone()
+    output = torch.full((1, capacity, heads, dim), torch.nan)
+    gate = torch.randn(capacity, heads, dim)
+    conv_meta = SimpleNamespace(query_start_loc=None, cache_indices=None, initial_state_mode=None)
+    metadata = SimpleNamespace(
+        num_actual_tokens=tokens,
+        num_prefills=int(mode == "prefill"),
+        num_decodes=0,
+        num_decode_tokens=0,
+        spec_sequence_masks=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        non_spec_prefill_metadata=SimpleNamespace(causal_conv1d=conv_meta, chunk=None),
+        prefill_state_indices=torch.tensor([0]),
+        prefill_has_initial_state=torch.tensor([False]),
+    )
+    norm = MagicMock()
+
+    def norm_into(x, g, *, out):
+        assert x is core
+        assert out is output
+        assert torch.isnan(out).all()
+        out[:, :tokens].copy_(x * g.sigmoid())
+        out[:, tokens:].zero_()
+
+    norm.side_effect = norm_into
+    attention = SimpleNamespace(
+        prefix="kda",
+        head_dim=dim,
+        kv_cache=(torch.empty(1), torch.empty(1)),
+        get_parameter=lambda name: torch.empty(1),
+        _run_causal_conv1d=lambda x, *args, **kwargs: x,
+        _run_prefill=MagicMock(return_value=core),
+        o_norm=SimpleNamespace(forward_oot=norm),
+    )
+    with (
+        patch("vllm_ascend.ops.kimi_kda.GDNAttentionMetadata", SimpleNamespace),
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
+        ),
+    ):
+        AscendKimiK3DeltaAttention._forward(
+            attention,
+            torch.randn(tokens, 3 * heads * dim),
+            torch.randn(1, tokens, heads, dim),
+            gate,
+            torch.zeros(1, tokens, heads),
+            output,
+        )
+    if mode == "idle":
+        norm.assert_not_called()
+        attention._run_prefill.assert_not_called()
+        torch.testing.assert_close(output, torch.zeros_like(output))
+    else:
+        norm.assert_called_once()
+        torch.testing.assert_close(output[:, :tokens], before * gate[:tokens].sigmoid())
+        torch.testing.assert_close(output[:, tokens:], torch.zeros_like(output[:, tokens:]))
+        torch.testing.assert_close(core, before)

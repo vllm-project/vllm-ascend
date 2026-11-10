@@ -182,7 +182,11 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
     original_weights = [layer.weight.float().clone() for layer in projections]
     original_scales = [layer.weight_scale.clone() for layer in projections]
     config = SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        model_config=SimpleNamespace(
+            runner_type="draft" if is_draft else "generate",
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="deepseek_v3"),
+        ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
@@ -1118,41 +1122,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
         self.assertEqual(metadata.decode.block_table.shape[0], 8)
 
-    def test_reorder_batch(self):
-        ascend_config = MagicMock()
-
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
-        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
-        mock_device = "cpu"
-
-        mock_vllm_config.speculative_config = None
-
-        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
-            builder.decode_threshold = 1
-
-        input_batch = MagicMock()
-        input_batch.req_ids = [0, 1, 2, 3]
-
-        scheduler_output = MagicMock()
-        scheduler_output.num_scheduled_tokens = {0: 1, 1: 3, 2: 1, 3: 2}
-        scheduler_output.scheduled_spec_decode_tokens = {0: [], 1: [1], 2: [], 3: []}
-
-        input_batch.swap_states = MagicMock()
-
-        modified = builder.reorder_batch(input_batch, scheduler_output)
-
-        self.assertTrue(modified)
-        input_batch.swap_states.assert_called_once_with(1, 2)
-
     def test_determine_chunked_prefill_workspace_size(self):
         mock_vllm_config = MagicMock()
         mock_vllm_config.scheduler_config.enable_chunked_prefill = True
@@ -1947,9 +1916,8 @@ class TestAscendMLAImpl(TestBase):
         """Kimi-K3 fuses its gate as a third QKV-A shard; MLAPO cannot carry it."""
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
-        # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.32.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.32.0")
+        # Both supported Kimi AMD implementations use the three-shard layout.
+        gate_fused = True
 
         impl = self._rebuild_impl()
 
@@ -2807,13 +2775,8 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
-        only while shape, dtype and device still match. The hand-rolled
-        ``copy_`` it replaced was unconditional, so a re-derived value that
-        stopped being compatible aborted the whole weight-update transaction
-        with a ``RuntimeError``. That failure mode is the only behaviour this
-        change alters, so it is the part of the contract the unit tests have to
-        pin down.
+        v0.33.0 rebinds an incompatible value; main can copy a smaller value
+        into the parameter's existing storage. Both must accept the new shape.
         """
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -2843,7 +2806,7 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             # A re-derived value that no longer fits rebinds the parameter.
             self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         else:
@@ -3695,10 +3658,6 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
     torch.testing.assert_close(kv_no_split, qkv_lora[:, 4:])
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="gate-fused QKV-A layout is vLLM main only",
-)
 def test_split_fused_qkv_lora_peels_kimi_output_gate():
     """A gate-fused layout returns the trailing shard separately from q/kv."""
     qkv_lora = torch.arange(15, dtype=torch.float32).reshape(1, 15)

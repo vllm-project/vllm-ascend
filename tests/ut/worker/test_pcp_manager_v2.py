@@ -34,7 +34,6 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -631,7 +630,10 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
     manager._local_batch = SimpleNamespace(
-        num_reqs=3, num_tokens=input_batch.num_tokens, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32)
+        num_reqs=3,
+        num_tokens=input_batch.num_tokens,
+        num_tokens_after_padding=input_batch.num_tokens_after_padding,
+        idx_mapping_np=np.array([3, 3, 7], dtype=np.int32),
     )
     manager._local_gather_idx = torch.arange(input_batch.num_tokens + 3, dtype=torch.int64)
     manager._block_tables = SimpleNamespace(
@@ -932,6 +934,31 @@ def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:
     assert result is restored_hidden_states
 
 
+@pytest.mark.parametrize("strided", [False, True])
+def test_pcp_hidden_restore_preserves_values_and_collective_layout(strided):
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._global_batch = SimpleNamespace(num_tokens=6, num_tokens_after_padding=6)
+    manager._hidden_restore_idx = torch.tensor([0, 3, 1, 4, 2, 5])
+    hidden_states = torch.arange(24).reshape(3, 8)[:, ::2]
+    if not strided:
+        hidden_states = hidden_states.contiguous()
+
+    def all_gather(value, dim):
+        assert value.is_contiguous(), "HCCL requires contiguous inputs"
+        torch.testing.assert_close(value, hidden_states)
+        if not strided:
+            assert value.data_ptr() == hidden_states.data_ptr()
+        return torch.cat([value, value + 100], dim=dim)
+
+    with (
+        patch("vllm_ascend.worker.v2.pcp_manager.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch("vllm.v1.worker.gpu.pcp_manager.get_pcp_group", return_value=SimpleNamespace(all_gather=all_gather)),
+    ):
+        restored = manager.restore_hidden_states(hidden_states)
+    expected = torch.cat([hidden_states, hidden_states + 100])[manager._hidden_restore_idx]
+    torch.testing.assert_close(restored, expected)
+
+
 def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     hidden_states = torch.randn(2, 4)
@@ -1189,7 +1216,7 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
     local_batch = _make_local_pcp_batch()
 
     # vLLM main renamed the upstream staging hook; patch and call the live name.
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_for_capture_or_profile"
     with (
         patch.object(PCPManager, stage_name) as stage,
         patch.object(manager, "partition_batch", return_value=local_batch) as partition,
@@ -1211,7 +1238,7 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
     legacy_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_for_capture_or_profile"
     with (
         patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,
@@ -1372,9 +1399,7 @@ def test_is_target_attn_groups_excludes_draft_only_groups(draft_pcp_size) -> Non
 
 
 def _get_draft_input_buffers(manager, buffers, num_tokens):
-    """Call the live upstream signature; vLLM main also returns the MoE padding mask."""
-    if vllm_version_is("0.32.0"):
-        return manager.get_draft_input_buffers(buffers)
+    """Both supported upstream versions return the MoE padding mask."""
     return manager.get_draft_input_buffers(buffers, num_tokens)[0]
 
 

@@ -193,6 +193,13 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     return hf_config
 
 
+def model_uses_kimi_kda(model_config: Any | None) -> bool:
+    text = getattr(model_config, "hf_text_config", None)
+    return getattr(text, "model_type", None) in ("kimi_linear", "kimi_k31") and bool(
+        getattr(text, "linear_attn_config", None)
+    )
+
+
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
@@ -235,6 +242,19 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
     parallel_config = vllm_config.parallel_config
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
+
+
+def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    """Kimi's uncompressed indexer uses the same token owners as MLA."""
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+    text = vllm_config.model_config.hf_text_config
+    return enable_sfa_dcp_replicated_indexer(vllm_config) and getattr(text, "model_type", None) in (
+        "kimi_linear",
+        "kimi_k31",
+    )
 
 
 def clear_enable_sp():
@@ -967,6 +987,17 @@ def register_ascend_fla_customop():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 1
+
+
+def requires_lmhead_dp_sync(vllm_config: VllmConfig) -> bool:
+    """V2 reduced LMHead padding requires real, synchronized DP token buckets."""
+    # TODO: Merge the requires_lmhead_dp_sync interface into
+    # should_skip_allreduce_across_dp_group in a future refactor.
+    return (
+        vllm_config.use_v2_model_runner
+        and vllm_config.parallel_config.decode_context_parallel_size == 1
+        and lmhead_tp_enable()
+    )
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:

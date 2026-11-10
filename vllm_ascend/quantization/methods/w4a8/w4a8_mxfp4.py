@@ -49,6 +49,11 @@ SITU_MX_DST_TYPE_E4M3FN = 36
 class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
 
+    # Declares the full scheme so consumers (e.g. the MegaMoe shared-expert
+    # weight collection) can tell this linear method apart from the W4A4MXFP
+    # one, whose packed weight bytes are indistinguishable.
+    quant_type: QuantType = QuantType.W4A8MXFP
+
     weight_switch_gather_specs = (
         WeightSwitchGatherSpec("weight"),
         WeightSwitchGatherSpec("weight_scale"),
@@ -246,6 +251,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None) if _EXTRA_CTX.use_mega_moe else None
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=w1,
                 w2=w2,
@@ -253,6 +260,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=layer.w13_weight,

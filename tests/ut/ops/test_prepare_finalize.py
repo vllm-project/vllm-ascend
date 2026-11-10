@@ -16,12 +16,6 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
 class TestPrepareAndFinalize(unittest.TestCase):
     def setUp(self):
         # These fixtures expose V1 forward-context attributes directly.
-        self.mock_use_v2 = patch(
-            "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
-            False,
-        )
-        self.mock_use_v2.start()
-        self.addCleanup(self.mock_use_v2.stop)
         self.mock_v2_extra_kwargs = patch(
             "vllm_ascend.ascend_forward_context._USE_V2_EXTRA_KWARGS",
             False,
