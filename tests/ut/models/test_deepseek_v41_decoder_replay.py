@@ -230,8 +230,7 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_v2_model_runner):
+def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     monkeypatch.setattr(model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     seen = []
 
@@ -255,7 +254,6 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_v2_model_ru
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
     model.hc_mult = 1
-    model._capture_aux_after_layer = use_v2_model_runner
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
@@ -292,6 +290,5 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_v2_model_ru
     )
     assert seen == [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
     assert output[:, 0].tolist() == [0, 0, 4, 4]
-    offset = int(use_v2_model_runner)
-    assert aux[0][:, 0].tolist() == [1 + offset] * 4
-    assert aux[1][:, 0].tolist() == [0, 0, 3 + offset, 3 + offset]
+    assert aux[0][:, 0].tolist() == [2] * 4
+    assert aux[1][:, 0].tolist() == [0, 0, 4, 4]

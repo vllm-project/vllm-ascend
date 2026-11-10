@@ -650,9 +650,11 @@ class V41PPCacheHandler(nn.Module):
         self.incoming = incoming
         self.outgoing = outgoing
         self.prefix = prefix
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        # Keep the leading local-token extent required by PP tensor slicing.
+        row_shape = (pcp_size,) if pcp_size > 1 else ()
         self.remote_caches = nn.ModuleDict()
-        self.specs = {}
+        cache_specs = {}
         for source in sorted(set(incoming.cache_sources + outgoing.cache_sources)):
             ratio = config.compress_ratios[source]
             block_size = vllm_config.cache_config.block_size
@@ -660,51 +662,38 @@ class V41PPCacheHandler(nn.Module):
             index_spec = make_index_cache_spec(
                 block_size=block_size, head_size=config.index_head_dim, compress_ratio=ratio
             )
-            self.specs[source] = (long_spec, index_spec)
+            long_prefix, index_prefix = self.cache_prefixes(source)
+            root = f"pp_transport_v41_cache_{source}"
+            cache_specs[source] = (
+                PPTransportTensorSpec(
+                    root + "_long", (*row_shape, long_spec.head_size), long_spec.dtype, (long_prefix, None)
+                ),
+                PPTransportTensorSpec(
+                    root + "_index", (*row_shape, index_spec.head_size), index_spec.dtype, (index_prefix, 0)
+                ),
+                PPTransportTensorSpec(
+                    root + "_scale", (*row_shape, index_spec.scale_dim), index_spec.scale_dtype, (index_prefix, 1)
+                ),
+            )
             if source in incoming.cache_sources:
-                long_prefix, index_prefix = self.cache_prefixes(source)
                 self.remote_caches[f"{source}_long"] = DeepseekV41CacheLayer(vllm_config, long_prefix, long_spec)
                 self.remote_caches[f"{source}_index"] = DeepseekV41CacheLayer(vllm_config, index_prefix, index_spec)
                 if uses_a5_packed_cache() and source == config.candidate_source_layer_id:
                     self.remote_caches[f"{source}_folded"] = DeepseekV41CacheLayer(
                         vllm_config, index_prefix + "_folded", make_folded_index_cache_spec(block_size=block_size)
                     )
-        self.incoming_planes = self.cache_planes(incoming)
-        self.outgoing_planes = self.cache_planes(outgoing)
+        self.incoming_specs = tuple(spec for source in incoming.cache_sources for spec in cache_specs[source])
+        self.outgoing_specs = tuple(spec for source in outgoing.cache_sources for spec in cache_specs[source])
 
     def cache_prefixes(self, source):
         root = f"{self.prefix}.layers.{source}.self_attn"
         return root + ".long_kv_cache", root + ".indexer.k_cache"
 
-    def wire_specs(self, plan):
-        specs: list[PPTransportTensorSpec] = []
-        for source in plan.cache_sources:
-            long_spec, index_spec = self.specs[source]
-            root = f"pp_transport_v41_cache_{source}"
-            # The wire's leading extent stays query-local for IntermediateTensors
-            # slicing. Each query reserves PCP-size rows for replicated caches.
-            row_shape = (self.pcp_size,) if self.pcp_size > 1 else ()
-            specs.extend(
-                (
-                    PPTransportTensorSpec(root + "_long", (*row_shape, long_spec.head_size), long_spec.dtype),
-                    PPTransportTensorSpec(root + "_index", (*row_shape, index_spec.head_size), index_spec.dtype),
-                    PPTransportTensorSpec(root + "_scale", (*row_shape, index_spec.scale_dim), index_spec.scale_dtype),
-                )
-            )
-        return tuple(specs)
-
-    def cache_planes(self, plan):
-        planes: list[tuple[str, int | None]] = []
-        for source in plan.cache_sources:
-            long_prefix, index_prefix = self.cache_prefixes(source)
-            planes.extend(((long_prefix, None), (index_prefix, 0), (index_prefix, 1)))
-        return tuple(planes)
-
     def export_rows(self, rows):
-        export_pp_cache_rows(self.outgoing_planes, rows)
+        export_pp_cache_rows(self.outgoing_specs, rows)
 
     def import_rows(self, rows):
-        import_pp_cache_rows(self.incoming_planes, rows, scatter_cache_sk)
+        import_pp_cache_rows(self.incoming_specs, rows, scatter_cache_sk)
         context = get_forward_context()
         layers, metadata = context.no_compile_layers, context.attn_metadata
         for source in self.incoming.cache_sources:
@@ -744,8 +733,8 @@ def make_pp_cache_transport(vllm_config, config, prefix, start_layer, end_layer,
         vllm_config,
         prefix + ".pp_dependencies",
         handler,
-        handler.wire_specs(incoming),
-        handler.wire_specs(outgoing),
+        handler.incoming_specs,
+        handler.outgoing_specs,
         states(incoming),
         states(outgoing),
     )
@@ -878,11 +867,9 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        topology: DeepseekV41Topology | None = None,
     ):
         layer_idx = int(prefix.split(".")[-2])
-        if topology is None:
-            topology = build_layer_plan(config)
+        topology = build_layer_plan(config)
         role = topology.layer(layer_idx)
         super().__init__(
             vllm_config=vllm_config,
@@ -971,7 +958,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
         is_draft_layer: bool = False,
-        topology: DeepseekV41Topology | None = None,
     ) -> None:
         super().__init__()
 
@@ -992,7 +978,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
 
         attn_cls = self.attention_cls
-        attn_kwargs = {"topology": topology} if topology is not None else {}
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -1003,7 +988,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            **attn_kwargs,
         )
 
         self.mlp = DeepseekV41MoE(
@@ -1138,16 +1122,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     supports_aux_hidden_states_over_pp = True
     AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
-    _capture_aux_after_layer = True
     decoder_layer_cls = DeepseekV41DecoderLayer
 
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__()
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
-        topology = build_layer_plan(config)
         quant_config = vllm_config.quant_config
         self.config = config
-        self._capture_aux_after_layer = vllm_config.use_v2_model_runner
         self.has_engram = _engram_enabled_for_runtime(config, vllm_config)
         self.device = current_platform.device_type
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
@@ -1180,7 +1161,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: self.decoder_layer_cls(
-                vllm_config, prefix, config=config, topk_indices_buffer=topk_indices_buffer, topology=topology
+                vllm_config, prefix, config=config, topk_indices_buffer=topk_indices_buffer
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1218,6 +1199,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self, self._make_empty_intermediate_tensors
         )
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        topology = build_layer_plan(self.config)
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
             (max_tokens, 1, topology.candidate_topk_blocks),
@@ -1853,13 +1835,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 last_layer = self.layers[self.end_layer - 1]
                 break
             last_layer = layer
-            # MRV1 supplies shifted layer IDs and captures the entry stream,
-            # including the embedding boundary before the first Engram layer.
-            if not self._capture_aux_after_layer and layer.layer_idx + 1 in self.aux_hidden_state_layers:
-                aux_hidden_state = hidden_states.mean(dim=1)
-                if use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
             if layer.engram is not None and token_mask.numel():
                 # Without SP the earlier mask slices are views. Delay the wait
                 # until the first actual consumer so early layers can overlap
@@ -1890,7 +1865,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
             # MRV2 uses checkpoint capture boundaries directly: boundary L
             # is the post-layer L-1 residual, before layer L's Engram input.
-            if self._capture_aux_after_layer and layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states.mean(dim=1)
                 if use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
@@ -1928,13 +1903,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux = []
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
-            if not self._capture_aux_after_layer and layer.layer_idx + 1 in self.aux_hidden_state_layers:
-                residual = hidden_states.mean(dim=1)
-                if self.use_sequence_parallel:
-                    residual = sp_all_gather(residual)[: positions.shape[0]]
-                aux.append(residual)
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
-            if self._capture_aux_after_layer and layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
                 residual = hidden_states.mean(dim=1)
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]

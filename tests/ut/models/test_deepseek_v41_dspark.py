@@ -80,7 +80,6 @@ def test_target_exports_post_residual_at_selected_boundaries(monkeypatch):
     model = SimpleNamespace(
         hc_mult=4,
         decoder_replay_layers=None,
-        _capture_aux_after_layer=True,
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),

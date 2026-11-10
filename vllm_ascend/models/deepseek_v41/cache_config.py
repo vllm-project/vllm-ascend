@@ -3,7 +3,7 @@
 """Framework-side V4.1 layer-outermost cache placement and allocation."""
 
 from dataclasses import replace
-from itertools import zip_longest
+from itertools import chain, zip_longest
 
 import torch
 from vllm.config import VllmConfig
@@ -263,27 +263,21 @@ def _specs_from_groups(groups):
 
 
 def _get_worker_layer_tuples(groups):
-    """Keep resources sharing a scheduler block ID in distinct physical slots.
-
-    Projected PP groups retain the global grouping. A stage with three KV
-    sources can still own four SWA layers in one such group, so re-striping
-    SWA by the local source count would alias live pages within that group.
-    """
+    """Pack scheduler groups whose width may exceed the stage's KV source count."""
     specs = _specs_from_groups(groups)
     if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
-        # Preserve independent allocations for reduced SWA-only backbones,
-        # including draft layers, instead of constructing empty MLA slots.
+        # Preserve main's independent slots for SWA-only backbones and drafts.
         return get_layer_tuples(specs)
     _, source_tuples = get_layer_tuples(specs)
-    slots = [[name for name in names if isinstance(specs[name], AscendMLAAttentionSpec)] for names in source_tuples]
-    aliases = [
-        [name for name in group.layer_names if not isinstance(specs[name], AscendMLAAttentionSpec)] for group in groups
+    # A column's entries need distinct slots; different columns may alias.
+    columns = [
+        [tuple(name for name in names if isinstance(specs[name], AscendMLAAttentionSpec)) for names in source_tuples]
     ]
-    slot_count = max(len(slots), max(map(len, aliases), default=0))
-    slots.extend([] for _ in range(slot_count - len(slots)))
-    for names in aliases:
-        for slot, name in enumerate(names):
-            slots[slot].append(name)
+    columns.extend(
+        [(name,) for name in group.layer_names if not isinstance(specs[name], AscendMLAAttentionSpec)]
+        for group in groups
+    )
+    slots = [tuple(chain.from_iterable(parts)) for parts in zip_longest(*columns, fillvalue=())]
     page_sizes = [
         max(
             sum(
@@ -295,7 +289,7 @@ def _get_worker_layer_tuples(groups):
         )
         for names in slots
     ]
-    return page_sizes, [tuple(names) for names in slots]
+    return page_sizes, slots
 
 
 def get_deepseek_v41_pool_bytes_per_block(groups):

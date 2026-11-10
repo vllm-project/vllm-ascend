@@ -435,9 +435,8 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     assert [x[0].tolist() for x in seen] == [[1, 0], [0, 1], [1, 0]]
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @pytest.mark.parametrize("engram_offset", [0, 10])
-def test_v41_target_preserves_runner_specific_aux_boundaries(use_v2_model_runner, engram_offset):
+def test_v41_target_captures_aux_after_layer(engram_offset):
     from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
@@ -448,7 +447,6 @@ def test_v41_target_preserves_runner_specific_aux_boundaries(use_v2_model_runner
     model.end_layer = 3
     model.decoder_replay_start = 3
     model.use_sequence_parallel = False
-    model._capture_aux_after_layer = use_v2_model_runner
     model.engram_rotated = False
     model.needs_moe_input_ids = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
@@ -489,9 +487,8 @@ def test_v41_target_preserves_runner_specific_aux_boundaries(use_v2_model_runner
     embedded = model.embed_tokens(ids)
     torch.testing.assert_close(output, embedded + engram_offset + 3)
     assert len(aux) == 2
-    offset = int(use_v2_model_runner)
-    torch.testing.assert_close(aux[0], embedded + offset * (engram_offset + 1))
-    torch.testing.assert_close(aux[1], embedded + engram_offset + 2 + offset)
+    torch.testing.assert_close(aux[0], embedded + engram_offset + 1)
+    torch.testing.assert_close(aux[1], embedded + engram_offset + 3)
 
 
 def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():

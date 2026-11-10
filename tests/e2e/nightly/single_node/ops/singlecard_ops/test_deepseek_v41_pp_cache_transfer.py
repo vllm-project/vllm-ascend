@@ -140,8 +140,8 @@ def test_pp_dependency_transport_forwards_native_cache_and_selection_states(
             runtime,
             f"transport_{rank}",
             handler,
-            handler.wire_specs(incoming),
-            handler.wire_specs(outgoing),
+            handler.incoming_specs,
+            handler.outgoing_specs,
             states if rank else {},
             states if rank < 2 else {},
         )

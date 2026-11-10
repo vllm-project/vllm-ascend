@@ -278,6 +278,7 @@ class PPTransportTensorSpec:
     name: str
     shape: tuple[int, ...]
     dtype: torch.dtype
+    cache: tuple[str, int | None] | None = None
 
     def allocate(self, num_tokens: int, device: torch.device) -> torch.Tensor:
         return torch.zeros((num_tokens, *self.shape), dtype=self.dtype, device=device)
@@ -330,10 +331,12 @@ def pp_cache_write_metadata(metadata):
     return global_metadata if global_metadata is not None else metadata
 
 
-def export_pp_cache_rows(cache_planes: Sequence[tuple[str, int | None]], rows: Sequence[torch.Tensor]) -> None:
+def export_pp_cache_rows(specs: Sequence[PPTransportTensorSpec], rows: Sequence[torch.Tensor]) -> None:
     """Gather model-declared cache planes using the current forward's slots."""
     context = get_forward_context()
-    for (prefix, plane), output in zip(cache_planes, rows):
+    for spec, output in zip(specs, rows):
+        assert spec.cache is not None
+        prefix, plane = spec.cache
         cache = context.no_compile_layers[prefix].kv_cache[0]
         if plane is not None:
             cache = cache[plane]
@@ -344,13 +347,15 @@ def export_pp_cache_rows(cache_planes: Sequence[tuple[str, int | None]], rows: S
 
 
 def import_pp_cache_rows(
-    cache_planes: Sequence[tuple[str, int | None]],
+    specs: Sequence[PPTransportTensorSpec],
     rows: Sequence[torch.Tensor],
     scatter_rows: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], None],
 ) -> None:
     """Restore native cache planes while preserving the model's scatter ABI."""
     context = get_forward_context()
-    for (prefix, plane), values in zip(cache_planes, rows):
+    for spec, values in zip(specs, rows):
+        assert spec.cache is not None
+        prefix, plane = spec.cache
         cache = context.no_compile_layers[prefix].kv_cache[0]
         if plane is not None:
             cache = cache[plane]
