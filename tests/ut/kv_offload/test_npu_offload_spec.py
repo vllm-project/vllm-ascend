@@ -64,6 +64,7 @@ def test_npu_worker_releases_handlers_before_mmap() -> None:
     worker._load_handler = FakeHandler("load")  # type: ignore[assignment]
     worker._mmap_region = FakeRegion()
     worker._pinned_tensors = []
+    worker._pinned_registration = None
 
     worker.shutdown()
 
