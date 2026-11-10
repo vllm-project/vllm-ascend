@@ -482,7 +482,7 @@ def _resolve_window_policy(vllm_config: VllmConfig) -> int | None:
             "draft_window_size with method 'dflash' requires a supported "
             "DFlashDraftModel or DFlash2DraftModel architecture"
         )
-    return resolve_draft_window_policy(
+    policy = resolve_draft_window_policy(
         requested_window_size=requested,
         method=method,
         target_model_type=target_model_type,
@@ -490,6 +490,11 @@ def _resolve_window_policy(vllm_config: VllmConfig) -> int | None:
         dynamic_k=speculative_config.uses_dynamic_speculative_decoding(),
         is_dflash2="DFlash2DraftModel" in architectures,
     )
+    if vllm_config.parallel_config.prefill_context_parallel_size != 1:
+        raise NotImplementedError(
+            "MRV2 draft_window_size currently requires Target PCP1; the PCP window integration is delivered separately"
+        )
+    return policy
 
 
 def _use_graph_window_owner(vllm_config: VllmConfig, policy: int | None, support: Any) -> bool:
@@ -515,23 +520,7 @@ def validate_draft_window_graph_config(vllm_config: Any, *, support: Any) -> Non
     if parallel.pipeline_parallel_size != 1:
         raise RuntimeError("Draft Window Graph requires PP=1")
     if parallel.prefill_context_parallel_size != 1:
-        draft_parallel = speculative.draft_parallel_config
-        # Official PCP restores global requests before the replicated DSpark
-        # draft prepares its own positions, Full slots and exact lengths.
-        # The loaded provider still validates its PCP1/DCP1 reader and tables.
-        if not (
-            speculative.method == "dspark"
-            and vllm_config.model_config.hf_text_config.model_type == "glm_moe_dsa"
-            and not speculative.draft_model_config.use_mla
-            and parallel.tensor_parallel_size == parallel.prefill_context_parallel_size == 4
-            and parallel.decode_context_parallel_size == parallel.data_parallel_size == 1
-            and parallel.enable_expert_parallel
-            and speculative.num_speculative_tokens == 8
-            and not speculative.enable_adaptive_verification
-            and draft_parallel is not None
-            and draft_parallel.prefill_context_parallel_size == draft_parallel.decode_context_parallel_size == 1
-        ):
-            raise NotImplementedError("Draft Window Graph PCP requires replicated GLM DSpark TP4/PCP4, DP1/DCP1 and K8")
+        raise NotImplementedError("Draft Window Graph requires Target PCP1")
     if parallel.decode_context_parallel_size != 1:
         # Upstream gives a dense parallel drafter replicated KV even when the
         # GLM Target shards its KV across the TP group. The loaded provider
