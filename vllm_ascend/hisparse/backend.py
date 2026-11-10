@@ -38,6 +38,7 @@ def _allocate_attention_lengths(runtime: HiSparseRuntime) -> tuple[torch.Tensor,
     )
 
 
+@torch.inference_mode(False)
 def prepare_hisparse_workspaces(runtimes: Iterable[HiSparseRuntime]) -> None:
     """Create real next-binding storage inside the existing profile scope.
 
