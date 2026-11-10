@@ -1,0 +1,5 @@
+pr: 21391
+entries:
+  - category: performance
+    text: Added automatic split-K scheduling for FP8 and INT8 QuantLightningIndexerV2 calls with small queries and long contexts on Ascend A5.
+    hardware: [A5]
