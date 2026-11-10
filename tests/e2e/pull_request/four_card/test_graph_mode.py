@@ -400,7 +400,7 @@ def _install_spies(metrics: dict[str, Any] | None):
     if metrics is None:
         return contextlib.nullcontext()
 
-    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
     def make_spy(cls, method_name, capture_mem):
         original = getattr(cls, method_name)

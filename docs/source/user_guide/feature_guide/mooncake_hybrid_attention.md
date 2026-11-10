@@ -162,12 +162,6 @@ To use PCP, add these options to the model's launch command:
 ```
 
 Use the same TP, PP, and PCP topology on every instance sharing these objects.
-Select Model Runner V2 for the DeepSeek-V4-Flash PCP path:
-
-```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-```
-
 Each PCP worker owns separate Store objects and transfer sessions. Prefix lookup
 requires committed objects from every required PCP rank, PP stage, and storing
 TP rank or head. Objects from different PCP sizes are isolated, and PCP does

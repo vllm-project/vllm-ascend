@@ -19,7 +19,7 @@ the host between steps, then ``run_fullgraph`` per step.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
@@ -44,6 +44,9 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
 class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
@@ -82,6 +85,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        pcp_manager: PCPManager | None = None,
     ) -> None:
         if not self.is_draft_model_prefill:
             self._capture_decode_per_step(
@@ -103,6 +107,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 attn_groups,
                 kv_cache_config,
                 progress_bar_desc=progress_bar_desc,
+                pcp_manager=pcp_manager,
             )
 
         from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -140,6 +145,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 attn_groups,
                 kv_cache_config,
                 progress_bar_desc=progress_bar_desc,
+                pcp_manager=pcp_manager,
             )
         finally:
             AscendInputBatch.make_dummy = orig_make_dummy  # type: ignore[method-assign]

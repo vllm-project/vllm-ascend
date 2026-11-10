@@ -18,6 +18,7 @@
 #
 
 import inspect
+import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -107,6 +108,7 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
+    requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
@@ -147,6 +149,7 @@ class NPUModelRunner(GPUModelRunner):
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
     max_num_reqs: int
+    max_num_tokens: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -336,7 +339,10 @@ class NPUModelRunner(GPUModelRunner):
                 "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
             )
 
+        state = self.execute_model_state
+        self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
+        self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
@@ -476,14 +482,16 @@ class NPUModelRunner(GPUModelRunner):
             else None
         )
 
-        # Upstream has bound every local cache; publish sealed plans before
-        # the worker can warm up, capture graphs or execute prefill requests.
+        # Register the exact bound state-copy layouts; kernel_warmup owns
+        # compilation before model dummy runs and graph capture.
         from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 
-        initialize_kda_state_copy(
-            self.vllm_config.compilation_config.static_forward_context,
-            self.vllm_config.scheduler_config.max_num_seqs,
-        )
+        registry = getattr(self, "jit_warmup_registry", None)
+        with registry.activate() if registry is not None else nullcontext():
+            initialize_kda_state_copy(
+                self.vllm_config.compilation_config.static_forward_context,
+                self.vllm_config.scheduler_config.max_num_seqs,
+            )
 
         copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
         if (
@@ -628,9 +636,15 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        dp_coordination_context = (
-            skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
+        # Reduced LMHead padding needs synchronized token buckets for V2,
+        # DCP=1. Share the MC2 dispatcher's policy so active masks agree;
+        # DCP>1 retains full capacity and the original coordination policy.
+        # TODO: Merge the requires_lmhead_dp_sync interface into
+        # should_skip_allreduce_across_dp_group in a future refactor.
+        skip_dp_metadata_sync = should_skip_allreduce_across_dp_group(self.vllm_config) and not requires_lmhead_dp_sync(
+            self.vllm_config
         )
+        dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
@@ -654,14 +668,13 @@ class NPUModelRunner(GPUModelRunner):
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
-            # lmhead TP: idle ranks never call sample(); join the target head
-            # here at capacity, before _dummy_run replays the dummy propose.
+            # Idle ranks join the same LMHead collective size as active ranks.
             if self.execute_model_state is None:
                 raise RuntimeError(
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
                 )
             dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
+                self._get_lmhead_pad_size(self.execute_model_state),
                 dtype=torch.int64,
                 device=self.device,
             )
@@ -738,10 +751,12 @@ class NPUModelRunner(GPUModelRunner):
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        global_tokens = self.max_num_tokens
+        profile_tokens = self._get_pcp_profile_num_tokens()
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and self.max_num_tokens > mc2_tokens_capacity
+                and profile_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
@@ -754,7 +769,11 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            super().profile_run(**profile_kwargs)
+            self.max_num_tokens = profile_tokens
+            try:
+                super().profile_run(**profile_kwargs)
+            finally:
+                self.max_num_tokens = global_tokens
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
@@ -854,6 +873,7 @@ class NPUModelRunner(GPUModelRunner):
             adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        admitted_draft_kwargs = {}
         if adaptive_verification_active:
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
@@ -886,19 +906,32 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            # vLLM main appends the admitted draft counts (a 4th element) for
-            # batch-sharded sampling; the release tree returns three fields.
-            draft_split = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
-            if vllm_version_is("0.32.0"):
-                cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split
-            else:
-                cu_num_logits, query_start_loc, total_num_draft_tokens, _ = draft_split
+            num_scheduled_draft_tokens = total_num_draft_tokens
+            self._log_adaptive_verification_costs(adaptive_verification_manager)
+            allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
+            if len(allocation) == 4:
+                admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+            logger.debug(
+                "Adaptive verification budget: requests=%d, scheduled_drafts=%d, admitted_drafts=%d, "
+                "padded_tokens=%d, graph_mode=%s",
+                num_reqs,
+                num_scheduled_draft_tokens,
+                total_num_draft_tokens,
+                num_tokens_after_padding,
+                batch_desc.cg_mode,
+            )
 
             # Non-fia backends skip padding query boundary when using adaptive verification
             if self.use_fia:
-                query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
-                query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
+                self._sync_adaptive_fia_query_start_loc(
+                    query_start_loc_np,
+                    query_start_loc,
+                    num_reqs,
+                    num_scheduled_draft_tokens,
+                    total_num_draft_tokens,
+                )
 
         if self.use_fia and adaptive_verification_manager:
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -987,6 +1020,7 @@ class NPUModelRunner(GPUModelRunner):
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
         pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
+        pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1069,6 +1103,15 @@ class NPUModelRunner(GPUModelRunner):
         ``max_num_reqs * decode_query_len``); drift desyncs and hangs."""
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
+    def _get_lmhead_pad_size(self, execute_model_state) -> int:
+        pad_size = self._lmhead_tp_max_num_logits()
+        if self.dcp_size == 1 and execute_model_state is not None:
+            # vLLM #60754 renamed the stored DP-sync state on main.
+            dp_sync = execute_model_state.dp_sync if vllm_version_is("0.31.0") else execute_model_state.dp_sync_state
+            if dp_sync is not None:
+                pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
+        return pad_size
+
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
@@ -1077,7 +1120,7 @@ class NPUModelRunner(GPUModelRunner):
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self._lmhead_tp_max_num_logits()
+        capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
         # V1-style index pad: pad a private copy of the indices (input_batch keeps
         # the real ones; the V2 sampler gathers penalties by them) so one gather
         # feeds compute_logits the capacity rows; zero entries gather row 0.
@@ -1101,8 +1144,8 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
-            if vllm_version_is("0.32.0"):
-                # 0.32.0 rejects drafts verified against a permissive grammar
+            if vllm_version_is("0.33.0"):
+                # 0.33.0 rejects drafts verified against a permissive grammar
                 # row; main moved that bookkeeping into the scheduler and the
                 # draft-token handler.
                 import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
@@ -1120,7 +1163,7 @@ class NPUModelRunner(GPUModelRunner):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            if vllm_version_is("0.32.0"):
+            if vllm_version_is("0.33.0"):
                 sampler_output = self.rejection_sampler(
                     logits,
                     input_batch,
@@ -1179,6 +1222,27 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.profile_cpp = previous_profile_cpp
             self.speculator = previous_speculator
             self.max_num_reqs = previous_max_num_reqs
+
+    def _get_pcp_profile_num_tokens(self) -> int:
+        """Keep replicated draft requests when profiling PCP-local prefill.
+
+        Initial memory profiling precedes KV/PCP-manager initialization.
+        Block drafters retain the global budget: their context-KV precompute
+        processes all target hidden states, independently of short queries.
+        """
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size <= 1:
+            return self.max_num_tokens
+        query_per_req = 1
+        spec = self.speculative_config
+        if spec is not None:
+            # Use shared config, not the last PP rank's speculator instance:
+            # every pipeline stage must profile the same target token shape.
+            if spec.method not in ("mtp", "eagle", "eagle3"):
+                return self.max_num_tokens
+            query_per_req = 1 + spec.num_speculative_tokens
+        local_tokens = (self.max_num_tokens + pcp_size - 1) // pcp_size
+        return min(self.max_num_tokens, max(local_tokens, self.max_num_reqs * query_per_req))
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
@@ -1325,8 +1389,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc,
             )
         else:
-            # Main hands non-last PP ranks the drafts received from the last
-            # rank; 0.32.0 has no such argument, hence the None-only path above.
+            # Non-last PP ranks receive drafts from the last rank on both versions.
             super().postprocess_sampled(
                 idx_mapping,
                 sampled_tokens,
@@ -1454,6 +1517,51 @@ class NPUModelRunner(GPUModelRunner):
             self._debugger_started = False
 
         self.debugger.step(**kwargs)
+
+    @staticmethod
+    def _log_adaptive_verification_costs(manager: Any) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        scheduled, non_draft, budget = manager._batch_budget
+        req_ids = list(scheduled)
+        slots = [manager.req_states.req_id_to_index[req_id] for req_id in req_ids]
+        confidence = manager._stale_confidences[manager._stale_idx].np[slots].astype(np.float64)
+        capacities = np.array(list(scheduled.values()))
+        valid = np.arange(manager.num_speculative_steps)[None, :] < capacities[:, None]
+        scores = np.sort(np.cumprod(confidence, axis=1)[valid])[::-1]
+        max_budget = min(len(scores), max(0, manager._max_total_logits - len(req_ids) * manager.num_bonus_tokens))
+        accepted = np.concatenate(([0.0], np.cumsum(scores[:max_budget])))
+        base_tokens = sum(non_draft.values())
+        draft_cost, verify_cost = manager.cost_tables
+        confidence_by_step = [
+            float(confidence[valid[:, i], i].mean()) for i in range(confidence.shape[1]) if valid[:, i].any()
+        ]
+        logger.debug(
+            "Adaptive verification costs: budget=%d/%d, base_tokens=%d, draft_ms=%.6f, "
+            "verify_ms(zero/chosen/full)=%s, expected_accepted_drafts(chosen/full)=%s, "
+            "mean_confidence_by_step=%s",
+            budget,
+            max_budget,
+            base_tokens,
+            float(draft_cost[len(req_ids)]),
+            [float(verify_cost[base_tokens + n]) for n in (0, budget, max_budget)],
+            [float(accepted[n]) for n in (budget, max_budget)],
+            confidence_by_step,
+        )
+
+    @staticmethod
+    def _sync_adaptive_fia_query_start_loc(
+        query_start_loc_np: np.ndarray,
+        query_start_loc: torch.Tensor,
+        num_reqs: int,
+        num_scheduled_draft_tokens: int,
+        num_admitted_draft_tokens: int,
+    ) -> None:
+        # compact_batch already gives exact host boundaries for full and zero
+        # budgets. Partial budgets may redistribute them on device.
+        if 0 < num_admitted_draft_tokens < num_scheduled_draft_tokens:
+            query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
+        query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
 
     def _pad_adaptive_query_start_loc_for_fia(
         self,

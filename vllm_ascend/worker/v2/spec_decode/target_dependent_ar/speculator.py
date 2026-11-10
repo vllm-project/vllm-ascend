@@ -39,7 +39,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
@@ -82,7 +82,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     model_state: "AscendModelState"
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -148,6 +148,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
+    @draft_config_context()
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config the way V1's proposer does: validate the
         target-derived config, then swap in the draft model config without
@@ -188,6 +189,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             # Set this before profiling so compiled inputs stay consistent.
             self.supports_mm_inputs = False
 
+    @draft_config_context()
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -279,6 +281,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         with (
             build_attn_metadata_wrapper(),
             torch_gather_wrapper(),
+            self._lmhead_pad_size_context(
+                sync_state,
+                capture_num_reqs=input_batch.num_reqs if self.dp_size == 1 else None,
+            ),
         ):
             return super().propose(
                 input_batch,
@@ -426,15 +432,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
         # vLLM #60335 added `num_speculative_steps` on main.
-        super()._generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-            num_speculative_steps,
-        )
+        with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
+            super()._generate_draft(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                num_speculative_steps,
+            )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
@@ -487,17 +494,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        if vllm_version_is("0.32.0"):
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-            )
-        else:
+        with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
             # vLLM main forwards `skip_sample` so the drafter KV stays in sync
             # without sampling when num_speculative_tokens == 0.
             super()._prefill(

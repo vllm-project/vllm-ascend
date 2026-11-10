@@ -149,7 +149,11 @@ class TestGLM53Store(unittest.TestCase):
                 worker = make_worker(
                     self, kv_cache_config=plan, prefix_match_unit=prefix_unit, use_mla=True, num_layers=4
                 )
-                start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+                start_patch(
+                    self,
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                    "MooncakeBackend.create_scheduler_client",
+                )
                 scheduler = KVPoolScheduler(worker.vllm_config, False, plan)
                 self.assertEqual(worker.hash_block_size, prefix_unit or 512)
                 self.assertEqual(scheduler.hash_block_size, worker.hash_block_size)
@@ -212,9 +216,7 @@ class TestGLM53Store(unittest.TestCase):
                     self.fill_caches(plan, caches, source, target, rank)
                     metadata = self.make_metadata(source, hashes)
                     worker.wait_for_save(metadata)
-                    # Drain this batch under the per-request fence (the
-                    # whole-batch wait_for_previous_save is gone).
-                    worker.kv_send_thread.wait_for_requests_saved({req.req_id for req in metadata.requests})
+                    worker.wait_for_previous_save()
                     workers.append((worker, caches))
                     self.doCleanups()
 
@@ -320,7 +322,11 @@ class TestGLM53Store(unittest.TestCase):
 
         self.assertEqual(len(readable), 14)  # Per PP stage: one MLA shard and three KDA groups on both TP ranks.
         self.assertFalse(any("@1@" in key.split(block_hash.hex())[0] for key in readable))
-        start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+        start_patch(
+            self,
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend."
+            "MemcacheBackend.create_scheduler_client",
+        )
         # The scheduler builds its coordinator from vllm_config, which
         # make_worker pins to retention 0 (semantic checkpoints only); this
         # round-trip persists every block, so look it up densely.
@@ -348,7 +354,11 @@ class TestGLM53Store(unittest.TestCase):
     def test_mooncake_layerwise_excludes_private_tail(self):
         plan = make_glm53_plan()
         worker = make_worker(self, kv_cache_config=plan, use_layerwise=True, use_mla=True, num_layers=4)
-        start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+        start_patch(
+            self,
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+            "MooncakeBackend.create_scheduler_client",
+        )
         scheduler = create_kv_pool_scheduler(worker.vllm_config, True, plan)
         self.assertTrue(worker.use_block_key_layerwise)
         self.assertTrue(scheduler.use_block_key_layerwise)
