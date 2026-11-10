@@ -72,20 +72,24 @@ def _store_qsa_rows_kernel(
     rows_ptr,
     stride_cache_block,
     stride_cache_token,
+    stride_cache_head,
     stride_cache_dim,
     stride_rows_row,
+    stride_rows_head,
     stride_rows_dim,
     num_rows,
     num_blocks,
+    num_heads,
     PAGE_SIZE: tl.constexpr,
     WIDTH: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
+    head = tl.program_id(1)
     dims = tl.arange(0, BLOCK_D)
     slot = tl.load(slots_ptr + row)
     cache_capacity = num_blocks * PAGE_SIZE
-    valid = (row < num_rows) & (slot >= 0) & (slot < cache_capacity)
+    valid = (row < num_rows) & (head < num_heads) & (slot >= 0) & (slot < cache_capacity)
     # Triton-Ascend can validate addresses before applying the store mask.
     # Keep every lane in bounds even when graph padding supplies an invalid
     # positive slot. Cast before multiplying by a potentially large stride so
@@ -94,12 +98,16 @@ def _store_qsa_rows_kernel(
     block = safe_slot // PAGE_SIZE
     token = safe_slot % PAGE_SIZE
     values = tl.load(
-        rows_ptr + row * stride_rows_row + dims * stride_rows_dim,
+        rows_ptr + row * stride_rows_row + head * stride_rows_head + dims * stride_rows_dim,
         mask=valid & (dims < WIDTH),
         other=0,
     )
     tl.store(
-        cache_ptr + block * stride_cache_block + token * stride_cache_token + dims * stride_cache_dim,
+        cache_ptr
+        + block * stride_cache_block
+        + token * stride_cache_token
+        + head * stride_cache_head
+        + dims * stride_cache_dim,
         values,
         mask=valid & (dims < WIDTH),
     )
@@ -296,15 +304,15 @@ def qsa_store_cache_rows(
     """Store fixed-width rows in a strided QSA cache."""
     if cache.device.type != "npu" or not HAS_TRITON:
         raise RuntimeError("QSA NPU cache stores require Triton")
-    if cache.ndim != 4 or cache.shape[2] != 1:
-        raise ValueError("QSA cache must be [pages, page_size, 1, width]")
+    if cache.ndim != 4:
+        raise ValueError("QSA cache must be [pages, page_size, heads, width]")
     if not all(cache.shape):
         raise ValueError("QSA cache dimensions must be nonzero")
-    if rows.ndim == 3:
-        if rows.shape[1] != 1:
-            raise ValueError("QSA cache rows must have one head")
-        rows = rows[:, 0]
-    if rows.ndim != 2 or rows.shape[1] != cache.shape[3]:
+    if rows.ndim == 2:
+        if cache.shape[2] != 1:
+            raise ValueError("Headless QSA rows require a single-head cache")
+        rows = rows.unsqueeze(1)
+    if rows.ndim != 3 or rows.shape[1] != cache.shape[2] or rows.shape[2] != cache.shape[3]:
         raise ValueError("QSA cache rows have an incompatible width")
 
     slot_mapping = slot_mapping.reshape(-1)
@@ -313,17 +321,20 @@ def qsa_store_cache_rows(
     rows = rows[:num_updates]
     if not num_updates:
         return
-    _store_qsa_rows_kernel[(num_updates,)](
+    _store_qsa_rows_kernel[(num_updates, cache.shape[2])](
         cache,
         slot_mapping,
         rows,
         cache.stride(0),
         cache.stride(1),
+        cache.stride(2),
         cache.stride(3),
         rows.stride(0),
         rows.stride(1),
+        rows.stride(2),
         num_updates,
         cache.shape[0],
+        cache.shape[2],
         PAGE_SIZE=cache.shape[1],
         WIDTH=cache.shape[3],
         BLOCK_D=triton.next_power_of_2(cache.shape[3]),
