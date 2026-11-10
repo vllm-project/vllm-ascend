@@ -128,6 +128,10 @@ jobs:
               "tests/e2e/pull_request/two_card/test_activation.py",
               "tests/e2e/pull_request/two_card/test_prefix_caching.py",
               "tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py",
+              # 参考线上真实业务分组（a3-2 的 test_pipeline_parallel.py）补一个
+              # 业务用例：DeepSeek-V2-Lite-Chat + tp1/pp2，模型与已通过的
+              # test_prefix_caching.py 相同，线下缓存可满足。
+              "tests/e2e/pull_request/two_card/test_pipeline_parallel.py",
           ]
           available = {test for group in all_groups for test in group["tests"].split()}
           if missing := set(a2_tests + a3_tests) - available:
