@@ -872,7 +872,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             manager = get_sparse_kv_offload_manager()
             layer_name = self._offload_layer_name()
-            k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             if attn_metadata.fused_copy_sfa_enabled:
                 layer_id = manager._get_offload_layer_id(layer_name)
                 device_slots = attn_metadata.copy_sfa_device_slots
@@ -888,6 +887,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                     layer_name, slots, attn_metadata.selective_tail_rows, k_nope, k_pe, self._in_graph_runtime()
                 )
                 return k_pe, k_nope
+            k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,

@@ -787,20 +787,6 @@ def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    from vllm_ascend.ascend_config import uses_selective_kv_offload
-
-    if uses_selective_kv_offload(vllm_config):
-        # Equal-lifetime specs can share block IDs while retaining per-layer placement.
-        if UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
-            return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
-        host_specs = {name: spec for name, spec in kv_cache_spec.items() if getattr(spec, "store_on_host", False)}
-        device_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in host_specs}
-        if not host_specs or not device_specs:
-            raise ValueError("Selective KV offload requires both Host and device cache specs")
-        return [
-            *_orig_get_kv_cache_groups(vllm_config, host_specs),
-            *_orig_get_kv_cache_groups(vllm_config, device_specs),
-        ]
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)

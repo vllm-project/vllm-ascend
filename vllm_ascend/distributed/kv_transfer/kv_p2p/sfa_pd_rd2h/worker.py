@@ -548,7 +548,8 @@ class SFAPDRD2HConsumerWorker:
             indexer_t = self._indexer_tensors[pool_idx]
             indexer_scale_t = self._indexer_scale_tensors[pool_idx]
             cpu_pool = self._cpu_pools[pool_idx]
-            if mname in self._full_names:
+            is_full = mname in self._full_names
+            if is_full:
                 device_pair = kv_caches[mname]
                 if not isinstance(device_pair, (list, tuple)) or len(device_pair) != 2:
                     raise RuntimeError(f"Selective full layer {mname} requires device K/V tensors")
@@ -563,17 +564,17 @@ class SFAPDRD2HConsumerWorker:
             else:
                 self._main_gva_bases.append(host_gvas[mname])
                 self._main_block_lens.append(host_lens[mname])
-            if cpu_pool is not None:
-                k_cpu, v_cpu = cpu_pool
-                addrs = [k_cpu.data_ptr(), v_cpu.data_ptr()]
-                block_lens = [
-                    k_cpu.element_size() * math.prod(k_cpu.shape[1:]),
-                    v_cpu.element_size() * math.prod(v_cpu.shape[1:]),
-                ]
-                scales = [k_cpu.shape[0] // num_blocks, v_cpu.shape[0] // num_blocks]
-            elif mname not in self._full_names:
-                addrs, block_lens, scales = [], [], []
-            groups = [full_group_idx if mname in self._full_names else main_group_idx] * len(addrs)
+                if cpu_pool is not None:
+                    k_cpu, v_cpu = cpu_pool
+                    addrs = [k_cpu.data_ptr(), v_cpu.data_ptr()]
+                    block_lens = [
+                        k_cpu.element_size() * math.prod(k_cpu.shape[1:]),
+                        v_cpu.element_size() * math.prod(v_cpu.shape[1:]),
+                    ]
+                    scales = [k_cpu.shape[0] // num_blocks, v_cpu.shape[0] // num_blocks]
+                else:
+                    addrs, block_lens, scales = [], [], []
+            groups = [full_group_idx if is_full else main_group_idx] * len(addrs)
             if indexer_t is not None:
                 addrs.append(indexer_t.data_ptr())
                 block_lens.append(indexer_t.element_size() * math.prod(indexer_t.shape[1:]))
@@ -589,7 +590,7 @@ class SFAPDRD2HConsumerWorker:
                 kv_caches_base_addr=addrs,
                 block_len=block_lens,
                 block_size_scale=scales,
-                main_tensor_count=2 if cpu_pool is not None or mname in self._full_names else 0,
+                main_tensor_count=2 if is_full or cpu_pool is not None else 0,
                 has_indexer=indexer_t is not None,
             )
 
