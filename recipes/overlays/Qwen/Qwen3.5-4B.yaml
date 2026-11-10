@@ -38,6 +38,7 @@ variants:
     hardware_overrides:
       ascend_310p:
         docker_image: "quay.io/ascend/vllm-ascend:v0.30.0rc1-310p"
+        docker_serve_command: "vllm serve"
         install:
           pip: false
 
