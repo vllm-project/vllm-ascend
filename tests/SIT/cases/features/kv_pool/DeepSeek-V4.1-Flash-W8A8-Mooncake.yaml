@@ -1,4 +1,4 @@
-test_name: "DeepSeek-V4.1-Flash-W8A8-Mooncake-1P1D-PD"
+test_name: "DeepSeek-V4.1-Flash-W8A8-Mooncake-PD"
 model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
 num_nodes: 2
 npu_per_node: 16
@@ -119,7 +119,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--additional-config"
   - '{"enable_cpu_binding": true, "enable_fused_mc2": 0, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
   - "--kv-transfer-config"
-  - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": true}}]}}'
+  - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": true}}]}}'
 
 decode_server_cmd: &decode_server_cmd
   - "--host"
@@ -174,7 +174,7 @@ decode_server_cmd: &decode_server_cmd
   - "--additional-config"
   - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
   - "--kv-transfer-config"
-  - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake"}}]}}'
+  - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake"}}]}}'
 
 templates:
   - node_index: 0
