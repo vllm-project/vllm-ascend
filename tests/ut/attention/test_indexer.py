@@ -21,6 +21,46 @@ from vllm_ascend.device.device_op import A5DeviceAdaptor
 _KERNEL_BLOCK_SIZE = 128
 
 
+@pytest.mark.parametrize("dtype,width", [(torch.float8_e4m3fn, 128), (torch.float32, 1)])
+@pytest.mark.parametrize("strided", [False, True])
+def test_fp8_indexer_cache_writes_preserve_pages(monkeypatch, dtype, width, strided):
+    blocks, block_size = 3, 4
+    element_size = torch.empty((), dtype=dtype).element_size()
+    page_bytes = block_size * width * element_size + 32
+    backing = torch.full((blocks * page_bytes,), 23, dtype=torch.uint8)
+    expected_backing = backing.clone()
+
+    def view(raw):
+        return raw.view(dtype).as_strided((blocks, block_size, 1, width), (page_bytes // element_size, width, width, 1))
+
+    cache = view(backing)
+    expected = view(expected_backing)
+    if not strided:
+        cache = cache.contiguous()
+        expected = expected.contiguous()
+    slots = torch.tensor([1, 5, 11], dtype=torch.int64)
+    updates = (torch.arange(3 * width).view(3, width) % 16).to(dtype)
+    for i, slot in enumerate(slots.tolist()):
+        block, offset = divmod(slot, block_size)
+        expected[block, offset, 0].copy_(updates[i])
+
+    def scatter(destination, indices, values):
+        if indices.shape[-1] == 1:
+            for i, slot in enumerate(indices[:, 0].tolist()):
+                destination[slot].copy_(values[i])
+        else:
+            assert destination is cache
+            for i, (block, offset) in enumerate(indices.tolist()):
+                destination[block, offset].copy_(values[i])
+
+    monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter)
+    AscendSFAIndexerBackend._write_cache_tensor(cache, updates, slots)
+    torch.testing.assert_close(cache.float(), expected.float())
+    if strided:
+        assert cache.data_ptr() == backing.data_ptr()
+        torch.testing.assert_close(backing, expected_backing, rtol=0, atol=0)
+
+
 def _make_builder(
     pcp_size: int = 1,
     dcp_size: int = 1,

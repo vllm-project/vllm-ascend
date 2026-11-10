@@ -26,6 +26,7 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.device_config import uses_native_int8_sparse_adaptor
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -47,7 +48,144 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+@lru_cache(maxsize=1)
+def _load_a3_dcp_qli() -> None:
+    """Load the optional isolated bridge when the full extension lacks it."""
+    if not hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_dcp"):
+        torch.ops.load_library(os.path.join(os.path.dirname(os.path.dirname(__file__)), "_qli_a3_dcp.so"))
+
+
 class BaseDeviceAdaptor:
+    native_dcp_indexer = False
+
+    @staticmethod
+    def build_indexer_local_metadata(
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_heads_q: int,
+        head_dim: int,
+        topk: int,
+        causal_seqlens_kv_global: torch.Tensor,
+        cp_world: int,
+        cp_rank: int,
+        cp_kv_cache_interleave_size: int,
+    ) -> torch.Tensor:
+        if not uses_native_int8_sparse_adaptor(get_current_hardware_profile()):
+            raise NotImplementedError("Owner-local INT8 QLI metadata requires the A3 native QLI kernel")
+        _load_a3_dcp_qli()
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_dcp_metadata(
+            num_heads_q,
+            1,
+            head_dim,
+            topk,
+            2,
+            cu_seqlens_q=query_start_loc,
+            seqused_k=seq_lens,
+            batch_size=seq_lens.shape[0],
+            max_seqlen_q=-1,
+            max_seqlen_k=-1,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=1,
+            enable_dcp=1,
+            causal_seqlens_kv_global=causal_seqlens_kv_global.to(torch.int32),
+            cp_world=cp_world,
+            cp_rank=cp_rank,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
+
+    @staticmethod
+    def indexer_select_dcp_candidates(
+        q_li: torch.Tensor,
+        weights: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kv_scale_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        local_seq_lens: torch.Tensor,
+        global_seq_lens: torch.Tensor,
+        quant_scale_query: torch.Tensor,
+        *,
+        cp_world: int,
+        cp_rank: int,
+        cp_interleave: int,
+        qli_metadata: torch.Tensor,
+        topk: int = 2048,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select owner-local causal candidates with the A3 QLI DCP kernel."""
+        if (
+            not uses_native_int8_sparse_adaptor(get_current_hardware_profile())
+            or q_li.dtype != torch.int8
+            or kv_cache.dtype != torch.int8
+        ):
+            raise NotImplementedError("DCP QLI requires A3 INT8 query and key caches")
+        indices, scores, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_dcp(
+            q_li.contiguous(),
+            kv_cache,
+            weights.to(torch.float16).contiguous(),
+            quant_scale_query.reshape(q_li.shape[:-1]).to(torch.float16).contiguous(),
+            kv_scale_cache.squeeze(2),
+            topk,
+            2,
+            cu_seqlens_q=query_start_loc,
+            seqused_k=local_seq_lens,
+            block_table=block_table,
+            metadata=qli_metadata,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=1,
+            candidate_mode=3,
+            output_idx_offset=None,
+            enable_dcp=True,
+            cp_world=cp_world,
+            cp_rank=cp_rank,
+            cp_kv_cache_interleave_size=cp_interleave,
+            causal_seqlens_kv_global=global_seq_lens,
+            return_value=1,
+        )
+        from vllm_ascend.ops.triton.sharded_indexer import normalize_dcp_candidates
+
+        return normalize_dcp_candidates(indices, scores, query_start_loc)
+
+    @staticmethod
+    def indexer_select_local_candidates(
+        q_li: torch.Tensor,
+        weights: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kv_scale_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        quant_scale_query: torch.Tensor,
+        local_visible_lengths: torch.Tensor,
+        *,
+        qli_metadata: torch.Tensor,
+        topk: int = 2048,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select native INT8 candidates from each query's causal local prefix."""
+        if (
+            not uses_native_int8_sparse_adaptor(get_current_hardware_profile())
+            or q_li.dtype != torch.int8
+            or kv_cache.dtype != torch.int8
+        ):
+            raise NotImplementedError("Owner-local INT8 QLI candidates require A3 INT8 query and key caches")
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_local_candidates(
+            q_li.contiguous(),
+            kv_cache,
+            weights.to(torch.float16).contiguous(),
+            quant_scale_query.reshape(q_li.shape[:-1]).to(torch.float16).contiguous(),
+            kv_scale_cache.squeeze(2),
+            query_start_loc,
+            seq_lens,
+            block_table,
+            local_visible_lengths.to(torch.int32).reshape(-1, 1).contiguous(),
+            qli_metadata,
+            topk,
+        )
+
     @staticmethod
     def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
         """Return the packed-cache ABI implementation, or use standard caches."""
@@ -997,6 +1135,8 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    native_dcp_indexer = True
+
     @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
         operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
@@ -1629,6 +1769,127 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def get_dsa_kernel_block_sizes():
         """A5: return supported kernel block sizes."""
         return [8, 16, 128]
+
+    @staticmethod
+    def build_indexer_local_metadata(
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_heads_q: int,
+        head_dim: int,
+        topk: int,
+        global_seq_lens: torch.Tensor | None = None,
+        cp_world: int = 1,
+        cp_rank: int = 0,
+        cp_interleave: int = 1,
+    ) -> torch.Tensor:
+        dcp_args = {}
+        if global_seq_lens is not None:
+            dcp_args = dict(
+                enable_dcp=True,
+                cp_world=cp_world,
+                cp_rank=cp_rank,
+                cp_kv_cache_interleave_size=cp_interleave,
+                causal_seqlens_kv_global=global_seq_lens,
+            )
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+            num_heads_q,
+            1,
+            head_dim,
+            topk,
+            1,
+            cu_seqlens_q=query_start_loc,
+            seqused_k=seq_lens,
+            batch_size=seq_lens.shape[0],
+            max_seqlen_q=-1,
+            max_seqlen_k=-1,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3 if dcp_args else 0,
+            cmp_ratio=1,
+            **dcp_args,
+        )
+
+    @staticmethod
+    def indexer_select_dcp_candidates(
+        q_li: torch.Tensor,
+        weights: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kv_scale_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        quant_scale_query: torch.Tensor,
+        *,
+        global_seq_lens: torch.Tensor,
+        cp_world: int,
+        cp_rank: int,
+        cp_interleave: int,
+        qli_metadata: torch.Tensor,
+        topk: int = 2048,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """A5 computes causal prefixes internally and returns local IDs/BF16 scores."""
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+            q_li.contiguous(),
+            kv_cache,
+            weights.to(torch.float32).contiguous(),
+            quant_scale_query.reshape(q_li.shape[:-1]).to(torch.float32).contiguous(),
+            kv_scale_cache.squeeze(2),
+            topk,
+            1,
+            cu_seqlens_q=query_start_loc,
+            seqused_k=seq_lens,
+            block_table=block_table,
+            metadata=qli_metadata,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=1,
+            return_value=1,
+            output_idx_offset=None,
+            enable_dcp=True,
+            cp_world=cp_world,
+            cp_rank=cp_rank,
+            cp_kv_cache_interleave_size=cp_interleave,
+            causal_seqlens_kv_global=global_seq_lens,
+        )
+
+    @staticmethod
+    def indexer_select_local_candidates(
+        q_li: torch.Tensor,
+        weights: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kv_scale_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        quant_scale_query: torch.Tensor,
+        local_visible_lengths: torch.Tensor,
+        *,
+        qli_metadata: torch.Tensor,
+        topk: int = 2048,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select from the causal local prefix before distributed Top-K.
+
+        ``local_visible_lengths[T,1]`` counts local keys visible to each query,
+        computed from its global position and the DCP interleave mapping. Keys
+        retain the full local resident history; future local rows cannot enter
+        Top-K. Scores are the existing QLI BF16 comparator values transported
+        losslessly as FP32. Empty prefixes return (-1, -inf), fixed shape K.
+        """
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_local_candidates(
+            q_li.contiguous(),
+            kv_cache,
+            weights.to(torch.float32).contiguous(),
+            quant_scale_query.reshape(q_li.shape[:-1]).to(torch.float32).contiguous(),
+            kv_scale_cache.squeeze(2),
+            query_start_loc,
+            seq_lens,
+            block_table,
+            local_visible_lengths.to(torch.int32).reshape(-1, 1).contiguous(),
+            qli_metadata,
+            topk,
+        )
 
     @staticmethod
     def indexer_select_post_process(
