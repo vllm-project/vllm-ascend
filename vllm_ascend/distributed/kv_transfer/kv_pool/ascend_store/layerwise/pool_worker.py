@@ -715,10 +715,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self.tp_rank == min(peers)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
-        # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and (
-            self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
-        )
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+            return False
+
+        # Each rank must save its own Mamba state shard.
+        if group_id in self.sharded_mamba_group_ids:
+            return True
+
+        # Deduplicate PCP replicas only when DCP does not shard their KV.
+        if self.dcp_size == 1 and self.pcp_rank != 0:
+            return False
+
+        return self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
         if self.use_block_key_layerwise:

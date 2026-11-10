@@ -121,7 +121,7 @@ class KeyMetadata:
     """name of the LLM model"""
 
     model_name: str
-    """ Cache-key partition rank: head/TP rank or a joint TP/PCP state rank """
+    """ worker id when running under a distributed setting """
     head_or_tp_rank: int
     """ Initialize the current decode context model parallel rank """
     dcp_rank: int
@@ -277,7 +277,7 @@ def infer_group_block_sizes(
     return block_sizes
 
 
-def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None, tp_size: int, pcp_size: int) -> set[int]:
+def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[int]:
     """Return IDs of Mamba cache groups whose states are not TP-replicated."""
     if kv_cache_config is None:
         return set()
@@ -289,9 +289,6 @@ def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None, tp_size: 
                 spec = spec.kv_cache_specs[name]
             if not isinstance(spec, MambaSpec):
                 continue
-            # Remove when PCP/TP joint is implemented
-            if tp_size > 1 and pcp_size > 1:
-                raise ValueError("AscendStore Mamba state transfer currently requires PCP=1 or TP=1")
             tp_replicated = getattr(spec, "tp_replicated", False)
             if not tp_replicated:
                 group_ids.add(group_id)

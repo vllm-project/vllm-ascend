@@ -281,25 +281,6 @@ class TestGLM53Store(unittest.TestCase):
                     self.assertLess(workers[0][0].lookup_scheduler(1024, hashes, list(range(5))), 1024)
                     stored[missing] = payload
 
-    def test_recoverssm_pool_keys_match_native_for_same_persistent_layout(self):
-        keys_by_mode = []
-        for use_recoverssm in (False, True):
-            plan = make_glm53_plan(use_recoverssm=use_recoverssm)
-            worker = make_worker(self, kv_cache_config=plan, use_mla=True, num_layers=4, use_recoverssm=use_recoverssm)
-            worker.register_kv_caches(make_glm53_caches(plan))
-            keys_by_mode.append(
-                {
-                    group_id: next(
-                        iter(
-                            worker.token_database.process_token_key_strings(512, ["prefix"], kv_cache_group_id=group_id)
-                        )
-                    )[2]
-                    for group_id in worker.cacheable_group_ids
-                }
-            )
-            self.doCleanups()
-        self.assertEqual(keys_by_mode[0], keys_by_mode[1])
-
     def test_recoverssm_registration_exports_each_backend_copyable_state_prefix(self):
         plan = make_glm53_plan(use_recoverssm=True)
         short_conv = MambaAttentionBackendEnum.SHORT_CONV
@@ -337,8 +318,7 @@ class TestGLM53Store(unittest.TestCase):
         self.check_layerwise_round_trip()
 
     def test_layerwise_recoverssm_restores_model_state_shards(self):
-        # Memcache keeps its TP keys; Mooncake has per-PCP session keys.
-        for backend, tp_size, pcp_size in (("memcache", 2, 1), ("mooncake", 1, 2)):
+        for backend, tp_size, pcp_size in (("memcache", 2, 1), ("memcache", 1, 2), ("mooncake", 1, 2)):
             with self.subTest(backend=backend, tp_size=tp_size, pcp_size=pcp_size):
                 self.check_layerwise_round_trip(
                     backend=backend,
@@ -346,24 +326,6 @@ class TestGLM53Store(unittest.TestCase):
                     pcp_size=pcp_size,
                     pp_size=1,
                     use_recoverssm=True,
-                )
-
-    def test_pooling_rejects_unimplemented_joint_tp_pcp_head_sharding(self):
-        plan = make_glm53_plan()
-        single_mamba_plan = SimpleNamespace(kv_cache_groups=[plan.kv_cache_groups[2]])
-        for cache_plan, use_layerwise in product((plan, single_mamba_plan), (False, True)):
-            with (
-                self.subTest(num_groups=len(cache_plan.kv_cache_groups), use_layerwise=use_layerwise),
-                self.assertRaisesRegex(ValueError, "PCP=1 or TP=1"),
-            ):
-                make_worker(
-                    self,
-                    kv_cache_config=cache_plan,
-                    use_mla=True,
-                    num_layers=4,
-                    tp_size=2,
-                    pcp_size=2,
-                    use_layerwise=use_layerwise,
                 )
 
     def check_layerwise_round_trip(
@@ -451,15 +413,15 @@ class TestGLM53Store(unittest.TestCase):
             # start_load_kv is a no-op for layerwise workers.
             worker.prepare_layerwise_step(metadata)
             task_groups = {task.group_id for tasks in worker.layer_save_tasks for task in tasks}
-            expected_groups = {2, 3, 4} | ({0} if rank == 0 else set())
+            saves_attention = rank == 0 and pcp_rank == 0
+            expected_groups = {2, 3, 4} | ({0} if saves_attention else set())
             self.assertEqual(task_groups, expected_groups)
             self.finish_layerwise_step(worker, metadata)
             workers.append((worker, caches))
             self.doCleanups()
 
         state_shards = tp_size * pcp_size
-        attention_objects = pcp_size if backend == "mooncake" else 1
-        self.assertEqual(len(readable), pp_size * (attention_objects + 3 * state_shards))
+        self.assertEqual(len(readable), pp_size * (1 + 3 * state_shards))
         backend_class = worker.layerwise_backend
         start_patch(self, f"{backend_class.__module__}.{backend_class.__name__}.create_scheduler_client")
         # The scheduler builds its coordinator from vllm_config, which

@@ -67,7 +67,7 @@ class TestCacheLayoutHelpers(unittest.TestCase):
         config = SimpleNamespace(
             kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
         )
-        self.assertEqual(get_sharded_mamba_group_ids(config, 2, 1), {1, 3})
+        self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
 
     def test_uses_hybrid_kv_cache(self):
         groups = [

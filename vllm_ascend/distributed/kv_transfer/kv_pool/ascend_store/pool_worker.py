@@ -220,7 +220,7 @@ class BaseKVPoolWorker(ABC):
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
-        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config, self.tp_size, self.pcp_size)
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
@@ -1044,7 +1044,7 @@ class BaseKVPoolWorker(ABC):
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # Expand head partitions; replicas of the same partition share a key.
+        # PCP replicas share keys; expand only the physical KV partitions.
         expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match

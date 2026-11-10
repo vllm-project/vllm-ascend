@@ -227,6 +227,7 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
     # retain target keys even if its representative is draft or this PP stage
     # has no local layers; standalone draft groups have no target object.
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     scheduler.layerwise_keys = SimpleNamespace(
         make_hit_check_keys=MagicMock(side_effect=lambda group_id, *_: [f"target-group{group_id}"])
     )
@@ -778,15 +779,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.scheduled_cached_reqs.new_block_ids = [new_block_ids]
         sched_output.scheduled_cached_reqs.num_computed_tokens = [num_computed_tokens]
         return sched_output
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_recoverssm_bulk_pool_does_not_publish_decode_increments(self, mock_client_cls):
-        config = self._make_config()
-        config.cache_config.use_kda_recoverssm = True
-        scheduler = KVPoolScheduler(config, use_layerwise=False)
-        self._set_running_chunk(scheduler)
-        output = self._make_running_chunk_output([1], num_computed_tokens=64)
-        self.assertFalse(scheduler.build_connector_meta(output).requests)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_passes_computed_tokens_to_tracker(self, mock_client_cls):

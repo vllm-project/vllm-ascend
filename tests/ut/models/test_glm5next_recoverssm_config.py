@@ -25,8 +25,6 @@ def make_config():
             data_parallel_size=1,
         ),
         kv_transfer_config=None,
-        use_v2_model_runner=True,
-        additional_config={},
     )
 
 

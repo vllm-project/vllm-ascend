@@ -193,6 +193,50 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
+        for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
+            with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
+                worker = make_worker(
+                    self,
+                    use_layerwise=True,
+                    use_mla=True,
+                    extra_config={"backend": "memcache"},
+                    tp_size=4,
+                    tp_rank=tp_rank,
+                    pcp_size=2,
+                    pcp_rank=1,
+                    dcp_size=dcp_size,
+                )
+                worker.dcp_rank = dcp_size - 1
+                self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_non_align_sharded_mamba_save_ownership_respects_write_role(self):
+        spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")
+        plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.attn"], spec)])
+        for tp_size, tp_rank, pcp_size, pcp_rank in ((2, 1, 1, 0), (1, 0, 2, 1)):
+            worker = make_worker(
+                self,
+                kv_cache_config=plan,
+                num_layers=1,
+                use_layerwise=True,
+                use_mla=True,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
+            )
+            self.assertFalse(worker.group_uses_align_state[0])
+            for kv_role, consumer_is_to_put, expected in (
+                ("kv_producer", False, True),
+                ("kv_both", False, True),
+                ("kv_consumer", False, False),
+                ("kv_consumer", True, True),
+            ):
+                with self.subTest(tp_rank=tp_rank, pcp_rank=pcp_rank, role=kv_role, put=consumer_is_to_put):
+                    worker.kv_role = kv_role
+                    worker.consumer_is_to_put = consumer_is_to_put
+                    self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
     def test_single_mamba_group_uses_pcp_state_shards(self):
         plan = SimpleNamespace(
             kv_cache_groups=[

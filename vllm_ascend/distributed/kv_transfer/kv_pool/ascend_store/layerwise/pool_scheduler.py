@@ -50,7 +50,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config, self.tp_size, self.pcp_size)
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         if self.use_layerwise_transfer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
@@ -307,8 +307,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage and PCP rank has saved it,
-        so the protocol helper enumerates all stages, PCP ranks and heads.
+        The protocol helper covers every PP stage and head, and every PCP
+        rank for sharded Mamba groups. PCP replicas share one object.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
