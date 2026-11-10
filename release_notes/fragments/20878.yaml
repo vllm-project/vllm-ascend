@@ -1,0 +1,4 @@
+pr: 20878
+entries:
+  - category: bugfix
+    text: Added startup JIT warmup for SFA and MLA DCP output exchange and merge kernels, including draft attention and PCP composition, before graph capture.

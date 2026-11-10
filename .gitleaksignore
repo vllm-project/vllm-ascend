@@ -1,0 +1,9 @@
+# Historical generic-api-key false positives from PR #20878.
+# These entries match only the reviewed commit, file, rule, and line.
+
+# TILING_KEY_BF16_COOPERATIVE is an operator tiling constant, not a credential.
+1c93eb00d374337a90ea2d660da87c1aaaceef0c:csrc/attention/attn_res_fwd/op_host/attn_res_fwd_tiling.cpp:generic-api-key:189
+1c93eb00d374337a90ea2d660da87c1aaaceef0c:csrc/attention/attn_res_fwd/op_host/attn_res_fwd_tiling.cpp:generic-api-key:258
+
+# torch.float8_e4m3fn is the tensor dtype in a key.dtype comparison.
+1c93eb00d374337a90ea2d660da87c1aaaceef0c:vllm_ascend/attention/indexer.py:generic-api-key:350

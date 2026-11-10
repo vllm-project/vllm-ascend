@@ -11,7 +11,7 @@ from torch import nn
 from vllm.model_executor.layers.linear import KimiK3MergedQKVGateLinear
 from vllm.models.kimi_k3.amd import linear as upstream_kimi
 
-from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel, AscendKimiMLAAttention
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel, AscendKimiMLAAttention
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 
 PREFIX = "model.layers.0.self_attn"

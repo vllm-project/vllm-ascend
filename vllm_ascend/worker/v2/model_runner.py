@@ -103,6 +103,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    enable_sfa_dcp_sharded_indexer,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -359,8 +360,10 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        kv_cache_spec = super().get_kv_cache_spec()
+
         return apply_dspark_resident_kv_specs(
-            super().get_kv_cache_spec(),
+            kv_cache_spec,
             self.vllm_config,
             self.speculator,
             sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
@@ -478,7 +481,15 @@ class NPUModelRunner(GPUModelRunner):
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if uses_a5_packed_cache()
+            and (
+                self.model_config.architecture == "DeepseekV41ForCausalLM"
+                or (
+                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
+                    and enable_sfa_dcp_sharded_indexer(self.vllm_config)
+                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
+                )
+            )
             else None
         )
 

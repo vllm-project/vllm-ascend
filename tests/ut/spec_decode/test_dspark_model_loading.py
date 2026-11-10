@@ -10,7 +10,7 @@ import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.models import qwen3_dflash2, qwen3_dspark
-from vllm_ascend.models.kimi_k3_dspark import AscendK3DSparkForCausalLM
+from vllm_ascend.models.kimi_k3.kimi_k3_dspark import AscendK3DSparkForCausalLM
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared

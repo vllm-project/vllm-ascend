@@ -534,7 +534,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -583,7 +583,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",

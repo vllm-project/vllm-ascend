@@ -68,6 +68,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v3")),
     )
     impl = SimpleNamespace(
         vllm_config=config,
@@ -114,12 +115,26 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
 
 
 @pytest.mark.parametrize("dcp_size", [1, 8])
-def test_flashmla_dense_impl_does_not_inherit_target_sfa_gate(monkeypatch, dcp_size):
+@pytest.mark.parametrize(
+    "model_type, expected_flashmla",
+    [
+        ("kimi_k31", False),
+        ("glm4_moe", True),
+        ("glm4_moe_lite", True),
+        ("deepseek_v3", True),
+        ("kimi_k3", True),
+        ("kimi_linear", True),
+    ],
+)
+def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, model_type, expected_flashmla):
     config = SimpleNamespace(
         use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=model_type),
+            hf_text_config=SimpleNamespace(model_type="kimi_linear", index_topk=2048),
+        ),
     )
     impl = SimpleNamespace(
         vllm_config=config,
@@ -135,7 +150,7 @@ def test_flashmla_dense_impl_does_not_inherit_target_sfa_gate(monkeypatch, dcp_s
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
-    assert AscendMLAImpl._can_use_flashmla(impl)
+    assert AscendMLAImpl._can_use_flashmla(impl) is expected_flashmla
     config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
