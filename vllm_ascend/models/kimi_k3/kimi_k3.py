@@ -263,9 +263,6 @@ class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
 class AscendKimiMLP(KimiMLP):
     """Keep TP-sharded dense weights compatible with sequence-sharded tokens."""
 
-    SITU_MX_DST_TYPE_E4M3FN = 36
-    MX_GROUP_SIZE = 32
-
     def __init__(
         self,
         hidden_size: int,
@@ -289,57 +286,13 @@ class AscendKimiMLP(KimiMLP):
             activation_situ_linear_beta=activation_situ_linear_beta,
         )
         self.use_sequence_parallel = use_sequence_parallel
-        self._fuse_situ_mx_quant = False
-        self._fuse_situ_int8_quant = False
-        if hidden_act != "situ" or get_current_vllm_config().lora_config is not None:
-            return
-        self._situ_beta = self.act_fn.beta
-        self._situ_linear_beta = self.act_fn.linear_beta or 0.0
-        profile = get_current_hardware_profile()
-        scheme = getattr(getattr(self.down_proj, "quant_method", None), "quant_method", None)
-        self._fuse_situ_mx_quant = (
-            profile.supports(HardwareCapability.SITU_MX_QUANT)
-            and type(scheme) is AscendW8A8MXFP8DynamicLinearMethod
-            and scheme.group_size == self.MX_GROUP_SIZE
-            and scheme.dynamic_mx_quant_scale_alg == 0
-        )
-        self._fuse_situ_int8_quant = (
-            profile.supports(HardwareCapability.DEQUANT_SITU_QUANT) and type(scheme) is AscendW8A8DynamicLinearMethod
-        )
-
-    def _prepare_down_input(self, gate_up: torch.Tensor) -> torch.Tensor | PreparedLinearInput:
-        if self._fuse_situ_mx_quant:
-            quantized, scale = torch.ops._C_ascend.situ_mx_quant(
-                gate_up,
-                beta=self._situ_beta,
-                linear_beta=self._situ_linear_beta,
-                activate_left=True,
-                dst_type=self.SITU_MX_DST_TYPE_E4M3FN,
-            )
-            return PreparedLinearInput(quantized, scale, gate_up.dtype)
-        if self._fuse_situ_int8_quant:
-            # BF16 input is already dequantized; all dequant inputs stay
-            # absent. This kernel quantizes the FP32 SiTU result directly.
-            quantized, scale = torch.ops._C_ascend.dequant_situ_quant(
-                gate_up,
-                beta=self._situ_beta,
-                linear_beta=self._situ_linear_beta,
-                activate_left=True,
-                quant_mode="dynamic",
-            )
-            return PreparedLinearInput(quantized, scale, gate_up.dtype)
-        return self.act_fn(gate_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_sequence_parallel:
             # All weight shards must operate on the same tokens. Reducing
             # different sequence shards would mix live and padding rows.
             x = sp_all_gather(x)
-        if self._fuse_situ_mx_quant or self._fuse_situ_int8_quant:
-            gate_up, _ = self.gate_up_proj(x)
-            x, _ = self.down_proj(self._prepare_down_input(gate_up))
-        else:
-            x = super().forward(x)
+        x = super().forward(x)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         return x

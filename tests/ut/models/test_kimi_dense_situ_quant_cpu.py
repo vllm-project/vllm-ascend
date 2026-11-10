@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU routing tests; execute production MLP/linear methods with NPU ops mocked.
+"""CPU routing tests for the production MLP wrapper and linear quantization.
 
-Run with --confcutdir=tests/ut/models. These tests do not validate device math.
+The upstream MLP/SiTU contract is represented by CPU fixtures; NPU operations
+are mocked. These tests check activation/quantization boundaries, not device math.
 """
 
 import ast
 import math
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -28,23 +28,30 @@ def load_nodes(path, names, scope):
 
 
 class Situ(nn.Module):
-    def __init__(self, beta=4.0, linear_beta=25.0):
+    def __init__(self, beta, linear_beta, calls):
         super().__init__()
         self.beta, self.linear_beta = beta, linear_beta
-        self.calls = 0
+        self.calls = calls
+        self.output = None
 
     def forward(self, x):
-        self.calls += 1
-        return x[..., : x.shape[-1] // 2]
+        self.calls.append("activation")
+        gate, up = x.float().chunk(2, dim=-1)
+        gate = self.beta * torch.tanh(gate / self.beta) * torch.sigmoid(gate)
+        if self.linear_beta is not None:
+            up = self.linear_beta * torch.tanh(up / self.linear_beta)
+        self.output = (gate * up).to(x.dtype)
+        return self.output
 
 
 class MLPBase(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
-        self.act_fn = Situ(kwargs["activation_situ_beta"], kwargs["activation_situ_linear_beta"])
+        config = kwargs["quant_config"]
+        self.act_fn = Situ(kwargs["activation_situ_beta"], kwargs["activation_situ_linear_beta"], config.calls)
         self.reduce_results = kwargs["reduce_results"]
-        self.down_proj = kwargs["quant_config"].down_proj
-        self.gate_up_proj = kwargs["quant_config"].gate_up_proj
+        self.down_proj = config.down_proj
+        self.gate_up_proj = config.gate_up_proj
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -53,30 +60,28 @@ class MLPBase(nn.Module):
 
 @pytest.fixture
 def runtime(monkeypatch):
-    scope = dict(__name__=__name__, torch=torch, nn=nn, math=math, KimiMLP=MLPBase, SituAndMul=Situ)
-    # Use the real hardware mapping without importing vLLM or torch-npu.
-    exec((ROOT / "vllm_ascend/device/hardware.py").read_text(), scope)
-    scope["get_device_config"] = lambda: SimpleNamespace(_device_type=scope["AscendDeviceType"].A5)
-    tree = ast.parse((ROOT / "vllm_ascend/device/hardware_profile.py").read_text())
-    tree.body = [
-        n
-        for n in tree.body
-        if not (isinstance(n, ast.ImportFrom) and n.module is not None and n.module.startswith("vllm_ascend"))
-    ]
-    exec(compile(tree, "hardware_profile.py", "exec"), scope)
-    exec((ROOT / "vllm_ascend/quantization/prepared_linear_input.py").read_text(), scope)
-    config = SimpleNamespace(lora_config=None)
+    calls = []
+    scope = dict(__name__=__name__, torch=torch, nn=nn, math=math, KimiMLP=MLPBase)
+    exec((ROOT / "vllm_ascend/quantization/prepared_linear_input.py").read_text(encoding="utf-8"), scope)
     scope.update(
-        get_current_vllm_config=lambda: config,
         AscendLinearScheme=object,
         WeightSwitchGatherSpec=lambda *a, **kw: None,
         register_scheme=lambda *a: lambda cls: cls,
     )
+
+    def quantize(x, *, dst_type, **kwargs):
+        calls.append("quantize")
+        return x.to(dst_type), torch.ones(x.shape[0])
+
+    def matmul(q, *args, output_dtype, **kwargs):
+        calls.append("matmul")
+        return q.to(output_dtype)
+
     npu = SimpleNamespace(
         float8_e8m0fnu=object(),
-        npu_dynamic_quant=Mock(side_effect=AssertionError("unexpected requantization")),
-        npu_dynamic_mx_quant=Mock(side_effect=AssertionError("unexpected requantization")),
-        npu_quant_matmul=Mock(side_effect=lambda q, *a, output_dtype, **kw: q.to(output_dtype)),
+        npu_dynamic_quant=Mock(side_effect=quantize),
+        npu_dynamic_mx_quant=Mock(side_effect=quantize),
+        npu_quant_matmul=Mock(side_effect=matmul),
     )
     scope["torch_npu"] = npu
     for file, cls in [
@@ -85,187 +90,90 @@ def runtime(monkeypatch):
     ]:
         load_nodes(f"vllm_ascend/quantization/methods/w8a8/{file}.py", [cls], scope)
     kernels = {}
-    for name, dtype in [("situ_mx_quant", torch.float8_e4m3fn), ("dequant_situ_quant", torch.int8)]:
-
-        def fused(x, *, _dtype=dtype, **kwargs):
-            q = x[:, : x.shape[-1] // 2].to(_dtype)
-            scale_shape = (x.shape[0], x.shape[-1] // 128, 2) if _dtype == torch.float8_e4m3fn else (x.shape[0],)
-            return q, torch.ones(scale_shape)
-
-        kernels[name] = Mock(side_effect=fused)
+    for name in ("situ_mx_quant", "dequant_situ_quant"):
+        kernels[name] = Mock(side_effect=AssertionError("dense MLP must retain the upstream SiTU path"))
         monkeypatch.setattr(torch.ops._C_ascend, name, kernels[name], raising=False)
     load_nodes("vllm_ascend/models/kimi_k3/kimi_k3.py", ["AscendKimiMLP"], scope)
-    return SimpleNamespace(scope=scope, config=config, npu=npu, kernels=kernels)
+    return SimpleNamespace(scope=scope, npu=npu, kernels=kernels, calls=calls)
 
 
-def make_mlp(
-    runtime,
-    hardware="A5",
-    sequence_parallel=False,
-    *,
-    width=64,
-    beta=4.0,
-    linear_beta=25.0,
-    hidden_act="situ",
-    scheme_kind=None,
-    input_shard=True,
-    group_size=32,
-    scale_alg=0,
-):
-    s = runtime.scope
-    s["get_current_hardware_profile"] = Mock(
-        side_effect=lambda: s["get_hardware_profile"](getattr(s["AscendDeviceType"], hardware))
-    )
-    cls = s["AscendW8A8MXFP8DynamicLinearMethod" if hardware == "A5" else "AscendW8A8DynamicLinearMethod"]
-    if scheme_kind == "subclass":
-        cls = type("OtherScheme", (cls,), {})
-    scheme = object() if scheme_kind == "scheme" else cls.__new__(cls)
-    if scheme_kind != "scheme":
-        scheme.group_size, scheme.dynamic_mx_quant_scale_alg = group_size, scale_alg
-    layer = SimpleNamespace(
-        weight=object(),
-        weight_scale=object(),
-        input_is_parallel=input_shard,
-        quant_method=SimpleNamespace(quant_method=scheme),
-    )
-    down = Mock(wraps=lambda x: (scheme.apply(layer, x), None))
-    down.input_is_parallel = input_shard
-    down.input_size_per_partition = width
-    down.quant_method = layer.quant_method
-    gate_up = Mock(side_effect=lambda x: (x, None))
-    model = s["AscendKimiMLP"](
+def make_mlp(runtime, scheme_kind, sequence_parallel, *, linear_beta=25.0, reduce_results=True):
+    cls = runtime.scope[
+        "AscendW8A8DynamicLinearMethod" if scheme_kind == "int8" else "AscendW8A8MXFP8DynamicLinearMethod"
+    ]
+    scheme = cls.__new__(cls)
+    scheme.group_size, scheme.dynamic_mx_quant_scale_alg = 32, 0
+    layer = SimpleNamespace(weight=object(), weight_scale=object())
+
+    def gate_up(x):
+        runtime.calls.append("gate_up")
+        return x, None
+
+    model = runtime.scope["AscendKimiMLP"](
         128,
-        2 * width,
-        hidden_act,
+        33792,
+        "situ",
+        reduce_results=reduce_results,
         use_sequence_parallel=sequence_parallel,
-        activation_situ_beta=beta,
+        activation_situ_beta=4.0,
         activation_situ_linear_beta=linear_beta,
-        quant_config=SimpleNamespace(down_proj=down, gate_up_proj=gate_up),
+        quant_config=SimpleNamespace(
+            calls=runtime.calls,
+            gate_up_proj=Mock(side_effect=gate_up),
+            down_proj=Mock(side_effect=lambda x: (scheme.apply(layer, x), None)),
+        ),
     )
-    return model, scheme
+    return model
 
 
-@pytest.mark.parametrize("hardware", ["A3", "A5"])
+@pytest.mark.parametrize("scheme_kind", ["int8", "mxfp8"])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
 @pytest.mark.parametrize("linear_beta", [None, 25.0])
-def test_fused_input_reaches_real_linear_once_and_preserves_sp(runtime, hardware, sequence_parallel, linear_beta):
-    model, _ = make_mlp(runtime, hardware, sequence_parallel, linear_beta=linear_beta)
-    full = torch.arange(4, dtype=torch.bfloat16)[:, None].expand(4, 128).contiguous()
-    runtime.scope["sp_all_gather"] = Mock(return_value=full)
-    runtime.scope["sp_reduce_scatter"] = Mock(side_effect=lambda x: x[2:3])
+@pytest.mark.parametrize("input_width", [128, 33792])
+def test_dense_situ_quantizes_after_activation_once(runtime, scheme_kind, sequence_parallel, linear_beta, input_width):
+    # 33792 is the gate/up width of the existing K3 TP2 smoke model. The
+    # whole-row dequant_situ_quant kernel cannot fit this input in A3 UB.
+    model = make_mlp(runtime, scheme_kind, sequence_parallel, linear_beta=linear_beta)
+    full = torch.linspace(-3, 3, 4 * input_width, dtype=torch.float32).view(4, input_width).to(torch.bfloat16)
+
+    def gather(x):
+        runtime.calls.append("gather")
+        return full
+
+    def scatter(x):
+        runtime.calls.append("scatter")
+        return x[2:3]
+
+    runtime.scope["sp_all_gather"] = Mock(side_effect=gather)
+    runtime.scope["sp_reduce_scatter"] = Mock(side_effect=scatter)
     x = full[2:3] if sequence_parallel else full
     result = model(x)
-    torch.testing.assert_close(result, x[:, :64], rtol=0, atol=0)
-    selected = "situ_mx_quant" if hardware == "A5" else "dequant_situ_quant"
-    kernel = runtime.kernels[selected]
-    kernel.assert_called_once()
-    assert kernel.call_args.kwargs["activate_left"] is True
-    assert kernel.call_args.kwargs["beta"] == 4.0
-    assert kernel.call_args.kwargs["linear_beta"] == (linear_beta or 0.0)
-    if hardware == "A3":
-        assert kernel.call_args.kwargs == dict(
-            beta=4.0, linear_beta=linear_beta or 0.0, activate_left=True, quant_mode="dynamic"
-        )
-    assert model.act_fn.calls == 0
+    quantizer = runtime.npu.npu_dynamic_quant if scheme_kind == "int8" else runtime.npu.npu_dynamic_mx_quant
+    quantizer.assert_called_once()
+    quant_input = quantizer.call_args.args[0]
+    assert quant_input is model.act_fn.output
+    assert quant_input.dtype == torch.bfloat16
+    assert quant_input.shape == (4, input_width // 2)
     model.gate_up_proj.assert_called_once()
+    assert model.gate_up_proj.call_args.args[0] is full
     model.down_proj.assert_called_once()
-    prepared = model.down_proj.call_args.args[0]
-    assert isinstance(prepared, runtime.scope["PreparedLinearInput"])
-    assert runtime.npu.npu_quant_matmul.call_args.kwargs["pertoken_scale"] is prepared.scale
-    assert prepared.output_dtype == torch.bfloat16
-    runtime.npu.npu_dynamic_quant.assert_not_called()
-    runtime.npu.npu_dynamic_mx_quant.assert_not_called()
-    assert runtime.scope["sp_all_gather"].call_count == int(sequence_parallel)
-    assert runtime.scope["sp_reduce_scatter"].call_count == int(sequence_parallel)
+    assert model.down_proj.call_args.args[0] is quant_input
+    runtime.npu.npu_quant_matmul.assert_called_once()
+    assert runtime.npu.npu_quant_matmul.call_args.kwargs["output_dtype"] == torch.bfloat16
+    other_quantizer = runtime.npu.npu_dynamic_mx_quant if scheme_kind == "int8" else runtime.npu.npu_dynamic_quant
+    other_quantizer.assert_not_called()
+    quant_dtype = torch.int8 if scheme_kind == "int8" else torch.float8_e4m3fn
+    expected = quant_input.to(quant_dtype).to(torch.bfloat16)
+    torch.testing.assert_close(result, expected[2:3] if sequence_parallel else expected, rtol=0, atol=0)
+    expected_calls = ["gate_up", "activation", "quantize", "matmul"]
+    assert runtime.calls == (["gather", *expected_calls, "scatter"] if sequence_parallel else expected_calls)
+    for kernel in runtime.kernels.values():
+        kernel.assert_not_called()
     assert model.reduce_results is (not sequence_parallel)
 
 
-@pytest.mark.parametrize("hardware", ["A3", "A5"])
-@pytest.mark.parametrize("unsupported", ["scheme", "subclass", "activation"])
-def test_other_schemes_and_activations_keep_original_path(runtime, hardware, unsupported):
-    options = {"hidden_act": "silu"} if unsupported == "activation" else {"scheme_kind": unsupported}
-    model, _ = make_mlp(runtime, hardware, **options)
-    assert isinstance(model._prepare_down_input(torch.zeros(4, 128, dtype=torch.bfloat16)), torch.Tensor)
-    assert model.act_fn.calls == 1
-    for kernel in runtime.kernels.values():
-        kernel.assert_not_called()
-
-
-@pytest.mark.parametrize("unsupported", ["group_size", "scale_alg"])
-def test_mx_quantization_contract_is_not_bypassed(runtime, unsupported):
-    options = {"group_size": 64} if unsupported == "group_size" else {"scale_alg": 1}
-    model, _ = make_mlp(runtime, **options)
-    assert isinstance(model._prepare_down_input(torch.zeros(4, 128, dtype=torch.bfloat16)), torch.Tensor)
-    runtime.kernels["situ_mx_quant"].assert_not_called()
-
-
-@pytest.mark.parametrize("hardware", ["A3", "A5"])
-@pytest.mark.parametrize(
-    "case", ["dtype", "rank", "empty", "strides", "alignment", "wide", "beta", "linear_beta", "input_shard"]
-)
-def test_selected_kernel_owns_input_validation(runtime, hardware, case):
-    options: dict[str, Any] = {}
-    if case == "alignment":
-        options["width"] = 63
-    elif case == "wide":
-        options["width"] = 16896
-    elif case == "beta":
-        options["beta"] = -1.0
-    elif case == "linear_beta":
-        options["linear_beta"] = -2.0
-    elif case == "input_shard":
-        options["input_shard"] = False
-    model, _ = make_mlp(runtime, hardware, **options)
-    x = torch.zeros(4, 2 * options.get("width", 64), dtype=torch.bfloat16)
-    if case == "dtype":
-        x = x.float()
-    elif case == "rank":
-        x = x.unsqueeze(0)
-    elif case == "empty":
-        x = x[:0]
-    elif case == "strides":
-        x = torch.zeros(128, 4, dtype=x.dtype).t()
-    kernel = runtime.kernels["situ_mx_quant" if hardware == "A5" else "dequant_situ_quant"]
-    kernel.side_effect = RuntimeError("kernel input contract")
-    with pytest.raises(RuntimeError, match="kernel input contract"):
-        model._prepare_down_input(x)
-    assert kernel.call_args.args[0] is x
-    assert model.act_fn.calls == 0
-
-
-@pytest.mark.parametrize("hardware", ["A2", "_310P", "A3", "A5"])
-def test_hardware_and_lora_exclusions(runtime, hardware):
-    runtime.config.lora_config = object() if hardware in ("A3", "A5") else None
-    model, _ = make_mlp(runtime, hardware)
-    assert not model._fuse_situ_mx_quant
-    assert not model._fuse_situ_int8_quant
-
-
-@pytest.mark.parametrize("hardware", ["A3", "A5"])
-def test_operator_registration_can_happen_after_model_construction(runtime, monkeypatch, hardware):
-    name = "dequant_situ_quant" if hardware == "A3" else "situ_mx_quant"
-    kernel = runtime.kernels[name]
-    monkeypatch.delattr(torch.ops._C_ascend, name)
-    model, _ = make_mlp(runtime, hardware)
-    x = torch.zeros(1, 128, dtype=torch.bfloat16)
-    # Resolve the registered op when executing, not while constructing the model.
-    monkeypatch.setattr(torch.ops._C_ascend, name, kernel, raising=False)
-    assert isinstance(model._prepare_down_input(x), runtime.scope["PreparedLinearInput"])
-
-
-@pytest.mark.parametrize("hardware", ["A3", "A5"])
-def test_fixed_selection_is_not_repeated_in_forward(runtime, hardware):
-    model, _ = make_mlp(runtime, hardware)
-    select_profile = runtime.scope["get_current_hardware_profile"]
-    assert select_profile.call_count == 1
-    # These constructor inputs must no longer be read on the hot path.
-    model.down_proj.quant_method = None
-    model.act_fn.beta = float("nan")
-    model.act_fn.linear_beta = float("nan")
-    for _ in range(2):
-        result = model._prepare_down_input(torch.zeros(4, 128, dtype=torch.bfloat16))
-        assert isinstance(result, runtime.scope["PreparedLinearInput"])
-    assert select_profile.call_count == 1
-    kernel = runtime.kernels["situ_mx_quant" if hardware == "A5" else "dequant_situ_quant"]
-    assert kernel.call_args.kwargs["beta"] == 4.0
-    assert kernel.call_args.kwargs["linear_beta"] == 25.0
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_dense_mlp_preserves_reduce_results_contract(runtime, sequence_parallel, reduce_results):
+    model = make_mlp(runtime, "int8", sequence_parallel, reduce_results=reduce_results)
+    assert model.reduce_results is (reduce_results and not sequence_parallel)
