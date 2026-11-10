@@ -355,6 +355,7 @@ __aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
     const uint32_t cores = usedCoreNum;
     constexpr uint32_t MIN_SPLIT_KEY_LENGTH = 4096;
     constexpr uint32_t MIN_CORES_PER_GROUP = 2;
+    constexpr uint32_t AIVS_PER_AIC = 2;
     constexpr uint32_t QUANT_MODE_FP8 = 1;
     constexpr uint32_t QUANT_MODE_INT8 = 2;
     // Bound scalar metadata reads; large batches retain the metadata schedule.
@@ -417,8 +418,10 @@ __aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
     }
     ldInfo.saveWorkSpaceIdx = aiCoreIdx;
     if ASCEND_IS_AIV {
-        // Assign two AIVs per query group to reduce disjoint output rows.
-        const uint32_t reduceGroup = tmpBlockIdx / 2;
+        // Give each output row its own AIV whenever the vector budget permits.
+        // Two AIVs per group serialize the reduction of a four-row A5 tile.
+        const uint32_t reduceCoresPerGroup = Min(constInfo.s1BaseSize, cores * AIVS_PER_AIC / groups);
+        const uint32_t reduceGroup = tmpBlockIdx / reduceCoresPerGroup;
         ldInfo.isLdCoreEnable = reduceGroup < groups;
         if (ldInfo.isLdCoreEnable) {
             localGroup = reduceGroup;
@@ -426,9 +429,9 @@ __aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
                 ResolveQueryGroup(reduceGroup, batchIdx, localGroup, queryCount, keyCount, originalKeyCount);
             }
             const uint32_t rows = Min(constInfo.s1BaseSize, queryCount - localGroup * constInfo.s1BaseSize);
-            const uint32_t firstRows = CeilDiv(rows, 2U);
-            ldInfo.mStart = (tmpBlockIdx % 2) * firstRows;
-            ldInfo.mNum = (tmpBlockIdx % 2) == 0 ? firstRows : rows / 2;
+            const uint32_t rowsPerCore = CeilDiv(rows, reduceCoresPerGroup);
+            ldInfo.mStart = (tmpBlockIdx % reduceCoresPerGroup) * rowsPerCore;
+            ldInfo.mNum = ldInfo.mStart < rows ? Min(rowsPerCore, rows - ldInfo.mStart) : 0;
             ldInfo.isLdCoreEnable = ldInfo.mNum != 0;
             ldInfo.bn2Idx = batchIdx;
             ldInfo.bIdx = batchIdx;
