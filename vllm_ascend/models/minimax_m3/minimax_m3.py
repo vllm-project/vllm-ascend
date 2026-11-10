@@ -116,6 +116,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
+from vllm_ascend.ops.mmrs import install_sequence_parallel_mmrs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -1023,6 +1024,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         else:
             self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
+        # Optionally transfer the post-attention ReduceScatter into the
+        # O-projection; fused and fallback paths both return the SP shard.
+        self.fuse_o_proj_mm_reduce_scatter = install_sequence_parallel_mmrs(
+            self.self_attn.o_proj,
+            sequence_parallel=self.use_sequence_parallel,
+            attention_layer_name=f"{prefix}.self_attn.attn",
+        )
+
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
@@ -1090,7 +1099,10 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         # Fully Connected
         if self.use_sequence_parallel:
-            hidden_states = sp_reduce_scatter(hidden_states)
+            # A fused O-projection already returned the token shard; the
+            # residual still needs its first shard either way.
+            if not self.fuse_o_proj_mm_reduce_scatter:
+                hidden_states = sp_reduce_scatter(hidden_states)
             if not input_is_sequence_parallel:
                 residual = sp_shard(residual)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
