@@ -72,19 +72,19 @@ on:
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com'
         description: 'SWR registry domain'
-      # 保留旧输入，兼容上层调用，当前不再使用
+      # Kept for backward compatibility with existing callers; no longer used.
       run_nightly_test:
         required: false
         type: boolean
         default: true
         description: "【Deprecated, no effect】Whether to trigger nightly selected tests after image build success"
-      # 新增：presmoke冒烟开关
+      # Toggles the presmoke smoke test after a successful image build.
       run_presmoke:
         required: false
         type: boolean
         default: true
         description: "Whether to trigger presmoke smoke tests after image build success"
-      # 新增：vllm版本/sha传给presmoke测试
+      # Optional vLLM ref forwarded to the presmoke tests.
       vllm_ref_for_test:
         required: false
         type: string
@@ -138,17 +138,20 @@ jobs:
       build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
-      # Presmoke 镜像沿用 nightly 默认路径加 "_presmoke" 后缀，tag 规则不变。
+      # Presmoke images reuse the nightly paths plus a "_presmoke" suffix; the
+      # tag rules stay unchanged.
       image_repo_suffix: '_presmoke'
-      # nightly 层必须基于本次 build-base 产出的运行时镜像（nightly-<branch>-presmoke），
-      # 否则根 Dockerfile 的改动不会体现在最终镜像里。
+      # The nightly layer must be based on the runtime image produced by
+      # build-base in this same run (nightly-<branch>-presmoke); otherwise
+      # changes to the root Dockerfile would not show up in the final image.
       base_tag_suffix: '-presmoke'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
-  # ========== 解析已验证的vLLM commit，避免浮动main与vllm-ascend代码不匹配 ==========
+  # ========== Resolve the verified vLLM commit so a floating main branch cannot
+  # be paired with mismatched vllm-ascend code ==========
   resolve-vllm-ref:
     name: Resolve verified vLLM commit
     if: ${{ inputs.run_presmoke }}
@@ -170,7 +173,7 @@ jobs:
           fi
           echo "ref=${vllm_ref}" >> "$GITHUB_OUTPUT"
 
-  # ========== 生成presmoke分组，调用 _selected_tests.yaml 冒烟 ==========
+  # ========== Generate presmoke groups and run them through _selected_tests.yaml ==========
   gen-presmoke-groups:
     name: Generate presmoke test groups for ${{ inputs.target }}
     needs: build-nightly
