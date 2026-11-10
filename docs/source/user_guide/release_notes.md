@@ -1,6 +1,7 @@
 # Release Notes
 
 ## v0.32.0rc1 - 2026.11.09
+
 This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This release introduces support for **MiniMax-M3.1-Flash** and **Qwen3.8-Flash-Next**, and adds optimizations for **DeepSeek V4.1-Flash** and **GLM-5.3-Flash**. It also improves context parallelism, speculative decoding, and KV Cache management. The hardware and deployment scope below summarizes the configurations documented in each model guide; it does not claim validation for other model and hardware combinations. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
 
 | Model | Hardware | Supported Features |
@@ -11,6 +12,7 @@ This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstrea
 | GLM-5.3-Flash | A2 Products, A3 Products, 950DT Products | W8A8 on A2/A3 and W8A8-MXFP8 on 950DT; text, image, and video inference; MTP speculative decoding; single-node and multi-node P/D deployment with KV Cache Pool support. |
 
 ### Highlights
+
 - **MiniMax-M3.1-Flash:** Added support for MiniMax-M3.1-Flash on A3 and 950DT, including W8A8/MXFP8 deployment configurations, single-node and P/D disaggregated inference, native DSpark speculative decoding, and optional FlashAttention-3 execution on A3. Improved MXFP8 MoE quantization correctness, reasoning behavior, and multimodal execution stability. [#19723](https://github.com/vllm-project/vllm-ascend/pull/19723) [#20067](https://github.com/vllm-project/vllm-ascend/pull/20067) [#20691](https://github.com/vllm-project/vllm-ascend/pull/20691) [#20120](https://github.com/vllm-project/vllm-ascend/pull/20120) [#20468](https://github.com/vllm-project/vllm-ascend/pull/20468) [#20445](https://github.com/vllm-project/vllm-ascend/pull/20445) [#20935](https://github.com/vllm-project/vllm-ascend/pull/20935)
 - **Qwen3.8-Flash-Next:** Enabled pipeline and sequence parallelism with correct stage-local QSA/GDN/PLE cache management; optimized long-context prefill attention and reduced CPU synchronization overhead; added PLE embedding sharding and INT8 quantization support; and fixed MTP draft execution and MegaMoE communication issues. [#20443](https://github.com/vllm-project/vllm-ascend/pull/20443) [#20467](https://github.com/vllm-project/vllm-ascend/pull/20467) [#20444](https://github.com/vllm-project/vllm-ascend/pull/20444) [#20516](https://github.com/vllm-project/vllm-ascend/pull/20516) [#20548](https://github.com/vllm-project/vllm-ascend/pull/20548) [#20597](https://github.com/vllm-project/vllm-ascend/pull/20597) [#20502](https://github.com/vllm-project/vllm-ascend/pull/20502)
 - **GLM-5.3-Flash:** Improved PCP correctness and compatibility with `torch.compile`, including fixes for KPool query alignment, decode replication, and packed KV-cache layouts. Enabled static-kernel compilation, optimized KDA RecoverSSM state updates, and added optional FP8 KeyPool Lightning Indexer cache support. [#20473](https://github.com/vllm-project/vllm-ascend/pull/20473) [#20513](https://github.com/vllm-project/vllm-ascend/pull/20513) [#20503](https://github.com/vllm-project/vllm-ascend/pull/20503) [#20524](https://github.com/vllm-project/vllm-ascend/pull/20524) [#20447](https://github.com/vllm-project/vllm-ascend/pull/20447)
@@ -20,6 +22,7 @@ This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstrea
 - **Quantization and MoE:** Added ModelSlim W4A8 dynamic Linear support with INT4 weights and per-token INT8 activation quantization. Improved quantized inference correctness by fixing MXFP packed-store tail masking. Extended MegaMoE support for Qwen3.8-Flash-Next on 950DT with 2560-dimensional hidden states, corrected communication routing for unquantized MTP drafts, and unified MegaMoE configuration validation across A3 and 950DT. [#20507](https://github.com/vllm-project/vllm-ascend/pull/20507) [#20540](https://github.com/vllm-project/vllm-ascend/pull/20540) [#20502](https://github.com/vllm-project/vllm-ascend/pull/20502) [#20506](https://github.com/vllm-project/vllm-ascend/pull/20506)
 
 ### Features
+
 - Made Model Runner V2 the default execution path for supported Ascend configurations and expanded compatibility with encoder-only, encoder-decoder, pooling, and hybrid-encoder models. [#17681](https://github.com/vllm-project/vllm-ascend/pull/17681) [#19159](https://github.com/vllm-project/vllm-ascend/pull/19159) [#18995](https://github.com/vllm-project/vllm-ascend/pull/18995) [#20710](https://github.com/vllm-project/vllm-ascend/pull/20710)
 - Expanded Model Runner V2 speculative decoding with draft-model execution, block verification, N-gram NPU acceleration, MultiModuleMTPSpeculator support, and Gemma4 MTP compatibility. [#19364](https://github.com/vllm-project/vllm-ascend/pull/19364) [#19138](https://github.com/vllm-project/vllm-ascend/pull/19138) [#18061](https://github.com/vllm-project/vllm-ascend/pull/18061) [#19296](https://github.com/vllm-project/vllm-ascend/pull/19296) [#17492](https://github.com/vllm-project/vllm-ascend/pull/17492)
 - Extended DeepSeek-V4.1-Flash context parallelism with SWA bounded replay across PCP and DP configurations, reducing redundant decoder replay computation during long-context prefill. [#19321](https://github.com/vllm-project/vllm-ascend/pull/19321) [#20210](https://github.com/vllm-project/vllm-ascend/pull/20210)
@@ -33,8 +36,8 @@ This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstrea
 - Expanded quantization and expert load balancing support with ModelSlim W4A8 Dynamic Linear and EPLB compatibility for W4A8-MXFP and W8A8-MXFP8 MoE models. [#20507](https://github.com/vllm-project/vllm-ascend/pull/20507) [#20713](https://github.com/vllm-project/vllm-ascend/pull/20713) [#20847](https://github.com/vllm-project/vllm-ascend/pull/20847)
 - Expanded MiniMax speculative decoding with native DSpark draft support for MiniMax-M3.1-Flash and FlashAttention execution for compatible MiniMax-M3 draft configurations on Ascend A5. [#20691](https://github.com/vllm-project/vllm-ascend/pull/20691) [#19537](https://github.com/vllm-project/vllm-ascend/pull/19537)
 
-
 ### Performance
+
 - Improved Qwen3.8-Flash-Next long-context prefill performance by automatically selecting the appropriate attention kernel based on context length, reducing unnecessary computation. [#20467](https://github.com/vllm-project/vllm-ascend/pull/20467)
 - Reduced Qwen3.8-Flash-Next CPU-NPU synchronization overhead by eliminating unnecessary token-count transfers and CPU-side updates in supported Model Runner V2 configurations. [#20444](https://github.com/vllm-project/vllm-ascend/pull/20444)
 - Optimized Model Runner V2 UVA buffer management to reduce CPU tracking overhead and improve asynchronous memory transfers, accelerating request preparation for long prompts. [#20542](https://github.com/vllm-project/vllm-ascend/pull/20542)
@@ -44,6 +47,7 @@ This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstrea
 - Optimized GLM-5.3-Flash KDA RecoverSSM state updates on 950DT by reducing memory-write overhead and improving recurrent-state processing efficiency. [#20524](https://github.com/vllm-project/vllm-ascend/pull/20524)
 
 ### Dependencies
+
 Use the official v0.32.0rc1 release images to ensure that the required operator packages and matching dependency versions are installed.
 
 - **Upstream vLLM**: v0.32.0
@@ -57,6 +61,7 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - **Python**: 3.12 (release image base).
 
 ### Deprecation and Configuration Changes
+
 - Model Runner V2 is now the default when `VLLM_USE_V2_MODEL_RUNNER` is unset, with automatic fallback to Model Runner V1 for unsupported configurations. Users can explicitly select Model Runner V1 or V2 by setting `VLLM_USE_V2_MODEL_RUNNER=0` or `VLLM_USE_V2_MODEL_RUNNER=1`, respectively. [#17681](https://github.com/vllm-project/vllm-ascend/pull/17681)
 - Added optional CPU offloading for Qwen3.8-Flash-Next PLE embedding tables through `--engram-config` to reduce NPU memory usage. Offloading is disabled by default, with automatic fallback to private host memory when cross-node sharing is unavailable. [#20560](https://github.com/vllm-project/vllm-ascend/pull/20560)
 - Added optional FP8 and INT8 pooled-indexer KV-cache configurations for GLM-5.3-Flash through `attention_config.indexer_kv_dtype`, while retaining BF16 as the default. FP8 is supported on 950DT, while INT8 is restricted to A3. [#20447](https://github.com/vllm-project/vllm-ascend/pull/20447) [#20601](https://github.com/vllm-project/vllm-ascend/pull/20601)
@@ -64,6 +69,7 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 and has entered the sunset process. GQA models naturally shard KV heads across TP ranks and rarely require multi-node KV sharding; in speculative decoding, GQA draft models maintain native TP sharding without requiring DCP. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305) for details.
 
 ### Documentation
+
 - Added MiniMax-M3.1-Flash deployment guide and support matrix for A3, and Ascend 950DT products, covering W8A8/MXFP8 weights, DSpark speculative decoding, single-node serving, and P/D deployment. [#19723](https://github.com/vllm-project/vllm-ascend/pull/19723)
 - Updated DeepSeek V4.1-Flash A2 deployment guidance and removed obsolete MTP deployment examples from the DeepSeek V4-Flash tutorial, retaining the supported DSpark serving configurations. [#20292](https://github.com/vllm-project/vllm-ascend/pull/20292) [#20323](https://github.com/vllm-project/vllm-ascend/pull/20323)
 - Added GLM KDA RecoverSSM usage documentation, including A3/950DT configurations, execution-mode limitations, and Mooncake P/D requirements, and updated prefix-caching guidance. Corrected GLM deployment examples for expert parallelism, proxy configuration, and P/D serving. [#20134](https://github.com/vllm-project/vllm-ascend/pull/20134) [#20369](https://github.com/vllm-project/vllm-ascend/pull/20369) [#20183](https://github.com/vllm-project/vllm-ascend/pull/20183)
@@ -72,6 +78,7 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - Fixed the Qwen3-30B-A3B tutorial's serving command to use the valid `--served-model-name` option. [#20874](https://github.com/vllm-project/vllm-ascend/pull/20874)
 
 ### Stability and Bug Fixes
+
 - Fixed Model Runner V2 speculative decoding issues involving GLM-5.3-Flash, Gemma4, hybrid KV Cache, and PCP graph execution, improving compatibility and execution reliability. [#18931](https://github.com/vllm-project/vllm-ascend/pull/18931) [#19264](https://github.com/vllm-project/vllm-ascend/pull/19264) [#19165](https://github.com/vllm-project/vllm-ascend/pull/19165) [#19192](https://github.com/vllm-project/vllm-ascend/pull/19192)
 - Fixed Model Runner V2 KV Cache initialization failures when handling hybrid cache structures containing non-Tensor components. [#19598](https://github.com/vllm-project/vllm-ascend/pull/19598)
 - Fixed GLM-5.3-Flash PCP execution and compiled prefill issues, improving correctness in distributed attention and mixed prefill/decode workloads. [#20513](https://github.com/vllm-project/vllm-ascend/pull/20513) [#20473](https://github.com/vllm-project/vllm-ascend/pull/20473)
@@ -85,7 +92,6 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - Fixed shared KV Cache memory allocation and Mamba prefix-cache consistency issues across Step-3.5/3.7, GLM-Next, and hybrid recurrent-attention models. [#19558](https://github.com/vllm-project/vllm-ascend/pull/19558) [#19457](https://github.com/vllm-project/vllm-ascend/pull/19457) [#20942](https://github.com/vllm-project/vllm-ascend/pull/20942)
 - Improved MoE and EPLB stability by fixing expert-weight transfers, routing consistency, worker initialization, and communication selection under pipeline parallelism. [#18425](https://github.com/vllm-project/vllm-ascend/pull/18425) [#18502](https://github.com/vllm-project/vllm-ascend/pull/18502) [#18878](https://github.com/vllm-project/vllm-ascend/pull/18878) [#19073](https://github.com/vllm-project/vllm-ascend/pull/19073) [#20711](https://github.com/vllm-project/vllm-ascend/pull/20711) [#20490](https://github.com/vllm-project/vllm-ascend/pull/20490)
 - Fixed MegaMoE configuration validation and MiniMax FlashAttention-3 initialization issues, improving compatibility and startup reliability across supported Ascend configurations. [#20506](https://github.com/vllm-project/vllm-ascend/pull/20506) [#20935](https://github.com/vllm-project/vllm-ascend/pull/20935)
-
 
 ## v0.30.0rc1 - 2026.10.11
 
