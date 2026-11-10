@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""DeepSeek checkpoint-name conversion."""
+"""Checkpoint-name conversion and metadata missing from HF meta models."""
 
 from typing import Any
 
@@ -84,19 +84,16 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
 
 
 def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
-    """Checkpoint-facing parameter set of the DeepSeek-V4 vision tower.
+    """Describe vision and router parameters absent from the HF text meta model.
 
-    ``transformers``' ``DeepseekV4ForCausalLM`` builds the text backbone only,
-    while vLLM and vLLM-Ascend serve the multimodal wrapper
-    (``DeepseekV4ForConditionalGeneration`` /
-    ``AscendDeepseekV4ForConditionalGeneration``) whose ``vision`` ViT, ``aligner``
-    and four ``image_*`` vectors are not part of any HF meta model. The names are
-    the ones the published checkpoint ships and the wrapper resolves
-    (``vision.*`` / ``aligner.*`` / ``image_*``, see ``_vision_parameter_name``),
-    and every shape was verified against the real safetensors header of
-    ``deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`` (``vision_n_layers=32`` -> 267
-    tensors, e.g. ``vision.blocks.0.mlp.w1.weight`` == [5632, 1024] and
-    ``aligner.w1.weight`` == [4096, 9216]).
+    The shared weight source enumerates the text backbone, expands expert
+    shards and applies ``deepseek_v4_checkpoint_name``. This adapter adds only
+    missing checkpoint entries; it does not allocate or generate weights.
+
+    Shapes follow the vision checkpoint: fused ViT gate/up projections,
+    downsampled aligner input and four image-marker vectors. Router biases
+    remain FP32; vision and marker payloads use BF16, including markers whose
+    served parameters are FP32 and are cast by the loader on copy.
     """
     dim = int(config.vision_dim)
     inter = int(config.vision_inter_dim)
@@ -126,20 +123,13 @@ def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], t
         ("aligner.w2.weight", (hidden, hidden), torch.bfloat16),
         ("aligner.w2.bias", (hidden,), torch.bfloat16),
     ]
-    # The wrapper allocates these four vectors in float32, but the checkpoint -
-    # and therefore the payload - ships them in BF16, and ``default_weight_loader``
-    # casts on copy, so the payload stays faithful to the checkpoint.
     params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
     # HF's text meta model omits these real router parameters. A full update
     # must carry them rather than relying on the previous device allocation.
+    expert_shape = (int(config.n_routed_experts),)
     for layer in range(int(config.num_hidden_layers)):
-        params.append((f"model.layers.{layer}.mlp.gate.bias_vl", (int(config.n_routed_experts),), torch.float32))
+        prefix = f"model.layers.{layer}.mlp.gate"
+        params.append((f"{prefix}.bias_vl", expert_shape, torch.float32))
         if config.mlp_layer_types[layer] != "hash_moe":
-            params.append(
-                (
-                    f"model.layers.{layer}.mlp.gate.e_score_correction_bias",
-                    (int(config.n_routed_experts),),
-                    torch.float32,
-                )
-            )
+            params.append((f"{prefix}.e_score_correction_bias", expert_shape, torch.float32))
     return params
