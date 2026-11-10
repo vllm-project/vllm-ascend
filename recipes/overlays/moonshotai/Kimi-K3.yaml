@@ -4,6 +4,7 @@ variants:
   ascend_w4a8:
     # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
     model_id: Eco-Tech/Kimi-K3-w4a8
+    hub: modelscope
     precision: int4
     label: W4A8 (Ascend)
     vram_minimum_gb: 1711
@@ -49,6 +50,7 @@ variants:
   ascend_mxfp4:
     # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
     model_id: Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
+    hub: modelscope
     precision: mxfp4
     label: MXFP4(ASCEND)
     # Rough estimate: 2.8T params x 0.5 byte/param x 1.2 headroom = 1680 GB.
@@ -82,7 +84,6 @@ variants:
       - '--allowed-local-media-path'
       - /
     extra_env:
-      VLLM_USE_MODELSCOPE: 'true'
       VLLM_USE_V2_MODEL_RUNNER: '1'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       OMP_PROC_BIND: 'false'
@@ -95,11 +96,6 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: vllm serve
     description: ModelSlim MXFP4 with QuaRot for Ascend 950DT (A5). Requires --quantization ascend. Checkpoint not yet public; the 1680 GB loading estimate is provisional and unmeasured.
-
-hardware_overrides:
-  ascend_910c:
-    extra_env:
-      VLLM_USE_MODELSCOPE: 'true'
 
 meta:
   hardware:
