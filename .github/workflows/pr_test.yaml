@@ -115,20 +115,19 @@ jobs:
           all_groups = json.loads(outputs["test_groups"])
           a3_groups = [group for group in all_groups if group["npu_type"] == "a3"]
           candidates = [
-              group
-              for group in a3_groups
-              if group["num_npus"] in NPU_COUNTS and group.get("partition") in (1, None)
+              group for group in a3_groups if int(group["num_npus"]) in NPU_COUNTS
           ]
-          # Keep one partition per card count, preferring partition 1.
+          # Keep the first partition of each card count. "partition" is a range
+          # string such as "1-5", so sort it textually instead of comparing to 1.
           candidates.sort(
               key=lambda group: (
-                  group["num_npus"],
-                  0 if group.get("partition") == 1 else 1,
+                  int(group["num_npus"]),
+                  str(group.get("partition") or ""),
               )
           )
           picked = {}
           for group in candidates:
-              picked.setdefault(group["num_npus"], group)
+              picked.setdefault(int(group["num_npus"]), group)
           if sorted(picked) != sorted(NPU_COUNTS):
               raise SystemExit(f"Expected A3 partitions for {NPU_COUNTS}, got {sorted(picked)}")
 
