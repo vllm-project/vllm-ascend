@@ -469,7 +469,6 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
-    monkeypatch.setattr(attn_utils, "is_deepseek_v41_cache", lambda _: False)
     monkeypatch.setattr(attn_utils, "get_layerwise_reuse_config", lambda _: None)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)

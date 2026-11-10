@@ -1660,23 +1660,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def unpack_dsa_indexer_kv_cache(kv_cache):
-        """Unpack indexer kv_cache tuple.
-        A5: returns (state_cache, k_cache, scale_cache, full_cache)."""
-        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache = kv_cache
+        """Unpack MRV2 indexer components and recover the packed-page alias."""
+        # attention.utils imports device operators while loading attention ops.
+        from vllm_ascend.attention.utils import combine_cache_components
+
+        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache = kv_cache
+        indexer_full_cache = combine_cache_components(indexer_k_cache, indexer_scale_cache)
         return indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache
 
     @staticmethod
     def unpack_dsa_forward_kv_cache(kv_cache, compress_ratio):
-        """Unpack kv_cache for forward pass. A5: 7-element tuple with
-        indexer_full_cache at position 6; non-A5: 6 elements (None substituted)."""
-        idx_full = 6
-        full_cache = kv_cache[idx_full]
+        """Unpack six MRV2 components; only C4 needs the combined indexer alias."""
+        compressed, swa, state, _, indexer_key, indexer_scale = kv_cache
         if compress_ratio == 4:
-            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
+            from vllm_ascend.attention.utils import combine_cache_components
+
+            full_cache = combine_cache_components(indexer_key, indexer_scale)
+            return compressed, swa, state, indexer_key, indexer_scale, full_cache
         elif compress_ratio == 128:
-            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
+            return compressed, swa, state, None, None, None
         else:
-            return (None, kv_cache[1], None, None, None, full_cache)
+            return None, swa, None, None, None, None
 
     @staticmethod
     def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
