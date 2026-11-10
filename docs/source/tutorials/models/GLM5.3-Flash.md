@@ -34,11 +34,8 @@ All deployment examples on this page use Model Runner V2 with
 `VLLM_USE_V2_MODEL_RUNNER=1`. Every PD Prefill role uses PCP8 with TP1;
 Decode keeps PCP1.
 
-GLM-5.3-Flash supports Prefill Context Parallelism (PCP), ReplaySSM
-(`--use-replayssm`), and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
-The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use these features together.
-The [A3 KV Cache Pool example](#glm53-flash-5-4-a3)
-uses native KDA because ReplaySSM does not support `MultiConnector`.
+The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use Prefill Context
+Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
 ## 3 Prerequisites
 
@@ -313,7 +310,6 @@ are not interchangeable.
       --trust-remote-code \
       --quantization ascend \
       --kv-cache-dtype int8 \
-      --attention-config.indexer_kv_dtype int8 \
       --mamba-ssm-cache-dtype bfloat16 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
@@ -337,7 +333,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
   The complete single-node commands above use `fp8` on 950DT products and `int8` on A3 series.
   KV cache quantization is independent of weight quantization: enabling C8 does not require W8A8 weights or a separate C8 checkpoint.
   The examples use W8A8-MXFP8 weights on 950DT products and W8A8 weights on A3 series, as listed in Section 3.1.
-- `--attention-config.indexer_kv_dtype`: Uses FP8 KPool indexer cache on 950DT products and INT8 on A3 series, independently of `--kv-cache-dtype`.
+- `--attention-config.indexer_kv_dtype`: Uses FP8 KPool indexer cache on 950DT products, independently of `--kv-cache-dtype`. The A3 series example leaves the indexer cache dtype at its default.
 - `--mamba-ssm-cache-dtype bfloat16`: Uses BF16 SSM state in the A3 series single-node example.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input where specified. A3 ordinary PD uses `'{"image":1}'` to limit image input only.
@@ -870,10 +866,8 @@ For DP>1, the launcher executes the role script without filtering.
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
-      --attention-config.indexer_kv_dtype int8 \
       --prefix-cache-retention-interval None \
       --enforce-eager \
-      --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{"enable_shared_expert_dp": true,"enable_fused_mc2":2}' \
@@ -946,8 +940,6 @@ For DP>1, the launcher executes the role script without filtering.
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
-      --attention-config.indexer_kv_dtype int8 \
-      --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
@@ -1019,11 +1011,9 @@ For DP>1, the launcher executes the role script without filtering.
       for each engine.
     - Prefill API ports are `9081-9082`; Decode API ports are `9900-9907`.
       All ten endpoints must be reachable from the proxy.
-    - Both roles use Model Runner V2, INT8 main and indexer KV caches,
-      `--max-model-len 1048576`, MTP3, `--use-replayssm`, and
+    - Both roles use Model Runner V2, INT8 main KV cache,
+      `--max-model-len 1048576`, MTP3, and
       `--mamba-ssm-cache-dtype bfloat16`. Prefix caching uses the model default.
-      Refer to [GLM KDA RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md)
-      for the ReplaySSM switch and its requirements.
     - Prefill runs the target eagerly and enables draft graph execution.
       It enables asynchronous EPLB with the `stair` policy and `hixl`
       communicator. The Prefill configuration sets `enable_fused_mc2` to `2`
@@ -1548,12 +1538,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
     Keep the ordinary PD serving parameters on both roles, including
-    `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main and indexer KV caches,
+    `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main KV cache,
     BF16 SSM state, MTP3, and the role-specific scheduling and tuning options.
     Prefill uses 32 sequences and 16384 batched tokens; Decode uses 40
     sequences and 240 batched tokens. Both roles limit image input to one image.
-    Add `--enable-prefix-caching` and remove `--use-replayssm`: this pooling
-    example uses native KDA because ReplaySSM does not accept `MultiConnector`.
+    Add `--enable-prefix-caching` for this pooling example.
     Add the Memcache environment settings and replace the connectors as
     described below. Reuse the ordinary PD launch commands and proxy mapping.
 
@@ -2292,7 +2281,7 @@ and role-specific settings when reproducing the deployment.
 | Prefill MoE communication | Prefill | `enable_fused_mc2: 2`, `--enable-eplb` | Uses fused MoE communication and asynchronous EPLB with the `stair` policy and `hixl` communicator. |
 | Shared-expert overlap | Decode | `multistream_overlap_shared_expert: true` | Overlaps shared-expert execution with other work; the Decode configuration does not enable fused MC2. |
 | Decode execution | Decode | `FULL_DECODE_ONLY` | Reduces decode launch overhead. |
-| MTP | Prefill and Decode | `num_speculative_tokens: 3`, `--use-replayssm` | Uses ReplaySSM with draft graph execution on both roles; the Prefill target is eager. |
+| MTP | Prefill and Decode | `num_speculative_tokens: 3` | Uses draft graph execution on both roles; the Prefill target is eager. |
 | KV capacity | Prefill and Decode | `--kv-cache-dtype int8` | Reduces KV cache memory consumption for long contexts. |
 
 ### 9.2 Tuning Guidelines {: #92-workload-specific-settings }
