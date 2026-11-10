@@ -9,9 +9,10 @@ Usage:
     python -m tools.generate_zh_docs
 """
 
-import re
 import sys
 from pathlib import Path
+
+import regex as re
 
 SOURCE_DIR = Path("docs/source")
 LOCALE_DIR = SOURCE_DIR / "locale" / "zh_CN" / "LC_MESSAGES"
