@@ -2,7 +2,6 @@ import math
 from abc import ABC, abstractmethod
 from typing import Any
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
@@ -87,8 +86,7 @@ class BaseKVPoolScheduler(ABC):
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
+        self.retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
