@@ -439,10 +439,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         assert self.input_batch is not None
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
-        # capacity independently, as adaptive verification also requires.
-        sync_state = dp_sync_state
-        if self.pcp_manager is not None or (self.enable_adaptive_verification and not is_profile):
-            sync_state = None
+        # capacity independently for PCP.
+        sync_state = None if self.pcp_manager is not None else dp_sync_state
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
