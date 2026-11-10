@@ -2176,14 +2176,6 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        if vllm_config.kv_transfer_config.is_kv_consumer == \
-                vllm_config.kv_transfer_config.is_kv_producer:
-            raise ValueError(
-                "MooncakeConnectorV1 requires exactly one KV transfer role "
-                f"(got {self.kv_role!r}): kv_role='kv_both' is not supported "
-                "by this connector. Use 'kv_producer' on "
-                "prefill engines and 'kv_consumer' on decode engines."
-            )
         if self.kv_role == "kv_consumer" and self.pcp_size > 1:
             raise ValueError(
                 "In P/D disaggregation, Mooncake supports PCP only on the prefill (kv_producer) engine. "
