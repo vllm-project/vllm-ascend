@@ -101,6 +101,17 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
+      # TEMPORARY (fork smoke validation only, do not merge): 线下 karc 成员
+      # 经 squid 出网很慢，这里同时做三件事：
+      #   1) github 直连绕开 squid（karc 侧的 git-cdn-service 已就位）；
+      #   2) 强制 git 走 HTTP/1.1，避开 karc -> squid 的 h2 抖动；
+      #   3) 用华为云 pypi 镜像，避免 pypi.org 出口 120s 后 ABORTED。
+      NO_PROXY: "0.0.0.0,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.buildkitd,.svc.cluster.local,.cluster.local,.actions.githubusercontent.com,.blob.core.windows.net,api.github.com,100.100.100.200,stats.vllm.ai,metadata.google.internal,169.254.169.254,api.siliconflow.cn,api.deepseek.com,github.com,.github.com,codeload.github.com"
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: "http.version"
+      GIT_CONFIG_VALUE_0: "HTTP/1.1"
+      UV_DEFAULT_INDEX: https://mirrors.huaweicloud.com/repository/pypi/simple
+      PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -108,9 +119,18 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
-        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
+        # TEMPORARY (fork smoke validation only, do not merge): 去掉
+        # https://download.pytorch.org/whl/cpu/ —— 该索引的 numpy 链接直接指向
+        # files.pythonhosted.org（karc 实测 30KB/s，13.3MiB 反复 600s 超时）。
+        # torch 2.14.0 cp312 aarch64 在华为云 pypi 上存在，torch-npu 在 ascend 仓库，
+        # 因此不需要 pytorch 索引。
+        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
         UV_INDEX_STRATEGY: unsafe-best-match
-        UV_HTTP_TIMEOUT: 120
+        # karc 经 squid 并发下载时单连接会被拖过 120s（线上报 network timeout），
+        # 放宽超时、加重试并把并发降到 2。
+        UV_HTTP_TIMEOUT: 600
+        UV_HTTP_RETRIES: 5
+        UV_CONCURRENT_DOWNLOADS: 2
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
     steps:
@@ -375,6 +395,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
+
+      # TEMPORARY (fork smoke validation only, do not merge): 线下 karc 的 ARC
+      # 容器钩子在 job 收尾时用 `tar cf - -C / __w` 经 k8s exec 把整个工作区
+      # 回传给 runner，实测超过约 60 秒会被截断（tar-fs 报
+      # "Unexpected end of data"），导致 Post Checkout 失败。构建产物对后续
+      # 步骤没有用处，这里先删掉，减少回传体积。
+      - name: Trim workspace before runner copies it back
+        if: ${{ always() && matrix.group.npu_type != 'cpu' }}
+        continue-on-error: true
+        run: |
+          du -sh /__w 2>/dev/null || true
+          rm -rf build vllm-empty/build 2>/dev/null || true
+          du -sh /__w 2>/dev/null || true
 
   upload-coverage-to-obs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
