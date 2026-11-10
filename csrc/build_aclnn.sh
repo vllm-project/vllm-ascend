@@ -122,7 +122,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
-        "attn_res_fwd"
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
@@ -256,6 +255,40 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  # Cap the default build parallelism by the cgroup memory limit when one
+  # exists: each opc compilation peaks at ~10 GiB, and on memory-capped
+  # hosts (containers, CI runners) the default all-core parallelism gets opc
+  # OOM-killed mid-build. Every killed opc leaves a stale kernel_meta.lock
+  # that later retries trip over, so a single OOM wave compounds across
+  # rebuilds (see the matching reaping in csrc/scripts/build_cache.py).
+  if [[ -z "${CMAKE_BUILD_PARALLEL_LEVEL:-}" ]]; then
+      _cg_limit_bytes=""
+      for _f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+          if [[ -r "${_f}" ]]; then
+              _v=$(<"${_f}")
+              if [[ "${_v}" =~ ^[0-9]+$ && "${_v}" -lt $((1 << 50)) ]]; then
+                  _cg_limit_bytes="${_v}"
+                  break
+              fi
+          fi
+      done
+      if [[ -n "${_cg_limit_bytes}" ]]; then
+          _mem_jobs=$(( _cg_limit_bytes / (12 * 1024 * 1024 * 1024) ))
+          (( _mem_jobs >= 1 )) || _mem_jobs=1
+          _nproc=$(nproc)
+          (( _mem_jobs > _nproc )) && _mem_jobs=${_nproc}
+          # build.sh computes an explicit -j from nproc*2 (capped by
+          # OPS_CPU_NUMBER/MAX_JOBS) and passes it to cmake --build, which
+          # overrides CMAKE_BUILD_PARALLEL_LEVEL; cap MAX_JOBS so the limit
+          # actually reaches this entry point, and keep the env var for
+          # entry points that build without an explicit -j.
+          if [[ -z "${MAX_JOBS:-}" ]]; then
+              export MAX_JOBS=${_mem_jobs}
+          fi
+          export CMAKE_BUILD_PARALLEL_LEVEL=${_mem_jobs}
+          log "cgroup memory limit ${_cg_limit_bytes} bytes: capping build parallelism to ${_mem_jobs} (MAX_JOBS/CMAKE_BUILD_PARALLEL_LEVEL)"
+      fi
+  fi
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
