@@ -1885,7 +1885,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --compilation-config '{"cudagraph_mode":"NONE"}' \
       --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
@@ -1923,7 +1923,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
@@ -1952,7 +1952,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
     ```
 
-    `load_async=false` keeps external cache loading synchronous. Decode-side pool loading and saving remain disabled.
+    The tested configuration sets `lookup_rpc_port` to `"0"` for Prefill and `"1"` for Decode.
 
 **Verify three-tier cache reuse:**
 
