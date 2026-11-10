@@ -465,9 +465,6 @@ class SparseKVOffloadManager:
     No more scheduling logic: we reuse the original block_table/slot_mapping.
     """
 
-    # Class-level default keeps __new__-constructed instances (unit tests)
-    # on the legacy per-layer path unless __init__ enables the batch pipeline.
-    delayed_d2h = False
 
     def __init__(
         self,
@@ -478,7 +475,6 @@ class SparseKVOffloadManager:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.sparse_kv_offload_config = sparse_kv_offload_config
-        self.delayed_d2h = getattr(sparse_kv_offload_config, "delayed_d2h", False)
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -539,8 +535,7 @@ class SparseKVOffloadManager:
         store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
         config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
-        if getattr(sparse_kv_offload_config, "delayed_d2h", False):
-            self._d2h_init_state()
+        self._d2h_init_state()
         self.tp_group.barrier()
 
     def _warmup_external_lru_planner_threads(self) -> int:
@@ -766,7 +761,7 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
-        if self.delayed_d2h:
+        if getattr(self, "_d2h_state_ready", False):
             source_token_capacities = {
                 tensor.numel() * tensor.element_size() // token_bytes
                 for tensors, token_bytes in (
@@ -874,7 +869,7 @@ class SparseKVOffloadManager:
                 cpu_k_shape,
                 cpu_v_shape,
             )
-        if self.delayed_d2h:
+        if getattr(self, "_d2h_state_ready", False):
             self._allocate_d2h_descriptor_state(device)
             self._allocate_d2h_execution_state()
         if self.use_fused_copy_sfa:
@@ -1522,6 +1517,7 @@ class SparseKVOffloadManager:
         self.d2h_host_kv_cache_group_id = self._infer_host_kv_cache_group_id(self.kv_cache_config)
         self.d2h_host_num_blocks = self.kv_cache_config.num_blocks
         self._allocate_d2h_planner_state()
+        self._d2h_state_ready = True
 
     def _allocate_d2h_planner_state(self) -> None:
         """Allocate the dormant CPU control state for delayed D2H."""
@@ -1719,6 +1715,12 @@ class SparseKVOffloadManager:
             raise RuntimeError("delayed D2H has no source-ready compute frontier")
         with runtime.stream(self.d2h_stream):
             descriptor_count = self.prepare_d2h_descriptors()
+            logger.info_once(
+                "Delayed D2H pipeline active: first batch prepared with %d descriptors "
+                "(subsequent batches log at DEBUG level)",
+                descriptor_count,
+            )
+            logger.debug("Delayed D2H batch launched: %d descriptors", descriptor_count)
             self.d2h_stream.wait_event(self.d2h_source_ready_events[source_slot])
             # TODO: use an asynchronous SDMA copy API after its descriptor and
             # completion semantics are available; keep the existing MTE path
@@ -1862,7 +1864,8 @@ class SparseKVOffloadManager:
         owners = np.asarray(generations, dtype=np.int64)
         prefixes = np.asarray(stable_prefixes, dtype=np.int64)
         if slots.ndim != 1 or owners.shape != slots.shape or prefixes.shape != slots.shape:
-            raise ValueError("delayed D2H slot, generation, and stable-prefix vectors must be one-dimensional and equal")
+            raise ValueError(
+                "delayed D2H slot/generation/stable-prefix vectors must be 1-D and equal")
         if np.any((slots < 0) | (slots >= self.d2h_capacity)):
             raise ValueError("delayed D2H pool slot is outside the configured capacity")
         if np.unique(slots).size != slots.size:

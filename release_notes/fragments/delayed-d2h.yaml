@@ -1,0 +1,8 @@
+enhancement:
+  - |
+    Delayed batch D2H for sparse KV offload on Model Runner V2: replaces
+    per-layer synchronous device-to-host KV copies with an asynchronous
+    batch pipeline that overlaps the forward pass. Full blocks are
+    detected via ``num_computed_tokens``, copied on a dedicated stream,
+    and their stable prefixes are published to attention metadata after
+    the TP completion collective.

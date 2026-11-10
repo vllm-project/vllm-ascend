@@ -522,7 +522,7 @@ class AscendModelState(DefaultModelState):
                     block_table=block_tables[0],
                 )
             manager = get_sparse_kv_offload_manager()
-            if manager is not None and getattr(manager, "delayed_d2h", False):
+            if manager is not None:
                 # Newly bound rows adopt the manager's D2H ledger at their
                 # aligned computed frontier; every row then publishes its
                 # stable prefix for the metadata builder.
@@ -630,20 +630,19 @@ class AscendModelState(DefaultModelState):
             and self._offload_pool_generations is not None
         ):
             manager = get_sparse_kv_offload_manager()
-            if getattr(manager, "delayed_d2h", False):
-                num_real_reqs = input_batch.num_reqs
-                count = manager.plan_d2h_requests(
-                    input_batch.num_computed_tokens_np[:num_real_reqs],
-                    pool_slots.np[:num_real_reqs],
-                    self._offload_pool_generations.np[:num_real_reqs],
-                    # V2 keeps block ids device-only (no CPU mirror); one
-                    # small blocking D2H fetch is the planner's host input.
-                    block_tables[manager.d2h_host_kv_cache_group_id][:num_real_reqs].cpu().numpy(),
-                    np.ones(num_real_reqs, dtype=np.bool_),
-                )
-                if count:
-                    # All TP ranks freeze and launch the same host plan. Only
-                    # TP0 issues the physical copy; other ranks mark the batch
-                    # submitted to join the matching retire collective.
-                    manager.launch_d2h()
+            num_real_reqs = input_batch.num_reqs
+            count = manager.plan_d2h_requests(
+                input_batch.num_computed_tokens_np[:num_real_reqs],
+                pool_slots.np[:num_real_reqs],
+                self._offload_pool_generations.np[:num_real_reqs],
+                # V2 keeps block ids device-only (no CPU mirror); one
+                # small blocking D2H fetch is the planner's host input.
+                block_tables[manager.d2h_host_kv_cache_group_id][:num_real_reqs].cpu().numpy(),
+                np.ones(num_real_reqs, dtype=np.bool_),
+            )
+            if count:
+                # All TP ranks freeze and launch the same host plan. Only
+                # TP0 issues the physical copy; other ranks mark the batch
+                # submitted to join the matching retire collective.
+                manager.launch_d2h()
         return self.attn_metadata
