@@ -9,7 +9,15 @@ import pytest
 import torch
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+    compute_layout_strides,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -239,3 +247,86 @@ def test_paired_indexer_and_mamba_writes_stay_in_their_pages(vllm_config, scale_
     end = start + conv[2].numel() * conv.element_size() + ssm[2].numel() * ssm.element_size()
     torch.testing.assert_close(backing[:start], before[:start])
     torch.testing.assert_close(backing[end:], before[end:])
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v32", "glm_moe_dsa"])
+@pytest.mark.parametrize("num_heads", [2, 64])
+def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, model_type, num_heads):
+    """K3.1 paired dispatch must not consume generic SFA descriptor strides."""
+    vllm_config.model_config.hf_config.model_type = model_type
+    vllm_config.model_config.hf_text_config.model_type = model_type
+    main_spec = AscendMLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_heads=num_heads,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    indexer_spec = AscendSFAIndexerCacheSpec(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    # DeepSeek constructs each indexer before its MLA attention layer.
+    indexer_names = [f"model.layers.{layer}.indexer.k_cache" for layer in (0, 1)]
+    main_names = [f"model.layers.{layer}.attn" for layer in (0, 1)]
+    specs: dict[str, AscendMLAAttentionSpec | AscendSFAIndexerCacheSpec] = {}
+    for indexer_name, main_name in zip(indexer_names, main_names):
+        specs[indexer_name] = indexer_spec
+        specs[main_name] = main_spec
+    backing_size = NUM_BLOCKS * sum(spec.page_size_bytes for spec in specs.values())
+    descriptors = []
+    offset = 0
+    for spec, names in ((indexer_spec, indexer_names), (main_spec, main_names)):
+        # The generic planner derives descriptors from the logical head shape.
+        # Ascend's query-head field must not change its one-latent-head storage.
+        layer_stride, block_stride, *_ = compute_layout_strides(spec, NUM_BLOCKS, len(names), KVCacheLayout.LBNHC)
+        descriptors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=names,
+                offset=offset,
+                layer_stride=layer_stride,
+                block_stride=block_stride,
+            )
+        )
+        offset += len(names) * layer_stride
+    assert descriptors[1].offset + descriptors[1].layer_stride >= backing_size
+    plan = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=descriptors,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=list(specs),
+                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=BLOCK_SIZE, kv_cache_specs=specs),
+            )
+        ],
+    )
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_args: (512, 64))
+
+    raw_caches = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
+    for name, spec in specs.items():
+        assert isinstance(raw_caches[name], tuple)
+        assert sum(part.numel() for part in raw_caches[name]) == NUM_BLOCKS * spec.page_size_bytes
+    backend = SimpleNamespace(get_kv_cache_shape=lambda blocks, block, heads, size, *args: (blocks, block, heads, size))
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            AttentionGroup(backend, indexer_names, indexer_spec, 0),
+            AttentionGroup(backend, main_names, main_spec, 0),
+        ],
+        kv_cache_raw_tensors=raw_caches,
+        cache_dtype="auto",
+        kernel_block_sizes=[BLOCK_SIZE],
+        shared_kv_cache_layers={},
+        kv_cache_config=plan,
+    )
+    for name in indexer_names:
+        assert caches[name][0].shape == (NUM_BLOCKS, BLOCK_SIZE, 1, 128)
+    for name in main_names:
+        assert caches[name][0].shape == (NUM_BLOCKS, BLOCK_SIZE, 1, 512)
+        assert caches[name][1].shape == (NUM_BLOCKS, BLOCK_SIZE, 1, 64)
+    for name, parts in caches.items():
+        for part in parts:
+            part.fill_(7)
+        for other_name, other_parts in caches.items():
+            if other_name != name:
+                assert all(torch.count_nonzero(part) == 0 for part in other_parts)
+        for part in parts:
+            part.zero_()
