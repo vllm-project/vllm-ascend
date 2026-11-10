@@ -490,14 +490,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        use_pcp_reduce_scatter = has_pcp_prefill and isinstance(self.o_proj, PCPRowParallelLinear)
+        use_pcp_reduce_scatter = False
         if has_pcp_prefill:
             assert pcp_context is not None
             if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
+            # Mixed batches replicate decode rows in every rank's packed output.
+            # Keep them on AllReduce to avoid expanding the communication input.
+            use_pcp_reduce_scatter = isinstance(self.o_proj, PCPRowParallelLinear) and bool(
+                pcp_context.global_batch.is_prefilling_np.all()
+            )
         if use_pcp_reduce_scatter:
             assert pcp_context is not None
-            logger.info_once("KDA PCP output uses packed ReduceScatter.")
+            logger.info_once("KDA PCP pure-prefill output uses packed ReduceScatter.")
             output = self.o_proj(core_attn_out, pcp_output_indices=pcp_context.padded_gather_idx)[0]
         else:
             output = self.o_proj(core_attn_out)[0]
