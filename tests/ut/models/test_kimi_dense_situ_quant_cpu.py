@@ -16,6 +16,8 @@ import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.quantization.quant_type import QuantType
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -65,6 +67,7 @@ def runtime(monkeypatch):
     exec((ROOT / "vllm_ascend/quantization/prepared_linear_input.py").read_text(encoding="utf-8"), scope)
     scope.update(
         AscendLinearScheme=object,
+        QuantType=QuantType,
         WeightSwitchGatherSpec=lambda *a, **kw: None,
         register_scheme=lambda *a: lambda cls: cls,
     )
