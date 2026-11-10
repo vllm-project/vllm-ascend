@@ -128,15 +128,6 @@ strategy_hardware:
 strategy_min_gpus:
   ascend_910c: 64
   ascend_950dt: 32
-strategy_overrides:
-  multi_node_tp_dp:
-    hardware_overrides:
-      ascend_910c:
-        worker_args:
-          - '--headless'
-      ascend_950dt:
-        worker_args:
-          - '--headless'
 features:
   spec_decoding:
     hardware_overrides:
@@ -150,23 +141,16 @@ features:
           - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","enforce_eager":true}'
 
 hardware_notes:
-  ascend_910c:
-    title: Mixed-serving worker launch
-    body: The Head command serves the API. Nodes 1-3 already include --headless and distinct --data-parallel-start-rank values of 1, 2, and 3; run each generated command on its corresponding node.
   ascend_950dt:
-    title: Mixed-serving worker launch
-    body: The Head command serves the API. Nodes 1-3 already include --headless and distinct --data-parallel-start-rank values of 1, 2, and 3; run each generated command on its corresponding node. The 1680 GB loading-memory figure is a provisional estimate, not a measurement of this private checkpoint.
+    title: Provisional memory estimate
+    body: The 1680 GB loading-memory figure is a provisional estimate, not a measurement of this private checkpoint.
 
 guide_sections:
   section1: |
     ## Ascend mixed Prefill/Decode deployment
 
-    In the four-node A3/A5 mixed deployment, node 0 runs the API server.
-    The generated Head command omits `--headless`. The generated commands for
-    Nodes 1-3 include `--headless` and their respective
-    `--data-parallel-start-rank` values of 1, 2, and 3.
-    Run each command on its corresponding node; node 0 serves the API.
-    Follow the [official mixed deployment reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#51-prefilldecode)
-    for the per-node communication settings and startup order.
+    For the four-node A3/A5 mixed deployment, follow the
+    [official mixed deployment reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#51-prefilldecode)
+    for the per-node launch commands, communication settings, and startup order.
 
     PD separation is unavailable on Ascend 910C (A3) and 950DT (A5) in this recipe.
