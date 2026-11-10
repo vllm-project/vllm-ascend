@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check rendered Markdown links with concurrent checks and a late GET retry sweep.
+"""Check rendered Markdown links with concurrent checks and serial GET retry rounds.
 
 No vLLM or accelerator imports are needed. See docs/requirements-linkcheck.txt
 and the contribution testing guide for standalone usage.
@@ -41,7 +41,7 @@ MARKDOWN_EXTENSIONS = (
     "pymdownx.tabbed",
 )
 REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
-GET_FALLBACK_CODES = frozenset({401, 403, 404, 405, 501})
+GET_FALLBACK_CODES = frozenset({401, 403, 404, 405, 410, 501})
 TRANSIENT_CODES = frozenset({408, 425, 500, 502, 503, 504})
 MAX_REDIRECTS = 5
 UNREACHABLE_EXAMPLE_IP = "192.0.0.1"
@@ -64,11 +64,11 @@ SKIP_URLS = {
 class Settings:
     global_concurrency: int = 10
     initial_attempts: int = 3
-    recheck_attempts: int = 4
+    recheck_intervals: tuple[float, ...] = (2, 4, 8, 10)
     request_timeout: float = 15
     connect_timeout: float = 5
     total_timeout: float = 1200
-    retry_delay: float = 10
+    recheck_round_delay: float = 15
     excludes: tuple[str, ...] = ("docs/source/zh",)
 
 
@@ -181,7 +181,7 @@ class Link:
 
     @property
     def retryable(self) -> bool:
-        return self.status in {"network_error", "rate_limited"}
+        return self.status in {"network_error", "rate_limited", "restricted", "http_error"}
 
 
 def interleave_links(links: list[Link]) -> list[Link]:
@@ -302,7 +302,8 @@ class LinkChecker:
                 return self.finish(link, "network_error", f"HTTP {code}")
             if code in {401, 403}:
                 return self.finish(link, "restricted", f"HTTP {code}")
-            return self.finish(link, "broken", f"HTTP {code}")
+            status = "broken" if code in {404, 410} else "http_error"
+            return self.finish(link, status, f"HTTP {code}")
 
     async def check_batch(self, links: list[Link]) -> None:
         """Concurrent first pass; only temporary failures get another attempt."""
@@ -310,9 +311,8 @@ class LinkChecker:
         async def check(link: Link):
             for _ in range(self.settings.initial_attempts):
                 await self.check_url(link)
-                # Rate limits go straight to late GET rechecks; request()
-                # enforces explicit server waits without a default pause.
-                if not link.retryable or link.status == "rate_limited":
+                # Other HTTP failures go straight to late GET rechecks.
+                if link.status != "network_error":
                     break
 
         # A programming error propagates with its traceback and cancels peers.
@@ -325,19 +325,22 @@ class LinkChecker:
         try:
             async with asyncio.timeout(self.settings.total_timeout):
                 await self.check_batch([link for link in links if link.status == "pending"])
-                # Keep the proven late, serial GET sweep over temporary failures.
-                for link in interleave_links([link for link in links if link.retryable]):
-                    for attempt in range(self.settings.recheck_attempts):
-                        if attempt:
-                            await asyncio.sleep(self.settings.retry_delay)
+                for round_no, interval in enumerate(self.settings.recheck_intervals):
+                    failed = interleave_links([link for link in links if link.retryable])
+                    if not failed:
+                        break
+                    if round_no:
+                        await asyncio.sleep(self.settings.recheck_round_delay)
+                    # Give every remaining URL one GET before starting another round.
+                    for index, link in enumerate(failed):
+                        if index:
+                            await asyncio.sleep(interval)
                         await self.check_url(link, method="GET", phase="recheck")
-                        if not link.retryable:
-                            break
         except TimeoutError:
+            print("[timeout] Overall check deadline exceeded; keeping the last result for checked URLs.", flush=True)
             for link in links:
-                if link.status == "pending" or link.retryable:
-                    status = "rate_limited" if link.status == "rate_limited" else "unverified"
-                    self.finish(link, status, f"overall check deadline exceeded; last result: {link.message}")
+                if link.status == "pending":
+                    self.finish(link, "unverified", "overall check deadline exceeded before a result was received")
         for link in links:
             # Only a final HTTP 429 is non-blocking, not other errors or unchecked URLs.
             if link.status == "rate_limited" and link.history[-1].get("code") == 429:
