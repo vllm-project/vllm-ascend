@@ -72,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+from vllm.v1.worker.gpu_worker import Worker as VllmWorker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -118,7 +119,15 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
+
+# Online-quantized LM-head copies and these helpers exist only on paired main.
+if not vllm_version_is("0.32.0"):
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        restore_quantized_lm_heads,
+        share_source_lm_heads,
+    )
 
 
 def get_kv_cache_groups(
@@ -217,6 +226,7 @@ class NPUWorker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine = None
         self._weight_update_active = False
+        self._weight_update_is_draft = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -369,18 +379,13 @@ class NPUWorker(WorkerBase):
             self.sleep_wakeup_manager.wakeup(tags)
         self.synchronize_device()
 
-    def _check_weight_transfer_engine(self) -> None:
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
-            )
-
-    def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """Initialize the HCCL weight transfer process group with the trainer."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+    _check_weight_transfer_engine = VllmWorker._check_weight_transfer_engine
+    init_weight_transfer_engine = VllmWorker.init_weight_transfer_engine
+    get_draft_model = VllmWorker.get_draft_model
+    supports_draft_weight_updates = VllmWorker.supports_draft_weight_updates
+    _set_draft_weight_update_target = VllmWorker._set_draft_weight_update_target
+    start_weight_update = VllmWorker.start_weight_update
+    start_draft_weight_update = VllmWorker.start_draft_weight_update
 
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
@@ -391,20 +396,35 @@ class NPUWorker(WorkerBase):
                 "(enabled: true) which disables NZ automatically."
             )
 
-    def start_weight_update(self) -> None:
-        """Begin a new weight update; prepares the model for layerwise reload."""
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        """Begin a target or draft update; prepare the selected model for reload."""
         self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
 
+        if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support draft model weight updates."
+            )
         if self._weight_update_active:
             raise RuntimeError(
                 "start_weight_update called while a weight update is already active. Call finish_weight_update first."
             )
 
         self._check_nz_disabled()
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
+        draft_model = self.get_draft_model() if is_draft else None
+        try:
+            if is_draft:
+                self._set_draft_weight_update_target()
+            if draft_model is not None and not vllm_version_is("0.32.0"):
+                share_source_lm_heads(draft_model)
+            self.weight_transfer_engine.start_weight_update()
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            if draft_model is not None and not vllm_version_is("0.32.0"):
+                restore_quantized_lm_heads(draft_model, refresh=False)
+            raise
         self._weight_update_active = True
+        self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict) -> None:
         """Receive a chunk of weights from the trainer and load them in place."""
@@ -415,23 +435,45 @@ class NPUWorker(WorkerBase):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.update_weights(update_info)
+            except BaseException:
+                self._weight_update_active = False
+                self.weight_transfer_engine.reset_weight_update_target()
+                if (
+                    not vllm_version_is("0.32.0")
+                    and self._weight_update_is_draft
+                    and (draft_model := self.get_draft_model()) is not None
+                ):
+                    restore_quantized_lm_heads(draft_model, refresh=False)
+                self._weight_update_is_draft = False
+                raise
 
     def finish_weight_update(self) -> None:
-        """Finish the current weight update; runs layerwise postprocessing."""
+        """Finish reload and restore online-quantized draft heads."""
         self._check_weight_transfer_engine()
-
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
         assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
-        self._weight_update_active = False
+        is_draft = self._weight_update_is_draft
+        draft_model = self.get_draft_model() if is_draft else None
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                if draft_model is not None and not vllm_version_is("0.32.0"):
+                    restore_quantized_lm_heads(draft_model, refresh=False)
+                raise
+            else:
+                if draft_model is not None and not vllm_version_is("0.32.0"):
+                    restore_quantized_lm_heads(draft_model)
+                if not is_draft:
+                    self.model_runner.reset_lora_state()
+            finally:
+                self.weight_transfer_engine.reset_weight_update_target()
+                self._weight_update_active = False
+                self._weight_update_is_draft = False
 
     def shutdown(self) -> None:
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
