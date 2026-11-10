@@ -1,5 +1,7 @@
 # Context Parallel
 
+## Overview
+
 The context parallel features include Prefill Context Parallel (PCP) and Decode Context Parallel (DCP).
 
 Prefill Context Parallel splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
@@ -7,6 +9,10 @@ Prefill Context Parallel splits prefill tokens across additional ranks to reduce
 Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV-cache storage without adding devices to the process world.
 
 This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
+
+!!! warning "Sunset Notice for GQA DCP"
+
+    Decode Context Parallelism (DCP) for GQA models is **deprecated** as of v0.32.0 and will be removed in a future release. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
 
 ## KV-cache layout
 
@@ -252,14 +258,15 @@ It does not cover the upstream DCP-size rule (valid sizes are `1`, `tp`, `pcp` a
 | `cp_builder_cls`, `cp_impl_cls` | Static CP specialization pair used when `cp_resolver` is not set. |
 | `supports_pcp`, `supports_dcp` | Which axes this backend can serve; both default to `False`. |
 | `validate` | Reserved per-backend validation hook. `resolve_classes` does not call it yet; its docstring states that routing validation through the provider is a follow-up change. |
-| `cp_resolver` | Multi-layout hook `(vllm_config, topology) -> (builder_cls, impl_cls)`. When set it replaces the static `cp_*` pair; SFA uses it because it has three builder layouts and four implementation layouts. |
+| `cp_resolver` | Multi-layout hook `(vllm_config, topology) -> (builder_cls, impl_cls)`. When set it replaces the static `cp_*` pair; SFA uses it because it has three builder layouts and two implementation layouts (upstream main folded the PCP-only implementation into the base implementation). |
 | `spec_decode_drafting_updater` | Optional hook for speculative-decoding drafting metadata. It returns `True` when it handled the update; otherwise the shared `dcp_metadata.validate_spec_decode_drafting_metadata` checks run. Only SFA registers it today. |
+| `attn_metadata_hooks` | Optional `build_attn_metadata` extension hooks (`prepare_common_metadata`, `split_variants`, `build_extra_kwargs`, `after_build`). `None` keeps the plain path; DSA, DSA V4.1 and SFA register implementations. |
 
 The registry module is the only selection entry point for CP backend and class selection; `vllm_ascend/platform.py` still selects the top-level attention backend and validates configuration:
 
 - `register_cp_backend(provider)` stores a provider in the process-global registry. A duplicate name raises `ValueError` containing the backend name; adapters call it at import time.
 - `get_cp_backend(name)` returns the provider or `None`, and `list_cp_backends()` returns the registered names as a sorted tuple.
-- `resolve_cp_classes(name, vllm_config, topology)` returns the `(metadata builder class, attention implementation class)` pair. For the five built-in names a not-yet-imported adapter module is imported on demand from the internal lazy-loading table, so importing the registry alone stays lightweight; an unknown name raises `NotImplementedError` containing the name.
+- `resolve_cp_classes(name, vllm_config, topology)` returns the `(metadata builder class, attention implementation class)` pair. For the five built-in names a not-yet-imported adapter module is imported on demand from the internal lazy-loading table, so importing the registry alone stays lightweight; an unknown name raises `NotImplementedError` containing the name. Extra keyword hints are forwarded to a dynamic `cp_resolver` only; SFA uses `dcp_enabled` to carry the replicated-indexer switch that its v1 backend already evaluated.
 - `find_cp_backend_for_builder(attn_metadata_builder)` returns the provider whose `base_builder_cls` or `cp_builder_cls` matches the builder instance, or `None` for an unknown builder. `vllm_ascend/worker/dcp_utils.py` uses it to route speculative-decoding drafting updates through the optional hook.
 
 Selection has two gates. First `uses_cp(topology)` is `(dcp enabled and supports_dcp) or (pcp enabled and supports_pcp)`. When it is false the backend keeps its base pair, so a topology that enables only an unsupported axis stays on the base path (PCP is inlined in the GQA and MLA v1 backends, and those providers declare `supports_pcp=False`). When it is true, `cp_resolver` is used if present, otherwise `cp_builder_cls`/`cp_impl_cls`. A missing pair raises `NotImplementedError` with the backend name (`no base implementation` or `requires CP but has no CP implementation`).
@@ -282,7 +289,7 @@ Provider registration is import-time and cached for the process lifetime; adapte
        return resolve_cp_classes("<name>", vllm_config, resolve_cp_topology(vllm_config))[0]
    ```
    Import the adapter lazily so the provider is registered before the first `resolve_cp_classes` call: either inside `get_impl_cls`/`get_builder_cls` (a function-level import) or at the end of the v1 module after its class definitions. Importing the adapter at the top would create a v1 ↔ adapter cycle because the adapter imports the v1 classes. The built-in adapters instead rely on the registry's internal lazy-loading table, which only covers the built-in backend names. Do not add a second selection table or edit `vllm_ascend/platform.py`.
-3. Declare optional hooks only when the backend needs them: `cp_resolver` for more than one CP layout, `spec_decode_drafting_updater` for graph-stable drafting metadata (return `True` only for builders the hook handles), and `validate` once provider-routed validation exists.
+3. Declare optional hooks only when the backend needs them: `cp_resolver` for more than one CP layout, `spec_decode_drafting_updater` for graph-stable drafting metadata (return `True` only for builders the hook handles), `attn_metadata_hooks` when `build_attn_metadata` needs builder-specific extra kwargs or metadata variants, and `validate` once provider-routed validation exists.
 4. Add an isolated test to `tests/ut/attention/test_cp_registry.py`: register the provider, resolve it for a base and a CP topology, and assert that the built-in providers are unchanged. `test_simulated_backend_registers_without_touching_existing_backends` is the reference; its `sim_provider` fixture removes the temporary provider during teardown.
 
 Minimal registration and resolution example, using the same API that the test above exercises:
@@ -428,7 +435,7 @@ These constraints are what make the expected performance outcome "no measurable 
 ## Related Files
 
 - Slot mapping: `vllm_ascend/worker/block_table.py`
-- Input and attention metadata: `vllm_ascend/worker/v1/model_runner.py`
+- Input and attention metadata: `vllm_ascend/worker/v2/model_runner.py`
 - CP topology derivation: `vllm_ascend/attention/context_parallel/topology.py`
 - CP attention contract and shared metadata helpers: `vllm_ascend/attention/context_parallel/context.py`, `vllm_ascend/attention/context_parallel/metadata.py`, `vllm_ascend/attention/context_parallel/dcp_metadata.py`
 - CP backend registry and selection: `vllm_ascend/attention/context_parallel/registry.py`

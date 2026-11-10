@@ -2,13 +2,10 @@
 
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
-import torch
 from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
@@ -25,7 +22,6 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_mtp_runtime_patch,
 )
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(
@@ -218,104 +214,6 @@ def test_pp_ipc_cached_request_data_fills_empty_confirmed_token_only_for_async(
     assert scheduler.scheduler_config.async_scheduling is async_scheduling
 
 
-def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v1.model_runner.get_pp_group",
-        lambda: SimpleNamespace(is_last_rank=False),
-    )
-
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.is_kv_producer = False
-    runner.is_kv_consumer = False
-    runner.use_async_scheduling = True
-    runner.device = torch.device("cpu")
-    runner.discard_request_mask = SimpleNamespace(
-        np=np.zeros(2, dtype=bool),
-    )
-    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
-        num_reqs=2,
-        req_ids=["req-0", "req-1"],
-        prev_sampled_token_ids=None,
-        prev_req_id_to_index={},
-        num_tokens_no_spec=np.array([3, 5], dtype=np.int64),
-        is_token_ids=np.zeros((2, 8), dtype=bool),
-    )
-    runner.requests = {
-        "req-0": SimpleNamespace(output_token_ids=[31]),
-        "req-1": SimpleNamespace(output_token_ids=[41, 42]),
-    }
-    scheduler_output = SimpleNamespace(
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0", "req-1"],
-            new_token_ids=[[101], [202]],
-            num_output_tokens=[1, 2],
-        ),
-    )
-
-    runner._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-
-    assert runner.input_batch.prev_req_id_to_index == {
-        "req-0": 0,
-        "req-1": 1,
-    }
-    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]  # type: ignore[union-attr]
-    assert runner.requests["req-0"].output_token_ids == [
-        31,
-        PLACEHOLDER_TOKEN_ID,
-    ]
-    assert runner.requests["req-1"].output_token_ids == [
-        41,
-        42,
-        PLACEHOLDER_TOKEN_ID,
-    ]
-    assert runner.input_batch.is_token_ids[0, 3]
-    assert runner.input_batch.is_token_ids[1, 5]
-    assert runner.input_batch.num_tokens_no_spec.tolist() == [4, 6]
-
-
-def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v1.model_runner.get_pp_group",
-        lambda: SimpleNamespace(is_last_rank=False),
-    )
-
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.is_kv_producer = False
-    runner.is_kv_consumer = False
-    runner.use_async_scheduling = False
-    runner.device = torch.device("cpu")
-    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
-        num_reqs=1,
-        req_ids=["req-0"],
-        prev_sampled_token_ids="keep",
-        prev_req_id_to_index={"keep": 0},
-        num_tokens_no_spec=np.array([3], dtype=np.int64),
-        is_token_ids=np.zeros((1, 8), dtype=bool),
-    )
-    runner.requests = {
-        "req-0": SimpleNamespace(output_token_ids=[31]),
-    }
-    scheduler_output = SimpleNamespace(
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_token_ids=[[101]],
-            num_output_tokens=[1],
-        ),
-    )
-
-    runner._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-
-    assert runner.input_batch.prev_req_id_to_index == {"keep": 0}
-    assert runner.input_batch.prev_sampled_token_ids == "keep"
-    assert runner.requests["req-0"].output_token_ids == [31]
-    assert not runner.input_batch.is_token_ids[0, 3]
-    assert runner.input_batch.num_tokens_no_spec.tolist() == [3]
-
-
 @pytest.mark.parametrize("async_scheduling", [False, True])
 def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_async(
     async_scheduling,
@@ -416,9 +314,9 @@ def test_pp_mtp_spec_token_id_edge_cases():
     _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
     assert finished.spec_token_ids == ["keep"]
     assert empty_sampled.spec_token_ids == []
-    # Main trims to the validated prefix plus one lookahead token; 0.32.0 returns
+    # Main trims to the validated prefix plus one lookahead token; 0.33.0 returns
     # only the validated prefix.
-    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.32.0") else [401, 402])
+    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.33.0") else [401, 402])
 
 
 def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):

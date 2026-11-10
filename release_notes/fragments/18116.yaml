@@ -1,0 +1,4 @@
+pr: 18116
+entries:
+  - category: bugfix
+    text: W8A8 MXFP8 MoE uses per-expert NZ weight lists only with EPLB enabled. Without EPLB, the regular GMM path retains batched weight tensors; MegaMoE retains its required non-transposed expert lists.

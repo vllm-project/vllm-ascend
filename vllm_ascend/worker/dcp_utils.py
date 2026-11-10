@@ -25,11 +25,11 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.attention.context_parallel import dcp_metadata, registry
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.spec_decode_utils import correct_optimistic_seq_lens_cpu
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -359,7 +359,7 @@ class DCPManager:
         prev_num_draft_tokens_np: np.ndarray,
         valid_sampled_token_count_event: Any | None,
         valid_sampled_token_count_cpu: torch.Tensor | None,
-        input_batch: NPUInputBatch,
+        input_batch: "InputBatch",
         input_ids: CpuGpuBuffer,
         scheduler_output: "SchedulerOutput",
         arange_np: np.ndarray,
@@ -478,7 +478,7 @@ class DCPManager:
         total_num_scheduled_tokens: int,
         num_scheduled_tokens: dict[str, int],
         with_prefill: bool = True,
-        input_batch: NPUInputBatch | None = None,
+        input_batch: "InputBatch | None" = None,
         arange_np: np.ndarray | None = None,
         req_indices: np.ndarray | None = None,
         positions_np: np.ndarray | None = None,
@@ -628,7 +628,7 @@ class DCPManager:
         self,
         total_num_scheduled_tokens: int,
         query_lens: torch.Tensor,
-        input_batch: NPUInputBatch,
+        input_batch: "InputBatch",
         num_scheduled_tokens: np.ndarray | None,
         block_table_tensor: torch.Tensor,
         num_reqs_padded: int,

@@ -66,11 +66,18 @@ class CPBackendProvider:
         """Whether a CP specialization should be selected for this topology."""
         return (topology.is_dcp_enabled and self.supports_dcp) or (topology.is_pcp_enabled and self.supports_pcp)
 
-    def resolve_classes(self, vllm_config, topology: CPTopology) -> tuple[type, type]:
+    def resolve_classes(
+        self,
+        vllm_config,
+        topology: CPTopology,
+        **provider_hints: Any,
+    ) -> tuple[type, type]:
         """Resolve the (metadata builder, attention impl) pair for a topology.
 
         Backend-specific ``validate`` is intentionally not called here; routing
         validation through the provider is left to a follow-up change.
+        ``provider_hints`` are forwarded to a dynamic ``cp_resolver`` only; the
+        static ``base_*``/``cp_*`` providers ignore them.
         """
         if not self.uses_cp(topology):
             builder_cls, impl_cls = self.base_builder_cls, self.base_impl_cls
@@ -79,7 +86,7 @@ class CPBackendProvider:
             return builder_cls, impl_cls
 
         if self.cp_resolver is not None:
-            builder_cls, impl_cls = self.cp_resolver(vllm_config, topology)
+            builder_cls, impl_cls = self.cp_resolver(vllm_config, topology, **provider_hints)
         else:
             builder_cls, impl_cls = self.cp_builder_cls, self.cp_impl_cls
         if builder_cls is None or impl_cls is None:
@@ -118,11 +125,18 @@ def list_cp_backends() -> tuple[str, ...]:
     return tuple(sorted(_CP_BACKEND_REGISTRY))
 
 
-def resolve_cp_classes(name: str, vllm_config, topology: CPTopology) -> tuple[type, type]:
+def resolve_cp_classes(
+    name: str,
+    vllm_config,
+    topology: CPTopology,
+    **provider_hints: Any,
+) -> tuple[type, type]:
     """Resolve the (metadata builder, attention impl) pair of a CP backend.
 
     Unregistered built-in names are lazily loaded from their adapter module
-    first; unknown names raise ``NotImplementedError``.
+    first; unknown names raise ``NotImplementedError``. ``provider_hints`` are
+    forwarded to a dynamic ``cp_resolver`` (SFA uses ``dcp_enabled`` to carry
+    the upstream replicated-indexer switch that its v1 backend already read).
     """
     provider = _CP_BACKEND_REGISTRY.get(name)
     if provider is None:
@@ -132,7 +146,7 @@ def resolve_cp_classes(name: str, vllm_config, topology: CPTopology) -> tuple[ty
             provider = _CP_BACKEND_REGISTRY.get(name)
     if provider is None:
         raise NotImplementedError(f"Unknown context-parallel attention backend: {name!r}.")
-    return provider.resolve_classes(vllm_config, topology)
+    return provider.resolve_classes(vllm_config, topology, **provider_hints)
 
 
 def find_cp_backend_for_builder(attn_metadata_builder: Any | None) -> CPBackendProvider | None:

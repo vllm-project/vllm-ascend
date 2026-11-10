@@ -93,11 +93,19 @@ class DSAV41MetadataHooks(AttnMetadataHooks):
     """DSA V4.1: inject the compressed-indexer and ring-state extras."""
 
     def build_extra_kwargs(self, **ctx: Any) -> dict[str, Any]:
+        # Only query overrides affect SMLA; unrelated model-specific fields
+        # must not disable sharing of batch coordinates or RoPE.
+        smla_override = bool(
+            {"replay_start", "replay_max_seq_len", "replay_seq_lens", "ori_sparse_indices", "num_query_heads"}
+            & ctx["model_specific_extra_kwargs"].keys()
+        )
         return {
             "num_actual_reqs": ctx["num_actual_reqs"],
             "skip_ring_state_update": ctx["skip_ring_state_update"],
             "common_v41_metadata": ctx["common_v41_metadata"],
             "common_v41_batch_metadata": ctx["common_v41_batch_metadata"],
+            "v41_prefill_override": ctx["v41_prefill_override"],
+            "v41_smla_override": smla_override,
             # Upstream capture prepares metadata with runtime mode NONE and
             # for_cudagraph_capture=True. Keep V4.1 indexer branches in the
             # graph even for a short dummy sequence.

@@ -20,6 +20,13 @@
 # We will limit the concurrency of jobs on 310P to avoid the risk of insufficient resources
 name: Nightly-310P
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      (inputs.request_id == 'daily' &&
+        'Nightly-310P (Daily)' ||
+        format('Nightly-310P (PR) {0}', inputs.request_id)) ||
+      'Nightly-310P (scheduled)' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -138,6 +145,53 @@ jobs:
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
+      # Scheduled runs have request_id empty and test_cases=all. Force-cancel
+      # PR-triggered runs of this workflow before the tests start, otherwise
+      # their pending LWS pods stay ahead of this run in the npu-scheduler
+      # FIFO queue.
+      - name: Cancel PR nightly runs before scheduled test
+        if: ${{ inputs.request_id == '' }}
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            // Best-effort cleanup: never fail the job.
+            try {
+              // Only drain PR runs of this workflow, never other platforms.
+              const workflowRef = process.env.GITHUB_WORKFLOW_REF || '';
+              const workflow_id = workflowRef.split('@')[0].split('/').pop();
+              if (!workflow_id) {
+                core.warning('Cannot derive workflow file from GITHUB_WORKFLOW_REF; skip');
+                return;
+              }
+
+              const { owner, repo } = context.repo;
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 100,
+              });
+              for (const run of data.workflow_runs) {
+                if (run.id === context.runId) continue;
+                if (run.status === 'completed') continue;
+                if (!(run.display_title || '').includes('(PR)')) continue;
+                core.info(`Force-cancelling ${run.display_title}: ${run.html_url}`);
+                try {
+                  await github.request(
+                    'POST /repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel',
+                    { owner, repo, run_id: run.id },
+                  );
+                } catch (error) {
+                  if (error.status === 409 || error.status === 410) {
+                    core.info(`Run ${run.id} already finished`);
+                  } else {
+                    core.warning(`Failed to force-cancel ${run.id}: ${error.message}`);
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Skipping PR run cleanup: ${error.message}`);
+            }
+
       - id: export
         run: |
           {

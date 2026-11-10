@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import SparseKVOffloadConfig
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
@@ -444,33 +444,6 @@ def update_sparse_kv_offload_metadata(
     if num_tokens_padded > num_tokens:
         offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
     offload_token_to_req.copy_to_gpu(num_tokens_padded)
-
-
-def prepare_sparse_kv_offload_mtp_dummy_metadata(
-    num_tokens: int,
-    num_reqs: int,
-    query_start_loc_cpu: torch.Tensor,
-    req_ids_buffer: CpuGpuBuffer,
-    token_to_req_buffer: CpuGpuBuffer,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    if not get_ascend_config().sparse_kv_offload_config.enabled:
-        return None, None
-    if req_ids_buffer is None or token_to_req_buffer is None:
-        raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
-
-    query_lens = np.diff(query_start_loc_cpu[: num_reqs + 1].numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
-    if token_to_req.shape[0] < num_tokens:
-        token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
-
-    req_ids_buffer.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
-    req_ids_buffer.copy_to_gpu(num_reqs)
-    token_to_req_buffer.np[:num_tokens] = token_to_req[:num_tokens]
-    token_to_req_buffer.copy_to_gpu(num_tokens)
-    return (
-        req_ids_buffer.gpu[:num_reqs],
-        token_to_req_buffer.gpu[:num_tokens],
-    )
 
 
 class SparseKVOffloadManager:

@@ -730,6 +730,20 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, blocked_spec)
 
 
+def test_v2_flashmla_draft_cache_uses_selected_reader_with_sparse_target(monkeypatch):
+    layer_name = "draft.model.layers.0.self_attn.attn"
+    target_config = SimpleNamespace(kv_transfer_config=None, sparse=True)
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = SimpleNamespace(use_flashmla=True)
+    spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda config: config.sparse)
+    assert attn_utils._uses_single_raw_mla_cache(target_config, layer_name, spec)
+    layer.impl.use_flashmla = False
+    assert not attn_utils._uses_single_raw_mla_cache(target_config, layer_name, spec)
+
+
 def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     class RecordingZeroer:
         calls: list[dict[str, Any]] = []
@@ -1994,6 +2008,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     pcp_manager = (
         SimpleNamespace(
             build_attention_context=MagicMock(return_value=pcp_context),
+            is_target_attn_groups=MagicMock(return_value=True),
         )
         if pcp_context is not None
         else None
@@ -3220,6 +3235,9 @@ def test_attn_metadata_hooks_shadow_legacy_dispatch(kind, expected_provider, exp
 
     common_ratio = {"first_group": True}
     formatted_slot_mapping = torch.zeros(4, dtype=torch.int64)
+    # Cover both V4.1 override values across the capture/full-graph matrix.
+    v41_prefill_override = kind == "dsa_v41" and for_capture
+    model_specific_extra_kwargs = {"replay_start": 0} if kind == "dsa_v41" and full_graph else {}
     ctx = {
         "num_actual_reqs": 2,
         "common_ratio_to_sas_metadata": common_ratio,
@@ -3227,6 +3245,8 @@ def test_attn_metadata_hooks_shadow_legacy_dispatch(kind, expected_provider, exp
         "skip_ring_state_update": False,
         "common_v41_metadata": {"v41": 1},
         "common_v41_batch_metadata": {"batch": 2},
+        "v41_prefill_override": v41_prefill_override,
+        "model_specific_extra_kwargs": model_specific_extra_kwargs,
         "formatted_slot_mapping": formatted_slot_mapping,
     }
     legacy_extra_kwargs = {}
@@ -3239,11 +3259,19 @@ def test_attn_metadata_hooks_shadow_legacy_dispatch(kind, expected_provider, exp
         if formatted_slot_mapping is not None:
             legacy_extra_kwargs["formatted_slot_mapping"] = formatted_slot_mapping
     elif is_v41:
+        # Only query overrides affect SMLA; unrelated model-specific fields
+        # must not disable sharing of batch coordinates or RoPE.
+        smla_override = bool(
+            {"replay_start", "replay_max_seq_len", "replay_seq_lens", "ori_sparse_indices", "num_query_heads"}
+            & model_specific_extra_kwargs.keys()
+        )
         legacy_extra_kwargs.update(
             num_actual_reqs=2,
             skip_ring_state_update=False,
             common_v41_metadata={"v41": 1},
             common_v41_batch_metadata={"batch": 2},
+            v41_prefill_override=v41_prefill_override,
+            v41_smla_override=smla_override,
             full_graph_mode=for_capture or full_graph,
         )
     extra_kwargs = hooks.build_extra_kwargs(**ctx) if hooks is not None else {}

@@ -171,7 +171,7 @@ def _mock_npu_env():
             return_value=_cp_config(),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
+            "vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer",
             return_value=False,
         ),
         patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False),

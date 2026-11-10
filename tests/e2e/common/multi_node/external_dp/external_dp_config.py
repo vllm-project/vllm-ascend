@@ -244,7 +244,7 @@ class ExternalDPConfigLoader:
     @staticmethod
     def _load_yaml(yaml_path: str | None) -> dict[str, Any]:
         default_config_name = "GLM5_1-W8A8-EP-external.yaml"
-        default_config_base_path = "tests/e2e/cases/models/configs/GLM/"
+        default_config_base_path = "tests/SIT/cases/models/configs/GLM/"
         return load_yaml_mapping(
             yaml_path,
             default_name=default_config_name,
@@ -291,12 +291,15 @@ class ExternalDPConfigLoader:
             local_ip=local_ip,
             current_node_index=proxy_node_index,
         )
+        proxy_script = routing.get("proxy_script", PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type])
+        if not isinstance(proxy_script, str) or not proxy_script.strip():
+            raise ValueError("routing.proxy_script must be a non-empty string")
         return RoutingConfig(
             type=routing_type,
             proxy_node_index=proxy_node_index,
             proxy_host=local_ip,
             proxy_port=proxy_port,
-            proxy_script=PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type],
+            proxy_script=proxy_script,
             groups={
                 str(name): [int(index) for index in indices] for name, indices in routing.get("groups", {}).items()
             },

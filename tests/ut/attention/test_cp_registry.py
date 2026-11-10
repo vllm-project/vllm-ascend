@@ -405,7 +405,9 @@ _V1_BACKEND_CASES = [
         (1, 1),
         (2, 1),
         (AscendSFAMetadataBuilder, AscendSFAImpl),
-        (AscendSFAMetadataBuilder, sfa_cp.AscendSFAPCPImpl),
+        # Upstream main folded the PCP-only SFA implementation into the base
+        # implementation, so PCP alone keeps the base pair here.
+        (AscendSFAMetadataBuilder, AscendSFAImpl),
     ),
     (
         dsa_v1.AscendDSABackend,
@@ -443,6 +445,7 @@ def test_v1_backends_delegate_to_registry(
         lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
     )
     monkeypatch.setattr(sfa_cp, "enable_sfa_dcp_replicated_indexer", lambda: False)
+    monkeypatch.setattr(sfa_v1, "enable_sfa_dcp_replicated_indexer", lambda _config=None: False)
     for sizes, expected_pair in ((off_sizes, base_pair), (on_sizes, cp_pair)):
         vllm_config = SimpleNamespace(
             parallel_config=SimpleNamespace(

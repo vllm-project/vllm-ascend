@@ -96,6 +96,10 @@ def register_model():
         "vllm_ascend.models.qwen3_5_vl:AscendQwen3_5MoeForConditionalGeneration",
     )
     ModelRegistry.register_model(
+        "D3ForSequenceClassification",
+        "vllm_ascend.models.d3:AscendD3ForSequenceClassification",
+    )
+    ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )
     ModelRegistry.register_model(
