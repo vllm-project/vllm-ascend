@@ -14,14 +14,18 @@
 # This file is a part of the vllm-ascend project.
 
 name: Presmoke Trigger
-# pull_request_target 才能在 fork PR 上拿到 SWR 凭据（pull_request 事件对 fork
-# 不注入任何 secret）。workflow 文件本身取自目标分支，因此需要先合入 main 生效。
-# 安全前提：只有维护者打上 presmoke 标签才会进入，构建的是 PR head 的代码，
-# 也就是说打到标签等于允许该提交使用 SWR 写凭据。
+# pull_request_target is required so fork PRs can obtain the SWR credentials
+# (the pull_request event exposes no secret to forks). The workflow file itself
+# is read from the base branch, so this only takes effect once merged into main.
+# Security note: only a maintainer applying the presmoke label can enter the
+# pipeline, and the build uses the PR head code -- applying the label is
+# therefore equivalent to granting that commit access to the SWR write
+# credentials.
 on:
   pull_request_target:
     types: [labeled]
-  # 同仓分支上也可手动触发，用于不带 PR 的构建留档。
+  # Same-repository branches can also be triggered manually, for builds that do
+  # not come with a PR.
   workflow_dispatch:
     inputs:
       target:
