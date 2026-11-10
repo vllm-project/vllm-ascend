@@ -29,7 +29,12 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import (
+    _aligned_dspark_index_width,
+    build_dspark_swa_indices,
+    build_dspark_swa_indices_triton,
+    dsv4_dsa_overlap_stream,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -1249,32 +1254,45 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(req.num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and req.ori_sparse_indices is None:
-            req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
-                common.block_table_tensor[: req.num_reqs],
-                self.vllm_config.speculative_config.num_speculative_tokens,
-                window_size,
-                req.storage_block_size,
-                common.query_start_loc[: req.num_reqs + 1],
-                req.seq_lens,
-                req.num_actual_tokens,
-                use_logical_indices=True,
-            )
-            # Full draft graphs retain these addresses from capture. Rebuild
-            # the values in persistent buffers rather than returning temporary
-            # tensors whose capture-time contents never advance with decoding.
+            # Full draft graphs retain these addresses from capture: the
+            # indices are rebuilt every step straight into the persistent
+            # buffers rather than through temporary tensors whose capture-time
+            # contents never advance with decoding.
+            num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
+            index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
             if self._dspark_swa_indices is None:
-                self._dspark_swa_indices = req.ori_sparse_indices.new_empty(
-                    (self._max_tokens, *req.ori_sparse_indices.shape[1:])
+                self._dspark_swa_indices = torch.empty(
+                    (self._max_tokens, 1, index_width), dtype=torch.int32, device=seq_lens.device
                 )
-                self._dspark_swa_lengths = req.ori_topk_length.new_empty(
-                    (self._max_tokens, *req.ori_topk_length.shape[1:])
+                self._dspark_swa_lengths = torch.empty(
+                    (self._max_tokens, 1), dtype=torch.int32, device=seq_lens.device
                 )
-            indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
+            indices_view = self._dspark_swa_indices[:num_actual_tokens]
             assert self._dspark_swa_lengths is not None
-            lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
-            indices_view.copy_(req.ori_sparse_indices)
-            lengths_view.copy_(req.ori_topk_length)
-            req.ori_sparse_indices, req.ori_topk_length = indices_view, lengths_view
+            lengths_view = self._dspark_swa_lengths[:num_actual_tokens]
+            if build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu":
+                ori_sparse_indices, ori_topk_length = build_dspark_swa_indices_triton(
+                    common.query_start_loc[: num_reqs + 1],
+                    seq_lens,
+                    num_actual_tokens,
+                    index_width,
+                    window_size,
+                    indices_output=indices_view,
+                    lengths_output=lengths_view,
+                )
+            else:
+                ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
+                    common.block_table_tensor[:num_reqs],
+                    num_spec_tokens,
+                    window_size,
+                    storage_block_size,
+                    common.query_start_loc[: num_reqs + 1],
+                    seq_lens,
+                    num_actual_tokens,
+                    indices_output=indices_view,
+                    use_logical_indices=True,
+                    lengths_output=lengths_view,
+                )
         if (
             not noncausal
             and req.ori_sparse_indices is None
