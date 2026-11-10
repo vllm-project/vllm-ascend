@@ -540,7 +540,6 @@ Before starting:
     **Key parameters:**
 
     - TP4 × DP1 uses devices 0–3 and a W4A8-MXFP checkpoint. NPU graph extension and static kernels are enabled; super kernels are disabled.
-    - Prefix caching automatically selects Mamba cache mode `align` from the default `none`; A2/A3 set `align` explicitly.
 
 **Service Verification:**
 
@@ -1055,22 +1054,21 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 - Prefill uses TP4 × PP2 × DP1 in eager mode, with `enable_prefill_mc2=true` and fused MC2 disabled. Check MC2 token limits before increasing the batch budget.
 - Decode uses TP2 × DP4, `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling; super kernels are disabled.
 - Both roles use three MTP draft tokens, with `enforce_eager=true` on P and `false` on D. Batch tokens are 8192; P/D HCCL buffers are 8192/512.
-- Engram CPU offload requires supported n-gram layers and sufficient host memory. P uses `dp_shared_memory=false`; D uses `true`. Shared-memory DP replicas must share a host and shared-memory namespace; elastic EP is unsupported.
+- Engram CPU offload requires supported n-gram layers and sufficient host memory. P uses `dp_shared_memory=false`; D uses `true`. Shared-memory DP replicas must share a host and shared-memory namespace.
 - Both roles set prefix caching, Mamba cache mode `align`, and Mamba state dtype `bfloat16`. Keep Mooncake TP/PP/DP declarations consistent with the model commands; clear `VLLM_PP_LAYER_PARTITION` to use the default partition.
-- `enable_fused_mc2=0` is compatible with shared expert overlap; D uses the runtime default of zero. For tool calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify requests through the proxy.
+- Prefill sets `enable_fused_mc2=0` while enabling shared expert overlap.
 
 **950DT products key parameters:**
 
 - Each command starts TP2 × DP2 on four devices. `--api-server-count 1` exposes one API endpoint per role; use distinct DP RPC ports for Prefill and Decode.
-- Model Runner V2, async scheduling, and expert parallelism are enabled; EPLB is not enabled.
-- Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace; elastic EP is not enabled.
-- Prefill enables prefix caching, which automatically selects Mamba cache mode `align` from the default `none`, and uses `cudagraph_mode=NONE`; static kernels are disabled. Its validated MTP configuration leaves `enforce_eager` unset, inheriting the model setting; graph capture remains disabled by `cudagraph_mode=NONE`.
+- Model Runner V2, async scheduling, and expert parallelism are enabled.
+- Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace.
+- Prefill enables prefix caching and uses `cudagraph_mode=NONE`; static kernels are disabled.
 - Decode enables prefix caching, `FULL_DECODE_ONLY`, static kernels, and recompute scheduling; MTP sets `enforce_eager=false` to allow graph execution.
 - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
 - Both roles use three MTP draft tokens and `VLLM_ENGINE_READY_TIMEOUT_S=4800` for engine startup; model execution uses `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000`.
 - Both roles use `HCCL_BUFFSIZE=8192` and `ASCEND_BUFFER_POOL=0:0`. The validated configuration separates Prefill and Decode HCCL base ports (62000/63000) and NPU socket ranges (61400–61499/61500–61599).
 - Keep Mooncake DP2/TP2 declarations consistent with the services. The proxy connects to Prefill on port 8088 and Decode on port 8092. Keep the configured KV base ports at 30000 and 30100; the connector applies rank offsets internally.
-- For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
 ### 5.3 Image-and-Text 10K PD Separation Deployment
 
@@ -2039,7 +2037,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-The colocated examples and the optional Function Calling setup in [Section 5.2](#52-basic-pd-separation-deployment) use the following options:
+To enable Function Calling, use the following options in the model commands for colocated deployment ([Section 5.1](#51-single-node-online-deployment)) or basic PD separation ([Section 5.2](#52-basic-pd-separation-deployment)). For PD separation, add them to both Prefill and Decode commands:
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -2089,7 +2087,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-basic-pd-separation-deployment):
+Reasoning parsing requires the following startup option. The colocated examples in [Section 5.1](#51-single-node-online-deployment) already include it; for basic PD separation in [Section 5.2](#52-basic-pd-separation-deployment), add it to both Prefill and Decode commands:
 
 ```text
 --reasoning-parser qwen3
