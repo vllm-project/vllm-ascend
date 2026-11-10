@@ -1,4 +1,4 @@
-﻿#
+#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -120,7 +120,11 @@ jobs:
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
         UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
-        UV_INDEX_STRATEGY: unsafe-best-match
+        # TEMPORARY (fork smoke validation only, do not merge): unsafe-best-match
+        # 会让 uv 从 download.pytorch.org/whl/cpu 取 numpy，而该索引把文件重定向
+        # 到 files.pythonhosted.org（karc 实测 30KB/s，13.3MiB 反复 600s 超时）。
+        # first-index 优先用 UV_DEFAULT_INDEX（华为云，实测 52MB/s），缺包时才回落。
+        UV_INDEX_STRATEGY: first-index
         # karc 经 squid 并发下载时单连接会被拖过 120s（线上报 network timeout），
         # 放宽超时、加重试并把并发降到 2。
         UV_HTTP_TIMEOUT: 600
