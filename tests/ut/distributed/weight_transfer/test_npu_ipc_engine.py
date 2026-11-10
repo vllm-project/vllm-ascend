@@ -393,7 +393,8 @@ def test_packed_export_imported_once_with_fresh_payload_and_release(cleanup):
         engine = NPUIPCWeightTransferEngine(None, None, torch.device("cpu:0"), model)
     engine.packed = True
     staging = torch.tensor([1.0, 2.0])
-    imports, loaded = [], []
+    imports: list[weakref.ReferenceType[torch.Tensor]] = []
+    loaded: list[torch.Tensor] = []
 
     def rebuild(*args):
         assert args[6] == 0
