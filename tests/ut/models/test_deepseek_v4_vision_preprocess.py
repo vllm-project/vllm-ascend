@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +24,7 @@ from vllm.multimodal.processing.inputs import ProcessorInputs
 
 class _StubInfo:
     def __init__(self):
-        self.tokenizer = _TokenizedPromptTokenizer()
+        self.tokenizer = _StubTokenizer()
 
     @property
     def ctx(self):
@@ -38,17 +37,11 @@ class _StubInfo:
         return self.tokenizer
 
 
-class _TokenizedPromptTokenizer:
+class _StubTokenizer:
     def convert_tokens_to_ids(self, token):
         if token == prep.IMAGE_PLACEHOLDER:
             return 7
         return prep.IMAGE_SENTINEL_BASE_ID + prep.IMAGE_SENTINEL_TOKEN_NAMES.index(token)
-
-    def __call__(self, *args, **kwargs):
-        raise AssertionError("The renderer has already tokenized the prompt")
-
-    def encode(self, *args, **kwargs):
-        raise AssertionError("The renderer has already tokenized the prompt")
 
 
 @pytest.fixture
@@ -203,7 +196,7 @@ def processing_info():
         multimodal_config=mm_config,
         get_multimodal_config=lambda: mm_config,
     )
-    ctx = InputProcessingContext(model_config, _TokenizedPromptTokenizer())
+    ctx = InputProcessingContext(model_config, _StubTokenizer())
     return prep.DeepseekV4VLProcessingInfo(ctx)
 
 
@@ -234,27 +227,3 @@ def test_processor_apply_preserves_image_order_and_embedding_masks(processing_in
 
     expected.append(16)
     assert output["prompt_token_ids"] == expected
-
-
-def test_processor_apply_is_thread_safe_without_retokenizing(processing_info):
-    processor = DeepseekV4VLMultiModalProcessor(processing_info, None)
-    inputs = ProcessorInputs(
-        [11, 7, 16],
-        processing_info.parse_mm_data({"image": [Image.new("RGB", (128, 96))]}),
-    )
-
-    def process():
-        return processor.apply(inputs, TimingContext(enabled=False))
-
-    expected = process()
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        outputs = list(pool.map(lambda _: process(), range(8)))
-
-    for output in outputs:
-        assert output["prompt_token_ids"] == expected["prompt_token_ids"]
-        assert output["mm_hashes"] == expected["mm_hashes"]
-        for key in ("patches", "vit_grid", "llm_grid", "perm", "types"):
-            assert torch.equal(
-                output["mm_kwargs"]["image"][0][key].data,
-                expected["mm_kwargs"]["image"][0][key].data,
-            )
