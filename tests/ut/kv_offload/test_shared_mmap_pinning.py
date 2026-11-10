@@ -3,6 +3,7 @@
 """Shared host registration lifecycle; ACL operations are mocked on CPU."""
 
 import gc
+import multiprocessing
 import os
 import weakref
 from pathlib import Path
@@ -13,6 +14,7 @@ from uuid import uuid4
 
 import pytest
 import torch
+from vllm.v1.kv_offload.cpu import shared_offload_region as region_mod
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu as cpu_npu_mod
@@ -349,6 +351,8 @@ def test_failed_constructor_keeps_registered_mapping_alive(monkeypatch, pin_ops,
         assert len(synchronize_attempts) == expected_attempts
         assert len(unregister_attempts) == (expected_attempts if release_failure == "unregister" else 0)
         assert region_ref() is not None
+        assert not Path(path).exists()
+        assert not region_ref()._creator
         mapping = mapping_ref()
         assert mapping is not None and not mapping.closed
         mapping[0] = 73
@@ -378,3 +382,125 @@ def test_failed_constructor_keeps_registered_mapping_alive(monkeypatch, pin_ops,
     gc.collect()
     assert region_ref() is None
     assert mapping_ref() is None
+
+
+@pytest.mark.parametrize("construction_failure", ["registration", "handler"])
+@pytest.mark.parametrize("creator", [False, True])
+def test_failed_worker_process_unlinks_only_creator_files(monkeypatch, pin_ops, construction_failure, creator):
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("This CPU-only lifecycle test requires fork")
+    if construction_failure == "registration" and not hasattr(SharedOffloadRegion, "iter_worker_slot_ranges"):
+        pytest.skip("This vLLM version does not register multiple slots")
+    # Exercise all segment names with small real mappings, not GiBs of memory.
+    page_size = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    kwargs = dict(num_chunks=8, rank=0, kv_bytes_per_chunk=2 * page_size, cpu_page_size=page_size)
+    if hasattr(region_mod, "_MIN_SEGMENT_BYTES"):
+        monkeypatch.setattr(region_mod, "_MIN_SEGMENT_BYTES", page_size)
+        kwargs["num_segments"] = 4
+    engine_id = f"pin-exit-ut-{uuid4().hex}"
+    original_creator = None if creator else SharedOffloadRegion(engine_id=engine_id, **kwargs)
+    registered: set[int] = set()
+
+    def register(tensor):
+        if construction_failure == "registration" and registered:
+            raise RuntimeError("registration failed")
+        registered.add(tensor.data_ptr())
+
+    def unregister(tensor):
+        raise RuntimeError("release failed")
+
+    def fail_handler(**kwargs):
+        raise RuntimeError("handler failed")
+
+    monkeypatch.setattr(pin_ops, "register_pinned_host_mmap", register)
+    monkeypatch.setattr(pin_ops, "unregister_pinned_host_mmap", unregister)
+    monkeypatch.setattr(torch.npu, "synchronize", lambda: None)
+    monkeypatch.setattr(cpu_npu_mod, "is_pin_memory_available", lambda: False)
+    monkeypatch.setattr(cpu_npu_mod, "SingleDirectionNPUOffloadingHandler", fail_handler)
+    monkeypatch.setattr(cpu_npu_mod.logger, "warning", lambda *args, **kwargs: None)
+    context = multiprocessing.get_context("fork")
+    receive, send = context.Pipe(duplex=False)
+
+    def fail_in_child():
+        receive.close()
+        region = SharedOffloadRegion(engine_id=engine_id, **kwargs)
+        assert region._creator is creator
+        paths = [entry[0] for entry in getattr(region, "_segments", [(region.mmap_path, 0, 0)])]
+        caches = SimpleNamespace(
+            tensors=[SimpleNamespace(tensor=torch.empty((4, 4), dtype=torch.int8), page_size_bytes=4)],
+            group_data_refs=[],
+        )
+        try:
+            cpu_npu_mod.NPUOffloadingWorker(
+                kv_caches=caches,
+                blocks_per_chunk=2,
+                num_cpu_blocks=8,
+                mmap_region=region,
+                worker_slot_only=True,
+            )
+        except RuntimeError as error:
+            assert str(error) == "release failed"
+        else:
+            raise AssertionError("constructor unexpectedly succeeded")
+        # Unlink must preserve the mapping while native registrations remain.
+        assert registered and not region.mmap_obj.closed
+        region.mmap_obj[0] = 73
+        assert region.mmap_obj[0] == 73
+        send.send(paths)
+        send.close()
+        # Return without unregister/cleanup. The parent checks after OS exit.
+
+    process = context.Process(target=fail_in_child)
+    try:
+        process.start()
+        send.close()
+        process.join(timeout=20)
+        assert not process.is_alive(), "failed initialization process did not exit"
+        assert process.exitcode == 0
+        assert receive.poll(1), "child did not report its backing paths"
+        paths = receive.recv()
+        assert len(paths) == (4 if "num_segments" in kwargs else 1)
+        assert all(Path(path).exists() is (not creator) for path in paths)
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        receive.close()
+        send.close()
+        if original_creator is not None:
+            original_creator.cleanup()
+        for path in Path("/dev/shm").glob(f"vllm_offload_{engine_id}.mmap*"):
+            path.unlink()
+
+
+@pytest.mark.parametrize("failure", ["synchronize", "unregister"])
+def test_failed_shutdown_unlinks_creator_files_without_unmapping(pin_ops, failure):
+    page_size = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    region = SharedOffloadRegion(
+        engine_id=f"pin-shutdown-ut-{uuid4().hex}",
+        num_chunks=2,
+        rank=0,
+        kv_bytes_per_chunk=page_size,
+        cpu_page_size=page_size,
+    )
+    worker = _worker(region)
+    worker._store_handler = SimpleNamespace(shutdown=Mock())
+    worker._load_handler = SimpleNamespace(shutdown=Mock())
+    worker._pin_shared_region(True, False)
+    failing_call = torch.npu.synchronize if failure == "synchronize" else pin_ops.unregister_pinned_host_mmap
+    failing_call.side_effect = RuntimeError("release failed")
+    try:
+        with pytest.raises(RuntimeError, match="release failed"):
+            worker.shutdown()
+        assert not Path(region.mmap_path).exists()
+        assert not region._creator
+        assert not region.mmap_obj.closed
+        assert worker._pinned_tensors
+        region.mmap_obj[0] = 91
+        assert region.mmap_obj[0] == 91
+    finally:
+        failing_call.side_effect = None
+        worker.shutdown()
+        pin_ops.register_pinned_host_mmap.reset_mock()
+        pin_ops.unregister_pinned_host_mmap.reset_mock()
+        region.cleanup()
