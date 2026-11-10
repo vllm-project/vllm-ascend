@@ -1,5 +1,7 @@
 import random
+import socket
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -335,3 +337,107 @@ def test_dispatch_ffn_combine_kernel():
         p.join()
 
     assert all(results)
+
+
+def _capacity_worker(rank, world_size, port, active_num, capacity, tensor_list):
+    op = TestDispatchFFNCombine(rank, world_size, port)
+    op.generate_hcom()
+    try:
+        with torch.inference_mode():
+            _check_logical_token_capacity(op, active_num, capacity, tensor_list)
+    finally:
+        dist.destroy_process_group()
+
+
+def _check_logical_token_capacity(op, active_num, capacity, tensor_list):
+    num_tokens, hidden_size, ffn_size, num_experts = 64, 1024, 1024, 8
+    topk = num_experts
+    torch_npu.npu.config.allow_internal_format = True
+
+    # Every expert implements the same normalized projections. This gives a
+    # nonzero, bounded reference: silu(x) * x for each constant-valued row.
+    values = 1 + (torch.arange(num_tokens, dtype=torch.float32) + op.rank) % 3 / 4
+    x = values[:, None].expand(-1, hidden_size).to(torch.bfloat16).contiguous().npu()
+    active_mask = (torch.arange(num_tokens) < active_num).npu()
+    # Alternate destination ranks; even an odd active_num gives each expert
+    # exactly active_num tokens after combining the two source ranks.
+    destinations = (torch.arange(num_tokens) + op.rank) % op.world_size
+    expert_idx = (destinations[:, None] * num_experts + torch.arange(topk)).to(torch.int32).npu()
+    probs = torch.full((num_tokens, topk), 1 / topk, dtype=torch.float32).npu()
+
+    def projection(input_size, output_size):
+        # Eight signed int4 values of +1 packed into each int32.
+        packed_ones = 0x11111111
+        weight = torch.full((num_experts, input_size, output_size // 8), packed_ones, dtype=torch.int32)
+        scale = torch.full((num_experts, output_size), 1 / input_size, dtype=torch.float32)
+        scale = scale.view(torch.int32).to(torch.int64)
+        # W4A8's unsigned low-nibble conversion needs 8 * sum(weight * scale).
+        bias = torch.full((num_experts, output_size), 8.0, dtype=torch.float32)
+        if tensor_list:
+            return (
+                [torch_npu.npu_format_cast(item.npu(), 29) for item in weight.unbind()],
+                [item.npu() for item in scale.unbind()],
+                [item.npu() for item in bias.unbind()],
+            )
+        return [torch_npu.npu_format_cast(weight.npu(), 29)], [scale.npu()], [bias.npu()]
+
+    weight1, scale1, bias1 = projection(hidden_size, ffn_size)
+    weight2, scale2, bias2 = projection(ffn_size // 2, hidden_size)
+
+    def run(inputs, max_output_size):
+        out = torch.full_like(inputs, float("nan"))
+        counts = torch.full((1, num_experts), -1, dtype=torch.int32, device=inputs.device)
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            x=inputs,
+            weight1=weight1,
+            weight2=weight2,
+            expert_idx=expert_idx,
+            scale1=scale1,
+            scale2=scale2,
+            bias1=bias1,
+            bias2=bias2,
+            probs=probs,
+            group=op.hcomm_info,
+            max_output_size=max_output_size,
+            world_size=op.world_size,
+            out=out,
+            expert_token_nums=counts,
+            x_active_mask=active_mask,
+        )
+        torch.npu.synchronize()
+        torch.testing.assert_close(counts.cpu(), torch.full((1, num_experts), active_num, dtype=torch.int32))
+        return out.cpu()
+
+    reference_capacity = 2 * num_tokens * topk
+    reference = run(x, reference_capacity)
+    expected = torch.nn.functional.silu(values) * values
+    expected[active_num:] = 0
+    expected = expected[:, None].expand(-1, hidden_size).to(torch.bfloat16)
+    torch.testing.assert_close(reference, expected, rtol=0.02, atol=0.005)
+
+    # Poison shared output buffers with different valid values so missing
+    # Combine writes cannot accidentally reuse the reference result.
+    run(x * 2, reference_capacity)
+    actual = run(x, capacity)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tensor_list", [False, True], ids=["stacked", "tensor-list"])
+@pytest.mark.parametrize(
+    "active_num,capacity",
+    [(32, 512), (35, 512), (64, 512), (64, 640)],
+    ids=["half-full", "expanded-prefix-crosses-capacity", "exact-capacity", "spare-capacity"],
+)
+def test_dispatch_ffn_combine_logical_token_capacity(active_num, capacity, tensor_list):
+    """Changing sufficient logical capacity must not drop any expert output."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    world_size = 2
+    mp.spawn(
+        _capacity_worker,
+        args=(world_size, port, active_num, capacity, tensor_list),
+        nprocs=world_size,
+        join=True,
+    )

@@ -1126,6 +1126,7 @@ private:
         uint32_t aicCoreIdx = get_block_idx();
         uint32_t aivSubCoreIdx = get_subblockid();
         uint32_t preSrcExpertSum = 0;
+        uint32_t preSrcTokenSum = 0;
         uint32_t n2 = params.problemShape.k();
         uint32_t k2 = params.problemShape.n() / 2;
 
@@ -1136,11 +1137,16 @@ private:
         icache_preload(8);
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
-            if (preSrcExpertSum >= params.maxOutputSize) {
+            // Capacity is measured in logical tokens. preSrcExpertSum is an
+            // expanded GMM row offset (two rows per W4A8 token), so it must
+            // not participate in this limit. Keep the same logical group M
+            // as GMM2: the AIV swizzle and per-core waits depend on it.
+            if (preSrcTokenSum >= params.maxOutputSize) {
                 currentExpertM = 0;
-            } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
-                currentExpertM = params.maxOutputSize - preSrcExpertSum;
+            } else if (preSrcTokenSum + currentExpertM > params.maxOutputSize) {
+                currentExpertM = params.maxOutputSize - preSrcTokenSum;
             }
+            preSrcTokenSum += currentExpertM;
 
             if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
                 currentExpertM = currentExpertM * 2;
