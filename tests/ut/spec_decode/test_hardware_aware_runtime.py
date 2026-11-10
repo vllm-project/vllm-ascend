@@ -66,6 +66,33 @@ def test_full_mode_temporarily_installs_physical_k_profile_factory():
     assert runner_module.maybe_create_adaptive_verification_manager is original_factory
 
 
+@pytest.mark.parametrize("legacy_api", [False, True])
+def test_full_mode_forwards_av_factory_arguments(legacy_api):
+    config = make_speculator().vllm_config
+    calls = []
+
+    def original_factory(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    kwargs = dict(
+        enable_adaptive_verification=True,
+        attn_groups=[],
+        req_states=object(),
+        query_start_loc=object(),
+        num_bonus_tokens=1,
+        max_total_logits=16,
+    )
+    if legacy_api:
+        kwargs["attn_cg_support"] = object()
+    else:
+        kwargs.update(vllm_config=config, target_layer_names={"layer"}, copy_admitted_drafts_to_host=False)
+    runner_module = SimpleNamespace(maybe_create_adaptive_verification_manager=original_factory)
+    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.FULL, config):
+        assert runner_module.maybe_create_adaptive_verification_manager(**kwargs) is None
+    assert calls == [kwargs]
+
+
 def test_piecewise_mode_temporarily_installs_ascend_adapter():
     def original_factory(**kwargs):
         return kwargs

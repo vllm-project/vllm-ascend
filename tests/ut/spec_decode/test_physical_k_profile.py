@@ -4,6 +4,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification import AdaptiveVerificationManager
 
 from vllm_ascend.dynamic_spec import PHYSICAL_K_RECOMMEND_INTERVAL
 from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
@@ -24,9 +25,11 @@ class FakeManager:
             max_num_reqs=max_num_reqs,
         )
         self._stale_idx = 0
+        self._pending_resets = []
         self.num_bonus_tokens = 1
         self._max_total_logits = 128
         self._stale_confidences = [
+            SimpleNamespace(np=np.full((max_num_reqs, 4), 0.9)),
             SimpleNamespace(np=np.full((max_num_reqs, 4), 0.9)),
         ]
         self.cost_tables = None
@@ -38,11 +41,37 @@ class FakeManager:
 
     def set_initial_cost_curves(self, samples):
         assert all(sample.physical_k == 4 for sample in samples)
-        self.cost_tables = (np.ones(16), np.ones(128))
+        self.cost_tables = (np.ones(self.req_states.max_num_reqs + 1), np.ones(128))
 
     def get_num_tokens(self, num_tokens_per_req, draft_tokens):
         del draft_tokens
         return sum(num_tokens_per_req.values())
+
+    def record_confidences(self, confidence_probs, input_batch):
+        # These pricing tests need only the native buffer-index protocol.
+        # The separate provenance tests execute the real native record method.
+        ready_idx = self._stale_idx ^ 1
+        if self._pending_resets:
+            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
+            self._pending_resets.clear()
+        self._stale_idx, write_idx = ready_idx, self._stale_idx
+        self._stale_confidences[write_idx].np[input_batch.idx_mapping_np] = confidence_probs
+
+
+def record_fixture_confidences(manager, physical_k):
+    values = manager._stale_confidences[manager._stale_idx].np.copy()
+    batch = SimpleNamespace(
+        num_reqs=len(values),
+        idx_mapping_np=np.arange(len(values)),
+        _vllm_ascend_produced_confidence_k=physical_k,
+    )
+    manager.record_confidences(values, batch)
+
+
+def seed_full_confidences(manager):
+    # A snapshot becomes native-readable on the following record call.
+    record_fixture_confidences(manager, manager.num_speculative_steps)
+    record_fixture_confidences(manager, manager.num_speculative_steps)
 
 
 def config():
@@ -98,6 +127,7 @@ def profiled_manager(cost_k3: float, cost_k4: float):
             for case in cases
         ]
     )
+    seed_full_confidences(manager)
     return manager
 
 
@@ -226,7 +256,7 @@ def test_new_single_request_is_scored_without_waiting_for_periodic_timer():
     assert manager._physical_k_recommendation == (1, 4)
 
 
-def test_full_width_probe_rescores_after_narrow_draft_without_waiting_for_timer():
+def test_full_width_snapshot_rescores_on_the_native_readable_step():
     manager = profiled_manager(1.0, 10.0)
     per_req = {str(i): 5 for i in range(8)}
     full_drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
@@ -234,18 +264,21 @@ def test_full_width_probe_rescores_after_narrow_draft_without_waiting_for_timer(
 
     manager.get_num_tokens(per_req, full_drafts)
     assert manager._physical_k_recommendation == (8, 3)
+    record_fixture_confidences(manager, 3)
     manager.get_num_tokens(per_req, narrow_drafts)
     assert manager._physical_k_recommendation is None
-    mixed_drafts = dict(full_drafts)
-    mixed_drafts["0"] = [1, 2, 3]
-    manager.get_num_tokens(per_req, mixed_drafts)
-    assert manager._physical_k_recommendation is None
+    record_fixture_confidences(manager, 4)
     manager.get_num_tokens(per_req, full_drafts)
+    assert manager._physical_k_recommendation is None
+    record_fixture_confidences(manager, 3)
+    manager.get_num_tokens(per_req, narrow_drafts)
     assert manager._physical_k_recommendation == (8, 3)
 
 
-def test_narrowed_runtime_width_does_not_replace_full_width_recommendation():
+def test_narrow_cpu_snapshot_does_not_replace_full_width_recommendation():
     manager = profiled_manager(5.0, 1.0)
+    record_fixture_confidences(manager, 3)
+    record_fixture_confidences(manager, 3)
     per_req = {str(i): 4 for i in range(16)}
     drafts = {str(i): [1, 2, 3] for i in range(16)}
     manager.get_num_tokens(per_req, drafts)
@@ -304,3 +337,54 @@ def test_nonzero_tp_rank_skips_runtime_scoring():
     ):
         manager.get_num_tokens(per_req, drafts)
     assert manager._physical_k_recommendation is None
+
+
+def _native_budget_manager(verify_bucket8=15.5, cost_k4=10.5):
+    """Use native AV budget selection with explicit monotone graph costs."""
+    manager = FakeManager(1)
+    manager.num_speculative_steps = 7
+    manager.get_num_tokens = MethodType(AdaptiveVerificationManager.get_num_tokens, manager)
+    cfg = config()
+    cfg.speculative_config.num_speculative_tokens = 7
+    manager = configure_physical_k_profiling(manager, cfg)
+    manager._stale_confidences = [
+        SimpleNamespace(np=np.array([[0.9, 0.9, 0.9, 0.9, 0.01, 0.01, 0.01]])),
+        SimpleNamespace(np=np.array([[0.9, 0.9, 0.9, 0.9, 0.01, 0.01, 0.01]])),
+    ]
+    manager.cost_tables = (
+        np.full(2, 20.0),
+        np.array([0.0, 1.0, 2.0, 12.0, 12.0] + [verify_bucket8] * 4),
+    )
+    manager._physical_k_draft_costs = {
+        k: {1: cost} for k, cost in {3: 10.0, 4: cost_k4, 5: 15.0, 6: 18.0, 7: 20.0}.items()
+    }
+    seed_full_confidences(manager)
+    return manager
+
+
+def test_physical_recommendation_prices_the_native_verification_budget():
+    manager = _native_budget_manager()
+    tables = [table.copy() for table in manager.cost_tables]
+    manager.get_num_tokens({"0": 8}, {"0": list(range(7))})
+    # K3 realizes3.439/22; K4 realizes4.0951/26. A hypothetical K3 budget1
+    # scores1.9/12, but native AV selects budget3 using its unchanged curve.
+    assert manager._physical_k_recommendation == (1, 4)
+    assert manager._batch_budget[2] == 7
+    for actual, original in zip(manager.cost_tables, tables):
+        np.testing.assert_array_equal(actual, original)
+
+
+def test_equal_draft_cost_does_not_prune_better_narrow_native_budget():
+    manager = _native_budget_manager(verify_bucket8=17.0, cost_k4=10.0)
+    manager.get_num_tokens({"0": 8}, {"0": list(range(7))})
+    # Equal draft costs do not dominate: K4's larger native budget costs
+    # more to verify, so K3 realizes3.439/22 versusK4's4.0951/27.
+    assert manager._physical_k_recommendation == (1, 3)
+
+
+def test_full_k_native_budget_is_preserved_when_scoring_full_k():
+    manager = _native_budget_manager()
+    manager._physical_k_draft_costs = {k: {1: 20.0} for k in range(3, 8)}
+    manager.get_num_tokens({"0": 8}, {"0": list(range(7))})
+    assert manager._physical_k_recommendation == (1, 7)
+    assert manager._batch_budget[2] == 7

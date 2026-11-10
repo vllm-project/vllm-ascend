@@ -169,6 +169,8 @@ def physical_k_scope(
             active_k = _uniform_runtime_k(input_batch, max_k)
     if active_k is None or active_k >= max_k:
         speculator._vllm_ascend_last_runtime_k = max_k
+        if input_batch is not None:
+            input_batch._vllm_ascend_produced_confidence_k = max_k
         yield max_k
         return
 
@@ -194,6 +196,8 @@ def physical_k_scope(
             speculator._anchor_idx = speculator._vllm_ascend_physical_k_anchor_indices[active_k]
         speculator._vllm_ascend_active_speculative_steps = active_k
         speculator._vllm_ascend_last_runtime_k = active_k
+        if input_batch is not None:
+            input_batch._vllm_ascend_produced_confidence_k = active_k
         yield active_k
     finally:
         speculator.num_speculative_steps = old_steps
@@ -408,10 +412,20 @@ def extend_capture_descriptors(self) -> None:
     max_decode_tokens = self.max_num_reqs * self.decode_query_len
 
     capture_descs = self._capture_descs.setdefault(decode_mode, [])
-    for raw_tokens in capture_sizes:
-        for draft_k in configured_capture_k(self.vllm_config, max_k):
-            width = query_width(sample_from_anchor, draft_k)
-            rounded_tokens = ((raw_tokens + width - 1) // width) * width
+    # Physical-K profiling prices power-of-two request buckets. Target token
+    # capture sizes alone can pad those draft batches substantially (for
+    # example, batch32/K5 needs160 queries but may otherwise replay225).
+    # Add exact draft shapes without changing target capture or AV curves.
+    request_buckets = {self.max_num_reqs} if self.max_num_reqs > 0 else set()
+    bucket = 1
+    while bucket <= self.max_num_reqs:
+        request_buckets.add(bucket)
+        bucket *= 2
+    for draft_k in configured_capture_k(self.vllm_config, max_k):
+        width = query_width(sample_from_anchor, draft_k)
+        rounded_sizes = {((tokens + width - 1) // width) * width for tokens in capture_sizes}
+        rounded_sizes.update(requests * width for requests in request_buckets)
+        for rounded_tokens in sorted(rounded_sizes):
             num_reqs = rounded_tokens // width
             if rounded_tokens > max_decode_tokens or rounded_tokens > max_capture_size or num_reqs > self.max_num_reqs:
                 continue
@@ -455,8 +469,13 @@ def extend_capture_descriptors(self) -> None:
         candidates[:] = list(
             dict.fromkeys(desc for desc in candidates if desc.cg_mode != decode_mode or desc in kept_descs)
         )
+    mode_order = (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE)
     for key, candidates in self._candidates.items():
         unique = list(dict.fromkeys(candidates))
+        # Native dispatch takes the first compatible descriptor. Extensions
+        # must retain FULL-before-PIECEWISE priority while letting smaller
+        # newly captured graphs precede larger pre-existing padding buckets.
+        unique.sort(key=lambda desc: (mode_order.index(desc.cg_mode), desc.num_tokens))
         candidates[:] = unique
 
 
@@ -643,7 +662,6 @@ def adaptive_verification_gate_wrapper(
         *,
         enable_adaptive_verification: bool,
         attn_groups,
-        attn_cg_support,
         req_states,
         query_start_loc,
         num_bonus_tokens,
@@ -654,7 +672,6 @@ def adaptive_verification_gate_wrapper(
             return original_factory(
                 enable_adaptive_verification=enable_adaptive_verification,
                 attn_groups=attn_groups,
-                attn_cg_support=attn_cg_support,
                 req_states=req_states,
                 query_start_loc=query_start_loc,
                 num_bonus_tokens=num_bonus_tokens,

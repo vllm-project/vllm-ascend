@@ -159,6 +159,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     original_batches = manager.batches_to_profile
     original_set_curves = manager.set_initial_cost_curves
     original_get_num_tokens = manager.get_num_tokens
+    original_record_confidences = manager.record_confidences
     min_batch_size = PHYSICAL_K_MIN_TUNED_BATCH_SIZE
     manager._physical_k_profile_cases = []
     manager._physical_k_profile_is_upstream = []
@@ -167,7 +168,11 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager._physical_k_cost_saving = None
     manager._physical_k_last_logged = {}
     manager._physical_k_score_steps = defaultdict(int)
-    manager._physical_k_seen_narrow_draft = defaultdict(bool)
+    manager._physical_k_seen_narrow_confidence = defaultdict(bool)
+    manager._physical_k_global_confidence_widths = np.zeros(int(manager.req_states.max_num_reqs), dtype=np.int32)
+    manager._physical_k_confidence_widths = [
+        np.zeros(int(manager.req_states.max_num_reqs), dtype=np.int32) for _ in manager._stale_confidences
+    ]
     manager._physical_k_single_request_id = None
     manager._physical_k_score_new_request = False
 
@@ -265,6 +270,38 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             )
         logger.info("ASCEND_AV_PHYSICAL_K_COSTS candidates=%s costs=%s", candidates, dict(costs))
 
+    def record_confidences(self, confidence_probs, input_batch) -> None:
+        # Native record flips the readable index before writing the current
+        # snapshot. Tag its write buffer, without adding a copy or event wait.
+        write_idx = self._stale_idx
+        if self._pending_resets:
+            self._physical_k_global_confidence_widths[self._pending_resets] = 0
+            for widths in self._physical_k_confidence_widths:
+                widths[self._pending_resets] = 0
+        original_record_confidences(confidence_probs, input_batch)
+        produced_k = getattr(input_batch, "_vllm_ascend_produced_confidence_k", 0)
+        if type(produced_k) is not int or not 0 < produced_k <= max_k:
+            produced_k = 0
+        slots = input_batch.idx_mapping_np[: input_batch.num_reqs]
+        self._physical_k_global_confidence_widths[slots] = produced_k
+        # Native snapshots the entire global confidence table, including
+        # requests absent from this batch. Its CPU provenance must do so too.
+        np.copyto(self._physical_k_confidence_widths[write_idx], self._physical_k_global_confidence_widths)
+
+    def readable_confidence_width(self, req_ids, draft_tokens) -> int | None:
+        widths = self._physical_k_confidence_widths[self._stale_idx]
+        available = []
+        for req_id in req_ids:
+            if not draft_tokens.get(req_id):
+                continue
+            slot = self.req_states.req_id_to_index[req_id]
+            # Untracked slots, including requests beyond measured coverage,
+            # cannot establish the provenance of a full-width prediction.
+            if not 0 <= slot < len(widths):
+                return 0
+            available.append(int(widths[slot]))
+        return min(available, default=None)
+
     def lookup_cost(self, physical_k: int, batch_size: int) -> float | None:
         table = self._physical_k_draft_costs
         if not table or physical_k not in table:
@@ -314,25 +351,13 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 num_sampling_requests + np.cumsum(scores),
             )
         )
-        total_cost = draft_cost + verify_cost[non_draft : non_draft + max_budget + 1]
-        return float(np.max(expected / total_cost))
-
-    def cost_floor(self, batch_size: int) -> int | None:
-        """Return the shortest K not dominated by a wider draft graph.
-
-        A wider K that costs no more can emit every proposal available to the
-        shorter K, while AV remains free not to verify its tail. Treat a 2%
-        cost difference as equivalent to avoid selecting a noisy micro-win.
-        """
-
-        measured = {k: cost for k in candidates if (cost := lookup_cost(self, k, batch_size)) is not None}
-        if len(measured) != len(candidates):
-            return None
-        for physical_k in candidates:
-            cost = measured[physical_k]
-            if not any(measured[wider_k] <= cost * 1.02 for wider_k in candidates if wider_k > physical_k):
-                return physical_k
-        return max_k
+        verify_costs = verify_cost[non_draft : non_draft + max_budget + 1]
+        # Native AV still selects its budget using the unchanged max-K draft
+        # curve. Price the budget it will actually execute, rather than an
+        # independently optimized budget based on this candidate's draft cost.
+        av_draft_cost = self.cost_tables[0][num_reqs]
+        budget = int(np.argmax(expected / (av_draft_cost + verify_costs)))
+        return float(expected[budget] / (draft_cost + verify_costs[budget]))
 
     def recommend(self, num_tokens_per_req, draft_tokens):
         if self._physical_k_draft_costs is None or self.cost_tables is None:
@@ -349,14 +374,16 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             return None
         if not _is_tp_rank_zero():
             return None
-        fresh_width = min(len(draft_tokens[req_id]) for req_id in active)
-        # A narrowed physical step has no fresh confidence for wider
-        # candidates. Keep the last full-width recommendation until the next
-        # periodic K=max probe instead of creating a self-reinforcing low K.
-        if fresh_width < max_k:
+        # Current drafts and CPU confidence snapshots belong to different
+        # producer steps. Only the readable buffer's own label can establish
+        # that all candidate prefixes were actually evaluated at full width.
+        fresh_width = readable_confidence_width(self, req_ids, draft_tokens)
+        if fresh_width is None or fresh_width < max_k:
             return None
-        minimum_useful_k = cost_floor(self, batch_size)
-        if minimum_useful_k is None:
+        # Require complete measured coverage. Do not prune a narrow K solely
+        # by draft cost: wider K can make native AV choose a more expensive
+        # verification budget even when the two draft graphs cost the same.
+        if any(lookup_cost(self, k, batch_size) is None for k in candidates):
             return None
         all_slots = np.fromiter(
             (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
@@ -385,7 +412,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         scored = [
             (score, k)
             for k in candidates
-            if minimum_useful_k <= k <= fresh_width
+            if k <= fresh_width
             and (
                 score := score_k(
                     self,
@@ -418,7 +445,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         if self._physical_k_last_logged.get(bucket) != selected:
             logger.info(
                 "ASCEND_AV_PHYSICAL_K_DECISION batch_bucket=%d physical_k=%d "
-                "score=%.6f fresh_width=%d candidate_scores=%s",
+                "score=%.6f confidence_width=%d candidate_scores=%s",
                 bucket,
                 selected,
                 score,
@@ -454,21 +481,20 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             steps = self._physical_k_score_steps[bucket]
             self._physical_k_score_steps[bucket] = steps + 1
             probe_due = False
-            if self._physical_k_last_logged.get(bucket, max_k) < max_k:
-                active_widths = [len(draft_tokens[req_id]) for req_id in num_tokens_per_req if draft_tokens.get(req_id)]
-                if active_widths:
-                    if min(active_widths) < max_k:
-                        self._physical_k_seen_narrow_draft[bucket] = True
-                    elif self._physical_k_seen_narrow_draft[bucket]:
-                        # A full-width probe is the first fresh confidence
-                        # after a narrowed step. Score it immediately rather
-                        # than possibly missing it with the periodic timer.
-                        probe_due = True
-                        self._physical_k_seen_narrow_draft[bucket] = False
+            confidence_width = readable_confidence_width(self, num_tokens_per_req, draft_tokens)
+            if confidence_width is not None:
+                if confidence_width < max_k:
+                    self._physical_k_seen_narrow_confidence[bucket] = True
+                elif self._physical_k_seen_narrow_confidence[bucket]:
+                    # A full probe becomes CPU-readable on a later record
+                    # call, even if the newly published drafts are narrow.
+                    probe_due = True
+                    self._physical_k_seen_narrow_confidence[bucket] = False
             new_request_ready = (
                 self._physical_k_score_new_request
                 and len(num_tokens_per_req) == 1
-                and len(draft_tokens.get(self._physical_k_single_request_id, ())) >= max_k
+                and confidence_width is not None
+                and confidence_width >= max_k
             )
             if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0 or probe_due or new_request_ready:
                 self._physical_k_cost_saving = None
@@ -476,7 +502,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 if self._physical_k_recommendation is not None:
                     self._physical_k_score_new_request = False
                 if self._physical_k_recommendation is not None and self._physical_k_recommendation[1] == max_k:
-                    self._physical_k_seen_narrow_draft[bucket] = False
+                    self._physical_k_seen_narrow_confidence[bucket] = False
             else:
                 self._physical_k_recommendation = None
                 self._physical_k_cost_saving = None
@@ -485,4 +511,5 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager.batches_to_profile = MethodType(batches_to_profile, manager)
     manager.set_initial_cost_curves = MethodType(set_initial_cost_curves, manager)
     manager.get_num_tokens = MethodType(get_num_tokens, manager)
+    manager.record_confidences = MethodType(record_confidences, manager)
     return manager
