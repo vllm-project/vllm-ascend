@@ -8,6 +8,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import os
+
 import torch
 from cann_ops_transformer.op_builder import OpBuilder, get_as_library
 from torch.library import impl
@@ -491,6 +493,118 @@ def _qli_newapi_build_metadata(
     )
 
 
+_QSLI_META_SRC = os.path.normpath(
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "quant_sparse_lightning_indexer_metadata",
+        "torch_extension",
+        "csrc",
+        "quant_sparse_lightning_indexer_metadata.cpp",
+    )
+)
+_qsli_meta_module = None
+
+
+def _load_qsli_meta_module():
+    """懒加载 QSLI metadata 绑定（quant_sparse_lightning_indexer_metadata）。
+    vendor 经 ASCEND_CUSTOM_OPP_PATH 决定链接目标；CANN 根目录取
+    ASCEND_TOOLKIT_HOME（set_env.sh 注入），兜底本机常用路径。"""
+    global _qsli_meta_module
+    if _qsli_meta_module is None:
+        import os as _os
+
+        vendor = _os.environ.get("ASCEND_CUSTOM_OPP_PATH")
+        if not vendor:
+            raise RuntimeError(
+                "ASCEND_CUSTOM_OPP_PATH 未设置，无法加载 QSLI metadata 绑定"
+                "（quant_sparse_lightning_indexer_metadata 在 vendor 包内）"
+            )
+        cann = (
+            _os.environ.get("ASCEND_TOOLKIT_HOME") or _os.environ.get("ASCEND_HOME_PATH") or "/home/tjj/0824/cann-9.2.0"
+        )
+        import torch_npu
+        from torch.utils.cpp_extension import load
+
+        tn = _os.path.dirname(torch_npu.__file__)
+        _qsli_meta_module = load(
+            name="qsli_meta",
+            sources=[_QSLI_META_SRC],
+            extra_include_paths=[
+                f"{vendor}/op_api/include",
+                f"{cann}/include",
+                f"{cann}/include/aclnnop",
+                f"{tn}/include",
+                f"{tn}/include/third_party/hccl/inc",
+                f"{tn}/include/third_party/acl/inc",
+                f"{tn}/include/third_party/op-plugin",
+                f"{cann}/python/site-packages/cann_ops_transformer/common",
+            ],
+            extra_cflags=["-O2", "-std=c++17"],
+            extra_ldflags=[
+                f"-L{vendor}/op_api/lib",
+                "-lcust_opapi",
+                f"-L{cann}/lib64",
+                "-lascendcl",
+                f"-L{tn}/lib",
+                "-ltorch_npu",
+                f"-Wl,-rpath,{vendor}/op_api/lib",
+            ],
+            verbose=False,
+        )
+    return _qsli_meta_module
+
+
+def _qli_newapi_build_qsli_metadata(
+    q,
+    k,
+    layout_q,
+    layout_k,
+    cu_seqlens_q,
+    seqused_k,
+    cmp_residual_k,
+    topk,
+    quant_mode,
+    mask_mode,
+    cmp_ratio,
+    candidate_block_length,
+):
+    """带 candidate_block_length 的 QSLI metadata —— mode=2 + 长度必须用它：
+    旧 metadata 算子的 s2 区间是全量扫块数口径，与候选 tile 口径不兼容
+    （错配是错不是慢；见 2026-11-09/10 的 L=321 与 B5 定位记录）。"""
+    num_heads_q = int(q.shape[1])
+    num_heads_k = int(k.shape[2])
+    head_dim = int(q.shape[2])
+    if layout_q == "TND":
+        batch_size = int(cu_seqlens_q.numel()) - 1
+        max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
+    else:
+        batch_size = 1
+        max_seqlen_q = int(q.shape[0])
+    max_seqlen_k = int(seqused_k.max().item())
+    return _load_qsli_meta_module().quant_sparse_lightning_indexer_metadata(
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        topk,
+        quant_mode,
+        cu_seqlens_q,
+        None,
+        None,
+        seqused_k,
+        cmp_residual_k,
+        candidate_block_length,
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        layout_q,
+        layout_k,
+        mask_mode,
+        cmp_ratio,
+    )
+
+
 def quant_lightning_indexer_candidate_source(
     q,
     k,
@@ -606,7 +720,10 @@ def quant_lightning_indexer_candidate_consumer(
     """新规范接口2 (consumer, 内部 candidate_mode=2): 在候选块内选 topk。
 
     candidate_block_indices: (T1, N2, cb) source 侧输出的候选块索引 (块级, 相对块号);
-    candidate_block_length: 本后端忽略 (算子内部已按 mask 规则与 key 长度取小截断, 该输入语义冗余);
+    candidate_block_length: source 侧产出 (T1, 1) int32（mode=1 第 4 个输出），**必传**——
+        kernel 侧唯一闸门 hasCandidateBlockLength_；不传会静默回退 legacy 全量扫候选
+        （结果对但无 tile 驱动收益、无 FD 分片）。必须与 candidate_block_indices
+        同一次 source 调用产出（provenance）。
     candidate_topk_blocks 由 candidate_block_indices.shape[-1] 推导 (新规范无此属性)。
     返回 (sparse_indices, sparse_values); 布局与内部一致: B=1 BSND (B,S1,N2,topk) / TND (T1,N2,topk)。
     """
@@ -634,9 +751,36 @@ def quant_lightning_indexer_candidate_consumer(
         _qli_newapi_check(q.dim() == 3, "q must be 3-D (T1, N1, D).")
         q_in, w_in, q_descale_in = q.unsqueeze(0), w.unsqueeze(0), q_descale.unsqueeze(0)
         cand_in = candidate_block_indices.unsqueeze(0)  # (1, T1, N2, cb)
+    _qli_newapi_check(
+        candidate_block_length is not None,
+        "candidate_block_length is required for the candidate × block_length path "
+        "(mode=2 硬闸门；不传会静默回退 legacy 全量扫，无 tile 驱动收益)。",
+    )
+    _qli_newapi_check(
+        candidate_block_length.dim() == 2 and candidate_block_length.dtype == torch.int32,
+        "candidate_block_length must be int32 (T1, 1)，与候选表同一次 source 调用产出。",
+    )
     if metadata is None:
-        metadata = _qli_newapi_build_metadata(
-            q, k, layout_q, "PA_BBND", cu_seqlens_q, seqused_q, cmp_residual_k, topk, quant_mode, mask_mode, cmp_ratio
+        metadata = _qli_newapi_build_qsli_metadata(
+            q,
+            k,
+            layout_q,
+            "PA_BBND",
+            cu_seqlens_q,
+            seqused_q,
+            cmp_residual_k,
+            topk,
+            quant_mode,
+            mask_mode,
+            cmp_ratio,
+            candidate_block_length,
+        )
+    if os.environ.get("QLI_CHECK_QSLI_META", "0") == "1":
+        m = metadata.cpu().flatten().tolist()
+        max_l = int(candidate_block_length.max().item())
+        max_tiles = (max_l + 63) // 64 if max_l > 0 else 0
+        assert all(m[i * 8 + 6] <= max_tiles for i in range(36) if m[i * 8]), (
+            "metadata s2End 超出候选 tile 口径 —— 错配了旧 metadata 算子（应为 QSLI 算子）"
         )
     idx, vals, _, _ = quant_lightning_indexer_candidate(
         q_in,
@@ -663,5 +807,6 @@ def quant_lightning_indexer_candidate_consumer(
         candidate_mode=2,
         candidate_topk_blocks=topk_blocks,
         candidate_block_size=int(candidate_block_size),
+        candidate_block_length=candidate_block_length,
     )
     return idx, vals
