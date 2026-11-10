@@ -84,12 +84,30 @@ def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     return tensor[int(offset) :]
 
 
+def _parse_int_env(var: str, default: int) -> int:
+    """Read an integer env var, surfacing the variable name on a bad value.
+
+    A bare ``int(os.getenv(...))`` raises ``ValueError`` with only the
+    offending string, so a typo like ``HCCL_RDMA_TIMEOUT=abc`` is hard to
+    attribute to the right variable in a multi-env config.
+    """
+    raw = os.getenv(var)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"Environment variable {var} must be an integer, got {raw!r}."
+        ) from exc
+
+
 def get_transfer_timeout_value():
     ascend_transfer_timeout = os.getenv("ASCEND_TRANSFER_TIMEOUT", "")
     if len(ascend_transfer_timeout) > 0:
-        return int(ascend_transfer_timeout)
-    hccl_rdma_timeout = int(os.getenv("HCCL_RDMA_TIMEOUT", "20"))  # type: ignore
-    hccl_rdma_retry_cnt = int(os.getenv("HCCL_RDMA_RETRY_CNT", "7"))  # type: ignore
+        return _parse_int_env("ASCEND_TRANSFER_TIMEOUT", 0)
+    hccl_rdma_timeout = _parse_int_env("HCCL_RDMA_TIMEOUT", 20)
+    hccl_rdma_retry_cnt = _parse_int_env("HCCL_RDMA_RETRY_CNT", 7)
     return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 + 3000)
 
 

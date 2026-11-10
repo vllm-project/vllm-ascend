@@ -11,6 +11,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     QOS_KEY,
     collect_storage_merged_register_regions,
+    get_transfer_timeout_value,
     inject_qos,
 )
 
@@ -115,3 +116,39 @@ class TestKVRegisterRegions(unittest.TestCase):
         self.assertEqual(regions.lengths, [36 * cache.element_size()])
         self.assertEqual(regions.logical_total_bytes, cache.nbytes)
         self.assertEqual(regions.logical_tensor_count, 1)
+
+
+class TestTransferTimeout(unittest.TestCase):
+    def test_ascend_transfer_timeout_short_circuits(self):
+        with patch.dict(os.environ, {"ASCEND_TRANSFER_TIMEOUT": "15000"}, clear=False):
+            self.assertEqual(get_transfer_timeout_value(), 15000)
+
+    def test_defaults_use_hccl_formula(self):
+        with patch.dict(os.environ, {}, clear=True):
+            # int((4.096 * (2 ** 20)) * 7 // 1000 + 3000)
+            self.assertEqual(get_transfer_timeout_value(), 33064)
+
+    def test_hccl_overrides_change_formula(self):
+        with patch.dict(
+            os.environ, {"HCCL_RDMA_TIMEOUT": "21", "HCCL_RDMA_RETRY_CNT": "8"}, clear=True
+        ):
+            # int((4.096 * (2 ** 21)) * 8 // 1000 + 3000)
+            self.assertEqual(get_transfer_timeout_value(), 71719)
+
+    def test_invalid_ascend_transfer_timeout_names_variable(self):
+        with patch.dict(os.environ, {"ASCEND_TRANSFER_TIMEOUT": "abc"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "ASCEND_TRANSFER_TIMEOUT"):
+                get_transfer_timeout_value()
+
+    def test_invalid_hccl_rdma_timeout_names_variable(self):
+        with patch.dict(os.environ, {"HCCL_RDMA_TIMEOUT": "abc"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "HCCL_RDMA_TIMEOUT"):
+                get_transfer_timeout_value()
+
+    def test_invalid_hccl_rdma_retry_cnt_names_variable(self):
+        with patch.dict(
+            os.environ, {"HCCL_RDMA_TIMEOUT": "20", "HCCL_RDMA_RETRY_CNT": "x"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "HCCL_RDMA_RETRY_CNT"):
+                get_transfer_timeout_value()
