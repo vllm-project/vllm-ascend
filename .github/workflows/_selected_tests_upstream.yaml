@@ -238,9 +238,9 @@ jobs:
               GIT_PROXY: https://gh-proxy.test.osinfra.cn/
             run: |
               set -euo pipefail
-              FLA_WHL=flash_linear_attention_npu_a2-26.9.1+deva4a7958-py3-none-manylinux_2_34_aarch64.whl
-              FLA_SHA256=7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a
-              FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
+              FLA_WHL=flash_linear_attention_npu_a2-26.9.1-py3-none-manylinux_2_34_aarch64.whl
+              FLA_SHA256=aefe29fe3f021db45276b289b1f9882f85a34ce1f9900ba94251bda490af4b6e
+              FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-release/$FLA_WHL"
               if [ -n "${GIT_PROXY:-}" ]; then
                 FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
               fi
