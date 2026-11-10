@@ -221,8 +221,16 @@ class TargetDeviceMetadata:
         if not full_graph:
             self.begin_forward()
 
-    def begin_forward(self):
+    @property
+    def pending_tasks(self) -> tuple[DeviceMetadataTask, ...]:
+        return self._tasks
+
+    def begin_forward(self, capture_tasks: tuple[DeviceMetadataTask, ...] = ()):
         """Called inside target graph warmup/capture, or after eager prepare."""
+        if not self._tasks:
+            # Compiled PIECEWISE capture reuses the warmup's metadata. Only
+            # its capture wrapper may restore tasks for that identical object.
+            self._tasks = capture_tasks
         if not self._tasks or self.executor.submission_in_flight:
             return
         try:

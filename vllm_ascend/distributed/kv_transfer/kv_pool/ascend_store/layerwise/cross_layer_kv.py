@@ -709,7 +709,7 @@ class CrossLayerKVRecvingThread(KVCacheStoreRecvingThread):
 class CrossLayerKVPoolWorker(KVPoolWorker):
     """Bulk-compatible CrossLayerKV worker with step-local producer/consumer plans.
 
-    Eager target loads also support the V2 DeepSeek V4.1 DSpark drafter.
+    Eager and PIECEWISE target loads support the V2 DeepSeek V4.1 DSpark drafter.
     Unmapped groups, including draft KV, load synchronously before forward;
     target copies drain before drafting. Other speculative/parallel layouts
     retain bulk behavior. SDK 1.3 does not support exclusive saves.
@@ -730,7 +730,9 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
         self._cross_layer_kv_load_started = False
         compilation = vllm_config.compilation_config
         mode = getattr(compilation.cudagraph_mode, "name", str(compilation.cudagraph_mode))
-        eager = bool(vllm_config.model_config.enforce_eager) or mode == "NONE"
+        # Reuse ordinary layerwise's graph contract: consumer callbacks run
+        # between graph segments, so their host-side waits execute on replay.
+        layerwise_execution = bool(vllm_config.model_config.enforce_eager) or mode in ("NONE", "PIECEWISE")
         parallel = vllm_config.parallel_config
         speculative = vllm_config.speculative_config
         dspark_supported = (
@@ -741,7 +743,7 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
         )
         self._cross_layer_kv_runtime_supported = (
             str(self._extra_config.get("backend", "mooncake")).lower() == "memcache"
-            and eager
+            and layerwise_execution
             and not self.load_async
             and self.pp_size == self.pcp_size == self.dcp_size == 1
             and not self.use_kvpp
@@ -754,7 +756,7 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
         self._cross_layer_kv_load_capable = False
         if not self._cross_layer_kv_runtime_supported:
             logger.warning(
-                "cross_layer_kv requires eager memcache, load_async=false, full blocks and no "
+                "cross_layer_kv requires eager or PIECEWISE memcache, load_async=false, full blocks and no "
                 "PP/PCP/DCP/KVPP/microbatching; speculative loads support only V2 DeepSeek V4.1 DSpark. "
                 "Retaining bulk transfers."
             )

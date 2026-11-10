@@ -14,6 +14,12 @@ entries:
     model: deepseek-v4.1
   - category: other
     text: >-
+      Experimental cross-layer target loads support PIECEWISE as well as eager
+      execution, reusing ordinary layerwise graph boundaries. V2 Engram inputs
+      refresh before replay, and bounded replay uses stable output buffers.
+    model: deepseek-v4.1
+  - category: other
+    text: >-
       Memcache 1.3 retains atomic bulk saves because incremental saves require
       exclusive allocation. Source layers derive from model parameters, and
       registered consumer hooks are validated before enabling pipelined loads.

@@ -234,7 +234,7 @@ class DecoderReplayState:
         # Initialize before early exits: capture and profile may also need warmup.
         if self.slots is None:
             self._initialize(inputs)
-        if for_capture or mode != CUDAGraphMode.NONE or get_mrv2_in_profile_run():
+        if for_capture or mode not in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE) or get_mrv2_in_profile_run():
             return
 
         # Compaction requires coordinated execution lengths across DP replicas.

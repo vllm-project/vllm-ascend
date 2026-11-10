@@ -22,18 +22,20 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 
-def _capability_worker(method="dspark", architecture="DeepseekV41DSparkModel", use_v2=True):
+def _capability_worker(
+    method="dspark", architecture="DeepseekV41DSparkModel", use_v2=True, graph_mode="NONE", enforce_eager=True
+):
     groups = _v41_layout(num_layers=12, sources=(2, 8), with_state=False, with_draft=True)
     config = SimpleNamespace(
         use_v2_model_runner=use_v2,
         compilation_config=SimpleNamespace(
-            cudagraph_mode=SimpleNamespace(name="NONE"),
+            cudagraph_mode=SimpleNamespace(name=graph_mode),
             static_forward_context={
                 str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_kv_transfer_hooks=True)
                 for layer in range(12)
             },
         ),
-        model_config=SimpleNamespace(enforce_eager=True),
+        model_config=SimpleNamespace(enforce_eager=enforce_eager),
         parallel_config=SimpleNamespace(use_ubatching=False, use_sequence_parallel_moe=False),
         speculative_config=SimpleNamespace(
             method=method,
@@ -42,6 +44,9 @@ def _capability_worker(method="dspark", architecture="DeepseekV41DSparkModel", u
         ),
     )
     store = FakeCrossLayerKVStore(bytearray(0x10000))
+    if method is None:
+        config.speculative_config = None
+        store.supports_exclusive_allocation = False
 
     def initialize(worker, *_args):
         worker.vllm_config = config
@@ -76,6 +81,27 @@ def _capability_worker(method="dspark", architecture="DeepseekV41DSparkModel", u
 
 
 class TestDSparkCrossLayerKVCapabilities(unittest.TestCase):
+    def test_piecewise_and_eager_enable_the_same_target_load_pipeline(self):
+        for method in [None, "dspark"]:
+            for mode, enforce_eager in [("NONE", False), ("NONE", True), ("PIECEWISE", False)]:
+                with self.subTest(method=method, mode=mode, enforce_eager=enforce_eager):
+                    worker = _capability_worker(method=method, graph_mode=mode, enforce_eager=enforce_eager)
+                    try:
+                        self.assertTrue(worker._cross_layer_kv_load_capable)
+                        self.assertEqual(worker.cross_layer_kv_trigger_layers, (2, 3, 7, 8, 11))
+                        self.assertFalse(worker._cross_layer_kv_save_capable)
+                    finally:
+                        if worker.kv_recv_thread is not None:
+                            worker.kv_recv_thread.stop()
+                            worker.kv_recv_thread.join(timeout=2)
+
+    def test_unnegotiated_full_graph_modes_keep_bulk(self):
+        for mode in ["FULL", "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "UNKNOWN"]:
+            with self.subTest(mode=mode):
+                worker = _capability_worker(graph_mode=mode, enforce_eager=False)
+                self.assertFalse(worker._cross_layer_kv_load_capable)
+                self.assertFalse(worker._cross_layer_kv_save_capable)
+
     def test_dspark_enables_target_loads_and_keeps_speculative_saves_bulk(self):
         worker = _capability_worker()
         try:

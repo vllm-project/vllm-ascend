@@ -81,7 +81,7 @@ from .cache_config import (
     make_swa_cache_spec,
 )
 from .compressor import DeepseekV41Compressor
-from .decoder_replay_layers import make_decoder_replay
+from .decoder_replay_layers import make_decoder_replay, run_decoder_replay
 from .engram import (
     create_engram_hash_state,
     engram_cpu_offload,
@@ -1116,6 +1116,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         self.decoder_replay_start = self.end_layer
         self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+        self.decoder_replay_uses_piecewise = vllm_config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
         self.decoder_replay_layer_name: str | None = None
         if self.decoder_replay_layers is not None:
             self.decoder_replay_layer_name = f"{prefix}.decoder_replay" if prefix else "decoder_replay"
@@ -1603,13 +1604,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.decoder_replay_start < layer_idx <= self.end_layer
                     for layer_idx in self.aux_hidden_state_layers
                 )
-                replay_outputs = torch.ops.vllm.dsv41_decoder_replay_forward(
+                replay_outputs = run_decoder_replay(
                     hidden_states,
                     pre_mix,
                     positions,
                     input_ids,
                     num_late_aux,
                     self.decoder_replay_layer_name,
+                    use_piecewise=self.decoder_replay_uses_piecewise,
                 )
                 hidden_states, pre_mix, *late_aux = replay_outputs
                 aux_hidden_states.extend(late_aux)

@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
 from vllm.forward_context import get_forward_context
@@ -141,6 +142,90 @@ direct_register_custom_op(
 )
 
 
+def dsv41_decoder_replay_forward_with_output(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    outputs: list[torch.Tensor],
+    layer_name: str,
+) -> None:
+    """Keep mutable replay rows and KV hooks outside PIECEWISE graph segments.
+
+    Reuse the ordinary layerwise eager-break contract. Caller-owned outputs
+    keep addresses stable even when this step's replay rows or context change.
+    """
+    # The shared decorator weakens individual tensor arguments, not lists.
+    # Flatten buffers at that boundary so graph-pool slots are not pinned by
+    # capture closures across batch sizes.
+    _decoder_replay_with_output(hidden_states, pre_mix, positions, input_ids, layer_name, *outputs)
+
+
+@eager_break_during_capture
+def _decoder_replay_with_output(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    layer_name: str,
+    *outputs: torch.Tensor,
+) -> None:
+    if len(outputs) < 2:
+        raise ValueError("Decoder replay needs hidden-state and pre-mix output buffers")
+    values = dsv41_decoder_replay_forward(hidden_states, pre_mix, positions, input_ids, len(outputs) - 2, layer_name)
+    for output, value in zip(outputs, values, strict=True):
+        if output.shape != value.shape:
+            raise RuntimeError("Decoder replay output buffer shape does not match the current replay")
+        output.copy_(value)
+
+
+def dsv41_decoder_replay_forward_with_output_fake(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    outputs: list[torch.Tensor],
+    layer_name: str,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="dsv41_decoder_replay_forward_with_output",
+    op_func=dsv41_decoder_replay_forward_with_output,
+    mutates_args=["outputs"],
+    fake_impl=dsv41_decoder_replay_forward_with_output_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+def run_decoder_replay(
+    hidden_states: torch.Tensor,
+    pre_mix: torch.Tensor,
+    positions: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    num_late_aux: int,
+    layer_name: str,
+    *,
+    use_piecewise: bool,
+) -> list[torch.Tensor]:
+    # Select from immutable model configuration, including NONE warmup:
+    # vLLM reuses the compiled trace without checking Python mode guards.
+    if use_piecewise:
+        outputs = [
+            torch.empty_like(hidden_states),
+            torch.empty_like(pre_mix),
+            *(hidden_states.new_empty((positions.shape[0], hidden_states.shape[-1])) for _ in range(num_late_aux)),
+        ]
+        torch.ops.vllm.dsv41_decoder_replay_forward_with_output(
+            hidden_states, pre_mix, positions, input_ids, outputs, layer_name
+        )
+        return outputs
+    return torch.ops.vllm.dsv41_decoder_replay_forward(
+        hidden_states, pre_mix, positions, input_ids, num_late_aux, layer_name
+    )
+
+
 def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> AscendDecoderReplayLayers | None:
     if not getattr(config.cache_config, "swa_bounded_replay", False):
         return None
@@ -160,8 +245,12 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         or parallel.use_ubatching
     ):
         reason = "SP, PP, DCP and microbatching need a separate replay layout"
-    elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
-        reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
+    elif config.compilation_config.cudagraph_mode not in (
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.PIECEWISE,
+    ):
+        reason = "replay prefill requires eager or PIECEWISE execution; use NONE, FULL_DECODE_ONLY or PIECEWISE"
     elif any(layer > cut for layer in model.config.engram_layer_ids):
         reason = "an Engram layer follows the last KV source"
     elif speculative is not None and not speculative.use_dspark():

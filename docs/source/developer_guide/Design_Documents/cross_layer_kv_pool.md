@@ -158,7 +158,7 @@ transfers. It does not claim to roll back SWA/compressor state or automatically
 reschedule a partially executed hybrid request. Distributed failure handling
 and worker restart behavior need hardware validation before production use.
 
-The runtime gate supports eager Memcache transfers with full blocks. With the
+The runtime gate supports eager and PIECEWISE Memcache loads with full blocks. With the
 V2 model runner, DeepSeek V4.1 DSpark also supports pipelined target loads.
 The target topology remains configuration-derived; this speculative extension
 requires the registered `DeepseekV41DSparkModel` drafter. Other speculative
@@ -179,10 +179,23 @@ no incremental producer callback publishes provisional draft/verify state.
 The pool coordinator's existing masks and trailing-block recomputation policy
 still determine which complete committed blocks can be reused.
 
-PP, PCP, DCP, KVPP, SP, microbatching, graph modes and partial objects retain
-bulk behavior. Unknown layouts retain bulk at the group boundary. Use
-`--enforce-eager` to enable the pipeline; ordinary layerwise keeps the existing
-graph-mode negotiation. KV-event publication also keeps saves on the bulk path.
+Both strategies reuse the connector's existing PIECEWISE negotiation and
+platform splitting operations. DS4.1 attention, cache-only writes and bounded
+decoder replay execute between graph segments, so consumer waits and KV hooks
+run for each replay. Bounded replay uses caller-owned output buffers, including
+during NONE warmup, rather than specializing on the warmup's replay rows.
+The V2 runner refreshes Engram's persistent lookup buffers before PIECEWISE
+dispatch and retires host-submitted device metadata after its consumers.
+
+Use `--enforce-eager` for eager execution. For PIECEWISE, omit that flag and set
+`compilation_config.cudagraph_mode` to `PIECEWISE`. The V2 runner requires a
+torch-compiled model or the existing `VLLM_USE_BREAKABLE_CUDAGRAPH=1` setting;
+the platform's default opt-in policy is unchanged. DSpark and bounded replay
+ON/OFF use the same graph boundaries; FULL graph support is not implied.
+
+PP, PCP, DCP, KVPP, SP, microbatching, unsupported graph modes and partial
+objects retain bulk behavior. Unknown layouts retain bulk at the group
+boundary. KV-event publication also keeps saves on the bulk path.
 
 ## Verification
 
@@ -203,6 +216,13 @@ CPU regression tests cover:
   target source is copying, metadata isolation, repeated load calls and draining
   in-flight target writes when synchronous draft restoration raises or returns
   missing, failed or malformed status results.
+- Eager/PIECEWISE load eligibility and unsupported-mode fallbacks, existing
+  graph-cut registration, fixed replay buffers, changing bounded replay
+  metadata, NONE-first compilation, and V2 Engram/metadata lifecycle.
+
+Native NPU PIECEWISE capture/replay, memory use across graph sizes, and
+request/logit equivalence with DSpark and bounded replay ON/OFF require
+hardware validation; CPU tests do not establish these results.
 
 NPU E2E (including DSpark), actual SDK execution, cross-rank failures, Graph/MTP extensions, and
 performance traces remain required before promoting this draft. Measure copy

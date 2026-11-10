@@ -223,7 +223,7 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
     assert result["decoder.swa_cache"] is metadata
 
 
-@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY])
 def test_graph_step_clears_previous_replay(state, mode):
     state.layers.rows = torch.arange(2)
     state.prepare(inputs(), mode)
@@ -231,10 +231,28 @@ def test_graph_step_clears_previous_replay(state, mode):
     state._gather.assert_not_called()
 
 
+def test_piecewise_step_prepares_current_replay_and_clears_stale_rows(state):
+    for request, expected_rows, offsets in [(0, 9, [0, 1, 7, 9]), (1, 9, [0, 1, 3, 9]), (None, 5, [0, 1, 3, 5])]:
+        state.keeps_rows.fill(False)
+        if request is not None:
+            state.keeps_rows[request] = True
+        state.prepare(inputs(), CUDAGraphMode.PIECEWISE)
+        assert state.layers.rows is not None
+        assert state.layers.rows.numel() == expected_rows
+        assert state.layers.context_factory is not None
+        assert state.num_actual_tokens == expected_rows
+        assert state._build_metadata.call_args.args[1].tolist() == offsets
+    assert state._gather.call_count == 3
+    state.prepare(inputs(dummy=True), CUDAGraphMode.PIECEWISE)
+    assert state.layers.rows is None
+    assert state.layers.context_factory is None
+
+
 @pytest.mark.parametrize("capture,profile", [(True, False), (False, True)])
-def test_capture_and_profile_do_not_prepare_replay(state, monkeypatch, capture, profile):
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_capture_and_profile_do_not_prepare_replay(state, monkeypatch, capture, profile, mode):
     monkeypatch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: profile)
-    state.prepare(inputs(), CUDAGraphMode.NONE, for_capture=capture)
+    state.prepare(inputs(), mode, for_capture=capture)
     assert state.layers.rows is None
     state._gather.assert_not_called()
 

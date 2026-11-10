@@ -1019,6 +1019,30 @@ class TestNPUPlatform(TestBase):
 
         vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
 
+    def test_piecewise_keeps_v41_cache_side_effects_outside_graph_segments(self):
+        config = TestNPUPlatform.mock_vllm_config()
+        compilation = config.compilation_config
+        compilation.mode = CompilationMode.VLLM_COMPILE
+        compilation.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        compilation.cudagraph_capture_sizes = [1, 2, 4, 8]
+        compilation.max_cudagraph_capture_size = 8
+        compilation.splitting_ops = []
+        config.additional_config = {"ascend_compilation_config": {}}
+        config.model_config.enforce_eager = False
+        config.parallel_config.tensor_parallel_size = 1
+        config._set_cudagraph_sizes = MagicMock()
+        with patch("vllm_ascend.platform.enable_sp", return_value=False):
+            _setup_compile_backend(config, compile_backend="test_backend", enable_shared_expert_dp=False)
+        self.assertEqual(compilation.cudagraph_mode, CUDAGraphMode.PIECEWISE)
+        for op in [
+            "vllm::mla_forward",
+            "vllm::dsa_forward",
+            "vllm::dsa_v41_forward",
+            "vllm::dsa_v41_write_kv",
+            "vllm::dsv41_decoder_replay_forward_with_output",
+        ]:
+            self.assertIn(op, compilation.splitting_ops)
+
     def test_setup_compile_backend_aligns_tp_token_layout_capture_sizes(self):
         cases = [
             (True, False, True),

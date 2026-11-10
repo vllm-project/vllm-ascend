@@ -961,12 +961,20 @@ Expected output: MetaService starts successfully with no errors.
     or a model-name allowlist. Model implementations that reuse the same
     cache and hook contract adapt to topology changes automatically.
 
-    With Memcache, full cache blocks, and `--enforce-eager`, dependency loads
+    With Memcache, full cache blocks, and eager or PIECEWISE execution, dependency loads
     are submitted before forward and copied in first-consumer order. Each
     layer waits only for the data it needs. The scheduler and worker use
     synchronous admission (`load_async` is internally set to false), while
     later copies overlap earlier computation. Physical-layer buffer reuse,
     offload snapshots, and KVPP layer hooks are not enabled for shared sources.
+
+    PIECEWISE reuses ordinary layerwise graph negotiation and split boundaries.
+    To select it, omit `--enforce-eager` and set
+    `compilation_config.cudagraph_mode` to `PIECEWISE`. With the V2 runner,
+    use a torch-compiled model or the existing
+    `VLLM_USE_BREAKABLE_CUDAGRAPH=1` option. DS4.1 attention, cache-only writes
+    and bounded replay callbacks stay outside graph segments; eager remains
+    supported. In PD separation, enable layerwise on P only; D keeps it disabled.
 
     With `swa_bounded_replay=true`, target SWA is reconstructed by replay and
     is excluded from pool storage. Otherwise SWA saves follow the existing
@@ -987,7 +995,7 @@ Expected output: MetaService starts successfully with no errors.
     speculative methods or draft architectures retain bulk transfers.
 
     Unsupported backends, PP/PCP/DCP/KVPP, sequence parallelism, microbatching,
-    graph execution, partial objects, or missing
+    unsupported graph modes, partial objects, or missing
     consumer hooks retain group-object bulk transfers within this strategy.
     A load failure after computation begins fails the step; automatic state
     rollback/retry is not supported. NPU correctness and performance evidence

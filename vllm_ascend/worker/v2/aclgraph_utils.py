@@ -116,6 +116,22 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
+    def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
+        state = self.model_runner.model_state
+        metadata = getattr(state, "device_metadata", None)
+        try:
+            prepare_inputs = getattr(state, "prepare_engram_piecewise_inputs", None)
+            if prepare_inputs is not None:
+                # The parent establishes the forward context before dispatch,
+                # but its replay path does not invoke the model pre-hook.
+                model_inputs = prepare_inputs(model_inputs)
+            return super().run_pw_graph(model, model_inputs)
+        finally:
+            if metadata is not None:
+                # PIECEWISE submits current producers outside graph segments;
+                # unlike FULL replay they need the ordinary eager join.
+                metadata.finish()
+
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
@@ -250,6 +266,8 @@ class ModelWithContext(nn.Module):
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
         self.device_metadata = device_metadata
+        self._capture_attn_metadata: Any = object()
+        self._capture_metadata_tasks = ()
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -266,12 +284,15 @@ class ModelWithContext(nn.Module):
 
         try:
             if self.device_metadata is not None:
-                self.device_metadata.begin_forward()
+                if self._capture_attn_metadata is not forward_context.attn_metadata:
+                    self._capture_attn_metadata = forward_context.attn_metadata
+                    self._capture_metadata_tasks = self.device_metadata.pending_tasks
+                self.device_metadata.begin_forward(self._capture_metadata_tasks)
             return self.original_model(*args, **kwargs)
         finally:
-            # Warmup and actual capture receive separate prepare_attn calls.
-            # Retire each submission, including unused producers, after its
-            # consumers; do not wait for metadata at graph entry.
+            # FULL/breakable capture prepare fresh metadata; compiled PW
+            # reuses it. Retire every submission after its consumers and
+            # retain matching tasks only in this capture-scoped wrapper.
             if self.device_metadata is not None:
                 self.device_metadata.finish()
 
