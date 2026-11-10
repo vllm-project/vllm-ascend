@@ -3,6 +3,7 @@ mkdocs-material
 mkdocs-material-extensions
 mkdocs-exclude
 mkdocs-macros-plugin
+pymdown-multimd-table
 polib
 regex
 openai
