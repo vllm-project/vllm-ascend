@@ -13,6 +13,20 @@ INVALID_JOB_ID = -1
 
 
 @dataclass
+class MambaConvLoadMeta:
+    """Conv-only correction applied after the normal Mamba H2D restore.
+
+    The normal block copy remains authoritative for temporal/SSM state. Conv
+    state instead lives in the running-state block and must be shifted by the
+    accepted speculative-token offset before the resumed forward.
+    """
+
+    gpu_block_id: int
+    cpu_block_id: int
+    source_offset: int
+
+
+@dataclass
 class PreemptOffloadMetadata(KVConnectorMetadata):
     """Recompute offload transfers passed from scheduler to worker."""
 
@@ -29,6 +43,7 @@ class PreemptOffloadMetadata(KVConnectorMetadata):
     preempt_load_event: int = INVALID_JOB_ID
     preempt_load_gpu_blocks: list[int] = field(default_factory=list)
     preempt_load_cpu_blocks: list[int] = field(default_factory=list)
+    preempt_load_mamba_conv: list[MambaConvLoadMeta] = field(default_factory=list)
     preempt_load_event_to_reqs: dict[int, list[str]] = field(default_factory=dict)
 
 

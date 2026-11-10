@@ -201,7 +201,7 @@ class TestSnapshotV3(unittest.TestCase):
         self.assertTrue(torch.equal(restored.grid[1], model.grid[1]))
 
     def test_nested_tuple_sealed_innermost_first(self):
-        """回归: 嵌套 tuple 容器逐层密封，内层不能停留在 list。"""
+        """Nested tuple containers are sealed innermost-first; inner tuples must not stay lists."""
 
         class M(torch.nn.Module):
             def __init__(self):
@@ -214,7 +214,7 @@ class TestSnapshotV3(unittest.TestCase):
         restored = _BareModel().to("npu")
         self._restore(restored)
         self.assertIsInstance(restored.pair, tuple)
-        # 内层在保存时记录为 tuple，恢复后也必须是 tuple（而不是未密封的 list）
+        # The inner tuple must survive the roundtrip instead of degrading to a list.
         self.assertIsInstance(restored.pair[0], tuple)
         self.assertTrue(torch.equal(restored.pair[0][0], model.pair[0][0]))
         self.assertTrue(torch.equal(restored.pair[0][1], model.pair[0][1]))

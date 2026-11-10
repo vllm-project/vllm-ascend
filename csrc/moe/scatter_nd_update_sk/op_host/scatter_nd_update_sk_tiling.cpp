@@ -16,8 +16,10 @@
 #include "log/log.h"
 #include "platform/platform_info.h"
 #include "tiling/tiling_api.h"
+#include "tiling/platform/platform_ascendc.h"
 #include "register/op_impl_registry.h"
 #include "scatter_nd_update_sk_tiling.h"
+#include "scatter_nd_update_sk_tiling_regbase.h"
 
 namespace optiling {
 constexpr uint64_t MAX_DIM_NUM = 8;
@@ -522,9 +524,15 @@ ge::graphStatus ScatterNdUpdateSkArch22Tiling::Init()
     return ge::GRAPH_SUCCESS;
 }
 
-// tiling dispatch entry
+// tiling dispatch entry: ascend950 走 arch35 regbase tiling，其余走 arch22 tiling
 static ge::graphStatus ScatterNdUpdateSkArch22TilingFunc(gert::TilingContext* context)
 {
+    auto platformInfo = context->GetPlatformInfo();
+    if (platformInfo != nullptr && platform_ascendc::PlatformAscendC(platformInfo).GetSocVersion() ==
+                                       platform_ascendc::SocVersion::ASCEND950) {
+        ScatterNdUpdateSkTilingRegbase regbaseTiling(context);
+        return regbaseTiling.DoTiling();
+    }
     ScatterNdUpdateSkArch22Tiling tilingOp(context);
     if (tilingOp.Init() != ge::GRAPH_SUCCESS) {
         OP_LOGE(context->GetNodeName(), "Tiling init fail");

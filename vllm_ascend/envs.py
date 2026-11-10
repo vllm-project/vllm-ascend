@@ -22,17 +22,30 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable as ``1`` or ``0``.
+
+    Only ``1`` and ``0`` are accepted (surrounding whitespace is ignored).
+    Unset or empty values fall back to ``default``, which keeps
+    ``export VAR=`` from crashing. Any other value raises ValueError naming the
+    variable, instead of failing inside ``int()`` with an opaque message.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip()
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise ValueError(f"Invalid value for environment variable {name}: {raw!r}. Expected '0' or '1'.")
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # begin-env-vars-definition
-
-
-def _strict_binary_env(name: str, default: str = "0") -> bool:
-    value = os.getenv(name, default)
-    if value not in {"0", "1"}:
-        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
-    return value == "1"
 
 
 env_variables: dict[str, Callable[[], Any]] = {
@@ -48,7 +61,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This configuration option should only be set to False when running UT
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
-    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "COMPILE_CUSTOM_KERNELS": lambda: _bool_env("COMPILE_CUSTOM_KERNELS", True),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -60,7 +73,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Please make sure that the version is correct.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
-    "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    "VERBOSE": lambda: _bool_env("VERBOSE", False),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
@@ -79,14 +92,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
-    # Valid values: 0 or 1. This configuration is not sensitive.
-    "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
-    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
-    # 0 (default): auto-detect from device properties, falling back to 192 KB
-    # (safe for Ascend 910B/A3). Set to a positive value to override when
-    # auto-detection is unavailable or for debugging UB overflow issues.
-    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
     # Whether to enable BigTensorLoader v2 snapshot fast-restore. When enabled,
     # the first startup loads + processes weights and saves a snapshot to
     # VLLM_ASCEND_CHECKPOINT_PATH; subsequent startups restore from the

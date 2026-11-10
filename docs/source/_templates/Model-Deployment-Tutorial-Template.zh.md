@@ -271,7 +271,7 @@ lm_eval \
 
 | 优化技术      | 适用场景                 | 启用方式                                 | 注意事项                                      |
 | ------------ | ----------------------- | ---------------------------------------- | -------------------------------------------- |
-| FlashComm_v1 | A3预填充节点 / 共置节点   | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | 当 `layer_sharding` 包含 `o_proj` 时不可用    |
+| FlashComm_v1 | A3预填充节点 / 共置节点   | `--additional-config '{"enable_flashcomm1": true}'` | 当 `layer_sharding` 包含 `o_proj` 时不可用    |
 | MLAPO        | A3共置高吞吐 / PD解码节点 | `export VLLM_ASCEND_ENABLE_MLAPO=1`      | 消耗更多NPU内存；在PD场景中仅需在解码节点上启用  |
 
 #### 9.2.2 通用调优参考

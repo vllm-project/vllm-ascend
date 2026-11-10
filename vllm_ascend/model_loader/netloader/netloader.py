@@ -36,7 +36,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from .executor.elastic_load import cache_processed_layout_transfer_manifest, synchronize_npu
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
-from .utils import find_free_port, is_valid_path_prefix
+from .utils import disk_fallback_loader_extra_config, find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 MAX_FREE_PORT_RETRIES = 5
@@ -89,7 +89,7 @@ def pre_transfer_weight_processing(model: nn.Module):
 
     for module in model.modules():
         if AscendMoERunner is not None and isinstance(module, AscendMoERunner):
-            # 新基线用私有 _quant_method，v0.18.0 基线是公开 quant_method
+            # Accept both attribute spellings across baselines.
             quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
             _unwrap_quant_method(quant_method)
 
@@ -206,7 +206,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
     @staticmethod
     def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
-        """与 rfork 相同的判定: EPLB 重平衡会重新绑定权重存储，缓存的 donor 传输清单会失效。"""
+        """EPLB rebinding invalidates the donor's cached transfer manifest (same policy as rfork)."""
         parallel_config = getattr(vllm_config, "parallel_config", None)
         if bool(getattr(parallel_config, "enable_eplb", False)):
             return True
@@ -371,7 +371,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
             for module in model.modules():
                 if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                    # v0.18.0 基线的 wrapper 没有 cleanup()；有则调用，无则跳过
+                    # cleanup() is optional on some wrapper versions; call it only if present.
                     cleanup = getattr(module, "cleanup", None)
                     if callable(cleanup):
                         cleanup()
@@ -384,16 +384,15 @@ class ModelNetLoaderElastic(BaseModelLoader):
         vllm_config: VllmConfig,
         device_type: str,
     ) -> _FallbackCleanupContext:
-        # 该函数服务于兜底路径（保证模型始终能加载），任何 import 失败都不应
-        # 在这里升级为崩溃——降级为无 EPLB 清理
+        # This serves the always-load-a-model fallback path: degrade to no-EPLB
+        # cleanup instead of crashing on import failures.
         try:
             from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
         except Exception as exc:
             logger.debug("Netloader fallback: EPLB adaptor unavailable, skipping: %s", exc)
             VllmEplbAdaptor = None  # type: ignore[misc, assignment]
 
-        # 移植兼容: v0.18.0 基线的 VllmEplbAdaptor 没有 _registered_moe_layers
-        # 类属性（bigtensors 新基线才有）；旧基线下无静态注册表，等价于空列表
+        # Some EPLB adaptors expose no static layer registry; treat it as empty.
         eplb_layers = getattr(VllmEplbAdaptor, "_registered_moe_layers", []) if VllmEplbAdaptor else []
         return _FallbackCleanupContext(
             context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
@@ -507,9 +506,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 model_config, vllm_config, device_config, prefix
             )
         elif self._is_dynamic_eplb_enabled(vllm_config):
-            # 与 rfork 同款的动态 EPLB 防护: donor 注册的传输清单在 EPLB 重平衡
-            # （重新绑定权重存储）后会指向已失效的字节，因此动态 EPLB 场景下
-            # 一律回退默认加载器
+            # EPLB rebalancing rebinds weight storages, staling the donor's
+            # registered manifest; fall back to the default loader.
             logger.warning(
                 "Netloader transfer is disabled when dynamic EPLB is enabled; using the default model loader."
             )
@@ -786,7 +784,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
               weights post-processing (e.g. quantization adjustments) still needs to be applied.
         """
         load_config = deepcopy(self.load_config)
-        load_config.model_loader_extra_config = {}
+        # DefaultModelLoader rejects netloader keys (SOURCE/LISTEN_PORT). Keep
+        # multithread-load settings so seed/fallback disk loads stay parallel.
+        load_config.model_loader_extra_config = disk_fallback_loader_extra_config(
+            load_config.model_loader_extra_config,
+        )
         load_config.load_format = "auto"
         default_model_loader = DefaultModelLoader(load_config)
 

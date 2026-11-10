@@ -1,49 +1,39 @@
+from types import SimpleNamespace
+
 import pytest
+from vllm.config.compilation import CompilationMode
 from vllm.config.vllm import VllmConfig
 
-from vllm_ascend.patch.platform import patch_use_v2_model_runner
+# Importing the module applies the V2-only runner selection at collection time.
+from vllm_ascend.patch.platform import patch_use_v2_model_runner  # noqa: F401
 
 
-def test_use_v2_model_runner_is_driven_by_ascend_whitelist():
+def test_use_v2_model_runner_is_driven_by_ascend_default():
     assert isinstance(VllmConfig.use_v2_model_runner, property)
     from vllm_ascend.mrv2_utils import use_v2_model_runner
 
     assert VllmConfig.use_v2_model_runner.fget is use_v2_model_runner
 
 
-def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
-    if not hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
-        pytest.skip("V1 model runner validation is only present on vLLM main")
-
-    monkeypatch.setattr(
-        patch_use_v2_model_runner,
-        "_original_get_v1_model_runner_unsupported_features",
-        lambda _: [
-            "prefill context parallel",
-            "dspark speculative decoding",
-            "dflash2 drafts",
-            "diffusion models",
-        ],
+@pytest.mark.parametrize("method", ["eagle3", "mtp", "dspark"])
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_native_v2_spec_pp_validation(method, enable_sp):
+    config = SimpleNamespace(
+        model_config=None,
+        speculative_config=SimpleNamespace(method=method, parallel_drafting=False),
+        compilation_config=SimpleNamespace(mode=CompilationMode.NONE, pass_config=SimpleNamespace(enable_sp=enable_sp)),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+            use_ubatching=False,
+            enable_elastic_ep=False,
+        ),
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
-
-    unsupported = patch_use_v2_model_runner._patched_get_v1_model_runner_unsupported_features(object())
-
-    assert unsupported == ["prefill context parallel", "diffusion models"]
-
-
-def test_release_pcp_is_not_rejected_as_v2_unsupported_feature(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner, "vllm_version_is", lambda version: version == "0.28.0")
-    monkeypatch.setattr(
-        patch_use_v2_model_runner,
-        "_original_get_unsupported_features",
-        lambda _: ["prefill context parallelism", "diffusion models"],
-    )
-    monkeypatch.setattr(
-        patch_use_v2_model_runner,
-        "resolve_spec_pp_support",
-        lambda _: None,
-    )
-
-    unsupported = patch_use_v2_model_runner._patched_get_unsupported_features(object())
-
-    assert unsupported == ["diffusion models"]
+    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    # Spec+PP is natively supported; unrelated upstream guards still apply.
+    # vLLM main (#60517) dropped the PassConfig.enable_sp guard, so the V2
+    # runner no longer rejects sequence parallelism there.
+    expected_sp: list[str] = []
+    assert unsupported == expected_sp

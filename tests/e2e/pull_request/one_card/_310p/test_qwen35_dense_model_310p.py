@@ -15,7 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 

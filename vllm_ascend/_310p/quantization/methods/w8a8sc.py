@@ -76,6 +76,13 @@ class AscendW8A8SCLinearMethod310(AscendW8A8Linear310pScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        # npu_matmul_compress_dequant requires 2D activations; vision tower
+        # passes [B, S, K] which must be flattened then restored.
+        orig_shape = x.shape
+        need_reshape = x.ndim > 2
+        if need_reshape:
+            x = x.reshape(-1, orig_shape[-1])
+
         if x.dtype != torch.int8:
             x = torch.ops.vllm.quantize(
                 x,
@@ -84,13 +91,16 @@ class AscendW8A8SCLinearMethod310(AscendW8A8Linear310pScheme):
                 layer.aclnn_input_offset,
             )
 
-        return torch_npu.npu_matmul_compress_dequant(
+        out = torch_npu.npu_matmul_compress_dequant(
             x,
             layer.weight,
             layer.index,
             layer.quant_bias,
             layer.deq_scale,
         )
+        if need_reshape:
+            out = out.reshape(*orig_shape[:-1], out.shape[-1])
+        return out
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.aclnn_input_scale = layer.input_scale.data.repeat(self.input_size)

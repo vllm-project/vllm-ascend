@@ -3,23 +3,22 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple, TypeVar
 
 import torch
-import torch_npu
-from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
+import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     build_pcp_ordered_slot_mapping,
-    get_cp_local_query_key_lens,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    _index_select_kv_blocks,
+    as_byte_view,
     build_sfa_dcp_replicated_block_table,
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
@@ -30,190 +29,31 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
-    SFAForwardContext,
+    _view_cache_as_operator_pages,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    PreprocessType,
+    is_dcp_enabled,
+    split_decodes_and_prefills,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query
 from vllm_ascend.utils import (
-    _round_up,
-    enable_dsa_cp,
-    enable_dsa_cp_full_o_proj,
-    enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_force_tmajor_restore,
-    enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
-from vllm_ascend.weight_switch import (
-    WeightLoadPartition,
-    WeightSwitchConfig,
-    WeightSwitchMixin,
-)
-from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-
-M = TypeVar("M", bound=AscendSFAMetadata)
-
-
-class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
-    """SFA PCP implementation with PCP-sharded O-proj weights.
-
-    Weight switching is performed only in the PCP domain. When TP is enabled,
-    the checkpoint's ordinary TP-local O-proj layout remains unchanged; PCP
-    slices that TP-local weight, and the original TP output reduction remains
-    part of the row-parallel layer semantics.
-    """
-
-    o_proj_full_pools: dict[Any, torch.Tensor] = {}
-    o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
-        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
-        if not self.enable_pcp_o_proj_weight_sharding:
-            return
-        self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
-            get_tp_group(),
-            get_pcp_group(),
-        )
-        linear_method = self._get_o_proj_weight_switch_method()
-        self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
-            self.o_proj,
-            self.o_proj_weight_switch_config,
-            self.o_proj_weight_load_partition,
-        )
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        result = super().process_weights_after_loading(act_dtype)
-        if self.enable_pcp_o_proj_weight_sharding:
-            self._enable_o_proj_full_weight_switch()
-        return result
-
-    def _get_parallel_forward_context(
-        self,
-        attn_metadata: M,
-        num_input_tokens: int,
-        hidden_states: torch.Tensor,
-    ) -> SFAForwardContext:
-        context = super()._get_parallel_forward_context(
-            attn_metadata,
-            num_input_tokens,
-            hidden_states,
-        )
-        context.gather_full_o_proj = self._o_proj_weight_switch_enabled and attn_metadata.attn_state not in {
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        }
-        if context.gather_full_o_proj:
-            self._all_gather_o_proj_full_weight()
-        return context
-
-    def _finalize_o_proj(
-        self,
-        attn_output: torch.Tensor,
-        output: torch.Tensor,
-        gather_full_o_proj: bool,
-    ) -> torch.Tensor:
-        if not self._o_proj_weight_switch_enabled:
-            return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
-        if gather_full_o_proj:
-            with self._use_full_o_proj_weights():
-                return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
-
-        # Decode tokens are replicated on PCP ranks. Each rank projects only
-        # its PCP input slice; PCP all-reduce reconstructs the pre-existing
-        # TP-local result, then the normal row-parallel TP reduction completes
-        # the output when TP is enabled.
-        linear_method = self._get_o_proj_weight_switch_method()
-        weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
-        if weight_part is None:
-            raise RuntimeError("SFA PCP O-proj requires a gather spec for the weight attribute.")
-        # This is the logical TP-local O-proj input width. It remains valid
-        # even when a quantization method stores the weight in a packed layout
-        # whose gathered storage dimension differs from the activation dimension.
-        full_input_size = self.o_proj_weight_load_state.input_size_per_partition_before
-        if attn_output.shape[-1] != full_input_size:
-            raise RuntimeError(
-                "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
-                f"input_shape={tuple(attn_output.shape)}, expected_last_dim={full_input_size}."
-            )
-        local_input = WeightSwitchMixin.split_tensor_for_parallel(
-            attn_output,
-            self.o_proj_weight_switch_config.world_size,
-            self.o_proj_weight_switch_config.rank,
-            dim=-1,
-        )
-        partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
-        partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
-
-        if self.o_proj.reduce_results and get_tp_group().world_size > 1:
-            if not self.o_proj.skip_bias_add and get_tp_group().rank_in_group == 0 and self.o_proj.bias is not None:
-                partial_output = partial_output + self.o_proj.bias
-            partial_output = get_tp_group().all_reduce(partial_output)
-        elif not self.o_proj.skip_bias_add and self.o_proj.bias is not None:
-            partial_output = partial_output + self.o_proj.bias
-
-        output.copy_(partial_output)
-        return output
-
-    def _get_sfa_kv_slot_mapping(
-        self,
-        attn_metadata: M,
-    ) -> torch.Tensor:
-        assert attn_metadata.pcp_slot_mapping is not None
-        return attn_metadata.pcp_slot_mapping
-
-    def exec_kv(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
-    ):
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
-        assert slots.numel() == kv_no_split.shape[0], (
-            "SFA PCP cache write requires one slot per gathered token: "
-            f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
-        )
-
-        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-
-
-@dataclass
-class DSACPContext:
-    num_tokens: int
-    num_tokens_pad: int
-    local_start: int
-    local_end: int
-    local_end_with_pad: int
-    slot_mapping_cp: torch.Tensor
-    actual_seq_lengths_query: torch.Tensor
-    actual_seq_lengths_key: torch.Tensor
-
-
-@dataclass
-class AscendSFADSACPMetadata(AscendSFAMetadata):
-    """SFA metadata fields used only by the DSA-CP execution path."""
-
-    dsa_cp_context: DSACPContext | None = None
 
 
 class DCPGatherContext(NamedTuple):
-    """State needed to finish an async fused DCP KV all-gather."""
+    """State needed to finish an async DCP query or KV all-gather."""
 
     gathered: torch.Tensor
     handle: torch.distributed.Work | None
     restore_perm: tuple[int, ...] | None
     split_sizes: tuple[int, ...]
+    query_prepared: bool = False
 
 
 @dataclass
@@ -235,368 +75,7 @@ class AscendSFADCPMetadata(AscendSFAMetadata):
     dcp_context: DCPContext | None = None
 
 
-@dataclass
-class AscendSFADSADCPMetadata(AscendSFADCPMetadata):
-    """SFA metadata for the combined DSA-CP and DCP execution path."""
-
-    dsa_cp_context: DSACPContext | None = None
-
-
-class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
-    """Adds TP-token-sharded DSA-CP metadata to the shared SFA builder."""
-
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-        metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
-    ):
-        super().__init__(
-            kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-            metadata_cls or AscendSFADSACPMetadata,
-            supports_dcp_with_varlen,
-        )
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.dsa_cp_actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
-        self.dsa_cp_actual_seq_lengths_key = torch.empty_like(self.dsa_cp_actual_seq_lengths_query)
-        self.dsa_cp_spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
-        self.dsa_cp_spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
-        if self.speculative_config:
-            spec_token_num = self.speculative_config.num_speculative_tokens
-            self.dsa_cp_spec_actual_seq_lengths_query = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
-            ]
-            self.dsa_cp_spec_actual_seq_lengths_key = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
-            ]
-
-    def _prepare_parallel_metadata(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        cum_query_lens: torch.Tensor,
-        seq_lens: torch.Tensor,
-        draft_index: int | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
-        cos, sin, slot_mapping, extra = super()._prepare_parallel_metadata(
-            common_attn_metadata,
-            cos,
-            sin,
-            slot_mapping,
-            cum_query_lens,
-            seq_lens,
-            draft_index,
-        )
-        global_tp_size = get_tp_group().world_size
-        num_tokens = common_attn_metadata.num_input_tokens
-        num_tokens_pad = _round_up(num_tokens, global_tp_size)
-        num_tokens_per_device = num_tokens_pad // global_tp_size
-        local_start = get_tp_group().rank_in_group * num_tokens_per_device
-        local_end_with_pad = local_start + num_tokens_per_device
-        local_end = min(local_end_with_pad, common_attn_metadata.num_actual_tokens)
-
-        assert cos.shape == sin.shape, f"cos.shape must equal sin.shape, got {cos.shape} and {sin.shape}"
-        pad_size = num_tokens_pad - cos.shape[0]
-        if pad_size > 0:
-            cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
-            sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
-        pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
-        if pad_size_slot > 0:
-            slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size_slot), value=-1)
-        else:
-            slot_mapping = slot_mapping[:num_tokens_pad]
-
-        slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
-        cos = cos[local_start:local_end_with_pad]
-        sin = sin[local_start:local_end_with_pad]
-        assert cos.shape[0] == num_tokens_per_device
-        assert slot_mapping_cp.shape[0] == num_tokens_per_device
-        assert slot_mapping.shape[0] == num_tokens_pad
-
-        if draft_index is not None:
-            assert self.dsa_cp_spec_actual_seq_lengths_query is not None
-            assert self.dsa_cp_spec_actual_seq_lengths_key is not None
-            actual_seq_lengths_query = self.dsa_cp_spec_actual_seq_lengths_query[draft_index - 1]
-            actual_seq_lengths_key = self.dsa_cp_spec_actual_seq_lengths_key[draft_index - 1]
-        else:
-            actual_seq_lengths_query = self.dsa_cp_actual_seq_lengths_query
-            actual_seq_lengths_key = self.dsa_cp_actual_seq_lengths_key
-
-        num_segs = cum_query_lens.shape[0]
-        local_query_lens, local_key_lens = get_cp_local_query_key_lens(
-            common_attn_metadata.query_start_loc,
-            cum_query_lens,
-            seq_lens,
-            local_start,
-            local_end_with_pad,
-        )
-        actual_seq_lengths_query[:num_segs] = local_query_lens
-        actual_seq_lengths_key[:num_segs] = local_key_lens
-
-        extra["dsa_cp_context"] = DSACPContext(
-            num_tokens=num_tokens,
-            num_tokens_pad=num_tokens_pad,
-            local_start=local_start,
-            local_end=local_end,
-            local_end_with_pad=local_end_with_pad,
-            slot_mapping_cp=slot_mapping_cp,
-            actual_seq_lengths_query=actual_seq_lengths_query[: common_attn_metadata.num_reqs],
-            actual_seq_lengths_key=actual_seq_lengths_key[: common_attn_metadata.num_reqs],
-        )
-        return cos, sin, slot_mapping, extra
-
-    def _update_parallel_slot_mapping(
-        self,
-        metadata: AscendSFAMetadata,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> None:
-        super()._update_parallel_slot_mapping(metadata, slot_mapping, num_input_tokens)
-        dsa_cp_context = getattr(metadata, "dsa_cp_context", None)
-        if dsa_cp_context is None:
-            return
-        local_mapping = slot_mapping[:num_input_tokens]
-        if dsa_cp_context.num_tokens_pad > local_mapping.shape[0]:
-            local_mapping = nn.functional.pad(
-                local_mapping,
-                (0, dsa_cp_context.num_tokens_pad - local_mapping.shape[0]),
-                value=-1,
-            )
-        else:
-            local_mapping = local_mapping[: dsa_cp_context.num_tokens_pad]
-        dsa_cp_context.slot_mapping_cp = local_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
-
-
-class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
-    """SFA implementation for DSA-CP token sharding in the TP group."""
-
-    o_proj_full_pools: dict[Any, torch.Tensor] = {}
-    o_proj_weight_switch_pool_key = "sfa_o_proj"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.local_num_heads = self.num_heads * self.tp_size
-        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj()
-        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_tp_group()))
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        result = super().process_weights_after_loading(act_dtype)
-        if self.enable_dsa_cp_full_o_proj:
-            self._enable_o_proj_full_weight_switch()
-        return result
-
-    def _get_fused_type_unsupported_reasons(self, pp_type):
-        reasons = super()._get_fused_type_unsupported_reasons(pp_type)
-        reasons.insert(0, "Fused preprocessing does not support DSA-CP.")
-        return reasons
-
-    def _parallel_query_gather_dim(self) -> int:
-        return 0
-
-    def _prepare_native_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-        attn_metadata: M,
-    ) -> torch.Tensor:
-        context = getattr(attn_metadata, "dsa_cp_context", None)
-        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
-        actual_tokens = hidden_states.shape[0]
-        if actual_tokens > context.num_tokens_pad:
-            raise RuntimeError(
-                "SFA DSA-CP input exceeds its TP-aligned metadata, "
-                f"got {actual_tokens} tokens and num_tokens_pad={context.num_tokens_pad}."
-            )
-        if actual_tokens < context.num_tokens_pad:
-            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, context.num_tokens_pad - actual_tokens))
-        return hidden_states[context.local_start : context.local_end_with_pad]
-
-    def _get_parallel_forward_context(
-        self,
-        attn_metadata: M,
-        num_input_tokens: int,
-        hidden_states: torch.Tensor,
-    ) -> SFAForwardContext:
-        context = getattr(attn_metadata, "dsa_cp_context", None)
-        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
-        gather_full_o_proj = (
-            self.tp_size > 1
-            and self.enable_dsa_cp_full_o_proj
-            and attn_metadata.attn_state
-            not in {
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding,
-            }
-        )
-        return SFAForwardContext(
-            actual_seq_lengths_query=context.actual_seq_lengths_query,
-            actual_seq_lengths_key=context.actual_seq_lengths_key,
-            kv_slot_mapping=context.slot_mapping_cp,
-            topk_num_tokens=context.local_end_with_pad - context.local_start,
-            gather_full_o_proj=gather_full_o_proj,
-        )
-
-    def exec_kv(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
-    ):
-        if self.enable_sparse_sfa_c8:
-            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-        kv_a_layernorm = self.kv_a_layernorm
-        assert kv_a_layernorm is not None, "kv_a_layernorm must be initialized for DSA-CP KV preprocessing"
-        B = kv_no_split.shape[0]
-        kv_no_split = kv_no_split.view(B, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim)
-        _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
-            kv_no_split,
-            kv_a_layernorm.weight,
-            cos,
-            sin,
-            slots.to(torch.int64),
-            kv_cache[1],
-            kv_cache[0],
-            epsilon=kv_a_layernorm.variance_epsilon,
-            cache_mode="PA",
-            is_output_kv=True,
-        )
-        return k_pe, k_nope, None
-
-    def _prepare_kv_for_parallel(
-        self,
-        k_pe,
-        k_nope,
-        knope_scale,
-        full_gather_o_proj_enabled,
-    ):
-        assert k_pe is not None and k_nope is not None
-        async_op = full_gather_o_proj_enabled
-        handles: list[torch.distributed.Work] = []
-        if self.enable_sparse_sfa_c8:
-            assert knope_scale is not None
-            parts = [
-                k_nope.view(-1, k_nope.shape[-1]),
-                k_pe.view(-1, k_pe.shape[-1]),
-                knope_scale.view(-1, knope_scale.shape[-1]),
-            ]
-        else:
-            # With the indexer k computed inside ``indexer.forward`` right
-            # before the cache write, k_li no longer joins this fused gather:
-            # the indexer backend gathers it separately.
-            parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
-        fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
-        if handle is not None:
-            handles.append(handle)
-        return fused_kv, handles
-
-    def _store_parallel_kv(
-        self,
-        k_pe,
-        k_nope,
-        knope_scale,
-        fused_kv_no_split,
-        kv_ag_handles,
-        kv_cache,
-        slot_mapping_sfa,
-        attn_metadata,
-        full_gather_o_proj_enabled,
-    ):
-        for handle in kv_ag_handles:
-            handle.wait()
-        if full_gather_o_proj_enabled:
-            self._all_gather_o_proj_full_weight()
-
-        if kv_cache is not None:
-            assert fused_kv_no_split is not None
-            if self.enable_sparse_sfa_c8:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
-                )
-                k_pe = k_nope = None
-            else:
-                k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
-            if not self.enable_sparse_sfa_c8:
-                assert k_pe is not None and k_nope is not None
-                k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                DeviceOperator.reshape_and_cache(
-                    key=k_nope[: attn_metadata.num_actual_tokens],
-                    value=k_pe[: attn_metadata.num_actual_tokens],
-                    key_cache=kv_cache[0],
-                    value_cache=kv_cache[1],
-                    slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
-                )
-        return k_pe, k_nope
-
-    def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
-        return self._get_o_proj_weight_switch_method().apply(self.o_proj, attn_output)
-
-    def _finalize_o_proj(
-        self,
-        attn_output,
-        output,
-        gather_full_o_proj,
-    ):
-        if not self.enable_dsa_cp_full_o_proj:
-            return super()._finalize_o_proj(
-                attn_output,
-                output,
-                gather_full_o_proj,
-            )
-        if gather_full_o_proj:
-            with self._use_full_o_proj_weights():
-                local_output = self._apply_o_proj_full_weight(attn_output)
-                tp_group = get_tp_group()
-                if not self.o_proj.reduce_results:
-                    # The decoder's sequence-parallel path will reduce-scatter
-                    # this tensor. Place each rank's complete local projection in
-                    # its token slot so the collective does not sum duplicates.
-                    local_start = tp_group.rank_in_group * local_output.shape[0]
-                    local_end = min(local_start + local_output.shape[0], output.shape[0])
-                    output.zero_()
-                    if local_end > local_start:
-                        output[local_start:local_end] = local_output[: local_end - local_start]
-                else:
-                    full_output = tp_group.all_gather(local_output.contiguous(), dim=0)
-                    if full_output.shape[0] < output.shape[0] or full_output.shape[1:] != output.shape[1:]:
-                        raise RuntimeError(
-                            "SFA DSA-CP gathered output does not match the replicated "
-                            f"model state, got {tuple(full_output.shape)} and expected "
-                            f"{tuple(output.shape)}."
-                        )
-                    output[...] = full_output[: output.shape[0]]
-            return output
-
-        send = (
-            attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
-            .permute(1, 0, 2)
-            .reshape(-1, self.num_heads * self.v_head_dim)
-        )
-        sharded_output = torch.empty_like(send)
-        torch.distributed.all_to_all_single(sharded_output, send, group=get_tp_group().device_group)
-        projected_output = self.o_proj(sharded_output)[0]
-        if projected_output.shape[0] < output.shape[0] or projected_output.shape[1:] != output.shape[1:]:
-            raise RuntimeError(
-                "SFA DSA-CP projected output does not match the replicated "
-                f"model state, got {tuple(projected_output.shape)} and expected "
-                f"{tuple(output.shape)}."
-            )
-        output[...] = projected_output[: output.shape[0]]
-        return output
+M = TypeVar("M", bound=AscendSFAMetadata)
 
 
 # SFA DCP replicated-indexer layout:
@@ -625,7 +104,7 @@ class AscendSFADCPMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_dcp_with_varlen: bool = True,
     ):
         metadata_cls = metadata_cls or AscendSFADCPMetadata
         super().__init__(
@@ -636,7 +115,7 @@ class AscendSFADCPMetadataBuilder(
             metadata_cls,
             supports_dcp_with_varlen,
         )
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -821,7 +300,6 @@ class AscendSFADCPMetadataBuilder(
         dcp_slot_mapping = common_attn_metadata.slot_mapping
         full_dcp_block_table = common_attn_metadata.block_table_tensor
         num_reqs = common_attn_metadata.num_reqs
-        num_input_tokens = common_attn_metadata.num_input_tokens
         dcp_block_table = self._get_dcp_local_block_table(full_dcp_block_table, num_reqs)
         block_table_replicated_view = self._build_block_table_replicated_view(
             dcp_block_table,
@@ -856,12 +334,12 @@ class AscendSFADCPMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=(
-                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
             ),
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None
-        if num_prefills > 0:
+        if num_prefills > 0 or metadata.pcp_has_global_prefill:
             kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(
                 dcp_block_table,
                 global_dcp_block_table=global_dcp_block_table,
@@ -877,7 +355,6 @@ class AscendSFADCPMetadataBuilder(
         metadata.num_decodes = num_decodes
         metadata.num_decode_tokens = num_decode_tokens
         metadata.num_prefills = num_prefills
-        self._update_parallel_slot_mapping(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
 
     def build_for_graph_capture(
@@ -911,7 +388,7 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_dcp_with_varlen: bool = True,
     ):
         super().__init__(
             kv_cache_spec,
@@ -995,10 +472,10 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        pcp_context: Any | None = None,
-        pcp_cache_group_idx: int | None = None,
         **kwargs,
     ) -> AscendSFAMetadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         if pcp_context is None:
             # Decode-only graph capture builds dummy metadata without running
             # PCP's prefill gather, so no PCP context is available or needed.
@@ -1026,47 +503,42 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
                 global_dcp_num_blocks = pcp_context.global_block_table_num_blocks[pcp_cache_group_idx]
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=pcp_context),
             global_dcp_block_table=global_dcp_block_table,
             global_dcp_num_blocks=global_dcp_num_blocks,
         )
         assert isinstance(metadata, AscendSFADCPMetadata)
         if pcp_ordered_indexer_slot_mapping is not None:
             metadata.pcp_slot_mapping = pcp_ordered_indexer_slot_mapping
+        if metadata.num_prefills or metadata.pcp_has_global_prefill:
+            assert metadata.dcp_context is not None
+            group = get_pcp_group()
+            num_tokens = metadata.num_input_tokens
+            rank_slots = metadata.dcp_context.slot_mapping[: group.world_size * num_tokens].view(
+                group.world_size, num_tokens
+            )
+            num_decode_tokens = metadata.num_decode_tokens
+            local_slots = rank_slots[group.rank_in_group].contiguous()
+            if num_decode_tokens and group.rank_in_group != 0:
+                # Replicated decode slots are masked outside rank 0, but each
+                # rank still writes its locally computed decode KV.
+                local_slots = torch.cat((rank_slots[0, :num_decode_tokens], local_slots[num_decode_tokens:]))
+            metadata.pcp_prolog_local_slots = local_slots
+            metadata.pcp_prolog_global_slots = rank_slots[:, num_decode_tokens:].reshape(-1)
+            # Native KV gather keeps one decode prefix before all prefill rows.
+            metadata.slot_mapping = metadata.pcp_prolog_global_slots
+            if num_decode_tokens:
+                metadata.slot_mapping = torch.cat((rank_slots[0, :num_decode_tokens], metadata.slot_mapping))
         return metadata
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
-    can_return_lse_for_decode: bool = True
-    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+    """DCP execution, inheriting the shared ordinary and PCP preprocessing."""
 
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        **kwargs,
-    ):
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **kwargs,
-        )
+    can_return_lse_for_decode: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         # DCP shards only the SFA KV cache. MLAPO writes the SFA KV cache
         # internally, so keep DCP on the native path where we pass the DCP
         # slot mapping explicitly.
@@ -1089,9 +561,81 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        self._register_remap_buffers()
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        # DCP must write the main KV cache with its explicit local slot mapping.
+        return None
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        if self.pcp_enabled and self._has_prefill(attn_metadata):
+            assert isinstance(attn_metadata, AscendSFADCPMetadata)
+            assert attn_metadata.dcp_context is not None
+            slots = attn_metadata.dcp_context.slot_mapping
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    def _get_sfa_kv_slot_mapping(self, attn_metadata: M) -> torch.Tensor:
+        assert isinstance(attn_metadata, AscendSFADCPMetadata)
+        assert attn_metadata.dcp_context is not None
+        slots = attn_metadata.dcp_context.slot_mapping
+        # PCP stores gathered KV with the mapping prepared by the builder.
+        if self.pcp_enabled and self._has_prefill(attn_metadata):
+            return attn_metadata.slot_mapping
+        return slots[: attn_metadata.num_input_tokens]
+
+    def _on_query_ready(self, ql_nope: torch.Tensor, q_pe: torch.Tensor | None, attn_metadata: M) -> None:
+        if not self._has_prefill(attn_metadata):
+            assert isinstance(attn_metadata, AscendSFADCPMetadata)
+            assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
+            attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+
+    def _on_kv_cache_written(self, kv_cache: tuple[torch.Tensor, ...], attn_metadata: M) -> None:
+        # Gather the newly written KV while indexer selection runs.
+        if self._has_prefill(attn_metadata):
+            self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
+
+    def _register_remap_buffers(self) -> None:
+        """Expose the DCP remap constants to the level-2 sleep restore path.
+
+        ``_remap_order``/``_remap_invalid_index`` are created while the
+        sleep-mode weights mem-pool is active and are read by the non-Triton
+        remap fallback in ``_remap_sparse_indices``. Attention impls are not
+        ``nn.Module`` instances, so without an owning buffer a level-2 wake
+        would leave them pointing at remapped, discarded storage. Own them as
+        non-persistent buffers of this layer's attention module, the same owner
+        pattern the DSA/SFA Hadamard buffers use.
+        """
+        static_forward_context = self.vllm_config.compilation_config.static_forward_context
+        owner = static_forward_context.get(self.layer_name)
+        if not isinstance(owner, torch.nn.Module):
+            # Integrations that do not forward ``layer_name`` to the impl still
+            # keep the projections in this impl's model tree.
+            owner = self.o_proj
+        for name, tensor in (
+            ("_dcp_sfa_remap_order", self._remap_order),
+            ("_dcp_sfa_remap_invalid_index", self._remap_invalid_index),
+        ):
+            existing = getattr(owner, name, None)
+            if existing is None:
+                owner.register_buffer(name, tensor, persistent=False)
+            elif existing is not tensor:
+                raise RuntimeError(f"DCP SFA remap buffer {name!r} is already registered with a different tensor.")
+
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:
-        return attn_metadata.num_prefills > 0
+        # PCP ranks with no local prefill still join the DCP KV gather and use
+        # the same attention path as ranks that received prefill tokens.
+        return attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
 
     def _record_dcp_kv_gather_context(
         self,
@@ -1108,10 +652,13 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         valid_block_ids = attn_metadata.dcp_context.kv_gather_block_ids
         block_table = attn_metadata.dcp_context.kv_gather_block_table
         assert valid_block_ids is not None and block_table is not None
-        kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
+        cache = kv_cache[0]
+        if self.qk_rope_head_dim == 0:
+            cache = _view_cache_as_operator_pages(cache, attn_metadata.block_size)
+        kv = _index_select_kv_blocks(cache, valid_block_ids)
         split_sizes: tuple[int, ...]
-        if self.enable_sparse_sfa_c8:
-            # Sparse C8 stores nope, rope, and quantization data in one packed
+        if self.uses_packed_sfa_main_cache or self.qk_rope_head_dim == 0:
+            # Packed SFA formats store nope, rope, and quantization data in one
             # SFA KV cache. The remaining cache entries belong to the indexer
             # and must not participate in the DCP SFA KV all-gather.
             gather_input = kv.contiguous()
@@ -1119,7 +666,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         else:
             if len(kv_cache) < 2:
                 raise RuntimeError("DCP SFA KV all-gather requires nope and rope KV caches.")
-            key_rope = torch.index_select(kv_cache[1], 0, valid_block_ids)
+            key_rope = _index_select_kv_blocks(kv_cache[1], valid_block_ids)
             if kv.shape[:-1] != key_rope.shape[:-1] or kv.dtype != key_rope.dtype:
                 raise RuntimeError(
                     "Cannot fuse DCP KV gather for KV/nope and KV/rope caches with "
@@ -1139,7 +686,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dim: int,
         split_sizes: tuple[int, ...],
     ) -> DCPGatherContext:
-        gathered, handle, restore_perm = self._all_gather_dim_async(x, dim)
+        # HCCL does not transport FP8 directly; gather the packed cache as bytes.
+        transport = as_byte_view(x)
+        gathered, handle, restore_perm = self._all_gather_dim_async(transport, dim)
+        if transport.dtype != x.dtype:
+            gathered = gathered.view(x.dtype)
         return DCPGatherContext(
             gathered=gathered,
             handle=handle,
@@ -1154,12 +705,28 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> tuple[torch.Tensor, ...]:
         if context.handle is not None:
             context.handle.wait()
+        if context.query_prepared and not keep_view:
+            return unpack_query(context.gathered, context.split_sizes)
         gathered = context.gathered
         if context.restore_perm is not None:
             gathered = gathered.permute(context.restore_perm)
             if not keep_view:
                 gathered = gathered.contiguous()
         return torch.split(gathered, context.split_sizes, dim=-1)
+
+    def _finish_dcp_kv_gather(self, kv_cache, attn_metadata: AscendSFADCPMetadata) -> tuple[torch.Tensor, ...]:
+        dcp_context = attn_metadata.dcp_context
+        assert dcp_context is not None
+        gather_context = dcp_context.gather_context
+        dcp_context.gather_context = None
+        if gather_context is None:
+            # Normal forward starts this after cache writes to overlap indexer
+            # work. Direct attention callers still need to start it here.
+            self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
+            gather_context = dcp_context.gather_context
+            dcp_context.gather_context = None
+        assert gather_context is not None
+        return self._finish_dcp_gather(gather_context)
 
     def _all_gather_dim_async(
         self,
@@ -1229,49 +796,33 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self,
         sfa_output: torch.Tensor,
         softmax_lse: torch.Tensor,
-        dsa_cp_context: DSACPContext | None = None,
     ) -> torch.Tensor:
-        scatter_dim = 1
-        if dsa_cp_context is not None:
-            # DSA-CP keeps heads replicated and shards tokens. The All2All
-            # destination must match the token range assigned to this rank.
-            num_tokens = sfa_output.shape[0]
-            if num_tokens != dsa_cp_context.num_tokens_pad:
-                raise RuntimeError(
-                    "DSA-CP DCP All2All expects the SFA token count to match "
-                    f"num_tokens_pad, got {num_tokens} and {dsa_cp_context.num_tokens_pad}."
-                )
-            if num_tokens % self.dcp_size != 0:
-                raise RuntimeError(
-                    f"DSA-CP DCP All2All requires {num_tokens} tokens to be divisible by dcp_size={self.dcp_size}."
-                )
-            local_num_tokens = num_tokens // self.dcp_size
-            expected_local_start = self.dcp_rank * local_num_tokens
-            actual_local_num_tokens = dsa_cp_context.local_end_with_pad - dsa_cp_context.local_start
-            if dsa_cp_context.local_start != expected_local_start or actual_local_num_tokens != local_num_tokens:
-                raise RuntimeError(
-                    "DSA-CP token shards must follow DCP rank order for the output All2All, "
-                    f"but rank {self.dcp_rank} expects [{expected_local_start}, "
-                    f"{expected_local_start + local_num_tokens}) and metadata provides "
-                    f"[{dsa_cp_context.local_start}, {dsa_cp_context.local_end_with_pad})."
-                )
-            scatter_dim = 0
+        # The replicated MTP draft disables logical PCP, but still shares the
+        # target's physical PCP ranks and DCP-sharded KV cache.
+        if get_pcp_group().world_size > 1:
+            pcp_group = get_pcp_group()
+            tp_group = get_tp_group()
+            tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
+            return torch.ops.vllm.dcp_a2a_fused(
+                sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
+            )
 
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
-        return torch.ops.vllm.sfa_dcp_a2a_fused(
+        return torch.ops.vllm.dcp_a2a_fused(
             sfa_output,
             softmax_lse,
             self.dcp_size,
-            scatter_dim,
+            1,
             self.dcp_group.unique_name,
         )
 
     def _start_dcp_query_gather(
         self,
         ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q_pe: torch.Tensor | None,
     ) -> DCPGatherContext:
-        query_gather_dim = self._parallel_query_gather_dim()
+        if q_pe is None:
+            q_pe = ql_nope[..., :0]
         assert self.dcp_group is not None, "DCP query gather requires dcp_group when dcp_size > 1."
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
@@ -1280,11 +831,48 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
             )
 
+        # Query heads are replicated across physical PCP ranks, including
+        # when the MTP draft has logical PCP disabled. Gather only distinct
+        # TP head shards; DCP == PCP already owns one complete TP shard.
+        if get_pcp_group().world_size > 1:
+            fused_q = torch.cat([ql_nope, q_pe], dim=-1).transpose(0, 1).contiguous()
+            if self.dcp_size == get_pcp_group().world_size:
+                gathered, handle = fused_q, None
+            else:
+                gathered, handle = all_gather_async(fused_q, get_tp_group())
+            return DCPGatherContext(
+                gathered=gathered,
+                handle=handle,
+                restore_perm=(1, 0, 2),
+                split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+            )
+
+        # Decode-only callers reach this method; PCP+DCP keeps
+        # its separate TP-group override.
+        nope_dim, rope_dim = ql_nope.shape[-1], q_pe.shape[-1]
+        if (
+            ql_nope.dtype in (torch.bfloat16, torch.float16, torch.float32)
+            and ql_nope.shape[0] > 0
+            and nope_dim > 0
+            and rope_dim > 0
+            and nope_dim & (nope_dim - 1) == 0  # Each fragment uses a full tl.arange vector.
+            and rope_dim & (rope_dim - 1) == 0
+        ):
+            prepared = prepare_query_head_major(ql_nope, q_pe)
+            gathered, handle = all_gather_async(prepared, self.dcp_group)
+            return DCPGatherContext(
+                gathered=gathered,
+                handle=handle,
+                restore_perm=(1, 0, 2),
+                split_sizes=(nope_dim, rope_dim),
+                query_prepared=True,
+            )
+
         # Avoid back-to-back DCP all_gather calls for the two SFA query
         # fragments. On Ascend the separate gathers can leave SFA with an
-        # incomplete stream dependency on the first prefill. DSA-CP restores
-        # token shards on dim 0; native DCP restores query shards on dim 1.
-        if query_gather_dim == 1 and getattr(ql_nope, "is_npu", False):
+        # incomplete stream dependency on the first prefill. Native DCP
+        # restores query shards on dim 1.
+        if getattr(ql_nope, "is_npu", False):
             try:
                 from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
 
@@ -1305,64 +893,82 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
         return self._start_dcp_gather(
             fused_q,
-            dim=query_gather_dim,
+            dim=1,
             split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
         )
 
-    def _record_query_gather_context(
+    def _mask_nope_dcp_padding(self, output, query_lens, softmax_max=None, softmax_sum=None):
+        if self.qk_rope_head_dim == 0:
+            valid = torch.arange(output.shape[0], device=output.device) < query_lens[-1]
+            output = output.masked_fill(~valid[:, None, None], 0)
+            if softmax_max is not None:
+                softmax_max = softmax_max.masked_fill(~valid[None, :, None], 0)
+                softmax_sum = softmax_sum.masked_fill(~valid[None, :, None], 1)
+        return output, softmax_max, softmax_sum
+
+    def _execute_tq_dcp_sfa(
         self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        attn_metadata: M,
-    ) -> None:
-        assert isinstance(attn_metadata, AscendSFADCPMetadata)
-        # Prefill/mixed batches gather compact KV after its cache write instead.
-        # Keeping Q local avoids a full query all-gather and the subsequent LSE
-        # output merge in the all-KV attention path.
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+    ):
+        # Mirrors AscendSFAImpl for the non-DCP case, and additionally asks for
+        # softmax LSE so decode can merge partial results across CP ranks.
+        dcp_context = attn_metadata.dcp_context
+
         if self._has_prefill(attn_metadata):
-            return
-        assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
-        attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+            # Prefill keeps Q local and attends over the gathered KV, so no LSE.
+            gathered_kv_cache = self._finish_dcp_kv_gather(kv_cache, attn_metadata)
+            block_table = dcp_context.kv_gather_block_table
+            assert block_table is not None
+            attn_out, _, _ = self._turboquant_sfa(
+                self._tq_rotate_query(ql_nope, q_pe),
+                gathered_kv_cache[0],
+                topk_indices,
+                block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=3,
+            )
+            assert self.turboquant is not None
+            output = self.turboquant.inverse(attn_out)
+            return self._mask_nope_dcp_padding(output, actual_seq_lengths_query)[0]
 
-    def _get_sfa_kv_slot_mapping(
-        self,
-        attn_metadata: M,
-    ) -> torch.Tensor:
-        assert isinstance(attn_metadata, AscendSFADCPMetadata)
-        assert attn_metadata.dcp_context is not None
-        return attn_metadata.dcp_context.slot_mapping[: attn_metadata.num_input_tokens]
-
-    def _store_parallel_kv(
-        self,
-        k_pe: torch.Tensor | None,
-        k_nope: torch.Tensor | None,
-        knope_scale: torch.Tensor | None,
-        fused_kv_no_split: torch.Tensor | None,
-        kv_ag_handles: list[torch.distributed.Work],
-        kv_cache: tuple[torch.Tensor, ...] | None,
-        slot_mapping_sfa: torch.Tensor,
-        attn_metadata: M,
-        full_gather_o_proj_enabled: bool,
-    ) -> tuple[
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
-        result = super()._store_parallel_kv(
-            k_pe,
-            k_nope,
-            knope_scale,
-            fused_kv_no_split,
-            kv_ag_handles,
-            kv_cache,
-            slot_mapping_sfa,
-            attn_metadata,
-            full_gather_o_proj_enabled,
+        # Decode attends over this rank's KV shard only, so the partial results
+        # are recombined by _merge_dcp_outputs using the LSE.
+        gather_context = dcp_context.gather_context
+        dcp_context.gather_context = None
+        if gather_context is None:
+            gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+        topk_indices = self._remap_sparse_indices(topk_indices)
+        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        attn_out, softmax_max, softmax_sum = self._turboquant_sfa(
+            self._tq_rotate_query(ql_nope, q_pe),
+            kv_cache[0],
+            topk_indices,
+            dcp_context.block_table,
+            actual_seq_lengths_query,
+            dcp_context.seq_lens,
+            sparse_mode=0,
+            return_softmax_lse=True,
         )
-        # Prefill DCP gathers referenced blocks after the current layer writes
-        # its SFA KV cache and before indexer/top-k work begins.
-        if kv_cache is not None:
-            self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
-        return result
+        assert softmax_max is not None
+        assert softmax_sum is not None
+        attn_out, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
+            attn_out, actual_seq_lengths_query, softmax_max, softmax_sum
+        )
+        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        output_dtype = attn_out.dtype
+        output = self._merge_dcp_outputs(attn_out, softmax_lse)
+        # The merge runs in Hadamard space, so rotate back once at the end.
+        assert self.turboquant is not None
+        output = self.turboquant.inverse(output)
+        return output.to(output_dtype)
 
     def _execute_sparse_flash_attention_process(
         self,
@@ -1378,25 +984,28 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
         dcp_context = attn_metadata.dcp_context
+        if self.qk_rope_head_dim == 0:
+            kv_cache = (_view_cache_as_operator_pages(kv_cache[0], attn_metadata.block_size), *kv_cache[1:])
+            if q_pe is None and self.enable_sparse_sfa_turboquant:
+                q_pe = ql_nope[..., :0]
+        if self.enable_sparse_sfa_turboquant:
+            return self._execute_tq_dcp_sfa(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
         if self._has_prefill(attn_metadata):
-            gather_context = dcp_context.gather_context
-            dcp_context.gather_context = None
-            if gather_context is None:
-                # The normal forward path starts this after KV writes so it can
-                # overlap indexer selection. Keep a synchronous fallback for
-                # callers that invoke this method outside that path.
-                self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
-                gather_context = dcp_context.gather_context
-                dcp_context.gather_context = None
-            assert gather_context is not None
             # Splitting the packed KV buffer leaves non-contiguous inner strides.
-            gathered_kv_cache = tuple(t.contiguous() for t in self._finish_dcp_gather(gather_context))
+            gathered_kv_cache = tuple(t.contiguous() for t in self._finish_dcp_kv_gather(kv_cache, attn_metadata))
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
             # The gathered KV cache is complete, so each rank can attend with
-            # its local Q heads/tokens directly. In particular, DSA-CP keeps
-            # its token shard local; no Q all-gather, sparse-index remap, LSE,
-            # or output all-to-all merge is required.
+            # its local Q heads/tokens directly; no Q all-gather, sparse-index
+            # remap, LSE, or output all-to-all merge is required.
             attn_output = DeviceOperator.execute_sparse_flash_attention_process(
                 self,
                 ql_nope,
@@ -1410,21 +1019,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 sparse_mode=3,
                 return_lse=False,
             )
-            return attn_output
+            return self._mask_nope_dcp_padding(attn_output, actual_seq_lengths_query)[0]
 
         gather_context = dcp_context.gather_context
         dcp_context.gather_context = None
         if gather_context is None:
             gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
-        dsa_cp_context = getattr(attn_metadata, "dsa_cp_context", None)
-        if dsa_cp_context is not None:
-            # DSA-CP shards the token sequence. Restore the flat token order for
-            # SFA, and use the original full query lengths for varlen metadata.
-            actual_seq_lengths_query = attn_metadata.cum_query_lens
-            # topk_indices are in per-request global token coordinates. Gather
-            # the DSA token shards first, then remap for this receiver rank's
-            # DCP-local KV shard.
-            topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
         # Keep the gathered query as a strided view of the head-major gather
         # output. The split query fragments handed to npu_sparse_flash_
@@ -1454,138 +1054,14 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             sparse_mode=0,
             return_lse=True,
         )
+        sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
+            sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum
+        )
         softmax_lse = softmax_max + torch.log(softmax_sum)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
         output = self._merge_dcp_outputs(
             sfa_output,
             softmax_lse,
-            getattr(attn_metadata, "dsa_cp_context", None),
         )
         return output.to(output_dtype)
-
-
-class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
-    """Composes DCP attention with PCP gathered-token cache writes."""
-
-    def _start_dcp_query_gather(
-        self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-    ) -> DCPGatherContext:
-        # Decode Q is replicated across PCP ranks. Only gather the distinct
-        # TP head shards inside this PCP partition, never the full DCP group.
-        # When DCP == PCP, each DCP group owns one TP shard already.
-        fused_q = torch.cat([ql_nope, q_pe], dim=-1).transpose(0, 1).contiguous()
-        if self.dcp_size == get_pcp_group().world_size:
-            gathered, handle = fused_q, None
-        else:
-            gathered, handle = all_gather_async(fused_q, get_tp_group())
-        return DCPGatherContext(
-            gathered=gathered,
-            handle=handle,
-            restore_perm=(1, 0, 2),
-            split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
-        )
-
-    def _merge_dcp_outputs(
-        self,
-        sfa_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-        dsa_cp_context: DSACPContext | None = None,
-    ) -> torch.Tensor:
-        pcp_group = get_pcp_group()
-        tp_group = get_tp_group()
-        # Only scatter heads that were gathered by _start_dcp_query_gather.
-        # DCP == PCP already has TP-local heads; DCP == PCP * TP has full heads.
-        tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
-        return torch.ops.vllm.sfa_dcp_a2a_fused(
-            sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
-        )
-
-    def exec_kv(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
-    ):
-        if self._has_prefill(attn_metadata):
-            assert isinstance(attn_metadata, AscendSFADCPMetadata)
-            assert attn_metadata.dcp_context is not None
-            slots = attn_metadata.dcp_context.slot_mapping
-        return super().exec_kv(
-            kv_no_split,
-            cos,
-            sin,
-            kv_cache,
-            slots,
-            attn_metadata,
-        )
-
-
-class AscendSFADSADCPMetadataBuilder(
-    AscendSFADCPMetadataBuilder,
-    AscendSFADSACPMetadataBuilder,
-):
-    """Composes DCP's outer KV view with DSA-CP token sharding."""
-
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-        metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
-    ):
-        super().__init__(
-            kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-            metadata_cls or AscendSFADSADCPMetadata,
-            supports_dcp_with_varlen,
-        )
-
-
-class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
-    """Composes DCP collectives around the DSA-CP SFA implementation."""
-
-
-def resolve_sfa_metadata_builder(
-    vllm_config: VllmConfig | None = None,
-) -> type[AscendSFAMetadataBuilder]:
-    """Resolve one SFA metadata builder from the independent CP switches."""
-    dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    if dsa_cp_enabled and dcp_enabled:
-        return AscendSFADSADCPMetadataBuilder
-    if dsa_cp_enabled:
-        return AscendSFADSACPMetadataBuilder
-    if pcp_enabled and dcp_enabled:
-        return AscendSFAPCPDCPMetadataBuilder
-    if dcp_enabled:
-        return AscendSFADCPMetadataBuilder
-    return AscendSFAMetadataBuilder
-
-
-def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
-    """Resolve one SFA implementation from the independent CP switches."""
-    dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    if dsa_cp_enabled and dcp_enabled:
-        return AscendSFADSADCPImpl
-    if dsa_cp_enabled:
-        return AscendSFADSACPImpl
-    if pcp_enabled and dcp_enabled:
-        return AscendSFAPCPDCPImpl
-    if dcp_enabled:
-        return AscendSFADCPImpl
-    if pcp_enabled:
-        return AscendSFAPCPImpl
-    return AscendSFAImpl

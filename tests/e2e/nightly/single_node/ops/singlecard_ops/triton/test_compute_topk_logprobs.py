@@ -1,8 +1,15 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
+
+pytestmark = pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 
 
 @pytest.mark.parametrize(
@@ -44,7 +51,8 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     ref_logprobs = torch.gather(ref_all_logprobs, dim=1, index=ref_token_ids)
 
     sampled_logits = torch.gather(logits, 1, sampled_token_ids.unsqueeze(-1))
-    ref_ranks = (logits > sampled_logits).sum(dim=1).to(torch.int64)
+    # Match upstream rank semantics: count logits >= the selected logit.
+    ref_ranks = (logits >= sampled_logits).sum(dim=1).to(torch.int64)
 
     # ========== 4. Verify results ==========
     assert torch.equal(triton_output.logprob_token_ids, ref_token_ids), (
@@ -59,3 +67,34 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
         f"Logprobs values differ between Triton and PyTorch.\n"
         f"Max diff: {torch.max(torch.abs(triton_output.logprobs - ref_logprobs))}"
     )
+
+
+def test_selected_token_rank_is_one_based():
+    """Check ranks for a unique maximum, runner-up, and top tie."""
+    init_device_properties_triton()
+
+    vocab_size = 128
+    torch.manual_seed(0)
+    logits = torch.randn(3, vocab_size, device="npu", dtype=torch.float32)
+
+    # Force a two-way top tie.
+    logits[2].clamp_(max=6.0)
+    logits[2, 5] = 7.0
+    logits[2, 9] = 7.0
+
+    sampled_token_ids = torch.stack(
+        (
+            torch.argmax(logits[0]),  # unique argmax -> rank 1
+            torch.argsort(logits[1], descending=True)[1],  # runner-up -> rank 2
+            torch.tensor(5, device="npu", dtype=torch.int64),  # one of the tie
+        )
+    ).to(torch.int64)
+
+    output = compute_topk_logprobs(logits, 0, sampled_token_ids)
+    torch.npu.synchronize()
+
+    ranks = output.selected_token_ranks.cpu().tolist()
+    assert ranks[0] == 1, f"the argmax must rank 1, got {ranks[0]}"
+    assert ranks[1] == 2, f"the runner-up must rank 2, got {ranks[1]}"
+    assert ranks[2] == 2, f"each of a two-way top tie must report 2, got {ranks[2]}"
+    assert all(rank >= 1 for rank in ranks), f"ranks must be 1-based, got {ranks}"

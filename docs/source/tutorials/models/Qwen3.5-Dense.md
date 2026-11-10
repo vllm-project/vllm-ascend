@@ -276,7 +276,7 @@ Key Parameter Descriptions:
 - `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head. It is recommended to set `num_speculative_tokens` to `1`.
 - `--compilation-config` contains configurations related to the aclgraph graph mode:
     - `"cudagraph_mode"`: `"FULL_DECODE_ONLY"` is recommended.
-    - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
+    - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
 - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on these platforms.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.

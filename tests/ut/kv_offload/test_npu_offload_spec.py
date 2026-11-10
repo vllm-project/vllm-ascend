@@ -20,7 +20,6 @@ import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_npu_worker_routes_store_and_load_by_direction() -> None:
@@ -158,10 +157,7 @@ def test_cpu_spec_uses_v027_blocks_per_chunk(
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", fake_worker)
     spec = npu_mod.NPUOffloadingSpec.__new__(npu_mod.NPUOffloadingSpec)
     spec.blocks_per_chunk = 4
-    if vllm_version_is("0.28.0"):
-        spec.num_blocks = 17
-    else:
-        spec.num_chunks = 17
+    spec.num_chunks = 17
 
     spec.create_worker(object())
 
@@ -178,10 +174,15 @@ def test_only_tiering_spec_overrides_shared_region_capability() -> None:
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "device", "world_size", "expected_rank"),
+    ("replicated_layout", "device", "world_size", "worker_rank", "expected_rank"),
     [
-        (False, 5, 4, 1),
-        (True, 5, 4, 0),
+        (False, 0, 2, 0, 0),
+        (False, 1, 2, 1, 1),
+        (False, 1, 2, 0, 0),
+        (False, 3, 2, 1, 1),
+        (False, 0, 2, 1, 1),
+        (False, 1, 8, 5, 5),
+        (True, 3, 2, 1, 0),
     ],
 )
 def test_tiering_worker_matches_v027_shared_region_contract(
@@ -189,6 +190,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     replicated_layout: bool,
     device: int,
     world_size: int,
+    worker_rank: int,
     expected_rank: int,
 ) -> None:
     captured: dict = {}
@@ -208,7 +210,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     monkeypatch.setattr(npu_mod, "SharedOffloadRegion", FakeRegion)
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", fake_worker)
     monkeypatch.setattr(
-        npu_mod.torch,
+        torch,
         "npu",
         SimpleNamespace(current_device=lambda: device),
         raising=False,
@@ -216,15 +218,12 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
     spec = npu_mod.NPUTieringOffloadingSpec.__new__(npu_mod.NPUTieringOffloadingSpec)
     spec.config = SimpleNamespace(
-        parallel=SimpleNamespace(world_size=world_size),
+        parallel=SimpleNamespace(world_size=world_size, rank=worker_rank),
     )
     spec._engine_id = "engine-dp0"
     spec.replicated_layout = replicated_layout
     spec.cpu_page_size_per_worker = 64
-    if vllm_version_is("0.28.0"):
-        spec.num_blocks = 10
-    else:
-        spec.num_chunks = 10
+    spec.num_chunks = 10
     spec.blocks_per_chunk = 2
     spec.kv_bytes_per_chunk = 4096
     kv_caches = object()
@@ -233,9 +232,9 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
     assert result is sentinel_worker
     assert captured["engine_id"] == "engine-dp0"
-    assert captured["num_blocks" if vllm_version_is("0.28.0") else "num_chunks"] == 10
+    assert captured["num_chunks"] == 10
     assert captured["rank"] == expected_rank
-    assert captured["kv_bytes_per_block" if vllm_version_is("0.28.0") else "kv_bytes_per_chunk"] == 4096
+    assert captured["kv_bytes_per_chunk"] == 4096
     assert captured["cpu_page_size"] == 64
     assert captured["worker_kwargs"] == {
         "kv_caches": kv_caches,
@@ -270,6 +269,9 @@ def test_upstream_compatible_layout_uses_upstream_canonicalization(
             num_blocks=4,
             kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
             kv_cache_tensors=[],
+            # The connector offloads the groups vLLM selects, not all of them.
+            prefix_cacheable_group_ids=(0,),
+            hisparse_host_num_blocks=None,
         ),
         monkeypatch,
     )
@@ -305,6 +307,9 @@ def test_split_attention_cache_is_zero_copy(
             num_blocks=4,
             kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
             kv_cache_tensors=[],
+            # The connector offloads the groups vLLM selects, not all of them.
+            prefix_cacheable_group_ids=(0,),
+            hisparse_host_num_blocks=None,
         ),
         monkeypatch,
     )

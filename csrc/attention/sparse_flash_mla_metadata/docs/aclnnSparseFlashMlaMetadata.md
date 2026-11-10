@@ -3,13 +3,13 @@
 ## 产品支持情况
 
 <!-- npu="950" id1 -->
-- <term>Ascend 950PR/Ascend 950DT</term>：支持
+- <term>Ascend 950PR&950DT 系列产品</term>：支持
 <!-- end id1 -->
 <!-- npu="A3" id2 -->
-- <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>：支持
+- <term>Atlas A3 系列产品</term>：支持
 <!-- end id2 -->
 <!-- npu="910b" id3 -->
-- <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：支持
+- <term>Atlas A2 系列产品</term>：支持
 <!-- end id3 -->
 <!-- npu="310b" id4 -->
 - <term>Atlas 200I/500 A2 推理产品</term>：不支持
@@ -449,10 +449,10 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
 
   <ul>
     <!-- npu="A3" id7 -->
-    <li><term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> ：不支持sequsedQOptional、cmpTopkLengthOptional，numHeadsQ/numHeadsKv仅支持1、2、4、8、16、32、64、128；SWA稀疏ori_kv场景支持oriTopkLengthOptional、oriTopk大于0及oriMaskMode为0，oriWinLeft和oriWinRight支持非负数；其他SWA场景oriTopk为0、oriMaskMode为4、oriWinLeft为127、oriWinRight为0；cmpTopk仅支持0、512、1024，cmpMaskMode仅支持3，cmpRatio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
+    <li><term>Atlas A3 系列产品</term> ：不支持sequsedQOptional、cmpTopkLengthOptional，numHeadsQ/numHeadsKv仅支持1、2、4、8、16、32、64、128；SWA稀疏ori_kv场景支持oriTopkLengthOptional、oriTopk大于0及oriMaskMode为0，oriWinLeft和oriWinRight支持非负数；其他SWA场景oriTopk为0、oriMaskMode为4、oriWinLeft为127、oriWinRight为0；cmpTopk仅支持0、512、1024，cmpMaskMode仅支持3，cmpRatio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
     <!-- end id7 -->
     <!-- npu="910b" id8 -->
-    <li><term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> ：不支持sequsedQOptional、cmpTopkLengthOptional，numHeadsQ/numHeadsKv仅支持1、2、4、8、16、32、64、128；SWA稀疏ori_kv场景支持oriTopkLengthOptional、oriTopk大于0及oriMaskMode为0，oriWinLeft和oriWinRight支持非负数；其他SWA场景oriTopk为0、oriMaskMode为4、oriWinLeft为127、oriWinRight为0；cmpTopk仅支持0、512、1024，cmpMaskMode仅支持3，cmpRatio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
+    <li><term>Atlas A2 系列产品</term> ：不支持sequsedQOptional、cmpTopkLengthOptional，numHeadsQ/numHeadsKv仅支持1、2、4、8、16、32、64、128；SWA稀疏ori_kv场景支持oriTopkLengthOptional、oriTopk大于0及oriMaskMode为0，oriWinLeft和oriWinRight支持非负数；其他SWA场景oriTopk为0、oriMaskMode为4、oriWinLeft为127、oriWinRight为0；cmpTopk仅支持0、512、1024，cmpMaskMode仅支持3，cmpRatio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
     <!-- end id8 -->
   </ul>
 
@@ -463,7 +463,7 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
   第一段接口完成入参校验，出现以下场景时报错：
 
     <!-- npu="950" id9 -->
-    - <term>Ascend 950PR/Ascend 950DT</term>：
+    - <term>Ascend 950PR&950DT 系列产品</term>：
 
     <table style="undefined;table-layout: fixed;width: 1200px"><colgroup>
     <col style="width: 262px">
@@ -518,7 +518,7 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
     </table>
   <!-- end id9 -->
   <!-- npu="A3" id10 -->
-    - <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>：
+    - <term>Atlas A3 系列产品</term>：
 
     <table style="undefined;table-layout: fixed;width: 1200px"><colgroup>
     <col style="width: 262px">
@@ -576,7 +576,7 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
     </table>
   <!-- end id10 -->
   <!-- npu="910b" id11 -->
-    - <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：
+    - <term>Atlas A2 系列产品</term>：
 
     <table style="undefined;table-layout: fixed;width: 1200px"><colgroup>
     <col style="width: 262px">
@@ -690,7 +690,7 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
     - layoutQOptional和layoutKvOptional组合仅支持"BSND"/"BSND"、"TND"/"TND"、"BSND"/"PA_BBND"、"TND"/"PA_BBND"；非PA_BBND场景下layoutQOptional和layoutKvOptional必须一致。
     - 参数cmpResidualKvOptional需满足cmpResidualKvOptional[i] < cmpRatio。
 <!-- npu="950" id12 -->
-- Ascend 950PR/Ascend 950DT约束：
+- Ascend 950PR&950DT 系列产品约束：
     - hasOriKv为true时，oriTopk大于0认为oriKvOptional部分是稀疏的，oriTopk为0则认为oriKvOptional部分是非稀疏的。
     - hasCmpKv为true时，cmpTopk大于0认为cmpKvOptional部分是稀疏的，cmpTopk为0则认为cmpKvOptional部分是非稀疏的。
     - hasOriKv为true，oriTopk不为0且oriMaskMode为0时，oriTopkLengthOptional必须传入，此时取oriMaskMode规则与oriTopkLengthOptional元素的最小值作为当前q token对应的oriKvOptional的有效seqlen，其他oriKvOptional稀疏场景取oriMaskMode规则与oriTopk的最小值作为当前q token对应的oriKvOptional的有效seqlen。
@@ -724,7 +724,7 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
         - layoutKvOptional为PA_BBND时，优先通过sequsedCmpKvOptional中的元素获取seqlen，sequsedCmpKvOptional未传入则通过cmpTopkLengthOptional获取seqlen。
 <!-- end id12 -->
 <!-- npu="A3" id13 -->
-- Atlas A3 训练系列产品/Atlas A3 推理系列产品约束：
+- Atlas A3 系列产品约束：
     - SWA稀疏ori_kv场景下，仅支持SWA模板，`hasOriKv`为true、`hasCmpKv`为false、`oriTopk`大于0、`oriMaskMode`为0，`oriWinLeft`和`oriWinRight`为非负数，且必须传入`oriTopkLengthOptional`。`oriTopk`应与配套主算子oriSparseIndicesOptional最后一维K保持一致；`oriTopkLengthOptional`表示每个q token和KV head的左对齐有效索引条目数，取值应在[0, K]范围内；Metadata仅使用`oriTopkLengthOptional`生成任务切分。配套主算子在PA_BBND场景仍要求传入`sequsedOriKvOptional`。
     - layoutQOptional为TND时，`cuSeqlensQOptional`必须传入。
     - layoutKvOptional为PA_BBND时，`sequsedOriKvOptional`必须传入。BSND场景可选传入`sequsedOriKvOptional`覆盖每个batch的oriKv有效长度；TND场景使用`cuSeqlensOriKvOptional`表达oriKv序列边界。
@@ -733,7 +733,7 @@ aclnnStatus aclnnSparseFlashMlaMetadata(
     - `cmpResidualKvOptional`为`aclnnSparseFlashMlaMetadata`和`aclnnSparseFlashMla`的可选输入，在CSA、HCA、cmpRatio不等于1且cmpMaskMode为3场景必传，用于恢复cmp侧mask使用的压缩前长度。
 <!-- end id13 -->
 <!-- npu="910b" id14 -->
-- Atlas A2 训练系列产品/Atlas A2 推理系列产品约束：
+- Atlas A2 系列产品约束：
     - SWA稀疏ori_kv场景下，仅支持SWA模板，`hasOriKv`为true、`hasCmpKv`为false、`oriTopk`大于0、`oriMaskMode`为0，`oriWinLeft`和`oriWinRight`为非负数，且必须传入`oriTopkLengthOptional`。`oriTopk`应与配套主算子oriSparseIndicesOptional最后一维K保持一致；`oriTopkLengthOptional`表示每个q token和KV head的左对齐有效索引条目数，取值应在[0, K]范围内；Metadata仅使用`oriTopkLengthOptional`生成任务切分。配套主算子在PA_BBND场景仍要求传入`sequsedOriKvOptional`。
     - layoutQOptional为TND时，`cuSeqlensQOptional`必须传入。
     - layoutKvOptional为PA_BBND时，`sequsedOriKvOptional`必须传入。BSND场景可选传入`sequsedOriKvOptional`覆盖每个batch的oriKv有效长度；TND场景使用`cuSeqlensOriKvOptional`表达oriKv序列边界。

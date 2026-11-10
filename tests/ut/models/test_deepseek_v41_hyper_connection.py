@@ -1,8 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytest.importorskip(
+    "vllm.transformers_utils.configs.deepseek_v41",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
+
 import torch
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference
@@ -146,7 +153,8 @@ def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
     layer.post_attention_layernorm = norm
 
     with (
-        patch("vllm_ascend.models.deepseek_v41.model.enable_custom_op", return_value=True),
+        patch("vllm_ascend.utils.enable_custom_op", return_value=True),
+        patch("vllm_ascend.device.device_op.get_current_hardware_profile") as profile,
         patch.object(
             torch.ops._C_ascend,
             "npu_rms_norm_cast",
@@ -154,6 +162,7 @@ def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
             return_value=(normalized, normalized_fp32),
         ) as op,
     ):
+        profile.return_value.supports.return_value = True
         actual, actual_fp32 = layer.rms_norm_cast(x)
 
     assert actual is normalized
@@ -238,6 +247,7 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     torch.nn.Module.__init__(model)
     model.hc_mult = 2
     model.needs_moe_input_ids = False
+    model.decoder_replay_layers = None
     model.use_sequence_parallel_moe = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     seen = []
@@ -261,11 +271,20 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.decoder_replay_layers = None
     model.hc_mult = 2
+    model.start_layer = 0
+    model.end_layer = 3
+    model.decoder_replay_start = 3
+    model.decoder_replay_layers = None
+    model.use_sequence_parallel = False
     model.needs_moe_input_ids = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     model.norm = torch.nn.Identity()
     model.shared_attention_state = MagicMock()
+    # forward reads the MTP buffer (None = collapse locally), which __init__
+    # normally allocates; the __new__-built fixture skips that.
+    model._mtp_hidden_buffer = None
     model._set_aux_hidden_state_layers((1, 3))
 
     class Layer(torch.nn.Module):
@@ -309,6 +328,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     draft = SimpleNamespace(
         hc_mult=4,
         hidden_size=8,
+        head_dim=4,
         dspark_block_size=5,
         dspark_markov_rank=4,
         num_nextn_predict_layers=3,
@@ -330,6 +350,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     def make_layer(*args, **kwargs):
         layer = torch.nn.Module()
         layer.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        layer.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=object())))
         return layer
 
     factory = MagicMock(side_effect=make_layer)
@@ -337,6 +358,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
         for name in (
             "VocabParallelEmbedding",
             "ColumnParallelLinear",
+            "MergedColumnParallelLinear",
             "RMSNorm",
             "DSparkMarkovHead",
             "DSparkConfidenceHead",

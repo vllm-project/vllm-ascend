@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import torch
 from typing_extensions import override
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -16,7 +15,6 @@ from vllm.v1.kv_offload.tiering.spec import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 class _NPUWorkerMixin:
@@ -55,7 +53,7 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks if vllm_version_is("0.28.0") else self.num_chunks,
+            num_cpu_blocks=self.num_chunks,
         )
 
 
@@ -75,19 +73,10 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         self,
         kv_caches: CanonicalKVCaches,
     ) -> NPUOffloadingWorker:
-        world_size = self.config.parallel.world_size
-        if self.replicated_layout:
-            rank = 0
-        else:
-            # engine_id identifies the DP replica; fold the process-local
-            # physical device index into that replica's mmap slot range.
-            rank = int(torch.npu.current_device()) % world_size
+        # Match the scheduler's rank-based layout, regardless of device selection.
+        rank = 0 if self.replicated_layout else self.config.parallel.rank
 
-        region_kwargs = (
-            dict(num_blocks=self.num_blocks, kv_bytes_per_block=self.kv_bytes_per_chunk)
-            if vllm_version_is("0.28.0")
-            else dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
-        )
+        region_kwargs = dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             rank=rank,
@@ -97,6 +86,6 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks if vllm_version_is("0.28.0") else self.num_chunks,
+            num_cpu_blocks=self.num_chunks,
             mmap_region=worker_mmap,
         )

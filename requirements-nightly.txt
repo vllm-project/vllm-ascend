@@ -1,0 +1,20 @@
+-r requirements-lint.txt
+openai
+pytest >= 6.0,<9.0.0
+pytest-asyncio
+pytest-mock
+lm-eval==0.4.12
+types-jsonschema
+zmq
+types-psutil
+pytest-cov
+sentence_transformers
+pyarrow<26
+jiwer
+librosa
+soundfile
+mindstudio-probe>=8.3.0
+xlite==0.2.0rc5
+uc-manager
+ninja
+coverage

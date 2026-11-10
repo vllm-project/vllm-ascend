@@ -1,15 +1,18 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend.attention.context_parallel import common_cp
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     _npu_attention_update,
     _npu_attn_out_lse_update,
     _update_out_and_lse,
+    use_dcp_q_replicate,
 )
 
 
@@ -80,10 +83,14 @@ class TestCommonCP(unittest.TestCase):
         self.assertEqual(builder.dcp_rank, 2)
         mock_get_dcp_group.assert_called_once_with()
 
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_tp_group")
+    @patch("vllm_ascend.attention.context_parallel.common_cp.get_pcp_group")
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
     def test_impl_mixin_reuses_the_initialized_dcp_group(
         self,
         mock_get_dcp_group,
+        mock_get_pcp_group,
+        mock_get_tp_group,
     ):
         class BaseImpl:
             def __init__(self):
@@ -101,7 +108,11 @@ class TestCommonCP(unittest.TestCase):
         self.assertTrue(impl.base_initialized)
         self.assertIs(impl.dcp_group, group)
         self.assertIs(impl.dcp_device_group, group.device_group)
+        self.assertIs(impl.pcp_group, mock_get_pcp_group.return_value)
+        self.assertIs(impl.tp_group, mock_get_tp_group.return_value)
         mock_get_dcp_group.assert_called_once_with()
+        mock_get_pcp_group.assert_called_once_with()
+        mock_get_tp_group.assert_called_once_with()
 
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_decode_context_model_parallel_world_size")
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
@@ -211,3 +222,78 @@ class TestCommonCP(unittest.TestCase):
 
         self.assertIsInstance(out_final, torch.Tensor)
         self.assertIsInstance(lse_final, torch.Tensor)
+
+
+def test_fragment_gather_keeps_kv_on_the_dcp_token_axis():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    impl = DCPImplMixin.__new__(DCPImplMixin)
+    impl.dcp_size = 4
+    impl.pcp_group = SimpleNamespace(world_size=2)
+    impl.tp_group = SimpleNamespace(all_gather=Mock(side_effect=AssertionError("KV must use DCP")))
+    impl.dcp_group = SimpleNamespace(all_gather=Mock(side_effect=lambda x, dim: torch.cat([x] * 4, dim=dim)))
+    k_nope = torch.arange(6).float().view(2, 1, 3)
+    k_pe = torch.arange(4).float().view(2, 1, 2)
+    out_nope, out_pe = impl._dcp_all_gather_fragments(k_nope, k_pe, dim=0)
+    torch.testing.assert_close(out_nope, torch.cat([k_nope] * 4, dim=0))
+    torch.testing.assert_close(out_pe, torch.cat([k_pe] * 4, dim=0))
+    impl.tp_group.all_gather.assert_not_called()
+    impl.dcp_group.all_gather.assert_called_once()
+
+
+class TestDCPQReplicationConfig(unittest.TestCase):
+    @staticmethod
+    def _make_dcp_q_replicate_config(requested=True, **hf_config):
+        return SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(**hf_config)),
+            parallel_config=SimpleNamespace(
+                dcp_q_replicate=requested,
+                decode_context_parallel_size=2,
+                prefill_context_parallel_size=1,
+            ),
+            lora_config=None,
+        )
+
+    def test_request_precedence(self):
+        for requested, legacy, expected in [
+            (False, None, False),
+            (True, None, True),
+            (False, True, True),
+            (True, False, False),
+        ]:
+            with (
+                self.subTest(requested=requested, legacy=legacy, expected=expected),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertIs(
+                    use_dcp_q_replicate(self._make_dcp_q_replicate_config(requested)),
+                    expected,
+                )
+
+    def test_sparse_q_replication_is_disabled(self):
+        for legacy in (None, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertFalse(use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048)))
+
+    def test_lora_q_replication_is_disabled(self):
+        config = self._make_dcp_q_replicate_config()
+        config.lora_config = SimpleNamespace()
+        for legacy in (None, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertFalse(use_dcp_q_replicate(config))
+
+    def test_compressed_attention_is_not_classified_as_sfa(self):
+        with patch.object(common_cp.envs, "is_set", return_value=False):
+            self.assertTrue(
+                use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048, compress_ratios=[1, 4]))
+            )

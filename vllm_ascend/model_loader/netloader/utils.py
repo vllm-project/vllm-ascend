@@ -16,9 +16,32 @@
 
 import os
 import socket
+from typing import Any
 
 import regex as re
 from vllm.logger import logger
+
+_DEFAULT_LOADER_EXTRA_KEYS = (
+    "enable_multithread_load",
+    "num_threads",
+    "enable_weights_track",
+)
+
+
+def disk_fallback_loader_extra_config(existing_extra: Any) -> dict[str, Any]:
+    """Extra config DefaultModelLoader accepts on a local-disk fallback.
+
+    Netloader extras carry SOURCE / LISTEN_PORT, which DefaultModelLoader
+    rejects, so the fallback used to drop the whole dict and silently lose the
+    user's multithread-load settings. Keep the keys DefaultModelLoader knows
+    and drop the rest. Defaults are left to vLLM.
+    """
+    kept: dict[str, Any] = {}
+    if isinstance(existing_extra, dict):
+        for key in _DEFAULT_LOADER_EXTRA_KEYS:
+            if key in existing_extra:
+                kept[key] = existing_extra[key]
+    return kept
 
 
 def find_free_port():

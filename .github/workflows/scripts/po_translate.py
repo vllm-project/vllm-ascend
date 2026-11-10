@@ -35,6 +35,22 @@ SYSTEM_PROMPT = (
     "You produce accurate, consistent translations of all gettext PO file entries "
     "without skipping any. You never add explanations, markdown fences, or extra text "
     "outside the PO file content."
+    "TERMINOLOGY RULE (MUST FOLLOW):"
+    "- The standalone word 'Ascend' (Huawei's NPU brand) MUST be translated to '昇腾' (Simplified Chinese brand name)."
+    "NEVER translate it to '升腾'."
+    "- The compound name 'vLLM Ascend' (the project name) MUST be kept in English verbatim as 'vLLM Ascend'."
+    "Do NOT translate it to 'vLLM 昇腾' or 'vLLM 升腾'."
+    "- Same for 'vllm-ascend' (the package/repo name): keep it verbatim in English."
+    "- Other brand/product names (vLLM, CANN, Huawei, Atlas) MUST be kept in English verbatim."
+    "PRODUCT-LINE NAMING RULE (MUST FOLLOW EXACTLY, including spaces):"
+    "- '950PR&950DT Products'  -> 'Ascend 950PR&950DT系列产品'"
+    "- '950DT Products'        -> 'Ascend 950DT系列产品'"
+    "- '950PR Products'        -> 'Ascend 950PR系列产品'"
+    "- 'Atlas A2 Products'     -> 'Atlas A2系列产品'"
+    "- 'Atlas A3 Products'     -> 'Atlas A3系列产品'"
+    "IMPORTANT: In all five cases there MUST be NO space between the model"
+    "number (e.g. '950DT', 'A2', 'A3') and '系列产品'. The '&' in '950PR&950DT'"
+    "has NO surrounding spaces. Do NOT output '950DT 系列产品' (with a space) or '950DT系列 产品' (split)."
 )
 
 TRANSLATION_PROMPT = """Translate these PO file entries (gettext format) from English to Simplified Chinese (简体中文).
@@ -73,7 +89,10 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 6. HTML tags and attributes: <div>, <a href>, <img>, etc.
 7. Environment variables, file paths, command names, code identifiers.
 8. Proper nouns: person names, contributor names, author names, company names,
-   product names (vLLM, Ascend, CANN, Huawei, etc.).
+   product/project/package names:
+   - 'vLLM Ascend' → 'vLLM Ascend'
+   - 'vllm-ascend' → 'vllm-ascend'
+   - vLLM, CANN, Huawei, Atlas, etc..
 
 --- CONTENT THAT SHOULD NOT BE TRANSLATED ---
 9. DO NOT translate contributor names, GitHub usernames, or dates.
@@ -93,39 +112,52 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 12. DO NOT translate URLs, email addresses, or paths.
     Copy them verbatim from msgid to msgstr.
 
+--- TERMINOLOGY (MUST TRANSLATE) ---
+
+13. standalone 'Ascend' → '昇腾'
+14. '950PR&950DT Products' → 'Ascend 950PR&950DT系列产品'
+15. '950DT Products'       → 'Ascend 950DT系列产品'
+16. '950PR Products'       → 'Ascend 950PR系列产品'
+17. 'Atlas A2 Products'    → 'Atlas A2系列产品'
+18. 'Atlas A3 Products'    → 'Atlas A3系列产品'
+
 --- MkDocs MATERIAL EXTENSIONS ---
-13. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
+19. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
     in English. Only translate the title text after type.
     Example: msgid "!!! note" → msgstr "!!! note"
     Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-14. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
+20. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
     "???+" marker, the type keyword, and quote syntax unchanged. The "+"
     means expanded by default and MUST NOT be added or removed. Translate only
     the title text inside quotes.
     Example: msgid "??? note \\"Click here...\\"" → msgstr "??? note \\"点击这里...\\""
     Example: msgid "???+ warning \\"Important\\"" → msgstr "???+ warning \\"重要\\""
 
-15. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
+21. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
     Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""
 
+
+
 --- TRANSLATION QUALITY ---
-16. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
+22. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
     literal translation.
-17. Use standard Chinese technical terminology consistently.
-18. For markdown links [text](url): translate the display text in [] but keep
+23. Use standard Chinese technical terminology consistently.
+24. For markdown links [text](url): translate the display text in [] but keep
     the URL in () exactly as-is.
     Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-19. For headings: translate the heading text but KEEP the "#" / "##" / "###"
+25. For headings: translate the heading text but KEEP the "#" / "##" / "###"
     prefix exactly as in the msgid.
     Example: msgid "# Quick Start" → msgstr "# 快速开始"
     Example: msgid "## Overview" → msgstr "## 概述"
-20. DO NOT add "#, fuzzy" markers.
-21. If a msgid is purely structural (symbols, code, file paths only), copy it
+26. DO NOT add "#, fuzzy" markers.
+27. If a msgid is purely structural (symbols, code, file paths only), copy it
     verbatim to msgstr.
-22. Never invent or guess content. If unsure about a term, leave it in English.
+28. Never invent or guess content. If unsure about a term, leave it in English.
 
 {content}"""
+
+_SIMPLIFIED_CONVERSION_PROTECTED_TERMS = ("昇腾",)
 
 
 def _normalize_msgid(text: str) -> str:
@@ -148,11 +180,21 @@ def _convert_po_to_simplified(po):
 
     This is a safety net to catch any Traditional Chinese characters that the
     translation model may have produced despite the prompt requesting Simplified
-    Chinese only.
+    Chinese only. Preserve configured terms during conversion, including
+    spellings such as ``昇腾`` that zhconv would otherwise normalize to ``升腾``.
     """
     for entry in po:
         if entry.msgstr:
-            entry.msgstr = zhconv.convert(entry.msgstr, "zh-cn")
+            protected = entry.msgstr
+            placeholders = []
+            for index, term in enumerate(_SIMPLIFIED_CONVERSION_PROTECTED_TERMS):
+                placeholder = f"__VLLM_DOC_PROTECTED_TERM_{index}__"
+                protected = protected.replace(term, placeholder)
+                placeholders.append((placeholder, term))
+            converted = zhconv.convert(protected, "zh-cn")
+            for placeholder, term in placeholders:
+                converted = converted.replace(placeholder, term)
+            entry.msgstr = converted
 
 
 class POTranslator:

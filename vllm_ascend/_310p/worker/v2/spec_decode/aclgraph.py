@@ -19,7 +19,7 @@ the host between steps, then ``run_fullgraph`` per step.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
@@ -37,16 +37,44 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend.compilation.updatable_graph import SharedSource, UpdatableGraph
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
 
 class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
     """310P draft FULL: SpecDecoding prefill + per-step decode graphs."""
+
+    def _updatable_graph_replay(self, desc: BatchExecutionDescriptor, draft_attn_metadatas):
+        """Skip empty update↔compute handshake on 310P draft FULL prefill.
+
+        Parent ``AutoRegressiveAclGraphManager.run_fullgraph`` always passes
+        ``draft_attn_metadatas``. Dropping that argument raises TypeError on
+        the first MTP draft-prefill FULL replay.
+        """
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        fia_params = self.speculator.build_fia_params(
+            desc.num_reqs,
+            draft_attn_metadatas[0],
+            self.is_draft_model_prefill,
+        )
+        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
+        # Empty tasks (typical on 310P): no host-side graph update work.
+        if resolved_tasks:
+            self.update_stream.wait_stream(torch.npu.current_stream())
+        # Skip AutoRegressiveAclGraphManager.run_fullgraph (would recurse).
+        ret = super(AutoRegressiveAclGraphManager, self).run_fullgraph(desc)
+        if resolved_tasks:
+            graph.update(self.update_stream, resolved_tasks)
+        return ret
 
     def capture(
         self,
@@ -57,6 +85,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        pcp_manager: PCPManager | None = None,
     ) -> None:
         if not self.is_draft_model_prefill:
             self._capture_decode_per_step(
@@ -78,6 +107,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 attn_groups,
                 kv_cache_config,
                 progress_bar_desc=progress_bar_desc,
+                pcp_manager=pcp_manager,
             )
 
         from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -97,6 +127,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 kwargs["max_query_len"] = max_query_len
             batch = orig_make_dummy(num_reqs, num_tokens, input_buffers_arg, **kwargs)
             if num_reqs > 0 and (num_tokens // num_reqs) > 1:
+                # TODO: Migrate 310P draft-prefill capture before dropping SpecDecoding.
                 batch.attn_state = AscendAttentionState.SpecDecoding
             return batch
 
@@ -114,6 +145,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 attn_groups,
                 kv_cache_config,
                 progress_bar_desc=progress_bar_desc,
+                pcp_manager=pcp_manager,
             )
         finally:
             AscendInputBatch.make_dummy = orig_make_dummy  # type: ignore[method-assign]
@@ -133,10 +165,11 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             "(CPU slot_mapping updated between steps, outside capture)."
         )
 
+        # Graphs bind tensor addresses: retain metadata for their lifetime.
+        self._decode_capture_attn_metadata = {}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
-                del warmup
                 num_tokens = desc.num_tokens
                 num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
                 num_tokens_across_dp = (
@@ -165,6 +198,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                     num_tokens_padded=num_tokens,
                     seq_lens_cpu_upper_bound=seq_ub,
                     step=1,
+                    cg_mode=desc.cg_mode,
                 )
                 # Move capture-stable attn tensors to NPU before graph begin
                 # (pageable H2D inside capture is banned).
@@ -176,6 +210,8 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                         seq_lens = getattr(meta, "seq_lens", None)
                         if seq_lens is not None and seq_lens.device != device:
                             meta.seq_lens = seq_lens.to(device=device, non_blocking=False)
+                if not warmup:
+                    self._decode_capture_attn_metadata[desc] = attn_metadata
                 torch.npu.current_stream().synchronize()
                 self.speculator.current_draft_step.fill_(1)
                 set_draft_step_host(1)
@@ -213,20 +249,12 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        num_tokens = desc.num_tokens
-        if self.is_draft_model_prefill:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager310: draft prefill run_fullgraph with num_tokens=%s",
-                num_tokens,
-            )
-        else:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager310: draft decode per-step run_fullgraph with num_tokens=%s",
-                num_tokens,
-            )
-
-        # Ensure H2D into capture-stable buffers is visible before replay.
-        torch.npu.current_stream().synchronize()
+        logger.info_once(
+            "ACL graph replay is active for the 310P draft model (%s, logged once).",
+            "prefill" if self.is_draft_model_prefill else "per-step decode",
+        )
+        # Refresh capture-stable seq_lens on the compute stream; same-stream
+        # ordering makes a full synchronize() before replay unnecessary.
         ms = self.speculator.model_state
         runtime_seq_lens = self.speculator.input_buffers.seq_lens
         refresh = getattr(ms, "_refresh_capture_seq_lens", None)
@@ -241,5 +269,15 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         # after host-side slot/seq updates (done by the speculator loop).
         pending_attn = getattr(self.speculator, "_pending_draft_attn_metadata", None)
         if pending_attn is not None:
+            capture_attn = self._decode_capture_attn_metadata[desc]
+            if capture_attn is not None:
+                for layer_name, captured in capture_attn.items():
+                    runtime = pending_attn[layer_name]
+                    if captured is None or runtime is None:
+                        continue
+                    # Python metadata replacement does not rebind PA arguments.
+                    captured.seq_lens.copy_(runtime.seq_lens, non_blocking=True)
+                    if captured.block_tables.data_ptr() != runtime.block_tables.data_ptr():
+                        captured.block_tables.copy_(runtime.block_tables, non_blocking=True)
             ms.attn_metadata = pending_attn
         return CudaGraphManager.run_fullgraph(self, desc)

@@ -22,4 +22,12 @@ enable_custom_op()
   4. Bind aclnn operators to torch.ops._C_ascend module in `csrc/torch_binding.cpp`.
   5. Write a meta implementation in `csrc/torch_binding_meta.cpp` for the op to be captured into the aclgraph.
 
+If the new operation participates in the cached generated-kernel build in
+`csrc/cmake/func.cmake`, check that its compiler-visible source, generated and
+shared inputs, build recipe, and toolchain environment are represented in the
+[cache identity contract](persistent_csrc_build_cache.md#cmake-integration-contract).
+When changing one of those inputs or commands, update the matching cache
+identity arguments in the same change; otherwise an old compiled action could
+be reused incorrectly.
+
 After a successful build of vllm-ascend, the custom aclnn operation can be invoked in Python code.

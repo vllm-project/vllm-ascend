@@ -24,9 +24,9 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.encoder_only import AscendEncoderOnlyModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 from .rejection_sampler import RejectionSampler310V2
@@ -139,7 +139,12 @@ class _Ascend310PModelStateMixin:
             model_config = getattr(self, "model_config", None)
             if model_config is not None and hasattr(model_config, "get_vocab_size"):
                 vocab_size = model_config.get_vocab_size()
-        base_sampler = Ascend310PSampler(max_num_reqs, device, vocab_size=vocab_size)
+        base_sampler = Ascend310PSampler(
+            max_num_reqs,
+            device,
+            vocab_size=vocab_size,
+            req_states=getattr(sampler, "req_states", None),
+        )
         vllm_config = getattr(self, "vllm_config", None)
         spec_config = None if vllm_config is None else vllm_config.speculative_config
         if spec_config is None:
@@ -173,6 +178,33 @@ class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
         self._replace_310p_rope_state(encoder_cache)
 
 
+class Ascend310PEncoderOnlyModelState(_Ascend310PModelStateMixin, AscendEncoderOnlyModelState):
+    """310P state for encoder-only (BERT/BGE) models.
+
+    Encoder-only layers are non-causal and keep no KV cache, so they never
+    enter ``kv_cache_config.kv_cache_groups`` and the KV-backed
+    ``Ascend310PModelState`` builds no metadata for them. Take the encoder
+    metadata construction from the shared Ascend encoder state and keep the
+    310P Triton-free RoPE / sampler from the mixin.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> None:
+        # follow-imports=skip hides EncoderOnlyModelState.__init__; ignore call-arg.
+        AscendEncoderOnlyModelState.__init__(  # type: ignore[call-arg]
+            self, vllm_config, model, encoder_cache, device
+        )
+        # ACLGraph replays the tensor addresses bound during capture. Keep every
+        # captured seq_lens buffer so its contents can be refreshed before replay.
+        self._capture_seq_lens_by_ptr = {}
+        self._replace_310p_rope_state(encoder_cache)
+
+
 class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHybridModelState):
     """310P hybrid/GDN state: keep Ascend hybrid contract, swap Triton RoPE."""
 
@@ -190,16 +222,6 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         if self._mamba_copy_funcs_by_group is not None:
             return
         mamba_groups = get_mamba_groups(kv_cache_config)
-        if isinstance(mamba_groups, tuple):
-            # v0.28.0: one copy-function tuple shared by every Mamba group.
-            group_ids, mamba_spec = mamba_groups
-            copy_funcs = self.model.get_mamba_state_copy_func()
-            self._mamba_copy_funcs_by_group = {group_id: copy_funcs for group_id in group_ids}
-            self._mamba_group_ids = group_ids
-            self._mamba_spec = mamba_spec
-            return
-
-        # Verified vLLM main: Mamba specs may use different state layouts.
         copy_funcs_by_type = self.model.get_mamba_state_copy_funcs({spec.mamba_type for spec in mamba_groups})
         self._mamba_copy_funcs_by_group = {
             group_id: copy_funcs_by_type[spec.mamba_type]
@@ -255,9 +277,6 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         AscendMambaHybridModelState.__init__(  # type: ignore[call-arg]
             self, vllm_config, model, encoder_cache, device
         )
-        # vLLM main initializes RecoverSSM state, while v0.28.0 does not.
-        if vllm_version_is("0.28.0"):
-            self.recoverssm = None
         self._capture_seq_lens_by_ptr = {}
         self._replace_310p_rope_state(encoder_cache)
         self._num_accepted_tokens_cpu = np.ones(self.max_num_reqs, dtype=np.int32)

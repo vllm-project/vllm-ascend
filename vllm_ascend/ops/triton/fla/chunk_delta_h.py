@@ -215,7 +215,6 @@ def chunk_gated_delta_rule_fwd_h(
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
-    g = g.transpose(1, 2).contiguous()
 
     def grid(meta):
         return (1, N * H)

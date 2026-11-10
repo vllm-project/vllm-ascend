@@ -50,7 +50,7 @@
 # /vllm_ascend/patch
 /vllm_ascend/quantization @kunpengW-code
 /vllm_ascend/sample @realliujiaxu
-# /vllm_ascend/spec_decode
+# /vllm_ascend/worker/v1/spec_decode
 # /vllm_ascend/worker
 # /vllm_ascend/xlite
 # /vllm_ascend/ascend_config.py

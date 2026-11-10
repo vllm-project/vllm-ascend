@@ -33,7 +33,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_co
     AscendOffloadingConnectorWorker,
     _canonicalize_split_cache,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
@@ -42,6 +41,8 @@ def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
             OffloadingGroupConfig(
                 tokens_per_block=16,
                 layer_names=("model.layers.0.self_attn",),
+                # vLLM main added the originating KV cache group index.
+                group_id=0,
             ),
         ),
         worker_kv_bytes_per_block=64,
@@ -79,7 +80,7 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     )
     spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
-    assert (spec.num_blocks if vllm_version_is("0.28.0") else spec.num_chunks) == 10
+    assert spec.num_chunks == 10
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 
@@ -241,6 +242,9 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        # The connector offloads the groups vLLM selects, not all of them.
+        prefix_cacheable_group_ids=(0,),
+        hisparse_host_num_blocks=None,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
@@ -285,6 +289,9 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        # The connector offloads the groups vLLM selects, not all of them.
+        prefix_cacheable_group_ids=(0,),
+        hisparse_host_num_blocks=None,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config

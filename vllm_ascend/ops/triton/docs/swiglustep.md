@@ -12,7 +12,7 @@
 - **Algorithm flow** (processed row by row, independently):
   1. Grid `(num_vectorcore,)`: rows are evenly split as `block_size = ceil(M / num_vectorcore)`; each program iterates over the rows of its range (program count == vector-core count, which minimizes host launch overhead compared with a 2D `BLOCK_M x BLOCK_N` grid that spawns `O(M * N / tile)` programs on large MoE shapes).
   2. Per row: load the full `2N` row, split gate/up halves via `extract_slice`, compute `silu` + double-sided clamps + multiply in fp32, and store the `N`-element output row in the input dtype.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. Used by the MoE expert-MLP activation path of `vllm_ascend/ops/fused_moe/moe_mlp.py` and the quantized-MoE LoRA path; works in both eager and graph-capture modes.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by the MoE expert-MLP activation path of `vllm_ascend/ops/fused_moe/moe_mlp.py` and the quantized-MoE LoRA path; works in both eager and graph-capture modes.
 
 ## Parameters
 

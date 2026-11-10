@@ -201,10 +201,9 @@ def validate_transfer_items_numel_against_manifest(
     if not transfer_shape_manifest:
         return True
 
-    # HCCL send/recv 是按两端枚举顺序一一对齐的，任何一侧多/少/乱序一个张量，
-    # 都会把 donor 的第 i 份字节灌进 client 的第 i 个槽位——numel 巧合相等时
-    # 就是静默权重错位。manifest 的 key 顺序即 donor 的注册（发送）顺序，
-    # 因此数量与顺序都必须严格相等，否则在 HCCL 之前中止并回退。
+    # HCCL pairs send/recv positionally: a count or order divergence would
+    # silently mis-route bytes when numels happen to match, so items must
+    # match the donor's registration (manifest key order) exactly or we abort.
     if len(transfer_items) != len(transfer_shape_manifest):
         logger.error(
             "Transfer tensor count mismatch before HCCL: local %d vs manifest %d (donor/client enumeration diverged)",

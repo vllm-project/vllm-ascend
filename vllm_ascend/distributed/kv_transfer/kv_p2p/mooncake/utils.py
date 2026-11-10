@@ -111,7 +111,7 @@ def collect_configured_register_regions(
 
         cache_tensors: list[torch.Tensor] = []
         for layer_name in layer_names:
-            cache_tensors.extend(as_kv_cache_tensors(kv_caches.get(layer_name)))
+            cache_tensors.extend(cache for cache in as_kv_cache_tensors(kv_caches.get(layer_name)) if cache.numel() > 0)
 
         caches_by_storage: dict[int, list[torch.Tensor]] = {}
         for cache in cache_tensors:

@@ -1,6 +1,8 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.activation.swiglustep import swiglustep_forward_triton
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
@@ -19,6 +21,9 @@ def _swiglustep_reference(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
 # bf16/fp16 (32-byte UB alignment on NPU vector core), so every shape here
 # has a last dim that is a multiple of 32. Real MoE shape is N=1280
 # (Step-3.7 moe_intermediate_size).
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("shape", "dtype", "limit"),
     [
@@ -49,6 +54,9 @@ def test_swiglustep_triton_correctness(shape, dtype, limit):
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 def test_swiglustep_triton_clamps_to_golden_value():
     """gate=+100 -> silu(~100) clamped to limit(7); up=-100 -> -7; out = -49."""
@@ -66,6 +74,9 @@ def test_swiglustep_triton_clamps_to_golden_value():
     assert not torch.isinf(out).any()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 def test_swiglustep_triton_handles_non_contiguous_input():
     """the wrapper must contiguous() a strided view before launching."""

@@ -1,13 +1,25 @@
-"""SFA-specific CP helpers shared by the attention and indexer builders.
+"""SFA-specific CP cache and address helpers.
 
-These helpers encode the replicated SFA indexer-cache layout, so they stay
-outside ``common_cp`` while avoiding a dependency between the two builders.
+These helpers encode SFA cache transport and the replicated indexer-cache
+layout without depending on the attention implementation or metadata builders.
 """
 
 from typing import Any
 
 import torch
 from vllm.utils.math_utils import cdiv
+
+
+def as_byte_view(x: torch.Tensor) -> torch.Tensor:
+    """Return a byte view for FP8 tensors, preserving their bit patterns."""
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        return x.view(torch.uint8)
+    return x
+
+
+def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    # FP8 block movement must preserve bytes, including NaN bit patterns.
+    return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
 
 
 def get_sfa_pcp_global_metadata(
@@ -95,35 +107,31 @@ def build_sfa_dcp_replicated_slot_mapping(
     replicated_view_block_size: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Build slots that address the physically replicated indexer cache."""
+    """Build replicated slots with replay-safe request indices and padding."""
     num_reqs = common_attn_metadata.num_reqs
     num_input_tokens = common_attn_metadata.num_input_tokens
     num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
-    num_query_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs])
     slot_mapping_output.fill_(-1)
-    if num_actual_tokens == 0:
+    if num_reqs == 0 or num_actual_tokens == 0:
         return slot_mapping_output
 
-    query_lens = (
-        common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
+    # Padded input capacity can exceed the device-side query total.
+    # repeat_interleave with a fixed output_size can leave invalid request
+    # indices in that tail, so derive validity from device query boundaries.
+    token_indices = torch.arange(num_input_tokens, dtype=torch.int32, device=device)
+    req_indices = torch.searchsorted(
+        common_attn_metadata.query_start_loc[1 : num_reqs + 1].contiguous(),
+        token_indices,
+        right=True,
     )
-    req_indices = torch.repeat_interleave(
-        torch.arange(num_reqs, dtype=torch.int32, device=device),
-        query_lens.to(device=device),
-        output_size=num_query_tokens,
-    )[:num_actual_tokens]
-    if req_indices.numel() == 0:
-        return slot_mapping_output
-
-    num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
-    req_indices = req_indices[:num_actual_tokens]
-    positions = common_attn_metadata.positions[:num_actual_tokens].to(
-        device=device,
-        dtype=torch.int32,
-    )
+    valid = (token_indices < num_actual_tokens) & (req_indices < num_reqs)
+    req_indices = req_indices.clamp(max=num_reqs - 1)
+    positions = common_attn_metadata.positions[:num_input_tokens].to(device=device, dtype=torch.int32)
+    positions = torch.where(valid, positions, 0)
     logical_block_idx = positions // replicated_view_block_size
     block_offsets = positions % replicated_view_block_size
     block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
     block_numbers = block_table_replicated_view.flatten()[block_table_indices]
-    slot_mapping_output[:num_actual_tokens] = block_numbers * replicated_view_block_size + block_offsets
+    slots = block_numbers * replicated_view_block_size + block_offsets
+    slot_mapping_output[:num_input_tokens] = torch.where(valid, slots, -1)
     return slot_mapping_output

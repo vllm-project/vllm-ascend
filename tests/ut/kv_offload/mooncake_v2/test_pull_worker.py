@@ -10,8 +10,9 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 import torch
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -29,7 +30,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 )
 
 from .helpers import (
+    make_circular_spec,
     make_full_spec,
+    make_kpool_tail_spec,
     make_mamba_spec,
     make_metadata_groups,
     make_pp_metadata,
@@ -43,8 +46,11 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
     thread.tp_rank = 0
     thread.tp_size = 1
+    thread.pcp_rank = 0
+    thread.pcp_size = 1
     thread.dcp_rank = 0
     thread.dcp_size = 1
+    thread.num_key_value_heads = 0
     thread.num_speculative_tokens = 0
     thread.layer_names = ["model.layers.0.self_attn"]
     thread.group_indices = [0]
@@ -72,6 +78,7 @@ def make_req_meta(
     local: tuple[list[int], ...] = ([10, 11],),
     remote: tuple[list[int], ...] = ([20, 21],),
     engine_id: str = "engine-p",
+    remote_request_id: str = "request-p",
 ) -> ReqMeta:
     return ReqMeta(
         local_block_ids=local,
@@ -82,7 +89,7 @@ def make_req_meta(
         remote_host="10.0.0.1",
         remote_port=6000,
         remote_engine_id=engine_id,
-        remote_request_id="request-p",
+        remote_request_id=remote_request_id,
         remote_num_prompt_tokens=32,
         local_full_block_ids=local,
     )
@@ -96,12 +103,14 @@ def test_remote_endpoint_requires_one_endpoint() -> None:
 
 def test_result_queues_are_drained_atomically() -> None:
     thread = make_thread()
-    thread.finished_requests.put("request-a")
-    thread.finished_requests.put("request-b")
+    thread.finished_requests.put(("request-a", False))
+    thread.finished_requests.put(("request-b", True))
     thread.invalid_block_ids = {10, 11}
 
-    assert thread.get_and_clear_finished_requests() == {"request-a", "request-b"}
-    assert thread.get_and_clear_finished_requests() == set()
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+        finished_recving={"request-a", "request-b"}, failed_recving={"request-b"}
+    )
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults()
     assert thread.get_and_clear_invalid_block_ids() == {10, 11}
     assert thread.get_and_clear_invalid_block_ids() == set()
 
@@ -125,27 +134,143 @@ def test_hybrid_cache_failure_is_not_reported_as_invalid_blocks() -> None:
 
 def test_attention_tp_groups_cover_replication_split_and_dcp() -> None:
     replicated = make_thread(tp_size=4, tp_rank=1)
-    assert replicated._get_attention_remote_tp_rank_groups(8, 1, 1, 4) == [[2, 3]]
+    assert replicated._get_attention_remote_tp_rank_groups(8, 1, 1, 1, 4) == [[2, 3]]
 
     split = make_thread(tp_size=2, tp_rank=0)
-    assert split._get_attention_remote_tp_rank_groups(4, 1, 1, 8) == [[0], [1]]
+    assert split._get_attention_remote_tp_rank_groups(4, 1, 1, 1, 8) == [[0], [1]]
 
     mla_dcp = make_thread(tp_size=4, tp_rank=2, dcp_size=4, dcp_rank=2)
-    assert mla_dcp._get_attention_remote_tp_rank_groups(8, 4, 8, 1) == [list(range(8))]
+    assert mla_dcp._get_attention_remote_tp_rank_groups(8, 1, 4, 8, 1) == [list(range(8))]
 
     unequal_dcp = make_thread(tp_size=8, tp_rank=3, dcp_size=2, dcp_rank=1)
-    assert unequal_dcp._get_attention_remote_tp_rank_groups(8, 2, 4, 4) == [[0, 1, 2, 3]]
+    assert unequal_dcp._get_attention_remote_tp_rank_groups(8, 1, 2, 4, 4) == [[0, 1, 2, 3]]
 
 
-def test_mamba_tp_groups_follow_non_replicated_tp_ratio() -> None:
-    local_smaller = make_thread(tp_size=2, tp_rank=1)
-    assert local_smaller._get_mamba_remote_tp_rank_groups(4) == [[2], [3]]
+@pytest.mark.parametrize(
+    ("total_heads", "remote_dcp_size", "expected_group"),
+    [
+        (1, 1, list(range(16))),
+        (1, 2, list(range(16))),
+        (1, 16, list(range(16))),
+        (4, 1, [0, 1, 2, 3]),
+        (4, 2, [0, 1, 2, 3]),
+        (4, 4, [0, 1, 2, 3]),
+    ],
+)
+def test_pcp2_tp8_remote_groups_cover_mla_and_gqa(
+    total_heads: int,
+    remote_dcp_size: int,
+    expected_group: list[int],
+) -> None:
+    local_tp_size = total_heads
+    thread = make_thread(tp_size=local_tp_size, tp_rank=0)
 
-    local_larger = make_thread(tp_size=4, tp_rank=3)
-    assert local_larger._get_mamba_remote_tp_rank_groups(2) == [[1]]
+    assert thread._get_attention_remote_tp_rank_groups(
+        remote_tp_size=8,
+        remote_pcp_size=2,
+        local_dcp_size=1,
+        remote_dcp_size=remote_dcp_size,
+        total_num_kv_heads=total_heads,
+    ) == [expected_group]
+
+
+def test_pcp_dcp_selects_one_complete_replica_group() -> None:
+    thread = make_thread()
+
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[[0, 1, 2, 3]],
+        remote_dcp_size=2,
+        spec_index=0,
+        local_block_size=16,
+        remote_block_size=16,
+        local_group_block_ids=[10, 11],
+        local_full_group_block_ids=[10, 11],
+        remote_group_block_ids=[20],
+        local_num_prompt_tokens=32,
+        remote_num_prompt_tokens=32,
+        num_computed_tokens=0,
+        local_block_size_scale=1,
+        remote_block_size_scale=1,
+        spec=make_full_spec(),
+        selection_index=1,
+    )
+
+    assert result == [(2, [10], [20]), (3, [11], [20])]
+
+
+def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
+    physical_ranks: list[int] = []
+    for dcp_rank in range(8):
+        thread = make_thread(
+            tp_size=4,
+            pcp_size=2,
+            dcp_size=8,
+            dcp_rank=dcp_rank,
+        )
+        result = thread._compute_group_block_ids(
+            request_id="request",
+            remote_tp_rank_groups=[list(range(8))],
+            remote_dcp_size=8,
+            spec_index=0,
+            local_block_size=16,
+            remote_block_size=16,
+            local_group_block_ids=[10],
+            local_full_group_block_ids=[10],
+            remote_group_block_ids=[20],
+            local_num_prompt_tokens=128,
+            remote_num_prompt_tokens=128,
+            num_computed_tokens=0,
+            local_block_size_scale=1,
+            remote_block_size_scale=1,
+            spec=make_full_spec(),
+            selection_index=0,
+        )
+
+        assert result == [(dcp_rank, [10], [20])]
+        tp_rank, pcp_rank = divmod(dcp_rank, 2)
+        physical_ranks.append(pcp_rank * 4 + tp_rank)
+
+    assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+@pytest.mark.parametrize("local_pcp", [False, True])
+@pytest.mark.parametrize("remote_pcp", [False, True])
+def test_mamba_tp_groups_follow_non_replicated_tp_ratio(local_pcp: bool, remote_pcp: bool) -> None:
+    local_smaller = make_thread(
+        tp_size=1 if local_pcp else 2,
+        tp_rank=0 if local_pcp else 1,
+        pcp_size=2 if local_pcp else 1,
+        pcp_rank=1 if local_pcp else 0,
+    )
+    assert local_smaller._get_mamba_remote_tp_rank_groups(4 if remote_pcp else 1, 1 if remote_pcp else 4) == [[2], [3]]
+
+    local_larger = make_thread(
+        tp_size=1 if local_pcp else 4,
+        tp_rank=0 if local_pcp else 3,
+        pcp_size=4 if local_pcp else 1,
+        pcp_rank=3 if local_pcp else 0,
+    )
+    assert local_larger._get_mamba_remote_tp_rank_groups(2 if remote_pcp else 1, 1 if remote_pcp else 2) == [[1]]
 
     with pytest.raises(ValueError, match="integer ratio"):
-        local_larger._get_mamba_remote_tp_rank_groups(3)
+        local_larger._get_mamba_remote_tp_rank_groups(3 if remote_pcp else 1, 1 if remote_pcp else 3)
+
+
+@pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 8), (8, 1), (4, 2), (2, 2), (1, 1)])
+@pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 8), (8, 1), (4, 2), (2, 2), (1, 1)])
+def test_mamba_head_groups_follow_worker_rank(local_tp, local_pcp, remote_tp, remote_pcp) -> None:
+    local_size, remote_size = local_tp * local_pcp, remote_tp * remote_pcp
+    for local_rank in range(local_size):
+        tp_rank, pcp_rank = divmod(local_rank, local_pcp)
+        thread = make_thread(tp_size=local_tp, tp_rank=tp_rank, pcp_size=local_pcp, pcp_rank=pcp_rank)
+        # Select every producer whose global head interval overlaps this consumer.
+        expected = [
+            [rank]
+            for rank in range(remote_size)
+            if rank * local_size < (local_rank + 1) * remote_size and local_rank * remote_size < (rank + 1) * local_size
+        ]
+        assert thread._get_mamba_remote_tp_rank_groups(remote_pcp, remote_tp) == expected
 
 
 def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
@@ -159,6 +284,7 @@ def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
     pp1 = make_pp_metadata(layer_names=["layer.1"], tp_base_addrs={0: [[6000]]})
     groups = make_metadata_groups()
     groups = SimpleNamespace(
+        pcp_size=1,
         tp_size=1,
         dcp_size=1,
         use_kv_pp=False,
@@ -174,32 +300,45 @@ def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
 
 def test_build_remote_layout_filters_kv_parallel_owners_and_keeps_mtp_replicas() -> None:
     thread = make_thread(
-        layer_names=["layer.0", "mtp.layer"],
-        spec_indices=[0, 0],
+        layer_names=["layer.0", "layer.1", "layer.2", "layer.3", "mtp.layer"],
+        spec_indices=[0, 0, 0, 0, 0],
         kv_cache_specs=[make_full_spec()],
     )
-    thread._get_layer_remote_tp_rank_groups = MagicMock(return_value=[[0, 1]])  # type: ignore[method-assign]
+    thread._get_layer_remote_tp_rank_groups = MagicMock(return_value=[[0, 1, 2, 3]])  # type: ignore[method-assign]
     pp_metadata = make_pp_metadata(
-        layer_names=["layer.0", "mtp.layer"],
-        tp_base_addrs={
-            0: [[5000], [6000]],
-            1: [[], [7000]],
+        layer_names=["layer.0", "layer.1", "layer.2", "layer.3", "mtp.layer"],
+        pcp_tp_base_addrs={
+            0: {
+                0: [[5000], [], [], [], [9000]],
+                1: [[], [6000], [], [], [9100]],
+            },
+            1: {
+                0: [[], [], [7000], [], [9200]],
+                1: [[], [], [], [8000], [9300]],
+            },
         },
-        tp_layer_indices={0: [0, 1], 1: [1]},
+        pcp_tp_layer_indices={
+            0: {0: [0, 4], 1: [1, 4]},
+            1: {0: [2, 4], 1: [3, 4]},
+        },
     )
     groups = make_metadata_groups(
         tp_size=2,
+        pcp_size=2,
         use_kv_pp=True,
         pp_metadata=pp_metadata,
     )
 
     rank_groups, pairs = thread._build_remote_transfer_layout(groups)
 
-    assert pairs == {0: [(0, 0), (1, 1)]}
+    assert pairs == {0: [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]}
     assert rank_groups == {
         0: {
             (0, 0): [[0]],
-            (1, 1): [[0, 1]],
+            (1, 1): [[2]],
+            (2, 2): [[1]],
+            (3, 3): [[3]],
+            (4, 4): [[0, 1, 2, 3]],
         }
     }
     assert thread._get_layer_remote_tp_rank_groups.call_count == 1
@@ -303,6 +442,87 @@ def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
     assert result == [(0, [20, 21, 22, 23], expected_remote_blocks)]
 
 
+def test_compute_non_replicated_sfa_indexer_uses_dcp_sequence_shards() -> None:
+    thread = make_thread(
+        tp_size=4,
+        pcp_size=2,
+        dcp_size=8,
+        dcp_rank=3,
+    )
+
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[list(range(8))],
+        remote_dcp_size=8,
+        spec_index=0,
+        local_block_size=16,
+        remote_block_size=16,
+        local_group_block_ids=[10],
+        local_full_group_block_ids=[10],
+        remote_group_block_ids=[20],
+        local_num_prompt_tokens=128,
+        remote_num_prompt_tokens=128,
+        num_computed_tokens=0,
+        local_block_size_scale=1,
+        remote_block_size_scale=1,
+        spec=make_sfa_indexer_spec(replication_size=1),
+        selection_index=0,
+    )
+
+    assert result == [(3, [10], [20])]
+
+
+@pytest.mark.parametrize(
+    (
+        "local_dcp_size",
+        "remote_dcp_size",
+        "local_replication_size",
+        "remote_replication_size",
+        "expected_local_dcp_size",
+        "expected_remote_dcp_size",
+    ),
+    [
+        (8, 8, 1, 1, 8, 8),
+        (8, 8, 8, 8, 1, 1),
+        (1, 8, 1, 8, 1, 1),
+    ],
+)
+def test_sfa_indexer_topology_uses_dcp_only_when_neither_side_replicates(
+    local_dcp_size: int,
+    remote_dcp_size: int,
+    local_replication_size: int,
+    remote_replication_size: int,
+    expected_local_dcp_size: int,
+    expected_remote_dcp_size: int,
+) -> None:
+    thread = make_thread(
+        tp_size=4,
+        pcp_size=2,
+        dcp_size=local_dcp_size,
+        block_size_scales=[[local_replication_size]],
+    )
+    remote = make_pp_metadata(block_size_scales=[[remote_replication_size]])
+    get_remote_groups = MagicMock(return_value=[list(range(8))])
+    thread._get_attention_remote_tp_rank_groups = get_remote_groups  # type: ignore[method-assign]
+
+    assert thread._get_layer_remote_tp_rank_groups(
+        0,
+        0,
+        make_sfa_indexer_spec(replication_size=local_replication_size),
+        remote,
+        remote_pcp_size=2,
+        remote_tp_size=4,
+        remote_dcp_size=remote_dcp_size,
+    ) == [list(range(8))]
+    get_remote_groups.assert_called_once_with(
+        remote_tp_size=4,
+        remote_pcp_size=2,
+        local_dcp_size=expected_local_dcp_size,
+        remote_dcp_size=expected_remote_dcp_size,
+        total_num_kv_heads=1,
+    )
+
+
 def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
     spec = make_sfa_indexer_spec(replication_size=2)
     thread = make_thread(
@@ -320,13 +540,64 @@ def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
         remote_metadata=remote,
         layer_pairs=[(0, 0)],
         tp_rank_groups_by_layer={(0, 0): [[0]]},
+        remote_pcp_size=1,
         remote_dcp_size=4,
         requests={"request": make_req_meta()},
         transfer_block_ids_by_spec={},
     )
 
-    assert buckets[0][0][(0, 0)] == [("request", [20, 21, 22, 23], [80, 81, 82, 83])]
-    assert request_ids == {0: {"request"}}
+    assert buckets[(0, 0)][0][(0, 0)] == [("request", [20, 21, 22, 23], [80, 81, 82, 83])]
+    assert request_ids == {(0, 0): {"request"}}
+
+
+def test_multi_head_fa_uses_tp_transfer_with_global_dcp() -> None:
+    spec = make_full_spec(num_kv_heads=4)
+    thread = make_thread(
+        tp_size=2,
+        tp_rank=1,
+        dcp_size=2,
+        dcp_rank=1,
+        kv_cache_specs=[spec],
+        block_shapes=[[(2, 16, 4)]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(2, 16, 4)]],
+        tp_base_addrs={0: [[5000]], 1: [[6000]]},
+    )
+    groups = thread._get_layer_remote_tp_rank_groups(
+        0, 0, spec, remote, remote_pcp_size=1, remote_tp_size=2, remote_dcp_size=2
+    )
+    assert groups == [[1]]
+
+    buckets, _ = thread._build_transfer_block_buckets(
+        remote_metadata=remote,
+        layer_pairs=[(0, 0)],
+        tp_rank_groups_by_layer={(0, 0): groups},
+        remote_pcp_size=1,
+        remote_dcp_size=2,
+        requests={"request": make_req_meta()},
+        transfer_block_ids_by_spec={},
+    )
+    entries = buckets[(0, 1)][0]
+    assert entries[(0, 0)] == [("request", [10, 11], [20, 21])]
+
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+    thread._append_spec_transfer_addresses(
+        0,
+        remote_pcp_rank=0,
+        remote_tp_rank=1,
+        remote_pcp_size=1,
+        remote_tp_size=2,
+        remote_dcp_size=2,
+        transfer_entries_by_layer=entries,
+        remote_metadata=remote,
+        src_list=src,
+        dst_list=dst,
+        length_list=lengths,
+    )
+    assert (src, dst, lengths) == ([2280], [8560], [256])
 
 
 def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
@@ -354,8 +625,85 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     assert result == [(0, [10, 11], [20, 21])]
 
 
-def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
-    thread = make_thread(num_speculative_tokens=2)
+@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
+def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCacheSpec) -> None:
+    thread = make_thread(num_speculative_tokens=3)
+
+    result = thread._compute_group_block_ids(
+        "request",
+        [[0, 1, 2, 3]],
+        4,
+        0,
+        16,
+        16,
+        [10],
+        [1, 2, 10],
+        [20],
+        4096,
+        4095,
+        2048,
+        1,
+        1,
+        spec,
+        2,
+    )
+
+    assert result == [(2, [10], [20])]
+
+
+def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
+    thread = make_thread()
+    spec = make_circular_spec()
+
+    with pytest.raises(ValueError, match="exactly one block"):
+        thread._compute_group_block_ids(
+            "request",
+            [[0]],
+            1,
+            0,
+            16,
+            16,
+            [10, 11],
+            [10, 11],
+            [20],
+            32,
+            32,
+            0,
+            1,
+            1,
+            spec,
+            0,
+        )
+
+    with pytest.raises(ValueError, match="equal P/D physical block counts"):
+        thread._compute_group_block_ids(
+            "request",
+            [[0]],
+            1,
+            0,
+            16,
+            16,
+            [10],
+            [10],
+            [20],
+            32,
+            32,
+            0,
+            2,
+            1,
+            spec,
+            0,
+        )
+
+
+@pytest.mark.parametrize(
+    "num_speculative_tokens,num_speculative_blocks,local_blocks,checkpoint",
+    [(2, 2, [1, 2, 3, 4], 2), (5, 0, [7], 7)],
+)
+def test_compute_mamba_state_selects_pre_speculative_local_block(
+    num_speculative_tokens, num_speculative_blocks, local_blocks, checkpoint
+) -> None:
+    thread = make_thread(num_speculative_tokens=num_speculative_tokens)
 
     result = thread._compute_group_block_ids(
         "request",
@@ -364,19 +712,19 @@ def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
         0,
         16,
         16,
-        [1, 2, 3, 4],
-        [1, 2, 3, 4],
+        local_blocks,
+        local_blocks,
         [8, 9, 10],
         32,
         31,
         0,
         1,
         1,
-        make_mamba_spec(),
+        replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
         0,
     )
 
-    assert result == [(0, [2], [10])]
+    assert result == [(0, [checkpoint], [10])]
 
 
 def test_compute_dcp_blocks_maps_local_shards_to_remote_dcp_ranks() -> None:
@@ -457,13 +805,14 @@ def test_transfer_bucket_reuses_block_mapping_for_layers_of_same_spec() -> None:
         [(0, 0), (1, 1)],
         {(0, 0): [[0]], (1, 1): [[0]]},
         1,
+        1,
         {"request": make_req_meta()},
         {},
     )
 
     thread._compute_group_block_ids.assert_called_once()
-    assert set(buckets[0][0]) == {(0, 0), (1, 1)}
-    assert request_ids == {0: {"request"}}
+    assert set(buckets[(0, 0)][0]) == {(0, 0), (1, 1)}
+    assert request_ids == {(0, 0): {"request"}}
 
 
 def test_transfer_bucket_separates_same_spec_layers_with_different_tp_owners() -> None:
@@ -504,19 +853,49 @@ def test_transfer_bucket_separates_same_spec_layers_with_different_tp_owners() -
         [(0, 0), (1, 1)],
         {(0, 0): [[0]], (1, 1): [[1]]},
         1,
+        1,
         {"request": make_req_meta()},
         {},
     )
 
-    assert set(buckets) == {0, 1}
-    assert request_ids == {0: {"request"}, 1: {"request"}}
+    assert set(buckets) == {(0, 0), (0, 1)}
+    assert request_ids == {(0, 0): {"request"}, (0, 1): {"request"}}
     assert thread._compute_group_block_ids.call_count == 2
+
+
+def test_transfer_bucket_routes_each_request_to_one_complete_pcp_replica() -> None:
+    thread = make_thread()
+    thread._compute_group_block_ids = MagicMock(  # type: ignore[method-assign]
+        side_effect=[[(0, [10], [20])], [(1, [10], [20])]]
+    )
+
+    buckets, request_ids = thread._build_transfer_block_buckets(
+        make_pp_metadata(
+            pcp_tp_base_addrs={0: {0: [[5000]]}, 1: {0: [[7000]]}},
+        ),
+        [(0, 0)],
+        {(0, 0): [[0]]},
+        2,
+        1,
+        {
+            "decode-a": make_req_meta(remote_request_id="prefill-a"),
+            "decode-b": make_req_meta(remote_request_id="prefill-b"),
+        },
+        {},
+    )
+
+    assert set(buckets) == {(0, 0), (1, 0)}
+    assert request_ids == {(0, 0): {"decode-a"}, (1, 0): {"decode-b"}}
 
 
 def test_attention_address_generation_handles_partial_head_overlap() -> None:
     thread = make_thread(
         tp_size=1,
         tp_rank=0,
+        # The model-level value may describe the main model while this cache
+        # belongs to an MTP model. FA head topology must come from the
+        # registered HND cache shapes instead.
+        num_key_value_heads=64,
         kv_cache_specs=[make_full_spec(num_kv_heads=4)],
         block_shapes=[[(4, 16, 8)]],
         block_lens=[[128]],
@@ -535,7 +914,9 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
 
     thread._append_spec_transfer_addresses(
         0,
+        remote_pcp_rank=0,
         remote_tp_rank=1,
+        remote_pcp_size=1,
         remote_tp_size=2,
         remote_dcp_size=1,
         transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
@@ -550,37 +931,125 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
     assert lengths == [64]
 
 
-def test_mamba_equal_tp_address_generation_transfers_each_cache() -> None:
+@pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
+@pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 4), (4, 1), (2, 2)])
+@pytest.mark.parametrize("worker_rank", [1, 2, 3])
+@pytest.mark.parametrize("recoverssm", [False, True])
+def test_mamba_equal_tp_address_generation_transfers_each_cache(
+    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, recoverssm
+) -> None:
+    tp_rank, pcp_rank = divmod(worker_rank, local_pcp)
+    remote_tp_rank, remote_pcp_rank = divmod(worker_rank, remote_pcp)
+    shapes = [(3, 16), (2, 4, 4)]
+    dtypes: tuple[torch.dtype, ...] = (torch.float16, torch.float32)
+    local_bases, remote_bases = [1000, 2000], [5000, 6000]
+    strides, block_lens = [128, 256], [96, 128]
+    expected_src, expected_dst = [1128, 2256], [5256, 6512]
+    if recoverssm:
+        shapes += [(2, 6, 4), (2, 6, 8)]
+        dtypes += (torch.float32, torch.float16)
+        local_bases += [3000, 4000]
+        remote_bases += [7000, 8000]
+        strides += [256, 256]
+        block_lens += [192, 192]
+        expected_src += [3256, 4256]
+        expected_dst += [7512, 8512]
     thread = make_thread(
-        kv_caches_base_addr=[[1000, 2000]],
-        block_shapes=[[(3, 16), (2, 4, 4)]],
-        block_strides=[[128, 256]],
-        block_lens=[[96, 128]],
+        tp_size=local_tp,
+        tp_rank=tp_rank,
+        pcp_size=local_pcp,
+        pcp_rank=pcp_rank,
+        kv_caches_base_addr=[local_bases],
+        block_shapes=[shapes],
+        block_strides=[strides],
+        block_lens=[block_lens],
     )
     remote = make_pp_metadata(
-        block_shapes=[[(3, 16), (2, 4, 4)]],
-        block_strides=[[128, 256]],
-        block_lens=[[96, 128]],
-        tp_base_addrs={0: [[5000, 6000]]},
+        block_shapes=[shapes],
+        block_strides=[strides],
+        block_lens=[block_lens],
+        pcp_tp_base_addrs={
+            pcp: {
+                tp: [remote_bases] if tp * remote_pcp + pcp == worker_rank else [[base + 2000 for base in remote_bases]]
+                for tp in range(remote_tp)
+            }
+            for pcp in range(remote_pcp)
+        },
     )
     src: list[int] = []
     dst: list[int] = []
     lengths: list[int] = []
-
     thread._append_mamba_transfer_addresses(
-        make_mamba_spec(),
-        0,
-        1,
+        replace(make_mamba_spec(), shapes=tuple(shapes), dtypes=dtypes),
+        remote_pcp_rank,
+        remote_tp_rank,
+        remote_tp,
         {(0, 0): [("request", [1], [2])]},
         remote,
         src,
         dst,
         lengths,
     )
+    assert src == expected_src
+    assert dst == expected_dst
+    assert lengths == block_lens
 
-    assert src == [1128, 2256]
-    assert dst == [5256, 6512]
-    assert lengths == [96, 128]
+
+def test_recoverssm_pcp8_producer_reassembles_all_cache_contents_on_tp1_consumer() -> None:
+    shapes = ((8, 3 * 8 * 2), (8, 2, 2), (8, 6, 2), (8, 6, 4))
+    dtypes = (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)
+    expected = [
+        torch.arange(torch.empty(shape).numel()).reshape(shape).to(dtype) for shape, dtype in zip(shapes, dtypes)
+    ]
+    local_caches = [torch.full((3, *shape), -1, dtype=dtype) for shape, dtype in zip(shapes, dtypes)]
+    producer_caches = []
+    for rank in range(8):
+        shards = [expected[0].reshape(8, 3, 8, 2)[:, :, rank : rank + 1].reshape(8, 6)]
+        shards.extend(cache[rank : rank + 1] for cache in expected[1:])
+        caches = [torch.full((3, *shard.shape), -5, dtype=shard.dtype) for shard in shards]
+        for cache, shard in zip(caches, shards):
+            cache[2].copy_(shard)
+        producer_caches.append(caches)
+
+    thread = make_thread(
+        kv_caches_base_addr=[[cache.data_ptr() for cache in local_caches]],
+        block_shapes=[[tuple(cache.shape[1:]) for cache in local_caches]],
+        block_strides=[[cache.stride(0) * cache.element_size() for cache in local_caches]],
+        block_lens=[[cache[0].numel() * cache.element_size() for cache in local_caches]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[tuple(cache.shape[1:]) for cache in producer_caches[0]]],
+        block_strides=[[cache.stride(0) * cache.element_size() for cache in producer_caches[0]]],
+        block_lens=[[cache[0].numel() * cache.element_size() for cache in producer_caches[0]]],
+        pcp_tp_base_addrs={
+            rank: {0: [[cache.data_ptr() for cache in caches]]} for rank, caches in enumerate(producer_caches)
+        },
+    )
+    spec = replace(make_mamba_spec(), shapes=shapes, dtypes=dtypes, mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+    groups = thread._get_mamba_remote_tp_rank_groups(8, 1)
+    assert groups == [[rank] for rank in range(8)]
+    local_pages = [cache[1].view(torch.uint8).reshape(-1) for cache in local_caches]
+    for (rank,) in groups:
+        src: list[int] = []
+        dst: list[int] = []
+        lengths: list[int] = []
+        thread._append_mamba_transfer_addresses(
+            spec, rank, 0, 1, {(0, 0): [("request", [1], [2])]}, remote, src, dst, lengths
+        )
+        remote_pages = [cache[2].view(torch.uint8).reshape(-1) for cache in producer_caches[rank]]
+        for local_addr, remote_addr, length in zip(src, dst, lengths):
+            local_page = next(
+                page for page in local_pages if page.data_ptr() <= local_addr < page.data_ptr() + page.numel()
+            )
+            remote_page = next(
+                page for page in remote_pages if page.data_ptr() <= remote_addr < page.data_ptr() + page.numel()
+            )
+            local_offset = local_addr - local_page.data_ptr()
+            remote_offset = remote_addr - remote_page.data_ptr()
+            local_page[local_offset : local_offset + length].copy_(remote_page[remote_offset : remote_offset + length])
+    for cache, full_state in zip(local_caches, expected):
+        torch.testing.assert_close(cache[1], full_state, atol=0, rtol=0)
+        assert torch.all(cache[0] == -1) and torch.all(cache[2] == -1)
 
 
 def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
@@ -596,18 +1065,37 @@ def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
     entries = {0: {(0, 0): [("request", [1], [2])]}}
 
     thread.engine.batch_transfer_sync_read.return_value = 0
-    thread._execute_tp_transfer_bucket(0, 0, 1, 1, remote, entries)
+    thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
     thread.engine.batch_transfer_sync_read.assert_called_once_with("10.0.0.1:9000", [1000], [2000], [128])
 
     thread.engine.batch_transfer_sync_read.return_value = -1
     with pytest.raises(RuntimeError, match="transfer failed"):
-        thread._execute_tp_transfer_bucket(0, 0, 1, 1, remote, entries)
+        thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
 
 
-@pytest.mark.parametrize(("can_report", "expected_failed"), [(True, {"request-b"}), (False, set())])
+def test_execute_bucket_uses_selected_pcp_endpoint_and_addresses() -> None:
+    thread = make_thread(engine=MagicMock())
+    remote = make_pp_metadata(
+        pcp_tp_base_addrs={0: {0: [[5000]]}, 1: {0: [[7000]]}},
+    )
+    entries = {0: {(0, 0): [("request", [1], [2])]}}
+    thread.engine.batch_transfer_sync_read.return_value = 0
+
+    thread._execute_tp_transfer_bucket(0, 1, 0, 2, 1, 1, remote, entries)
+
+    thread.engine.batch_transfer_sync_read.assert_called_once_with(
+        "10.1.0.1:9100",
+        [1128],
+        [7256],
+        [128],
+    )
+
+
+@pytest.mark.parametrize("can_report", [True, False])
+@pytest.mark.parametrize("submission_error", [False, True])
 def test_handle_requests_attributes_failed_tp_to_affected_requests(
     can_report: bool,
-    expected_failed: set[str],
+    submission_error: bool,
 ) -> None:
     thread = make_thread(can_report_invalid_block_ids=can_report)
     remote_pp = make_pp_metadata(tp_base_addrs={0: [[5000]], 1: [[6000]]})
@@ -618,14 +1106,23 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     thread._build_transfer_block_buckets = MagicMock(  # type: ignore[method-assign]
         return_value=(
             {
-                0: {0: {(0, 0): [("request-a", [1], [2])]}},
-                1: {0: {(0, 0): [("request-b", [3], [4])]}},
+                (0, 0): {0: {(0, 0): [("request-a", [1], [2])]}},
+                (0, 1): {0: {(0, 0): [("request-b", [3], [4])]}},
             },
-            {0: {"request-a"}, 1: {"request-b"}},
+            {(0, 0): {"request-a"}, (0, 1): {"request-b"}},
         )
     )
 
-    def submit(_func: object, _pp: int, tp_rank: int, *_args: object) -> Future[None]:
+    completed_future: Future[None] = Future()
+    completed_future.set_result(None)
+    completed_result = MagicMock(wraps=completed_future.result)
+    completed_future.result = completed_result  # type: ignore[method-assign]
+
+    def submit(_func: object, _pp: int, _pcp: int, tp_rank: int, *_args: object) -> Future[None]:
+        if tp_rank == 0:
+            return completed_future
+        if submission_error:
+            raise RuntimeError("submit failed")
         future: Future[None] = Future()
         if tp_rank == 1:
             future.set_exception(RuntimeError("remote TP failed"))
@@ -637,7 +1134,12 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     thread.executor.submit.side_effect = submit
     requests = {"request-a": make_req_meta(), "request-b": make_req_meta()}
 
-    assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests) == expected_failed
+    if submission_error:
+        with pytest.raises(RuntimeError, match="submit failed"):
+            thread._handle_requests("engine-p", "10.0.0.1", 6000, requests)
+    else:
+        assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests) == {"request-b"}
+    completed_result.assert_called_once_with()
 
 
 def test_connector_worker_groups_start_load_by_remote_engine() -> None:
@@ -661,12 +1163,19 @@ def test_connector_worker_groups_start_load_by_remote_engine() -> None:
 
 def test_connector_worker_exposes_finished_and_invalid_blocks() -> None:
     worker = MooncakePullConnectorWorker.__new__(MooncakePullConnectorWorker)
-    worker._recving_thread = MagicMock()
-    worker._recving_thread.get_and_clear_finished_requests.return_value = {"request"}
-    worker._recving_thread.get_and_clear_invalid_block_ids.return_value = {10, 11}
+    worker._recving_thread = make_thread()
+    worker._recving_thread.finished_requests.put(("request", True))
+    worker._recving_thread.invalid_block_ids = {10, 11}
 
-    assert worker.get_finished() == (set(), {"request"})
+    assert worker.get_transfer_results() == KVConnectorTransferResults(
+        finished_recving={"request"}, failed_recving={"request"}
+    )
+    assert worker.get_transfer_results() == KVConnectorTransferResults()
     assert worker.get_block_ids_with_load_errors() == {10, 11}
+    worker._recving_thread.finished_requests.put(("legacy", False))
+    assert worker.get_finished() == (set(), {"legacy"})
+    worker._recving_thread = None
+    assert worker.get_transfer_results() == KVConnectorTransferResults()
 
 
 class _StopWorkerLoop(BaseException):
@@ -750,12 +1259,22 @@ def test_get_remote_metadata_rejects_empty_response(monkeypatch: pytest.MonkeyPa
     ("metadata", "expected_error"),
     [
         (replace(make_metadata_groups(), engine_id="wrong"), "engine ID mismatch"),
-        (replace(make_metadata_groups(), pcp_size=2), "requires remote pcp_size=1"),
+        (replace(make_metadata_groups(), pcp_size=2), "incomplete PCP ranks"),
         (replace(make_metadata_groups(), metadata_by_pp_rank={}), "no PP metadata"),
         (
             replace(
                 make_metadata_groups(),
-                metadata_by_pp_rank={0: replace(make_pp_metadata(), metadata_by_tp_rank={})},
+                metadata_by_pp_rank={
+                    0: replace(
+                        make_pp_metadata(),
+                        metadata_by_pcp_rank={
+                            0: replace(
+                                make_pp_metadata().metadata_by_pcp_rank[0],
+                                metadata_by_tp_rank={},
+                            )
+                        },
+                    )
+                },
             ),
             "no TP metadata",
         ),
@@ -775,10 +1294,14 @@ def test_validate_remote_metadata_rejects_invalid_topology(
         MooncakePullRecvingThread._validate_remote_metadata(metadata, "engine-p")
 
 
+@pytest.mark.parametrize("can_report", [True, False])
+@pytest.mark.parametrize("batch_error", [False, True])
 def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     monkeypatch: pytest.MonkeyPatch,
+    can_report: bool,
+    batch_error: bool,
 ) -> None:
-    thread = make_thread(device=0, ready_event=threading.Event())
+    thread = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
     requests = {
         "request-a": make_req_meta(local=([10],)),
         "request-b": make_req_meta(local=([20],)),
@@ -786,7 +1309,10 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     request_queue = MagicMock()
     request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
     thread.request_queue = request_queue
-    thread._handle_requests = MagicMock(return_value={"request-b"})  # type: ignore[method-assign]
+    thread._handle_requests = MagicMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("metadata unavailable") if batch_error else None,
+        return_value={"request-b"},
+    )
     set_device = MagicMock()
     monkeypatch.setattr(torch.npu, "set_device", set_device)
 
@@ -795,8 +1321,12 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
 
     set_device.assert_called_once_with(0)
     assert thread.ready_event.is_set()
-    assert thread.invalid_block_ids == {20}
-    assert thread.get_and_clear_finished_requests() == {"request-a", "request-b"}
+    expected_failed = set(requests) if batch_error else {"request-b"}
+    assert thread.invalid_block_ids == (({10, 20} if batch_error else {20}) if can_report else set())
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+        finished_recving=set(requests), failed_recving=expected_failed
+    )
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults()
     request_queue.task_done.assert_called_once_with()
 
 
@@ -820,6 +1350,8 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     thread._append_spec_transfer_addresses(
         0,
         0,
+        0,
+        1,
         1,
         1,
         {(0, 0): [("request", [1, 2], [3, 4])]},
@@ -832,6 +1364,65 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     assert src == [1256, 1512]
     assert dst == [6536, 7048]
     assert lengths == [128, 128]
+
+
+@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
+def test_circular_address_generation_transfers_whole_page_with_independent_stride(spec: KVCacheSpec) -> None:
+    thread = make_thread(
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000]],
+        block_strides=[[256]],
+        block_lens=[[128]],
+    )
+    remote = make_pp_metadata(
+        block_strides=[[512]],
+        block_lens=[[128]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    thread._append_spec_transfer_addresses(
+        0,
+        0,
+        0,
+        1,
+        1,
+        4,
+        {(0, 0): [("request", [1], [3])]},
+        remote,
+        src,
+        dst,
+        lengths,
+    )
+
+    assert src == [1256]
+    assert dst == [6536]
+    assert lengths == [128]
+
+
+@pytest.mark.parametrize("local_shape,remote_shape", [((9, 256), (2, 9, 128)), ((2, 9, 128), (9, 256))])
+def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remote_shape) -> None:
+    thread = make_thread(
+        kv_cache_specs=[make_kpool_tail_spec()],
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[local_shape]],
+        block_strides=[[9216]],
+        block_lens=[[9216]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[remote_shape]],
+        block_strides=[[9216]],
+        block_lens=[[9216]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src, dst, lengths = list[int](), list[int](), list[int]()
+    with pytest.raises(ValueError, match="circular cache layout mismatch"):
+        thread._append_spec_transfer_addresses(
+            0, 0, 0, 1, 1, 4, {(0, 0): [("request", [1], [3])]}, remote, src, dst, lengths
+        )
+    assert not src and not dst and not lengths
 
 
 def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
@@ -865,6 +1456,8 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
         thread._append_spec_transfer_addresses(
             0,
             0,
+            0,
+            1,
             1,
             1,
             {(0, 0): transfer_entries, (1, 1): transfer_entries},
@@ -882,7 +1475,8 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
     assert lengths == [256, 128, 128, 256, 128, 128]
 
 
-def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
+@pytest.mark.parametrize("remote_pcp", [False, True])
+def test_mamba_unequal_tp_slices_conv_projections_and_state(remote_pcp: bool) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
@@ -899,7 +1493,11 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
         block_shapes=[[(3, 8), (1, 4, 4)]],
         block_strides=[[48, 32]],
         block_lens=[[48, 32]],
-        tp_base_addrs={0: [[5000, 6000]], 1: [[7000, 8000]]},
+        pcp_tp_base_addrs=(
+            {0: {0: [[5000, 6000]]}, 1: {0: [[7000, 8000]]}}
+            if remote_pcp
+            else {0: {0: [[5000, 6000]], 1: [[7000, 8000]]}}
+        ),
     )
     src: list[int] = []
     dst: list[int] = []
@@ -907,8 +1505,9 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
 
     thread._append_mamba_transfer_addresses(
         spec,  # type: ignore[arg-type]
-        remote_tp_rank=1,
-        remote_tp_size=2,
+        remote_pcp_rank=1 if remote_pcp else 0,
+        remote_tp_rank=0 if remote_pcp else 1,
+        remote_tp_size=1 if remote_pcp else 2,
         transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
         remote_metadata=remote,
         src_list=src,
@@ -1083,14 +1682,17 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         assert worker._recving_thread is None
 
 
-def test_mamba_unequal_tp_slices_into_wider_remote_cache() -> None:
+@pytest.mark.parametrize("local_pcp", [False, True])
+def test_mamba_unequal_tp_slices_into_wider_remote_cache(local_pcp: bool) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
     )
     thread = make_thread(
-        tp_size=2,
-        tp_rank=1,
+        tp_size=1 if local_pcp else 2,
+        tp_rank=0 if local_pcp else 1,
+        pcp_size=2 if local_pcp else 1,
+        pcp_rank=1 if local_pcp else 0,
         kv_caches_base_addr=[[1000, 2000]],
         block_shapes=[[(3, 8), (1, 4, 4)]],
         block_strides=[[48, 32]],
@@ -1108,6 +1710,7 @@ def test_mamba_unequal_tp_slices_into_wider_remote_cache() -> None:
 
     thread._append_mamba_transfer_addresses(
         spec,  # type: ignore[arg-type]
+        remote_pcp_rank=0,
         remote_tp_rank=0,
         remote_tp_size=1,
         transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
@@ -1157,12 +1760,32 @@ def test_infer_total_kv_heads_across_tp_and_dcp_strategies(
         thread._infer_total_num_kv_heads(
             local_num_kv_heads=local_heads,
             remote_num_kv_heads=remote_heads,
+            local_pcp_size=1,
+            remote_pcp_size=1,
             remote_tp_size=remote_tp_size,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             fixed_total_num_kv_heads=fixed_heads,
         )
         == expected_heads
+    )
+
+
+def test_infer_total_kv_heads_keeps_tp_replicas_when_dcp_spans_only_pcp() -> None:
+    thread = make_thread(tp_size=8, pcp_size=2, dcp_size=2)
+
+    assert (
+        thread._infer_total_num_kv_heads(
+            local_num_kv_heads=1,
+            remote_num_kv_heads=2,
+            local_pcp_size=2,
+            remote_pcp_size=2,
+            remote_tp_size=2,
+            local_dcp_size=2,
+            remote_dcp_size=1,
+            fixed_total_num_kv_heads=None,
+        )
+        == 4
     )
 
 
@@ -1173,6 +1796,8 @@ def test_infer_total_kv_heads_rejects_inconsistent_topology() -> None:
         thread._infer_total_num_kv_heads(
             local_num_kv_heads=2,
             remote_num_kv_heads=2,
+            local_pcp_size=1,
+            remote_pcp_size=1,
             remote_tp_size=8,
             local_dcp_size=1,
             remote_dcp_size=1,
@@ -1215,6 +1840,7 @@ def test_attention_remote_tp_rank_groups_cover_tp_and_dcp_matrix(
     assert (
         thread._get_attention_remote_tp_rank_groups(
             remote_tp_size=remote_tp_size,
+            remote_pcp_size=1,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             total_num_kv_heads=total_heads,
@@ -1232,13 +1858,13 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
     )
     full_remote = make_pp_metadata(block_shapes=[[(1, 16, 4)]])
     assert full_thread._get_layer_remote_tp_rank_groups(
-        0, 0, make_full_spec(), full_remote, remote_tp_size=8, remote_dcp_size=2
+        0, 0, make_full_spec(), full_remote, remote_pcp_size=1, remote_tp_size=8, remote_dcp_size=2
     ) == [[4, 5]]
 
     mla_thread = make_thread(tp_size=4, tp_rank=2, dcp_size=4)
     mla_spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
     assert mla_thread._get_layer_remote_tp_rank_groups(
-        0, 0, mla_spec, make_pp_metadata(), remote_tp_size=8, remote_dcp_size=8
+        0, 0, mla_spec, make_pp_metadata(), remote_pcp_size=1, remote_tp_size=8, remote_dcp_size=8
     ) == [list(range(8))]
 
     swa_thread = make_thread(
@@ -1249,8 +1875,20 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
     )
     swa_remote = make_pp_metadata(block_shapes=[[(1, 16, 4)]])
     assert swa_thread._get_layer_remote_tp_rank_groups(
-        0, 0, make_sliding_spec(), swa_remote, remote_tp_size=4, remote_dcp_size=4
+        0, 0, make_sliding_spec(), swa_remote, remote_pcp_size=1, remote_tp_size=4, remote_dcp_size=4
     ) == [[2]]
+
+    circular_thread = make_thread(tp_size=4, tp_rank=2, pcp_size=2, dcp_size=4)
+    for circular_spec in (make_circular_spec(), make_kpool_tail_spec()):
+        assert circular_thread._get_layer_remote_tp_rank_groups(
+            0,
+            0,
+            circular_spec,
+            make_pp_metadata(),
+            remote_pcp_size=2,
+            remote_tp_size=4,
+            remote_dcp_size=4,
+        ) == [list(range(8))]
 
 
 @pytest.mark.parametrize(
@@ -1411,3 +2049,61 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
     )
 
     assert result == expected
+
+
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
+@pytest.mark.parametrize("remote_pcp", [1, 2])
+def test_replicated_mamba_selects_one_complete_producer_replica(local_tp: int, remote_tp: int, remote_pcp: int) -> None:
+    spec = replace(make_mamba_spec(), tp_replicated=True)
+    thread = make_thread(tp_size=local_tp, tp_rank=local_tp - 1)
+    groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), remote_pcp, remote_tp, 1)
+    assert groups == [list(range(remote_pcp * remote_tp))]
+    transfers = thread._compute_group_block_ids(
+        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1
+    )
+    assert transfers == [(1, [2], [3])]
+
+
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
+@pytest.mark.parametrize("mismatch", [None, "shape", "length"])
+def test_replicated_short_conv_copies_complete_state_between_different_ranks(
+    local_tp: int, remote_tp: int, mismatch: str | None
+) -> None:
+    spec = replace(
+        make_mamba_spec(),
+        shapes=((3, 16),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        tp_replicated=True,
+    )
+    thread = make_thread(
+        tp_size=local_tp,
+        tp_rank=local_tp - 1,
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[(3, 16)]],
+        block_strides=[[128]],
+        block_lens=[[96]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(6, 8) if mismatch == "shape" else (3, 16)]],
+        block_strides=[[160]],
+        block_lens=[[94 if mismatch == "length" else 96]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    def append() -> None:
+        thread._append_mamba_transfer_addresses(
+            spec, 0, 0, remote_tp, {(0, 0): [("request", [1], [2])]}, remote, src, dst, lengths
+        )
+
+    if mismatch is not None:
+        with pytest.raises(ValueError, match="replicated Mamba metadata mismatch"):
+            append()
+    else:
+        append()
+        assert src == [1128]
+        assert dst == [5320]
+        assert lengths == [96]

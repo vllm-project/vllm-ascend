@@ -89,8 +89,9 @@ public:
         int64_t rmsGmBaseOffset = 0;
         if ASCEND_IS_AIV {
             int64_t aivCurBlockIdx = GetBlockIdx();
-            xGmBaseOffset = ((aivCurBlockIdx / 2) / tilingData->cubeBlockDimK) * singleCoreMaxRound * tilingData->mL1Size * tilingData->hcMult * tilingData->d +
-                ((aivCurBlockIdx / 2) % tilingData->cubeBlockDimK) * tilingData->multCoreSplitKSize;
+            xGmBaseOffset = ((aivCurBlockIdx / 2) / tilingData->cubeBlockDimK) * singleCoreMaxRound *
+                            tilingData->mL1Size * tilingData->hcMult * tilingData->d +
+                            ((aivCurBlockIdx / 2) % tilingData->cubeBlockDimK) * tilingData->multCoreSplitKSize;
             rmsGmBaseOffset = ((aivCurBlockIdx / 2) / tilingData->cubeBlockDimK) * singleCoreMaxRound * tilingData->mL1Size;
         }
 
@@ -131,16 +132,20 @@ public:
                     if ASCEND_IS_AIC {
                         bool isFirstKL1 = kGmOffset == kGmStartOffset;
                         bool isLastKL1 = (kGmOffset + tilingData->kL1Size) >= kGmEndOffset;
-                        mmService_.CopyInB1Nd2Nz(tilingData->hcMult * tilingData->d, kL1RealSize,
-                                                tilingData->hcMix, hcFnGm[kGmOffset + kBlkDimIdx * tilingData->multCoreSplitKSize],
-                                                wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
+                        mmService_.CopyInB1Nd2Nz(
+                            tilingData->hcMult * tilingData->d, kL1RealSize, tilingData->hcMix,
+                            hcFnGm[kGmOffset + kBlkDimIdx * tilingData->multCoreSplitKSize],
+                            wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
                         CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIV_AIC_FLAG + FLAG_ID_MAX);
                         CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIV_AIC_FLAG);
                         uint64_t mL1AlignSize = Align(mL1RealSize, AscendC::BLOCK_CUBE);
                         uint64_t nL1AlignSize = Align((uint64_t)tilingData->hcMix, AscendC::BLOCK_CUBE);
 
-                        mmService_.Process(tilingData->bs, tilingData->hcMix, mL1RealSize, (256 / AscendC::Std::max(mL1AlignSize, nL1AlignSize)) * 32,
-                                        isFirstKL1, isLastKL1, xL1_[aL1BufferID_ * L1_BUF_OFFSET], wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
+                        mmService_.Process(
+                            tilingData->bs, tilingData->hcMix, mL1RealSize,
+                            (256 / AscendC::Std::max(mL1AlignSize, nL1AlignSize)) * 32,
+                            isFirstKL1, isLastKL1, xL1_[aL1BufferID_ * L1_BUF_OFFSET],
+                            wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
                         if (isLastKL1) {
                             mmService_.CopyOut(mmGm[mBlkDimIdx * tilingData->mL1Size * singleCoreMaxRound * tilingData->hcMix + kBlkDimIdx * tilingData->bs * tilingData->hcMix + roundIdx * tilingData->mL1Size]);
                         }
@@ -212,6 +217,14 @@ public:
                 WaitFlag<HardEvent::MTE3_V>(static_cast<event_t>(1));
             }
         }
+        if ASCEND_IS_AIV {
+            // Drain the two double-buffer credits seeded by the paired AIC.
+            CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
+            CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
+        }
+        if ASCEND_IS_AIC {
+            mmService_.End();
+        }
         SyncAll<false>();
     }
 
@@ -257,7 +270,7 @@ public:
 
     __aicore__ inline void Init(
         GM_ADDR x, GM_ADDR hcScale, GM_ADDR hcBase, GM_ADDR y, GM_ADDR post,
-        GM_ADDR combFrag, GM_ADDR workspace, const HcPreTilingData* tilingDataPtr, TPipe* pipePtr)
+        GM_ADDR combFrag, GM_ADDR pre, GM_ADDR workspace, const HcPreTilingData* tilingDataPtr, TPipe* pipePtr)
     {
         pipe = pipePtr;
         tilingData = tilingDataPtr;
@@ -268,16 +281,28 @@ public:
         yGm.SetGlobalBuffer((__gm__ T*)y);
         postGm.SetGlobalBuffer((__gm__ float*)post);
         combFragGm.SetGlobalBuffer((__gm__ float*)combFrag);
+        hasPreOut_ = (pre != nullptr);
+        if (hasPreOut_) {
+            preGm.SetGlobalBuffer((__gm__ float*)pre);
+        }
+        ubRowGapBlocks_ = UbRowGapBlocks(tilingData->hcMult, tilingData->hcMix);
         mmGm.SetGlobalBuffer((__gm__ float*)workspace);
         rmsGm.SetGlobalBuffer((__gm__ float*)workspace + tilingData->kBlockFactor * tilingData->bs * tilingData->hcMix);
-
 
         // InQue
         pipe->InitBuffer(
             xQue, 2, tilingData->stage2RowFactor * tilingData->hcMult * RoundUp<T>(tilingData->dFactor) * sizeof(T));
-        int64_t rmsAndmmQueSize = tilingData->kBlockFactor * RoundUp<float>(tilingData->stage2RowFactor) * sizeof(float) +
-                                  tilingData->kBlockFactor * tilingData->stage2RowFactor * RoundUp<float>(tilingData->hcMix) * sizeof(float);
+        int64_t rmsAndmmQueSize = tilingData->kBlockFactor * RoundUp<float>(tilingData->stage2RowFactor) *
+                                  sizeof(float) + tilingData->kBlockFactor * tilingData->stage2RowFactor *
+                                  RoundUp<float>(tilingData->hcMix) * sizeof(float);
         pipe->InitBuffer(rmsAndmmQue, 2, rmsAndmmQueSize);
+
+        // 可选输出pre使用独立UB空间（hcMultAlign行距紧凑布局），TQue double buffer
+        // 管理V->MTE3同步，MTE3搬出与下一轮V计算重叠；未请求输出时跳过分配
+        if (hasPreOut_) {
+            pipe->InitBuffer(preQue, DOUBLE_BUFFER,
+                             tilingData->stage2RowFactor * tilingData->hcMultAlign * sizeof(float));
+        }
 
         // OutQue
         pipe->InitBuffer(
@@ -339,6 +364,19 @@ public:
                 VFProcessPre(
                     mixesLocal, mixesLocal, hcBase0Local, hcScaleGm.GetValue(0), tilingData->hcEps,
                     curRowFactor, tilingData->hcMult, tilingData->hcMix);
+                if (hasPreOut_) {
+                    // pre与post同为[bs, hcMult]，复用post的GM偏移；先将mixesLocal行首的hcMult个
+                    // 元素按hcMixAlign行距聚拢到preLocal(hcMultAlign行距)，再经TQue异步搬出
+                    preLocal = preQue.AllocTensor<float>();
+                    CopyOut(mixesLocal, preLocal, curRowFactor, tilingData->hcMult, 0, ubRowGapBlocks_);
+                    preQue.EnQue(preLocal);
+                    preLocal = preQue.DeQue<float>();
+                    CopyOut(preLocal,
+                            preGm[curBlockIdx * tilingData->rowOfFormerBlock * tilingData->hcMult +
+                                    rowOuterIdx * tilingData->stage2RowFactor * tilingData->hcMult],
+                            curRowFactor, tilingData->hcMult);
+                    preQue.FreeTensor(preLocal);
+                }
                 for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
                     int64_t curDFactor =
                         (dLoopIdx == tilingData->dLoop - 1) ? tilingData->tailDFactor : tilingData->dFactor;
@@ -351,14 +389,14 @@ public:
                     xLocal = xQue.template DeQue<T>();
 
                     yLocal = yQue.template AllocTensor<T>();
-                    VFProcessY(yLocal, mixesLocal, xLocal, curRowFactor, tilingData->hcMult, curDFactor, tilingData->hcMix);
+                    VFProcessY(yLocal, mixesLocal, xLocal, curRowFactor, tilingData->hcMult,
+                               curDFactor, tilingData->hcMix);
                     xQue.template FreeTensor(xLocal);
                     yQue.template EnQue(yLocal);
                     yLocal = yQue.template DeQue<T>();
                     CopyOut(yLocal, yGm[curBlockIdx * tilingData->rowOfFormerBlock * tilingData->d + rowOuterIdx * tilingData->stage2RowFactor * tilingData->d + dLoopIdx * tilingData->dFactor], curRowFactor, curDFactor, tilingData->d - curDFactor);
                     yQue.template FreeTensor(yLocal);
                 }
-
                 // post
                 postLocal = postQue.AllocTensor<float>();
                 VFProcessPost(
@@ -397,12 +435,14 @@ private:
     GlobalTensor<T> yGm;
     GlobalTensor<float> postGm;
     GlobalTensor<float> combFragGm;
+    GlobalTensor<float> preGm;
 
     GlobalTensor<float> mmGm;
     GlobalTensor<float> rmsGm;
 
     TQue<QuePosition::VECIN, 1> rmsAndmmQue;
     TQue<QuePosition::VECIN, 1> xQue;
+    TQue<QuePosition::VECOUT, 1> preQue;
 
     TQue<QuePosition::VECOUT, 1> yQue;
     TQue<QuePosition::VECOUT, 1> postQue;
@@ -422,6 +462,9 @@ private:
     LocalTensor<float> hcBase0Local;
     LocalTensor<float> hcBase1Local;
     LocalTensor<float> hcBase2Local;
+    LocalTensor<float> preLocal;
+    bool hasPreOut_ = false;
+    uint32_t ubRowGapBlocks_ = 0;
 };
 } // namespace HCPreSinkhorn
 

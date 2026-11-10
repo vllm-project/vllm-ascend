@@ -3,7 +3,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from itertools import compress
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -13,62 +14,14 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
-
-def make_layerwise_block_key(
-    model_name: str,
-    block_hash_or_tail: str,
-    head_or_tp_rank: int,
-) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
-    return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
-
-
-def is_block_key_layerwise(use_layerwise: bool, backend_name: str) -> bool:
-    """Whether to use Mooncake's block-key range-session protocol.
-
-    Memcache also stores one object per block, but its layerwise path is
-    selected through the backend protocol registry and uses GVA allocation.
-    Keeping this flag Mooncake-specific prevents the two data planes from
-    being mixed after the generic layerwise refactor.
-    """
-    return use_layerwise and backend_name.lower() == "mooncake"
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
 
 
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
-
-
-def validate_mooncake_layerwise_topology(
-    parallel_config: Any,
-    backend_name: str,
-    use_layerwise: bool,
-) -> None:
-    """Reject coordinates omitted from the current Mooncake block key."""
-    if not use_layerwise or backend_name.lower() != "mooncake":
-        return
-
-    def parallel_size(name: str) -> int:
-        value = getattr(parallel_config, name, 1)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 1
-
-    topology_dimensions = (
-        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
-        (
-            "prefill_context_parallel_size",
-            parallel_size("prefill_context_parallel_size"),
-        ),
-        (
-            "decode_context_parallel_size",
-            parallel_size("decode_context_parallel_size"),
-        ),
-    )
-    unsupported = [f"{name}={size}" for name, size in topology_dimensions if size > 1]
-    if unsupported:
-        raise ValueError(
-            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
-        )
 
 
 @dataclass(frozen=True)
@@ -87,6 +40,43 @@ def _as_positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def infer_dcp_mismatch_info(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_dcp_size: int | object,
+    local_pcp_size: int | object = 1,
+) -> bool:
+    """Whether the peer P/D stage disagrees with this stage on CP layout.
+
+    Both the layerwise GVA shard stride and the per-shard save-leader rule
+    derive from the local dcp size/rank. In PD-disaggregation the producer
+    and consumer are separate worker groups, so when they are started with
+    unequal decode-context-parallel sizes they compute different shard
+    layouts for the SAME pool region and silently corrupt the KV pool.
+
+    The peer topology is carried through the flat peer keys used by the
+    store connector path (``prefill_dcp_size`` / ``decode_dcp_size``),
+    mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
+    convention. When the key is absent the single-group path is assumed and
+    the local layout is authoritative.
+    """
+    local_dcp_size = _as_positive_int(local_dcp_size, 1)
+    local_pcp_size = _as_positive_int(local_pcp_size, 1)
+    if not isinstance(extra_config, Mapping):
+        return False
+    if kv_role == "kv_consumer":
+        peer_dcp_key = "prefill_dcp_size"
+        peer_pcp_key = "prefill_pcp_size"
+    elif kv_role == "kv_producer":
+        peer_dcp_key = "decode_dcp_size"
+        peer_pcp_key = "decode_pcp_size"
+    else:
+        return False
+    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
+    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
+    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
 
 
 def infer_tp_mismatch_info(
@@ -178,6 +168,8 @@ class PoolKey:
 
     def split_layers(self, num_layers: int, layer_offset: int = 0) -> list[LayerPoolKey]:
         """Split the key into multiple keys for each layer"""
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
+
         keys = []
         for layer_id in range(layer_offset, layer_offset + num_layers):
             keys.append(
@@ -188,39 +180,6 @@ class PoolKey:
                 )
             )
         return keys
-
-
-@dataclass(order=True)
-class LayerPoolKey(PoolKey):
-    """A key for the layer cache engine"""
-
-    layer_id: int
-
-    def __hash__(self):
-        return hash(
-            (
-                self.key_metadata.model_name,
-                self.key_metadata.head_or_tp_rank,
-                self.key_metadata.dcp_rank,
-                self.key_metadata.kv_cache_group_id,
-                self.key_metadata.cache_role,
-                self.key_metadata.cache_family,
-                self.chunk_hash,
-                self.layer_id,
-            )
-        )
-
-    def to_string(self):
-        return (
-            f"{self.key_metadata.model_name}"
-            f"@dcp:{self.key_metadata.dcp_rank}"
-            f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
-            f"@group:{self.key_metadata.kv_cache_group_id}"
-            f"@cache_role:{self.key_metadata.cache_role}"
-            f"@cache_family:{self.key_metadata.cache_family}"
-            f"@layer_id:{self.layer_id}"
-            f"@{self.chunk_hash}"
-        )
 
 
 def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
@@ -318,6 +277,14 @@ def infer_group_block_sizes(
     return block_sizes
 
 
+def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
+    if not kv_cache_groups:
+        return [0]
+    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
+    return group_ids
+
+
 def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
     return group_block_sizes[group_id] if group_id < len(group_block_sizes) else group_block_sizes[0]
 
@@ -351,6 +318,9 @@ class ChunkedTokenDatabase:
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
+        # Per descriptor: physical-block index and count within a logical block.
+        # Compact contiguous descriptors cover the whole block as (0, 1).
+        self.group_cache_entry_segments: dict[int, list[tuple[int, int]]] = {}
         self.group_cache_families: dict[str, dict[int, str]] = {
             "kv": {},
             "state": {},
@@ -457,6 +427,7 @@ class ChunkedTokenDatabase:
         group_cache_families: dict[int, str] | None = None,
         group_num_layers: dict[int, int] | None = None,
         group_layer_cache_entry_offsets: dict[int, list[int]] | None = None,
+        group_cache_entry_segments: dict[int, list[tuple[int, int]]] | None = None,
     ) -> None:
         if cache_role == "state":
             # Keep the interface for future explicit state groups, but this
@@ -467,6 +438,7 @@ class ChunkedTokenDatabase:
             self.group_block_len = group_block_len
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
+            self.group_cache_entry_segments = group_cache_entry_segments or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -505,13 +477,25 @@ class ChunkedTokenDatabase:
         length = len(group_block_len)
         if length == 0:
             return addr_list, size_list, block_id
+        segments = self.group_cache_entry_segments.get(kv_cache_group_id)
+        block_start = start // group_block_size * group_block_size
+        start_in_block = start - block_start
+        end_in_block = end - block_start
         for index, base_addr in enumerate(group_addrs):
+            segment_index, segment_count = segments[index] if segments else (0, 1)
+            segment_tokens = group_block_size // segment_count
+            segment_start = segment_index * segment_tokens
+            copy_start = max(start_in_block, segment_start)
+            copy_end = min(end_in_block, segment_start + segment_tokens)
+            if copy_start >= copy_end:
+                continue
             block_len = group_block_len[index % length]
             block_stride = group_block_stride[index % length] if group_block_stride else block_len
-            addr = base_addr + block_id * block_stride
-            size = int(block_len / group_block_size * (end - start))
+            byte_start = block_len * (copy_start - segment_start) // segment_tokens
+            byte_end = block_len * (copy_end - segment_start) // segment_tokens
+            addr = base_addr + block_id * block_stride + byte_start
             addr_list.append(addr)
-            size_list.append(size)
+            size_list.append(byte_end - byte_start)
         return addr_list, size_list, block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
@@ -524,17 +508,32 @@ class ChunkedTokenDatabase:
         size_list: list[int] = []
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
         num_layers = self.group_num_layers.get("kv", {}).get(0, 1)
-        entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
-        if layer_id >= num_layers or entries_per_layer == 0:
+        if layer_id < 0 or layer_id >= num_layers:
             return [], [], 0
-        start_idx = layer_id * entries_per_layer
-        for i in range(entries_per_layer):
-            idx = start_idx + i
+        layer_offsets = self.group_layer_cache_entry_offsets.get(0)
+        if layer_offsets is None:
+            entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
+            start_idx = layer_id * entries_per_layer
+            end_idx = start_idx + entries_per_layer
+        else:
+            start_idx, end_idx = layer_offsets[layer_id : layer_id + 2]
+        segments = self.group_cache_entry_segments.get(0)
+        start_in_block = start - block_idx * group_block_size
+        end_in_block = end - block_idx * group_block_size
+        for idx in range(start_idx, end_idx):
+            segment_index, segment_count = segments[idx] if segments else (0, 1)
+            segment_tokens = group_block_size // segment_count
+            segment_start = segment_index * segment_tokens
+            copy_start = max(start_in_block, segment_start)
+            copy_end = min(end_in_block, segment_start + segment_tokens)
+            if copy_start >= copy_end:
+                continue
             block_stride = group_block_stride[idx] if group_block_stride else group_block_len[idx]
-            addr = group_addrs[idx] + block_id * block_stride
-            size = int(group_block_len[idx] / group_block_size * (end - start))
+            byte_start = group_block_len[idx] * (copy_start - segment_start) // segment_tokens
+            byte_end = group_block_len[idx] * (copy_end - segment_start) // segment_tokens
+            addr = group_addrs[idx] + block_id * block_stride + byte_start
             addr_list.append(addr)
-            size_list.append(size)
+            size_list.append(byte_end - byte_start)
         return addr_list, size_list, block_id
 
     def _iter_token_chunks(
@@ -550,7 +549,12 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
+        # Private circular state has no prefix key, even when its block size
+        # happens to be divisible by the request's hashing unit.
+        if self.cache_coordinator is not None and kv_cache_group_id not in self.cache_coordinator.cacheable_group_ids:
+            return
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
@@ -559,13 +563,17 @@ class ChunkedTokenDatabase:
             return
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
+        first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
+        chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
+        if chunk_mask is not None:
+            # Unlike transfer-range masks, a short lookup/store mask excludes
+            # chunks beyond its end. compress stops at the shorter iterator.
+            chunk_ids = compress(chunk_ids, chunk_mask[first_chunk:num_logical_blocks])
         candidate_index = 0
 
-        for chunk_id in range(num_logical_blocks):
+        for chunk_id in chunk_ids:
             start_idx = chunk_id * logical_block_size
             end_idx = min(start_idx + logical_block_size, token_len)
-            if start_idx < mask_num:
-                continue
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
@@ -625,6 +633,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         chunk_filter: Callable[[int], bool] | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -634,6 +643,7 @@ class ChunkedTokenDatabase:
             mask_num,
             kv_cache_group_id,
             chunk_filter=chunk_filter,
+            chunk_mask=chunk_mask,
         ):
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val
 
@@ -648,6 +658,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -661,6 +672,7 @@ class ChunkedTokenDatabase:
             chunk_filter=chunk_filter,
             shard_rank=shard_rank,
             shard_size=shard_size,
+            chunk_mask=chunk_mask,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
@@ -715,55 +727,6 @@ def get_block_hashes(
     return _LazyGroupedBlockHashList(block_hashes, group_block_size // hash_block_size)
 
 
-def get_partial_block_index(
-    token_count: int,
-    block_size: int,
-    hash_count: int,
-    enabled: bool,
-) -> int | None:
-    """Index of the trailing partial block to transfer, if any.
-
-    Returns None when disabled, when the request carries no tokens, or when
-    the token count aligns exactly with completed hash blocks.
-    """
-    if not enabled or token_count <= 0:
-        return None
-    full_blocks, remainder = divmod(token_count, block_size)
-    if remainder:
-        return full_blocks
-    if full_blocks > hash_count:
-        return full_blocks - 1
-    return None
-
-
-def masked_block_runs(
-    mask: Sequence[bool] | None,
-    start_block: int,
-    end_block: int,
-) -> list[tuple[int, int]]:
-    """Split [start_block, end_block) into maximal runs of mask-allowed blocks.
-
-    A None mask (or blocks at or beyond the mask length) disables filtering,
-    so callers never transfer fewer blocks than the mask actually covers.
-    """
-    if end_block <= start_block:
-        return []
-    if mask is None:
-        return [(start_block, end_block)]
-    runs: list[tuple[int, int]] = []
-    run_start: int | None = None
-    for block_idx in range(start_block, end_block):
-        allowed = block_idx >= len(mask) or mask[block_idx]
-        if allowed and run_start is None:
-            run_start = block_idx
-        elif not allowed and run_start is not None:
-            runs.append((run_start, block_idx))
-            run_start = None
-    if run_start is not None:
-        runs.append((run_start, end_block))
-    return runs
-
-
 class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
     def __init__(self, block_hashes: Sequence[BlockHash | str], scale_factor: int) -> None:
         self._block_hashes = block_hashes
@@ -815,6 +778,15 @@ class LoadSpec:
 
     token_len: int = 0
 
+    # Exact request-scoped snapshot identity, separate from the logical length
+    # which can roll back after speculative-token rejection.
+    layerwise_snapshot_end_token: int | None = None
+    layerwise_snapshot_block_index: int | None = None
+    # Distinguish the preceding step of this request from external prefix hits.
+    layerwise_previous_step: bool = False
+    # First block stored under request-scoped keys, including unhashed full blocks.
+    layerwise_snapshot_start_block: int | None = None
+
 
 @dataclass(init=False)
 class RequestTracker:
@@ -836,15 +808,23 @@ class RequestTracker:
 
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
+
+    # End of the range being (re)prefilled. For a resumed request this also
+    # includes previously generated tokens, so decode-only offload does not
+    # publish intermediate recomputation state.
+    prefill_end_tokens: int | None = None
     block_gvas: list[int] = field(default_factory=list)
     block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
-    mamba_group_ids: list[int] | None = None
+    # Identity of the latest request-scoped layerwise partial snapshot.
+    last_layerwise_snapshot_end_token: int | None = None
+    last_layerwise_snapshot_block_index: int | None = None
+    last_layerwise_snapshot_start_block: int | None = None
 
-    # spec blocks for mamba cache group
-    num_speculative_blocks: int = 0
+    # Number of speculative scratch blocks for each Mamba cache group.
+    num_speculative_blocks_by_group: dict[int, int] | None = None
 
     block_sizes: list[int] | None = None
 
@@ -857,18 +837,20 @@ class RequestTracker:
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
+        prefill_end_tokens: int | None = None,
         block_gvas: list[int] | None = None,
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
-        mamba_group_ids: list[int] | None = None,
-        num_speculative_blocks: int = 0,
+        num_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
+        last_layerwise_snapshot_end_token: int | None = None,
+        last_layerwise_snapshot_block_index: int | None = None,
+        last_layerwise_snapshot_start_block: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
-        self.mamba_group_ids = mamba_group_ids
-        self.num_speculative_blocks = num_speculative_blocks
+        self.num_speculative_blocks_by_group = num_speculative_blocks_by_group
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -876,11 +858,15 @@ class RequestTracker:
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
+        self.prefill_end_tokens = prefill_end_tokens
         self.block_gvas = [] if block_gvas is None else block_gvas
         self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
+        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
+        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
+        self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -914,24 +900,27 @@ class RequestTracker:
         so, if a speculative block is moved to last position and replaced with null block,
         we also need to update the previous allocated_block_ids to 0.
         """
-        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids:
+        if (
+            self.num_speculative_blocks_by_group is not None
+            and (num_speculative_blocks := self.num_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
+        ):
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (
-                max(num_computed_tokens - self.num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
+                max(num_computed_tokens - num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
             )
             num_skipped_blocks = min(len(self.allocated_block_ids_by_group[kv_cache_group_id]), num_skipped_blocks)
             if num_skipped_blocks > 0:
                 self.allocated_block_ids_by_group[kv_cache_group_id][:num_skipped_blocks] = [0] * num_skipped_blocks
-            if not block_ids or self.num_speculative_blocks <= 0:
+            if not block_ids or num_speculative_blocks <= 0:
                 return
-            mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
+            mask_spec_count = min(len(block_ids) - 1, num_speculative_blocks)
             group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
-            if mask_spec_count >= self.num_speculative_blocks:
-                group_block_ids[-self.num_speculative_blocks :] = [0] * self.num_speculative_blocks
+            if mask_spec_count >= num_speculative_blocks:
+                group_block_ids[-num_speculative_blocks:] = [0] * num_speculative_blocks
             else:
-                group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
-                    0
-                ] * mask_spec_count
+                group_block_ids[-num_speculative_blocks : mask_spec_count - num_speculative_blocks] = [0] * (
+                    mask_spec_count
+                )
 
 
 @dataclass(init=False)
@@ -966,6 +955,11 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
+    # Monotonic identity of one queued store operation. Unlike req_id, this
+    # value is never reused while the engine is alive, so an old asynchronous
+    # operation cannot update the save progress of a new request generation
+    # that happens to reuse the same req_id.
+    store_job_id: int | None = None
 
     def __init__(
         self,
@@ -984,6 +978,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
+        store_job_id: int | None = None,
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
@@ -1028,6 +1023,7 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
+        self.store_job_id = store_job_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np
@@ -1055,6 +1051,20 @@ class ReqMeta:
     @block_ids.setter
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
+
+    def get_event_token_ids(self, start: int, end: int) -> list[int] | None:
+        """Return token ids for an absolute request range.
+
+        Metadata carries only the newly savable suffix to avoid repeatedly
+        serializing the full request history during long decode sequences.
+        An empty list means this metadata does not cover the requested range.
+        """
+        if self.token_ids is None:
+            return None
+        token_ids_end = self.save_start_token + len(self.token_ids)
+        if start < self.save_start_token or end > token_ids_end:
+            return []
+        return self.token_ids[start - self.save_start_token : end - self.save_start_token]
 
     last_block_gva: int | None = None
     partial_block_index: int | None = None
@@ -1126,7 +1136,9 @@ class ReqMeta:
             and target_token_len % cache_transfer_granularity == 0
             and full_block_count > available_full_block_count
         )
-        if boundary_without_hash:
+        # Scheduled draft tokens can cross a page before that page has a
+        # committed request hash. Do not mark an unsent page as saved.
+        if full_block_count > available_full_block_count:
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
@@ -1138,7 +1150,7 @@ class ReqMeta:
             partial_block_index = None
 
         should_save_partial_block = save_partial_block and (
-            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
+            target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
         )
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
@@ -1157,10 +1169,24 @@ class ReqMeta:
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
             )
+            if should_save_partial_block:
+                tracker.last_layerwise_snapshot_end_token = target_token_len
+                tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
+                tracker.last_layerwise_snapshot_block_index = (
+                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
+                )
+            elif save_partial_block:
+                tracker.last_layerwise_snapshot_end_token = None
+                tracker.last_layerwise_snapshot_block_index = None
+                tracker.last_layerwise_snapshot_start_block = None
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # The worker consumes metadata asynchronously. Own a stable,
+            # bounded snapshot rather than sharing the scheduler's growing
+            # full-history list.
+            token_ids_end = target_token_len if should_save_partial_block else num_tokens_to_save
+            token_ids = tracker.token_ids[previous_saved_tokens:token_ids_end].copy()
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -1183,7 +1209,10 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            num_prompt_tokens=tracker.num_prompt_tokens or target_token_len,
+            # A resumed MRV2 request re-prefills prompt + previously generated
+            # tokens. Reachability masks must treat that complete range as the
+            # prefill boundary for this generation.
+            num_prompt_tokens=tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,
@@ -1205,140 +1234,14 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self,
         preempted_req_ids,
         loading_req_ids: set[str] | None = None,
-        delayed_free_req_ids: set[str] | None = None,
     ):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
-        self.delayed_free_req_ids = delayed_free_req_ids or set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
         self.requests.append(req_meta)
-
-
-@dataclass
-class LayerBatchReqMeta:
-    req_ids: list[str]
-    layer_id: int
-    is_last_chunks: list[bool | None] = field(default_factory=list)
-    addr_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    size_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    gvas_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    load_keys: list[str] = field(default_factory=list)
-
-
-@dataclass
-class LayerRangeReqMeta:
-    req_ids: list[str]
-    layer_id: int
-    block_ids: list[int]
-    keys: list[str]
-    all_buffers: list[list[int]]
-    all_sizes: list[list[int]]
-    all_offsets: list[list[int]]
-    load_keys: list[str] = field(default_factory=list)
-
-
-@dataclass
-class LayerBlockRange:
-    request: ReqMeta
-    start_block: int
-    end_block: int
-    partial_block_index: int | None = None
-
-
-@dataclass
-class SharedBlockData:
-    """Pre-computed block data shared across all layers for the same request."""
-
-    block_ids_arr: np.ndarray
-    block_gvas_arr: np.ndarray | None
-    req_ids: list[str]
-    is_last_chunks: list[bool | None]
-    block_keys: list[str] | None = None
-    save_keys: list[str] = field(default_factory=list)
-    load_keys: list[str] = field(default_factory=list)
-
-
-@dataclass
-class LayerTransferTask:
-    layer_id: int
-    block_ranges: list[LayerBlockRange]
-    shared_block_data: SharedBlockData | None = None
-    group_id: int = 0
-    layer_idx_in_group: int = 0
-    # Publish newly allocated GVA keys after this task completes the final
-    # actual layer copy for the batch.
-    write_finish_keys: list[str] = field(default_factory=list)
-    # Cache for KVCacheStoreKeyLayerSendingThread:
-    # maps block_range index -> list of (start, end, key_all_layers)
-    cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
-    # Mooncake uses one remote object per block/rank with per-layer ranges.
-    use_key_major_ranges: bool = False
-
-
-@dataclass
-class LayerLoadTask:
-    wait_for_save_layer: int | None
-    transfer_tasks: list[LayerTransferTask]
-    layer_id: int
-    attention_start_gate: AttentionComputeStartGate | None = None
-
-
-@dataclass(init=False)
-class LayerMultiBlockReqMeta:
-    req_id: str
-    keys: list[LayerPoolKey]
-    starts: list[int]
-    ends: list[int]
-    block_ids_by_group: list[list[int]]
-    layer_id: int
-    block_hashes: Sequence[Any] = field(default_factory=list)
-    is_last_chunk: bool | None = True
-    current_event: torch.npu.Event | None = None
-    token_ids: list[int] | None = None
-    original_block_size: list[int] | int | None = None
-    kv_cache_group_id: int = 0
-
-    def __init__(
-        self,
-        req_id: str,
-        keys: list[LayerPoolKey],
-        starts: list[int],
-        ends: list[int],
-        block_ids_by_group: list[list[int]] | None = None,
-        layer_id: int = 0,
-        is_last_chunk: bool | None = True,
-        current_event: torch.npu.Event | None = None,
-        block_ids: list[int] | list[list[int]] | None = None,
-        token_ids: list[int] | None = None,
-        original_block_size: list[int] | int | None = None,
-        block_hashes: Sequence[Any] | None = None,
-        kv_cache_group_id: int = 0,
-    ) -> None:
-        self.req_id = req_id
-        self.keys = keys
-        self.starts = starts
-        self.ends = ends
-        if block_ids_by_group is None:
-            block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
-        self.block_ids_by_group = block_ids_by_group
-        self.layer_id = layer_id
-        self.is_last_chunk = is_last_chunk
-        self.current_event = current_event
-        self.token_ids = token_ids
-        self.original_block_size = original_block_size
-        self.block_hashes = [] if block_hashes is None else block_hashes
-        self.kv_cache_group_id = kv_cache_group_id
-
-    @property
-    def block_ids(self) -> list[int]:
-        return self.block_ids_by_group[0] if self.block_ids_by_group else []
-
-    @block_ids.setter
-    def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
-        self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
 
 
 @dataclass
