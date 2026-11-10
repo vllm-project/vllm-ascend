@@ -874,7 +874,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     | API port | 8088 | 8092 |
     | DP RPC port | 13388 | 13389 |
     | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
-    | Maximum context / sequences / batched tokens | 141312 / 128 / 4096 | 141312 / 128 / 4096 |
+    | Maximum context / sequences / batched tokens | 143360 / 64 / 4096 | 143360 / 64 / 4096 |
 
     Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Set `local_ip` to the serving host address and `nic_name` to its network interface in each command block. Provide sufficient host memory for Engram CPU offload and shared memory.
 
@@ -932,8 +932,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
-        --max-model-len 141312 \
-        --max-num-seqs 128 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -996,8 +996,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
-        --max-model-len 141312 \
-        --max-num-seqs 128 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -1885,7 +1885,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --compilation-config '{"cudagraph_mode":"NONE"}' \
       --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
@@ -1923,7 +1923,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}' \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_coder \
       --reasoning-parser qwen3 \
@@ -1952,7 +1952,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
     ```
 
-    `load_async=false` keeps external cache loading synchronous. Decode-side pool loading and saving remain disabled.
+    The tested configuration sets `lookup_rpc_port` to `"0"` for Prefill and `"1"` for Decode.
 
 **Verify three-tier cache reuse:**
 
@@ -2194,10 +2194,10 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | 950DT products | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
 | A2 series | Prefill | 0–7 on prefill host | 4 × 2 × 1 | 141312 | 32 | 8192 |
 | A3 series | Prefill | 0–7 | 4 × 2 × 1 | 141312 | 32 | 8192 |
-| 950DT products | Prefill | 0–3 | 2 × 1 × 2 | 141312 | 128 | 4096 |
+| 950DT products | Prefill | 0–3 | 2 × 1 × 2 | 143360 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
 | A3 series | Decode | 8–15 | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| 950DT products | Decode | 4–7 | 2 × 1 × 2 | 141312 | 128 | 4096 |
+| 950DT products | Decode | 4–7 | 2 × 1 × 2 | 143360 | 64 | 4096 |
 | 950DT products | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
 | 950DT products | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
 | 950DT products | Prefill (long-context) | 0–3 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
