@@ -54,7 +54,7 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - **CANN**: 9.2.1
 - **PyTorch / torch-npu**: 2.10.0 / 2.10.0.post7
 - **Triton Ascend**: 3.6.0.post2 for A2, A3, and Ascend 950; Triton Ascend is not supported on Atlas 300I DUO.
-- **mooncake-transfer-engine-npu**: 0.3.14-rc1.
+- **mooncake-transfer-engine-npu**: 0.3.14.rc1.
 - **flash-linear-attention-npu**: v26.9.1-release.
 - **memfabric-hybrid / memcache-hybrid**: 1.3.0 / 1.3.0.
 - **ray**: >= 2.47.1, <= 2.48.0.
