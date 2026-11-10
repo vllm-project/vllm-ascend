@@ -957,7 +957,10 @@ Expected output: MetaService starts successfully with no errors.
     existing backend key builder; no additional public switch is required.
     `use_layerwise=false` retains ordinary bulk transfers.
 
-    The cross-layer strategy derives source positions/count and the replay
+    The cross-layer strategy requires Model Runner V2. Explicit V1
+    configurations fail before GVA initialization; existing bulk, ordinary
+    Memcache GVA and Mooncake block-key configurations keep their runner support.
+    Cross-layer derives source positions/count and the replay
     cut from `kv_source_layer_ids` and `num_hidden_layers`. It validates the
     registered cache layout and consumer hooks, without fixed layer numbers
     or a model-name allowlist. Model implementations that reuse the same

@@ -122,8 +122,9 @@ writers still require integration validation.
 
 ## Runtime and lifetime boundaries
 
-The initial worker supports Memcache TP deployments. PP, PCP, DCP and KVPP
-are rejected rather than changing key/layout protocols. Eager and PIECEWISE
+The initial worker requires Model Runner V2 and supports Memcache TP
+deployments. Explicit V1 configurations are rejected before GVA initialization;
+the V1 runner is unchanged. PP, PCP, DCP and KVPP are also rejected. Eager and PIECEWISE
 support target prefetch; the V2 `DeepseekV41DSparkModel` drafter is supported.
 Other speculative configurations, unsupported graph modes, SP, microbatching,
 missing hooks and unknown layouts retain synchronous GVA restoration. No

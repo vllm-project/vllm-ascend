@@ -5507,9 +5507,7 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
 
-        layerwise_reuse = (
-            get_layerwise_reuse_config(self.vllm_config.kv_transfer_config, vllm_config=self.vllm_config) is not None
-        )
+        layerwise_reuse = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
             # Only the layerwise planner emits zero-stride alias descriptors

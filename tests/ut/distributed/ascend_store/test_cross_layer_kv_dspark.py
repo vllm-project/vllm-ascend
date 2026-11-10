@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import unittest
+from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -9,6 +10,15 @@ from tests.ut.distributed.ascend_store.test_cross_layer_gva import make_cross_wo
 
 
 class TestDSparkCrossLayerGVA(unittest.TestCase):
+    def test_v1_is_rejected_before_gva_initialization(self):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.LayerwiseKVPoolWorker.__init__"
+        ) as initialize_gva:
+            for method in (None, "dspark"):
+                with self.subTest(method=method), self.assertRaisesRegex(ValueError, "requires Model Runner V2"):
+                    make_cross_worker(self, method=method, use_v2=False)
+            initialize_gva.assert_not_called()
+
     def test_eager_and_piecewise_keep_target_pipeline(self):
         for mode in ("NONE", "PIECEWISE"):
             for method in (None, "dspark"):
@@ -30,13 +40,12 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
                 self.assertFalse(store.leases)
 
     def test_other_drafters_do_not_enable_pipeline(self):
-        for method, architecture, use_v2 in (
-            ("eagle", "DeepseekV41DSparkModel", True),
-            ("dspark", "OtherDraft", True),
-            ("dspark", "DeepseekV41DSparkModel", False),
+        for method, architecture in (
+            ("eagle", "DeepseekV41DSparkModel"),
+            ("dspark", "OtherDraft"),
         ):
-            with self.subTest(method=method, architecture=architecture, use_v2=use_v2):
-                worker, _, _ = make_cross_worker(self, method=method, architecture=architecture, use_v2=use_v2)
+            with self.subTest(method=method, architecture=architecture):
+                worker, _, _ = make_cross_worker(self, method=method, architecture=architecture)
                 self.assertFalse(worker._pipeline_enabled)
 
     def test_draft_restores_before_forward_while_target_loads_continue(self):

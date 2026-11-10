@@ -34,6 +34,8 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
     """
 
     def __init__(self, vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None):
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError("cross_layer_kv requires Model Runner V2")
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         if self.pp_size != 1 or self.pcp_size != 1 or self.dcp_size != 1 or self.use_kvpp:
             raise ValueError("cross_layer_kv currently supports Memcache TP deployments without PP/PCP/DCP/KVPP")
@@ -48,7 +50,6 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
         dspark = (
             speculative is not None
             and speculative.method == "dspark"
-            and getattr(vllm_config, "use_v2_model_runner", False)
             and getattr(speculative.draft_model_config, "architectures", []) == ["DeepseekV41DSparkModel"]
         )
         self._pipeline_enabled = (

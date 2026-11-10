@@ -4,7 +4,8 @@ entries:
     text: >-
       The existing use_layerwise option now automatically selects experimental
       cross-layer KV prefetch for compatible shared-source models such as
-      DeepSeek-V4.1, while DS4 retains the physical-layer path.
+      DeepSeek-V4.1 on Model Runner V2, while DS4 retains the physical-layer path.
+      Explicit V1 configurations are rejected for cross-layer KV.
     model: deepseek-v4.1
   - category: feature
     text: >-
