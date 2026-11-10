@@ -33,23 +33,34 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
-
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_aux_layers_from_config,
+)
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionState,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
+from vllm_ascend.ops.triton.sample.fused_add_argmax import TwoStageAddArgmax
+from vllm_ascend.utils import (
+    lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
+    vllm_version_is,
+)
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    prepare_dflash_inputs_factory,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -62,8 +73,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin sample_draft alignment is not used; instead load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
-    # the group-agreed capacity and trim the logits back (no _sample_sequential
-    # override, upstream sampling logic untouched).
+    # the group-agreed capacity and trim the logits back. The optional fused
+    # sampler below retains this compute_draft_logits wrapper.
     _lmhead_tp_sample_draft_supported = True
 
     if not vllm_version_is("0.33.0"):
@@ -82,18 +93,74 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.use_flashmla: bool = False
         self._init_dcp()
 
-    def _sample_logits(
-        self,
-        logits: torch.Tensor,
-        idx_map: torch.Tensor,
-        sample_pos: torch.Tensor,
-        step: int,
-    ) -> torch.Tensor:
-        if self.draft_logits is not None or not get_ascend_config().enable_dspark_split_argmax:
-            return super()._sample_logits(logits, idx_map, sample_pos, step)
-        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
-        return self.model.map_draft_to_target(greedy_argmax(logits))
+        self._add_argmax_workspace = None
+        if get_ascend_config().enable_dspark_fused_add_argmax and self.draft_logits is None:
+            hf = self.draft_model_config.hf_config
+            max_vocab = max(
+                int(getattr(hf, "vocab_size", 0) or 0),
+                int(getattr(hf, "draft_vocab_size", 0) or 0),
+            )
+            if max_vocab > 0:
+                self._add_argmax_workspace = TwoStageAddArgmax(
+                    self.max_num_reqs, max_vocab, device, block=4096,
+                )
 
+
+    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        ws = self._add_argmax_workspace
+        # Keep every original logits consumer and model-specific sampling hook.
+        # hasattr(transform) is intentionally conservative, even for an identity
+        # transform. Relax only after implementing/proving its exact semantics.
+        if (
+            ws is None
+            or self.draft_logits is not None
+            or self._draft_topk is not None
+            or self.acceptance_estimator is not None
+            or hasattr(self.model, "apply_output_logit_transform")
+            or hasattr(self.model, "sample_sequential")
+        ):
+            return super()._sample_sequential(num_reqs, head_hidden)
+
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits.view(num_reqs, n_spec, -1)
+        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
+        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        confidence_markov_embeds = []
+
+        for i in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            if self.use_confidence_head:
+                confidence_markov_embeds.append(markov_embed)
+            bias = self.model.markov_bias(markov_embed)
+            base_i = base_logits[:, i]
+            # Persistent, strided column; no per-step output allocation.
+            output_i = self.draft_tokens[:num_reqs, i]
+            if ws.supports(base_i, bias, output_i):
+                ws.run(base_i, bias, output_i)
+                # Kernel emits draft IDs. Mapping must occur before next bias.
+                mapped = self.model.map_draft_to_target(output_i)
+                if mapped is not output_i:
+                    output_i.copy_(mapped)
+            else:
+                logits_i = base_i + bias
+                sampled = self._sample_logits(
+                    logits_i, idx_map[:, i], sample_pos[:, i], i
+                )
+                output_i.copy_(sampled)
+            prev = output_i
+
+        if self.use_confidence_head:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
+            )
     def _init_dcp(self) -> None:
         self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
         self.dcp_manager: DCPManager | None = None
