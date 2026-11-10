@@ -1,0 +1,7 @@
+pr: 21414
+entries:
+  - category: performance
+    text: Added an opt-in PCP prefill path that overlaps the local Q projection with global cache preparation.
+    hardware: [A2]
+  - category: config
+    text: Added the `pcp_q_projection_overlap` option (default off) for DSA PCP prefill.
