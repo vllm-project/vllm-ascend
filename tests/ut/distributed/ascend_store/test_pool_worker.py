@@ -219,7 +219,7 @@ class TestPCPPoolWorker(unittest.TestCase):
                 )
                 self.assertFalse(worker.use_hybrid)
                 self.assertEqual(worker.sharded_mamba_group_ids, {0})
-                self.assertEqual(worker.metadata[0].head_or_tp_rank, 1)
+                self.assertEqual(worker.metadata[0].head_or_tp_rank, 0 if use_layerwise else 1)
                 self.assertEqual(worker.get_group_tp_size(0), 2)
 
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):

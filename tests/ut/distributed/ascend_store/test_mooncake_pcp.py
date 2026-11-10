@@ -113,6 +113,12 @@ class TestMooncakePCP(unittest.TestCase):
                 self.assertEqual(len(keys), pcp_size)
                 self.assertEqual(len(state_keys), pcp_size * tp_size)
                 for index, (worker, _, _) in enumerate(workers):
+                    self.assertEqual(worker.metadata[2].head_or_tp_rank, worker.tp_rank)
+                    state_key = worker.layerwise_keys.make_base_key(2, b"h3".hex(), worker.tp_rank, worker.pp_rank)
+                    if pcp_size > 1:
+                        state_key += f"@pcp_size:{pcp_size}@pcp_rank:{worker.pcp_rank}"
+                    self.assertEqual(worker._make_layerwise_full_key(2, b"h3".hex()), state_key)
+                    self.assertIn(state_key, state_keys)
                     for group in worker.cacheable_group_ids:
                         self.assertIn(
                             worker._make_layerwise_full_key(group, b"h0".hex()),

@@ -912,15 +912,6 @@ Mooncake gathers the producer head shards into each receiving consumer's state.
 Use SD convolution state layout `[state_len, conv_dim]` on both roles when
 their KDA head-shard counts differ.
 
-For AscendStore prefix reuse, enable `--enable-prefix-caching` and
-`--mamba-cache-mode align`, then configure `AscendStoreConnector` with
-`backend="memcache"` or `"mooncake"` and either bulk or layerwise transfer.
-Use `load_async=false` for bulk RecoverSSM transfers. Persistent convolution
-and recurrent state are exported; temporary verification records remain local.
-With PCP>1, each PCP rank saves its own KDA head shard, and a prefix hit requires
-every shard. Pool peers must use matching model, cache, and head-partition layouts.
-TP and PCP cannot both exceed 1, and PCP still requires `kv_role="kv_producer"`.
-
 For example, an eight-device Prefill role and an eight-device Decode role can
 use the following layout with `--use-replayssm` and MTP5 on both sides:
 

@@ -335,7 +335,8 @@ class BaseKVPoolWorker(ABC):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
             if group_id in self.sharded_mamba_group_ids:
-                group_tp_rank = self.tp_rank * self.pcp_size + self.pcp_rank
+                # Layerwise keys carry PCP coordinates in their own suffix.
+                group_tp_rank = self.tp_rank if self.use_layerwise else self.tp_rank * self.pcp_size + self.pcp_rank
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],

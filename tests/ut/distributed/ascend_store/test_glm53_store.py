@@ -24,6 +24,7 @@ from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, star
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -152,6 +153,8 @@ class TestGLM53Store(unittest.TestCase):
     def finish_layerwise_step(worker, metadata, *, load=False):
         for _ in range(4):
             worker.wait_for_layer_load()
+            with attention_transfer_window():
+                pass
             worker.save_kv_layer(metadata)
         thread = worker.kv_recv_thread if load else worker.kv_send_thread
         thread.request_queue.join()
@@ -333,13 +336,14 @@ class TestGLM53Store(unittest.TestCase):
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
         self.check_layerwise_round_trip()
 
-    def test_layerwise_recoverssm_restores_model_tp_shards_under_pcp(self):
-        for backend in ("memcache", "mooncake"):
-            with self.subTest(backend=backend):
+    def test_layerwise_recoverssm_restores_model_state_shards(self):
+        # Memcache keeps its TP keys; Mooncake has per-PCP session keys.
+        for backend, tp_size, pcp_size in (("memcache", 2, 1), ("mooncake", 1, 2)):
+            with self.subTest(backend=backend, tp_size=tp_size, pcp_size=pcp_size):
                 self.check_layerwise_round_trip(
                     backend=backend,
-                    tp_size=1,
-                    pcp_size=2,
+                    tp_size=tp_size,
+                    pcp_size=pcp_size,
                     pp_size=1,
                     use_recoverssm=True,
                 )

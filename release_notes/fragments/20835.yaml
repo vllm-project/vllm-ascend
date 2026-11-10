@@ -1,6 +1,0 @@
-pr: 20835
-entries:
-  - category: feature
-    text: >-
-      Added GLM RecoverSSM prefix reuse through AscendStore bulk and layerwise
-      transfers, preserving each PCP rank's KDA head state.
