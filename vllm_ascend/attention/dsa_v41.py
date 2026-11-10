@@ -1262,31 +1262,33 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
             if self._dspark_swa_indices is None:
                 self._dspark_swa_indices = torch.empty(
-                    (self._max_tokens, 1, index_width), dtype=torch.int32, device=seq_lens.device
+                    (self._max_tokens, 1, index_width), dtype=torch.int32, device=req.seq_lens.device
                 )
-                self._dspark_swa_lengths = torch.empty((self._max_tokens, 1), dtype=torch.int32, device=seq_lens.device)
-            indices_view = self._dspark_swa_indices[:num_actual_tokens]
+                self._dspark_swa_lengths = torch.empty(
+                    (self._max_tokens, 1), dtype=torch.int32, device=req.seq_lens.device
+                )
+            indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
             assert self._dspark_swa_lengths is not None
-            lengths_view = self._dspark_swa_lengths[:num_actual_tokens]
+            lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
             if build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu":
-                ori_sparse_indices, ori_topk_length = build_dspark_swa_indices_triton(
-                    common.query_start_loc[: num_reqs + 1],
-                    seq_lens,
-                    num_actual_tokens,
+                req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices_triton(
+                    common.query_start_loc[: req.num_reqs + 1],
+                    req.seq_lens,
+                    req.num_actual_tokens,
                     index_width,
                     window_size,
                     indices_output=indices_view,
                     lengths_output=lengths_view,
                 )
             else:
-                ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
-                    common.block_table_tensor[:num_reqs],
+                req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
+                    common.block_table_tensor[: req.num_reqs],
                     num_spec_tokens,
                     window_size,
-                    storage_block_size,
-                    common.query_start_loc[: num_reqs + 1],
-                    seq_lens,
-                    num_actual_tokens,
+                    req.storage_block_size,
+                    common.query_start_loc[: req.num_reqs + 1],
+                    req.seq_lens,
+                    req.num_actual_tokens,
                     indices_output=indices_view,
                     use_logical_indices=True,
                     lengths_output=lengths_view,
