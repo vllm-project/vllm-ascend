@@ -22,7 +22,6 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
@@ -35,7 +34,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     cumsum_group_list,
 )
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz, supports_triton
 
 from ..base import (
     AscendLinearScheme,
@@ -493,7 +492,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     bias=mlp_compute_input.swiglu_beta,
                 )
                 hidden_states, swiglu_out_scale = self.apply_act_quant(mlp_compute_input, hidden_states)
-            elif HAS_TRITON:
+            elif supports_triton():
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
 
                 hidden_states, swiglu_out_scale = swiglu_quant(

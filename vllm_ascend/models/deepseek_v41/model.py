@@ -70,10 +70,10 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
-from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
+    supports_triton,
 )
 
 from .cache_config import (
@@ -102,6 +102,15 @@ from .indexer import DeepseekV41Indexer
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
     return engram_enabled(config) and vllm_config.engram_config is not None
+
+
+def _muls_add(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Tensor:
+    """Use the fused Triton op when available, with a 310P torch fallback."""
+    if supports_triton():
+        from vllm_ascend.ops.triton.mul_add import muls_add_triton
+
+        return muls_add_triton(x, y, scale)
+    return x * scale + y
 
 
 class DeepseekV41MLP(nn.Module):
@@ -308,15 +317,11 @@ class DeepseekV41MoE(nn.Module):
 
             if hidden_states.dtype != torch.float16:
                 if self.shared_experts is not None:
-                    final_hidden_states = muls_add_triton(
-                        final_hidden_states, shared_output, self.routed_scaling_factor
-                    )
+                    final_hidden_states = _muls_add(final_hidden_states, shared_output, self.routed_scaling_factor)
                 else:
                     final_hidden_states *= self.routed_scaling_factor
             elif self.shared_experts is not None:
-                final_hidden_states = muls_add_triton(
-                    shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor
-                )
+                final_hidden_states = _muls_add(shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor)
         else:
             final_hidden_states = fused_moe_out
 

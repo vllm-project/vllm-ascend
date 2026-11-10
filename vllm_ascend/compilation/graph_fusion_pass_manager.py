@@ -20,9 +20,10 @@ from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, supports_triton
 
 
 class GraphFusionPassManager:
@@ -63,15 +64,31 @@ class GraphFusionPassManager:
 
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
-        if self.ascend_compilation_config.fuse_qknorm_rope:
+        if self.ascend_compilation_config.fuse_qknorm_rope and supports_triton():
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
 
             self.passes.append(QKNormRopeFusionPass(config))
+        elif self.ascend_compilation_config.fuse_qknorm_rope:
+            logger.warning_once(
+                "fuse_qknorm_rope is enabled but Triton is unsupported or unavailable; the fusion is disabled.",
+                scope="global",
+            )
 
-        if self.ascend_compilation_config.fuse_muls_add and profile.supports(HardwareCapability.GRAPH_MULS_ADD_FUSION):
+        if (
+            self.ascend_compilation_config.fuse_muls_add
+            and profile.supports(HardwareCapability.GRAPH_MULS_ADD_FUSION)
+            and supports_triton()
+        ):
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))
+        elif self.ascend_compilation_config.fuse_muls_add and profile.supports(
+            HardwareCapability.GRAPH_MULS_ADD_FUSION
+        ):
+            logger.warning_once(
+                "fuse_muls_add is enabled but Triton is unsupported or unavailable; the fusion is disabled.",
+                scope="global",
+            )
         fuse_gemm_comms = enable_sp(config)
         if fuse_gemm_comms and profile.supports(HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION):
             from .passes.mm_reduce_scatter_fusion_pass import MatmulReduceScatterFusionPass

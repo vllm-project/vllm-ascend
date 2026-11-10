@@ -6,7 +6,8 @@
 import torch
 import torch_npu
 
-from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
+from vllm_ascend.device.pcp_kv_cache import copy_pcp_kv_cache
+from vllm_ascend.utils import supports_triton
 
 PCP_COPY_MAX_TILE_ROWS = 8
 
@@ -26,6 +27,8 @@ def load_mla_cache_rows_by_slots(cache_k, cache_v, slots):
 
 def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offset, key, value) -> bool:
     """Handle validated strided 4D FP16/BF16 ND caches with one physical head."""
+    if not supports_triton():
+        return False
     if (
         cache_k.ndim != 4
         or cache_v.ndim != 4

@@ -41,8 +41,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
-from vllm_ascend.utils import cp_decode_comm_stream, weak_ref_tensors
+from vllm_ascend.utils import cp_decode_comm_stream, supports_triton, weak_ref_tensors
 
 
 class MLASplitAttentionGraphParams(NamedTuple):
@@ -738,6 +737,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
+        if not supports_triton():
+            raise RuntimeError("MLA context parallelism requires Triton-Ascend and is not supported on 310P.")
+        from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+
         flash = getattr(attn_metadata, "external_flashmla", None)
         decode_meta = attn_metadata.decode
         if flash is None:

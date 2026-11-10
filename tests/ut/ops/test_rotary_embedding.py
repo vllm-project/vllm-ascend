@@ -114,7 +114,7 @@ class TestRopeForwardOOT:
         key_fp8 = torch.empty(SEQ_LEN, 1, 96, dtype=torch.float8_e4m3fn)
         mock_rope_triton.return_value = query_fp8, key_fp8
 
-        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", True):
+        with patch("vllm_ascend.ops.rotary_embedding.supports_triton", return_value=True):
             query_out, key_out = rope_forward_oot(
                 positions,
                 query,
@@ -326,7 +326,7 @@ class TestAscendEmbeddingForwardOOT:
         positions, query, _ = _make_tensors()
         expected_query = torch.randn_like(query)
         mock_rope.return_value = expected_query, torch.empty_like(query)
-        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False):
+        with patch("vllm_ascend.ops.rotary_embedding.supports_triton", return_value=False):
             result = emb.forward_oot(positions, query, None)
         assert result[0] is expected_query
         assert result[1] is None

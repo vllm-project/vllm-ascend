@@ -30,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
@@ -736,6 +735,8 @@ def merge_prefill_chunks(
     representation without synchronizing the host. The first group contains
     current causal attention, so every real query has a finite prefix LSE.
     """
+    from vllm_ascend.ops.triton.attention_update import prepare_attention_update
+
     assert 1 < len(out_list) == len(lse_list) <= ATTENTION_UPDATE_MAX_INPUTS
     if lse_anchor is None and not return_lse:
         output, lse = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)

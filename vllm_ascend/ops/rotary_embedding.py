@@ -32,14 +32,13 @@ from vllm.model_executor.layers.rotary_embedding import (
     YaRNScalingRotaryEmbedding,
 )
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model, supports_triton
 
-if HAS_TRITON:
+if supports_triton():
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
     from vllm_ascend.ops.triton.rope import rope_forward_triton
@@ -255,7 +254,7 @@ def rope_forward_oot(
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
         raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
-    if HAS_TRITON:
+    if supports_triton():
         num_tokens = query.shape[0]
         if out_dtype == torch.float8_e4m3fn:
             query_width = query.numel() // num_tokens
@@ -333,7 +332,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if key is None:
             dummy_key = (
                 torch.empty(query.shape[0], 0, self.head_size, dtype=query.dtype, device=query.device)
-                if HAS_TRITON
+                if supports_triton()
                 else torch.empty(
                     (query.shape[0], 1, self.head_size) if query.ndim == 3 else (query.shape[0], self.head_size),
                     dtype=query.dtype,
@@ -710,7 +709,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
 
         assert key is not None
         q_in, k_in = query, key
-        if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
+        if supports_triton() and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             query, key = self.forward_triton(positions, query, key)
         elif self.mrope_section != [16, 24, 24]:

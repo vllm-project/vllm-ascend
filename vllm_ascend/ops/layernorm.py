@@ -21,8 +21,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, supports_triton
 
 # Scanning quant_description is O(number of quantized tensors) and every
 # RMSNorm used to redo it. The answer is a property of the checkpoint, so
@@ -147,6 +146,10 @@ class LayerNormFn(torch.autograd.Function):
         weight = weight.contiguous()
         if bias is not None:
             bias = bias.contiguous()
+        if not supports_triton():
+            raise RuntimeError("Fused gated LayerNorm requires Triton-Ascend and is not supported on Ascend 310P.")
+        from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
+
         y, mean, rstd = layer_norm_fwd_npu(
             x,
             weight,

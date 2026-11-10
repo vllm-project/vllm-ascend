@@ -45,11 +45,11 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
 from vllm_ascend.utils import (
     cp_chunkedprefill_comm_stream,
     cp_decode_comm_stream,
     is_pd_decode_recompute_scheduler_enabled,
+    supports_triton,
 )
 
 if TYPE_CHECKING:
@@ -521,6 +521,10 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         main_stream.wait_event(current_attn_done)
         # Only historical shards participate in A2A. Current K/V are
         # replicated across DCP ranks and must contribute exactly once.
+        if not supports_triton():
+            raise RuntimeError("Attention context parallelism requires Triton-Ascend and is not supported on 310P.")
+        from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+
         return fused_dcp_lse_combine(
             history_recv,
             self.head_size,
@@ -701,6 +705,10 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             if self.use_pcp:
                 assert chunked_context.pcp_local_query_indices is not None
                 history_recv = torch.index_select(history_recv, 2, chunked_context.pcp_local_query_indices)
+            if not supports_triton():
+                raise RuntimeError("Attention context parallelism requires Triton-Ascend and is not supported on 310P.")
+            from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+
             current_output = fused_dcp_lse_combine(
                 history_recv,
                 self.head_size,

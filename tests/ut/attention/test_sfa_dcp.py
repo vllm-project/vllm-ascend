@@ -2,6 +2,7 @@
 """CPU routing, dependency, integer-mapping and specialization contracts for SFA."""
 
 import ast
+import builtins
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import Any, NamedTuple
@@ -11,6 +12,16 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[3]
 TRITON_ROOT = ROOT / "vllm_ascend/ops/triton"
+
+
+def kernel_builtins(kernels, supported=True):
+    def import_kernel(name, *args, **kwargs):
+        if name.startswith("vllm_ascend.ops.triton"):
+            assert supported, f"Native fallback imported {name}"
+            return SimpleNamespace(**kernels)
+        return builtins.__import__(name, *args, **kwargs)
+
+    return {**vars(builtins), "__import__": import_kernel}
 
 
 def load_function(path, name, namespace):
@@ -256,8 +267,9 @@ def test_attention_forwards_its_group_without_scheduler_config():
 @pytest.mark.parametrize("keep_view", [False, True])
 @pytest.mark.parametrize("layout", ["native", "fp16", "fp32", "other_width", "non_power_two"])
 @pytest.mark.parametrize("ranks", [2, 4, 8, 16])
+@pytest.mark.parametrize("triton_supported", [False, True])
 def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
-    tokens, prepared, pcp_size, ranks, layout, keep_view
+    tokens, prepared, pcp_size, ranks, layout, keep_view, triton_supported
 ):
     if pcp_size > ranks:
         pytest.skip("PCP must divide the DCP group")
@@ -298,8 +310,8 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
         "all_gather_async": gather,
         "get_pcp_group": lambda: SimpleNamespace(world_size=pcp_size),
         "get_tp_group": lambda: tp_group,
-        "prepare_query_head_major": prep,
-        "unpack_query": unpack,
+        "supports_triton": lambda: triton_supported,
+        "__builtins__": kernel_builtins({"prepare_query_head_major": prep, "unpack_query": unpack}, triton_supported),
     }
     exec(compile(ast.Module(body=[context_class, *methods], type_ignores=[]), str(source), "exec"), namespace)
     context_type = namespace["DCPGatherContext"]
@@ -317,7 +329,7 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(
     )
     dtype = {"fp16": torch.float16, "fp32": torch.float32}.get(layout, torch.bfloat16)
     nope_dim = {"other_width": 256, "non_power_two": 496}.get(layout, 512)
-    prepared = prepared and layout != "non_power_two"
+    prepared = prepared and layout != "non_power_two" and triton_supported
     qn = torch.arange(tokens * 8 * nope_dim).to(dtype).view(8, tokens, nope_dim).transpose(0, 1)
     qr = torch.ones(tokens, 8, 64, dtype=dtype)
     context = namespace["_start_dcp_query_gather"](state, qn, qr)
@@ -416,11 +428,12 @@ def test_native_quantization_and_cache_pipeline_routing(variant):
 
     namespace = {
         "torch": torch,
-        "HAS_TRITON": True,
+        "supports_triton": lambda: True,
         "AscendSFAIndexerBackend": Backend,
         "torch_npu": SimpleNamespace(npu_dynamic_quant=native_quant, npu_dynamic_mx_quant=native_quant),
-        "rope_forward_triton_siso": lambda x, *args, **kwargs: x,
-        "store_indexer_key_scale": store,
+        "__builtins__": kernel_builtins(
+            {"rope_forward_triton_siso": lambda x, *args, **kwargs: x, "store_indexer_key_scale": store}
+        ),
         "INDEXER_K_CACHE_SLOT": 0,
         "INDEXER_SCALE_CACHE_SLOT": 1,
         "_gather_prefill_cache_inputs": lambda tensors, slots, count: (tensors, slots),

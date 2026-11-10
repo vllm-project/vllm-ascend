@@ -14,6 +14,7 @@ import torch_npu  # noqa: F401
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from vllm_ascend.ops import kda_state_copy_plan as production
+from vllm_ascend.ops.triton.kda_state_copy_kernel import _kda_state_copy_kernel, _validate_cache_layout
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -163,7 +164,7 @@ def prepared_state_copy():
             if not preparing:
                 # Preserve the original invalid-inner-layout assertion without
                 # preparing a new plan (or entering JIT) during formal tests.
-                production._validate_cache_layout(state)
+                _validate_cache_layout(state)
                 raise AssertionError("Unprepared production cache layout")
             registry = JitWarmupRegistry(None)
             with registry.activate():
@@ -196,7 +197,7 @@ def prepared_state_copy():
         # Every plan was sealed before its first use, as production requires.
         assert all(plan._sealed for plan in plans.values())
         preparing = False
-        patch.setattr(production._kda_state_copy_kernel, "run", forbid_compile)
+        patch.setattr(_kda_state_copy_kernel, "run", forbid_compile)
         for name in ("triton", "triton.compiler", "triton.compiler.compiler", "triton.runtime.jit"):
             backend = importlib.import_module(name)
             if callable(getattr(backend, "compile", None)):

@@ -87,6 +87,21 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
+def supports_triton() -> bool:
+    """Return whether Triton kernels may run on this installation.
+
+    Upstream ``HAS_TRITON`` only describes the Python environment. 310P does
+    not support Triton-Ascend, so an accidentally installed package must not
+    make the inference path import, compile, or launch Triton kernels.
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.TRITON_KERNELS):
+        return False
+
+    from vllm.triton_utils import HAS_TRITON
+
+    return HAS_TRITON
+
+
 def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
     """Whether a GQA/MQA model enables both PCP and DCP."""
     return (

@@ -5,8 +5,7 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
-from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.utils import supports_triton
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -24,7 +23,7 @@ mamba_utils._TEMPORAL_TILES = 1
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
+    return supports_triton() and get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
@@ -40,6 +39,9 @@ def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
 # the same signature and raw-pointer semantics, so do_mamba_copy_block and any
 # other caller reached through the module attribute pick it up unchanged.
 if _can_launch_triton_batch_memcpy():
+    from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+    from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel

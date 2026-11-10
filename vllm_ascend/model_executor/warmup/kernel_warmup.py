@@ -27,7 +27,8 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.utils import supports_triton
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker
@@ -133,7 +134,7 @@ def _prune_unlaunchable_registrations(registry) -> int:
 def kernel_warmup(worker: NPUWorker) -> None:
     """Expand JIT warmup registrations and compile every kernel/key pair
     before ACL graph capture."""
-    if not HAS_TRITON:
+    if not supports_triton():
         return
 
     kernel_config = getattr(worker.vllm_config, "kernel_config", None)
