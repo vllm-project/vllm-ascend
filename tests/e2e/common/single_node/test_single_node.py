@@ -46,6 +46,13 @@ configs = SingleNodeConfigLoader.from_yaml_cases()
 TEST_ROUNDS = tuple(expand_test_rounds(configs))
 
 
+def _get_epd_server_port(server_cmd: list[str]) -> int:
+    """Return the HTTP port of one EPD server command for profiling endpoints."""
+    if "--port" not in server_cmd:
+        raise ValueError(f"EPD server command has no --port: {server_cmd}")
+    return int(server_cmd[server_cmd.index("--port") + 1])
+
+
 async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     client = server.get_async_client()
     batch = await client.completions.create(
@@ -660,9 +667,25 @@ async def _run_single_node(config: SingleNodeConfig) -> None:
             subprocess.call(command)
     kv_pool_manager = create_single_node_kv_pool_manager(config.kv_pool, config.name)
     if config.service_mode == "epd":
-        if ProfileSpec.from_env().enabled:
-            logger.warning("Profiling is not supported for the single-node EPD service mode")
-            (profile_root() / "serve_manifest.json").unlink(missing_ok=True)
+        spec = ProfileSpec.from_env()
+        if spec.enabled:
+            # EPD profiling: profile every vLLM instance (E and PD), not the proxy.
+            # Each instance gets its own endpoint and profiler-config flag; the
+            # manifest is consumed by AisbenchRunner through profile_root().
+            root = profile_root()
+            instances = tuple(
+                ServeInstance.from_endpoint(
+                    f"serve-{index}",
+                    f"http://127.0.0.1:{_get_epd_server_port(server_cmd)}",
+                    root=root,
+                )
+                for index, server_cmd in enumerate(config.epd_server_cmds)
+            )
+            ServeManifest(instances).write(root / "serve_manifest.json")
+            config.epd_server_cmds = [
+                configure_profiler_command(server_cmd, instance, spec)
+                for server_cmd, instance in zip(config.epd_server_cmds, instances)
+            ]
         with (
             kv_pool_manager,
             RemoteEPDServer(
