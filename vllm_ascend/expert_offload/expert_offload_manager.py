@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from functools import partial
 from typing import cast
 
 import torch
+from vllm.logger import logger
 
 from .transfer import TorchExpertTransfer
 from .utils import ExpertMapBuffer, ExpertWeightView, PreparedExpertTensor
@@ -180,25 +182,23 @@ class LayerOffloadBinding:
                 self.prepare_graph(topk_ids),
                 manager.get_comm(self, layer.moe_config, self.num_slots),
             )
-        # One batched synchronization. No scalar device .item() loop.
-        selected_expert_ids = set(topk_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist())
-        use_full_pool = manager.has_prefill or len(selected_expert_ids) > self.num_slots
-        if use_full_pool:
-            expert_weights = manager.full_pool.load_layer(self)
-            physical_topk_ids = topk_ids
-            num_physical_experts = self.num_experts
-        else:
-            # The blocking route D2H above also fences the previous use of this host map.
-            slot_to_expert, expert_loads = self.plan_expert_loads(selected_expert_ids)
-            self.load_resident(slot_to_expert, expert_loads)
-            physical_topk_ids = mapping.remap(topk_ids)
-            expert_weights = self.resident
-            num_physical_experts = self.num_slots
-        # A private comm instance avoids mutating the cached full-layer dispatcher.
+        if not manager.has_prefill:
+            # Only resident selection needs routes on the CPU; prefill loads all experts.
+            selected_expert_ids = set(topk_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist())
+            if len(selected_expert_ids) <= self.num_slots:
+                # The blocking route D2H above also fences the previous use of this host map.
+                slot_to_expert, expert_loads = self.plan_expert_loads(selected_expert_ids)
+                self.load_resident(slot_to_expert, expert_loads)
+                return (
+                    ExpertWeightView(layer, self.resident),
+                    mapping.remap(topk_ids),
+                    manager.get_comm(self, layer.moe_config, self.num_slots),
+                )
+        # Prefill and decode batches exceeding resident capacity use all experts.
         return (
-            ExpertWeightView(layer, expert_weights),
-            physical_topk_ids,
-            manager.get_comm(self, layer.moe_config, num_physical_experts),
+            ExpertWeightView(layer, manager.full_pool.load_layer(self)),
+            topk_ids,
+            manager.get_comm(self, layer.moe_config, self.num_experts),
         )
 
     def plan_expert_loads(self, selected_expert_ids: set[int]) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
@@ -221,14 +221,20 @@ class LayerOffloadBinding:
 
     @torch.inference_mode()
     def update_graph(self, num_topk_ids) -> None:
-        manager = cast(ExpertOffloadManager, self.manager)
-        # Each graph supplies its own fixed length; unused tail entries are stale.
-        selected_expert_ids = set(self.topk_ids_cpu[:num_topk_ids].tolist())
-        slot_to_expert, expert_loads = self.plan_expert_loads(selected_expert_ids)
-        # Report threads have their own current device/stream state.
-        torch.npu.set_device(self.device)
-        with torch.npu.stream(manager.graph_load_stream):
-            self.load_resident(slot_to_expert, expert_loads)
+        try:
+            manager = cast(ExpertOffloadManager, self.manager)
+            # Each graph supplies its own fixed length; unused tail entries are stale.
+            selected_expert_ids = set(self.topk_ids_cpu[:num_topk_ids].tolist())
+            slot_to_expert, expert_loads = self.plan_expert_loads(selected_expert_ids)
+            # Report threads have their own current device/stream state.
+            torch.npu.set_device(self.device)
+            with torch.npu.stream(manager.graph_load_stream):
+                self.load_resident(slot_to_expert, expert_loads)
+        except Exception:
+            # torch_npu reports and clears callback exceptions. Do not let the
+            # graph continue with partially overwritten weights and an old map.
+            logger.exception("Expert offload graph callback failed for %s; terminating worker", self.layer_name)
+            os._exit(1)
 
     def prepare_graph(self, topk_ids):
         num_topk_ids = topk_ids.numel()
@@ -244,9 +250,39 @@ class FullExpertPool:
     def __init__(self):
         self.tensors: dict[str, torch.Tensor] = {}
 
-    def allocate(self, binding) -> None:
+    def allocate(self, bindings) -> None:
+        first_binding, *remaining_bindings = bindings
+        expert_layout = self._expert_layout(first_binding)
+        for binding in remaining_bindings:
+            if self._expert_layout(binding) != expert_layout:
+                raise ValueError(
+                    "expert offload requires identical expert layouts for the shared full pool; "
+                    f"{binding.layer_name} differs from {first_binding.layer_name}"
+                )
         # Allocate in the scheme's native format, including scale strides.
-        self.tensors = binding.adapter.allocate_weights(binding.host_store, binding.num_experts, binding.device)
+        self.tensors = first_binding.adapter.allocate_weights(
+            first_binding.host_store, first_binding.num_experts, first_binding.device
+        )
+
+    @staticmethod
+    def _expert_layout(binding):
+        if binding.device.type == "npu":
+            import torch_npu
+
+        return (
+            binding.num_experts,
+            binding.adapter.quant_scheme.quant_type,
+            {
+                name: (
+                    tuple(tensor.shape[1:]),
+                    tuple(tensor.stride()),
+                    tensor.dtype,
+                    torch_npu.get_npu_format(tensor) if binding.device.type == "npu" else None,
+                    binding.host_store.prepared[name].expert_bytes if binding.host_store.prepared else None,
+                )
+                for name, tensor in binding.resident.items()
+            },
+        )
 
     def load_layer(self, binding):
         TorchExpertTransfer.copy_experts(
@@ -322,7 +358,7 @@ class ExpertOffloadManager:
         }
         for binding in self.bindings.values():
             binding.manager = self
-        self.full_pool.allocate(next(iter(self.bindings.values())))
+        self.full_pool.allocate(self.bindings.values())
 
     def get_comm(self, binding, moe_config, num_physical_experts):
         # Lazy import avoids an initialization cycle with quantization and routed experts.
