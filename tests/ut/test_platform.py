@@ -2070,6 +2070,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.scheduler_config = MagicMock()
 
         from vllm_ascend import platform
+
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
 

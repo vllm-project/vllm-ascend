@@ -1317,11 +1317,9 @@ def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
         extra_config = kv_transfer_config.kv_connector_extra_config or {}
         connectors = extra_config.get("connectors", [])
     else:
-        connectors = [{"kv_connector": kv_transfer_config.kv_connector,
-                       "kv_role": kv_transfer_config.kv_role}]
+        connectors = [{"kv_connector": kv_transfer_config.kv_connector, "kv_role": kv_transfer_config.kv_role}]
     for connector in connectors:
-        if connector.get("kv_connector") == "MooncakeConnectorV1" and \
-                connector.get("kv_role") == "kv_both":
+        if connector.get("kv_connector") == "MooncakeConnectorV1" and connector.get("kv_role") == "kv_both":
             raise ValueError(
                 "MooncakeConnectorV1 does not support kv_role='kv_both': "
                 "only the receive thread would be started and "
