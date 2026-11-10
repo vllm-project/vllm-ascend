@@ -379,7 +379,9 @@ A few important things to consider when using DFlash2 draft models:
     capture length preparation and FlashAttn metadata generation once per
     compatible attention group in each captured forward, so replay
     reads the latest rejection-corrected device lengths without converting
-    them to Python lists or updating FIA tasks on the host. Unsupported
+      them to Python lists or updating FIA tasks on the host. The backend also
+      advertises in-place draft metadata updates, allowing `propose()` to skip
+      eager metadata construction before full-graph replay. Unsupported
     hardware, head sizes, cache types, and attention features retain their
     existing backend. This removes that draft length synchronization path;
     it does not remove all CPU-NPU transfers or guarantee a lower TPOT.
