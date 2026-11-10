@@ -147,6 +147,7 @@ class TestAscendMRotaryEmbedding:
         emb.head_size = HEAD_SIZE
         emb.mrope_section = mrope_section
         emb.mrope_interleaved = False
+        emb.is_neox_style = True
         emb.cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.float32)
         return emb
 
@@ -636,3 +637,37 @@ class TestAscendGemma4RotaryEmbedding:
         check_parent_init_signature_has_not_changed(
             Gemma4RotaryEmbedding.__init__, AscendGemma4RotaryEmbedding.__init__
         )
+
+
+class TestAscendMRotaryEmbeddingRotaryMode:
+    """The npu_mrope branch must pick rotary_mode from is_neox_style.
+
+    NeoX-style models rotate split-half pairs and need "half"; GPT-J style
+    models (e.g. GLM-OCR/GLM-4V) rotate even/odd pairs and need "interleave".
+    """
+
+    @staticmethod
+    def _build_mrope(is_neox_style: bool) -> AscendMRotaryEmbedding:
+        emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+        emb.mrope_interleaved = False  # bypass the Triton path
+        emb.mrope_section = [16, 24, 24]  # required to reach the npu_mrope branch
+        emb.is_neox_style = is_neox_style
+        emb.head_size = HEAD_SIZE
+        emb.cos_sin_cache = torch.zeros(MAX_POS, HEAD_SIZE, dtype=torch.float32)
+        return emb
+
+    @pytest.mark.parametrize("is_neox_style, expected_mode", [(True, "half"), (False, "interleave")])
+    @patch("torch_npu.npu_mrope", create=True)
+    def test_rotary_mode_follows_is_neox_style(self, mock_npu_mrope, is_neox_style, expected_mode):
+        emb = self._build_mrope(is_neox_style)
+        # 2D positions with a non-None key selects the npu_mrope branch rather
+        # than the DFlash, Triton, or fallback paths.
+        positions = torch.arange(SEQ_LEN, dtype=torch.int64).repeat(3, 1)
+        query = torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE)
+        key = torch.randn(SEQ_LEN, HEAD_SIZE)
+        mock_npu_mrope.return_value = query, key
+
+        emb.forward_oot(positions, query, key)
+
+        mock_npu_mrope.assert_called_once()
+        assert mock_npu_mrope.call_args.kwargs["rotary_mode"] == expected_mode

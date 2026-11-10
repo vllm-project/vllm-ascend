@@ -357,6 +357,11 @@ class RejectionSamplerConfig:
 
     @model_validator(mode="after")
     def _validate(self):
+        if self.enable_block_verify:
+            raise ValueError(
+                "rejection_sampler_config.enable_block_verify is no longer supported: Block Verify was only "
+                "implemented in Model Runner V1. Use enable_entropy_verify instead."
+            )
         if not (0 < self.posterior_threshold <= 1):
             raise ValueError(
                 f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
@@ -400,6 +405,50 @@ class RlConfig:
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
+@config(config=ConfigDict(frozen=True))
+class QuantizedAllReduceConfig:
+    """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
+
+    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
+    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
+    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+
+    The wrapper is built for every parallel group, but only groups with at most
+    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
+    TP degree itself is validated here, so an unsupported TP fails at config
+    parsing time instead of when some parallel group is constructed.
+    """
+
+    enable: bool = False
+    min_numel: int = 16777216
+
+    @field_validator("min_numel")
+    @classmethod
+    def _check_min_numel(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
+        return value
+
+    def _validate_preconditions(self, vllm_config: Any) -> None:
+        if not self.enable:
+            return
+        # Imported lazily: the wrapper module imports torch_npu, which should not
+        # be pulled in from the config factory at module import time.
+        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+            _MAX_VALID_WORLD_SIZE,
+        )
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if tp_size > _MAX_VALID_WORLD_SIZE:
+            raise ValueError(
+                "additional_config.quantized_all_reduce_config supports "
+                f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
+                f"int8 bound leaves too few quantization levels beyond that), but "
+                f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
+            )
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -439,7 +488,6 @@ class AscendConfig:
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
-            "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
@@ -481,7 +529,6 @@ class AscendConfig:
                 "stair_config": {}
             },
             "rejection_sampler_config": {
-                "enable_block_verify": false,
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4
@@ -491,6 +538,10 @@ class AscendConfig:
                 "sleep_mode_extra_cleanup": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
+            },
+            "quantized_all_reduce_config": {
+                "enable": false,
+                "min_numel": 16777216
             },
             "xlite_graph_config": {
                 "enabled": false,
@@ -535,10 +586,6 @@ class AscendConfig:
                     "long_req_block_threshold": 700,
                     "dynamic_max_step": 256
                 }
-            },
-            "dynamic_spec_config": {
-                "method": null,
-                "method_params": {}
             },
             "sparse_kv_offload_config": {
                 "enabled": false,
@@ -588,7 +635,6 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
-    draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -633,13 +679,13 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
     xlite_graph_config: XliteGraphConfig = dataclasses.field(default_factory=lambda: XliteGraphConfig())
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
     scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
-    dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
@@ -718,6 +764,12 @@ class AscendConfig:
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
             max_batched = vc.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
@@ -767,6 +819,18 @@ class AscendConfig:
         else:
             logger.info_once("FlashComm1 is enabled.")
 
+        # quantized_all_reduce_config and FlashComm1/SP are mutually exclusive:
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the
+        # quantized all-reduce wrapper would never be invoked.
+        sp_active = effective_flashcomm and vc.parallel_config.use_sequence_parallel_moe
+        if sp_active and self.quantized_all_reduce_config.enable:
+            logger.warning_once(
+                "additional_config.quantized_all_reduce_config is enabled together "
+                "with FlashComm1/SP. Sequence parallelism replaces TP all-reduce "
+                "with all-gather/reduce-scatter, so the int8 quantized all-reduce "
+                "would never be used. Disabling quantized_all_reduce_config."
+            )
+            self.quantized_all_reduce_config = dataclasses.replace(self.quantized_all_reduce_config, enable=False)
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
@@ -895,7 +959,7 @@ class AscendConfig:
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
-        # (and `PassConfig.enable_sp`) in both v0.32.0 and verified main.
+        # (and `PassConfig.enable_sp`) in both v0.33.0 and verified main.
 
         enable_sp_by_pass = False
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
@@ -1259,34 +1323,6 @@ class AscendConfig:
         ):
             return "fullmesh_v1"
         return self.mc2_comm_alg
-
-
-@config
-class DynamicSpecConfig:
-    """
-    Configuration Object for dynamic_spec_config from additional_config
-    """
-
-    # Dynamic speculative-length methods. "dspark" relies on the DSpark
-    # confidence head; models without such a head need another method.
-    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
-
-    # None disables the dynamic speculative-length path.
-    method: str | None = None
-    # Custom parameters of the selected dynamic method; the expected keys
-    # depend on `method` (e.g. dspark accepts
-    # initial_verify_budget_per_req, budget_update_interval and
-    # budget_threshold). Empty by default, in which case each method
-    # falls back to its own built-in defaults.
-    method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate(self):
-        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
-            )
-        return self
 
 
 @config
@@ -1923,6 +1959,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
+    new_config.quantized_all_reduce_config._validate_preconditions(vllm_config)
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)

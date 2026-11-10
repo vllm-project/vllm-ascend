@@ -42,6 +42,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    runner.dcp_size = 1
     # Dump contract from the production initializer; helpers no-op on None.
     runner.debugger = None
     runner._debugger_started = False
@@ -224,8 +225,8 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft and vllm_version_is("0.32.0"):
-        # 0.32.0 exposes the permissive-row mask as the fourth sampler argument;
+    if with_grammar and with_draft and vllm_version_is("0.33.0"):
+        # 0.33.0 exposes the permissive-row mask as the fourth sampler argument;
         # main feeds it through the scheduler/draft-token handler instead.
         invalid_drafts = runner.rejection_sampler.call_args.args[3]
         assert invalid_drafts.tolist() == [False, False, True]
@@ -290,7 +291,7 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
     execute_model_state (as the real forward does) for the hook to read."""
 
     def super_execute(scheduler_output, **kwargs):
-        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states, dp_sync=None, dp_sync_state=None)
         return "upstream-output"
 
     with (

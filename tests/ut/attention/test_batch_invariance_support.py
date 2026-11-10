@@ -5,7 +5,7 @@
 vLLM #60271 ("Check batch-invariance support for every attention backend") added
 a hard check in ``vllm/v1/worker/gpu/attn_utils.init_attn_backend`` on main:
 ``VLLM_BATCH_INVARIANT`` mode now rejects any attention backend whose
-``supports_batch_invariance()`` returns False. Both v0.32.0 and verified main
+``supports_batch_invariance()`` returns False. Both v0.33.0 and verified main
 enforce this check, so Ascend advertises support in both lanes.
 """
 

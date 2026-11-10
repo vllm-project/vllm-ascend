@@ -277,8 +277,16 @@ log_selected_ops
           (( _mem_jobs >= 1 )) || _mem_jobs=1
           _nproc=$(nproc)
           (( _mem_jobs > _nproc )) && _mem_jobs=${_nproc}
+          # build.sh computes an explicit -j from nproc*2 (capped by
+          # OPS_CPU_NUMBER/MAX_JOBS) and passes it to cmake --build, which
+          # overrides CMAKE_BUILD_PARALLEL_LEVEL; cap MAX_JOBS so the limit
+          # actually reaches this entry point, and keep the env var for
+          # entry points that build without an explicit -j.
+          if [[ -z "${MAX_JOBS:-}" ]]; then
+              export MAX_JOBS=${_mem_jobs}
+          fi
           export CMAKE_BUILD_PARALLEL_LEVEL=${_mem_jobs}
-          log "cgroup memory limit ${_cg_limit_bytes} bytes: capping build parallelism to ${_mem_jobs}"
+          log "cgroup memory limit ${_cg_limit_bytes} bytes: capping build parallelism to ${_mem_jobs} (MAX_JOBS/CMAKE_BUILD_PARALLEL_LEVEL)"
       fi
   fi
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""

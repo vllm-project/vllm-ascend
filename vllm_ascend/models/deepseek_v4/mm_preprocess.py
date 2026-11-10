@@ -29,7 +29,9 @@ from typing import Any, cast
 import numpy as np
 import torch
 from PIL import Image, ImageOps
-from transformers import BatchFeature
+
+# DeepseekV4Config is provided by Transformers on both supported versions.
+from transformers import BatchFeature, DeepseekV4Config
 from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
@@ -46,16 +48,6 @@ from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )
-
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.32.0 lane still ships it under
-# `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.32.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
-else:
-    from transformers import DeepseekV4Config
 
 IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4

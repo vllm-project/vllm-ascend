@@ -64,9 +64,8 @@ alternative implementation of EPLB.
 
 At runner initialization, platform validation checks the Model Runner version,
 EPLB mode, quantization layout, and execution features. Unsupported
-combinations fail before serving. Model Runner V1 keeps its legacy EPLB path;
-Model Runner V2 uses the upstream control plane. V1-only controls and V2 EPLB
-configuration cannot be mixed.
+combinations fail before serving. Ascend uses the upstream EPLB control plane;
+the legacy Model Runner V1 EPLB controls have been removed.
 
 At the start of a Model Runner V2 batch, the runner tells
 `AscendEPLBController` whether the batch belongs to the configured load
@@ -181,7 +180,7 @@ Changes to this integration must preserve these invariants:
 6. The worker does not reuse transfer workspace before the main thread
    commits the layer and refreshes routing.
 7. Unsupported modes fail during initialization instead of silently degrading.
-8. EPLB-disabled execution and the Model Runner V1 EPLB path remain isolated.
+8. EPLB-disabled execution stays isolated from the EPLB path.
 9. The routing hot path avoids host loops, device-to-host synchronization, and
    mutable Python mapping work.
 

@@ -44,7 +44,6 @@ it does not forward requests between the proxy and PD.
 
 - Install compatible vLLM, vLLM Ascend, CANN, and Mooncake builds. See [Install Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#install-mooncake)
   for installation guidance.
-- Use Model Runner V2 on E and PD: `VLLM_USE_V2_MODEL_RUNNER=1`.
 - Each producer must use TP=1, PP=1, and DP=1. Scale encoding by starting
   independent producer instances.
 - Reserve NPU memory for the model and EC pools, and provision Store storage
@@ -127,7 +126,6 @@ model path or identifier on E and PD:
 
 ```bash
 export MODEL=Qwen/Qwen3.5-9B
-export VLLM_USE_V2_MODEL_RUNNER=1
 ```
 
 ### A2: EC and Store over RoCE
