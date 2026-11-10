@@ -368,6 +368,13 @@ jobs:
         working-directory: /vllm-workspace/vllm-ascend
         run: python3 -m tools.profiling.capture initialize --root "$ASCEND_PROFILE_ROOT"
 
+      - name: Clear Ascend logs before tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          rm -rf /root/ascend/log
+          mkdir -p /root/ascend/log
+
       - name: Run Pytest (py-driven)
         id: pytest-driven
         if: ${{ inputs.tests != '' }}
@@ -385,7 +392,7 @@ jobs:
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ !cancelled() && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
@@ -410,38 +417,17 @@ jobs:
         env:
           ARTIFACT_LABEL: ${{ inputs.soc_version }}-${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path || inputs.tests }}
         run: |
-          set -euo pipefail
-          log_dir=$(mktemp -d "${RUNNER_TEMP}/single-node-logs.XXXXXXXX")
-          for log_path in /root/ascend/log /tmp/test-logs; do
-            if [ -d "$log_path" ]; then
-              mkdir -p "${log_dir}${log_path}"
-              if ! cp -a "${log_path}/." "${log_dir}${log_path}/"; then
-                echo "::warning::Could not copy all logs from $log_path"
-              fi
-            else
-              echo "::warning::Log directory does not exist: $log_path"
-            fi
-          done
-          {
-            printf 'HOME=%s\n' "$HOME"
-            printf 'ASCEND_PROCESS_LOG_PATH=%s\n' "${ASCEND_PROCESS_LOG_PATH:-}"
-            printf 'ASCEND_WORK_PATH=%s\n' "${ASCEND_WORK_PATH:-}"
-            printf 'ASCEND_SLOG_PRINT_TO_STDOUT=%s\n' "${ASCEND_SLOG_PRINT_TO_STDOUT:-}"
-          } > "$log_dir/log-environment.txt"
-          tar -czf "$log_dir.tar.gz" -C "$log_dir" .
-          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
-          {
-            echo "name=single-node-${safe_label}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${log_dir##*.}-ascend-logs"
-            echo "path=$log_dir.tar.gz"
-          } >> "$GITHUB_OUTPUT"
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-')
+          echo "name=single-node-${safe_label}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ascend-logs" >> "$GITHUB_OUTPUT"
+          tar -czf /tmp/single-node-ascend-logs.tar.gz -C / root/ascend/log tmp/test-logs
 
       - name: Upload Ascend logs (GitHub Artifacts)
-        if: ${{ !cancelled() && steps.collect_ascend_logs.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.collect_ascend_logs.outputs.name }}
-          path: ${{ steps.collect_ascend_logs.outputs.path }}
+          path: /tmp/single-node-ascend-logs.tar.gz
           if-no-files-found: warn
           retention-days: 7
           compression-level: 0
