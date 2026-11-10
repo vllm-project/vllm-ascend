@@ -51,7 +51,8 @@ variants:
       VLLM_ENGINE_READY_TIMEOUT_S: '7200'
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:kimi-k3-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
     description: ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D.
 
   ascend_mxfp4:
@@ -99,7 +100,8 @@ variants:
       VLLM_ENGINE_READY_TIMEOUT_S: '7200'
     hardware_overrides:
       ascend_950dt:
-        docker_image: quay.io/ascend/vllm-ascend:kimi-k3-a5
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: vllm serve
     description: ModelSlim MXFP4 with QuaRot for Ascend 950DT (A5). Requires --quantization ascend. Checkpoint not yet public; VRAM estimate is unverified.
 
 meta:
