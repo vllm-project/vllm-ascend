@@ -357,6 +357,9 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 !!! note "Timeout for long sequences or high concurrency"
 
+    The fixed timeout below applies to `MooncakeConnectorV1`. For
+    `MooncakeConnectorV2`, use the renewable KV leases described below.
+
     For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
 
     ```shell
@@ -368,6 +371,46 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
     Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented.
+
+### MooncakeConnectorV2 KV Leases
+
+`MooncakeConnectorV2` retains producer KV
+blocks with an initial 120-second lease. While a request is waiting on D or its
+KV transfer is in progress, a
+dedicated connector thread sends batched heartbeats every 20 seconds. Each
+heartbeat extends the deadline to the later of the existing deadline and
+80 seconds after receipt on P. Heartbeats do not depend on scheduler steps or
+model forward completion. P releases the blocks after aggregated transfer
+completion, or when the lease expires without renewal.
+
+Registration starts when the scheduler calls `on_new_request()`, before KV
+allocation. Once registered, requests keep renewing while waiting for scheduling
+or model execution. Requests still waiting in EngineCore's input queue before
+scheduler admission are not tracked and remain subject to the initial P lease.
+
+Set `kv_lease_duration` to the same integer value on P and D (at least 6 seconds).
+The heartbeat interval is `duration // 6` and the renewal window is
+`duration * 2 // 3`. For example, add this configuration
+to each side's existing `--kv-transfer-config`:
+
+```json
+{
+  "kv_connector_extra_config": {
+    "kv_lease_duration": 120
+  }
+}
+```
+
+Heartbeats are always enabled for `MooncakeConnectorV2`. `kv_lease_duration`
+(default 120 seconds) replaces `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` for V2;
+there is no heartbeat switch or fallback to the former 480-second timeout.
+Configure the same duration on P and D, and upgrade P before D.
+MooncakeConnectorV1 keeps its existing timeout behavior.
+
+An aborted request with an in-flight read keeps its lease until worker
+completion is reported. If the entire D process stops running or the control
+network is disconnected, heartbeats stop and the lease expires. Heartbeats
+do not replace transport completion or cancellation synchronization.
 
 ### QoS Configuration
 
