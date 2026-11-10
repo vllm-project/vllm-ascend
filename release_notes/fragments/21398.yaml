@@ -1,0 +1,6 @@
+pr: 21398
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek-V4.1-Flash A5 SMLA metadata using the wrong, hardcoded attention head count at tensor-parallel sizes greater than 1.
+    model: deepseek-v4.1
+    hardware: [A5]
