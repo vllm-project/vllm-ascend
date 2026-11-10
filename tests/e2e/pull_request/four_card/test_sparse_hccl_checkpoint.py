@@ -27,7 +27,7 @@ from transformers import Qwen3MoeConfig
 from vllm.distributed import get_dp_group
 from vllm.distributed.weight_transfer import HTTPVLLMWeightSyncClient, WeightTransferTrainerFactory
 
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import register_engines_once
+from tests.e2e.common.rlhf.common import register_engines_once
 from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
     SparseHCCLTrainerInitInfo,
     SparseWeightPatch,

@@ -228,7 +228,7 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             validated = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
         else:
             validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])

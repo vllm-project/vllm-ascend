@@ -56,6 +56,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -115,26 +117,14 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 
-# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
-# in kv_cache_utils, so importing the main-only module breaks worker startup.
-# Main resolves grouping through the platform's `KVCacheConfigBuilder`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
-else:
-    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-    from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
 
-    def get_kv_cache_groups(
-        vllm_config: VllmConfig,
-        kv_cache_spec: dict[str, KVCacheSpec],
-    ) -> list[KVCacheGroupSpec]:
-        return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
+def get_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -150,18 +140,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
-
-
-class _V1ModelRunnerFactory:
-    """Import the V1 model runner only when one is actually constructed."""
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-        return NPUModelRunner(*args, **kwargs)
-
-
-NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -599,20 +577,16 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
-            logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+            from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-                with torch_cuda_wrapper():
-                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-            else:
-                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
-
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+            with torch_cuda_wrapper():
+                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
         else:
+            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
@@ -1199,22 +1173,16 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        if vllm_version_is("0.32.0"):
-            # v0.32.0's engine core never issues this RPC, and the upstream
-            # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
-            # helpers do not exist on that lane.
-            return None
-        else:
-            from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-                _find_simple_cpu_offload_connector,
-            )
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
 
-            if not has_kv_transfer_group():
-                return None
-            connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-            if connector is None:
-                return None
-            return connector.get_aligned_num_cpu_blocks()
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
 
     def _get_layerwise_kv_cache_memory_info(
         self,
@@ -1348,20 +1316,8 @@ class NPUWorker(WorkerBase):
         )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
-        # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
-        # introduced only to prevent a recycled Mamba block from exposing stale
-        # values when reused by full attention during multi-step speculation.
-        speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_mamba_eagle_zeroing = (
-            kv_cache_config.has_mamba_layers
-            and speculative_config is not None
-            and speculative_config.method == "eagle3"
-            and speculative_config.num_speculative_tokens > 1
-        )
-        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
-        )
+        # set, so its worker-side consumer must use the same condition.
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
@@ -1396,10 +1352,9 @@ class NPUWorker(WorkerBase):
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
             # Else: profiler already initialized. Restart profiling but keep the
             # original trace name from the first initialization.
-            if not vllm_version_is("0.32.0"):
-                # vLLM main supports per-session profiler kwargs; the release
-                # wrapper has no slot for them.
-                self.profiler.set_profiler_kwargs(profiler_kwargs)
+            # vLLM main supports per-session profiler kwargs; the release
+            # wrapper has no slot for them.
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
             if self.profiler is None:
