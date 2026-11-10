@@ -41,7 +41,7 @@ def test_glm_tail_binding_keeps_registered_tensor_and_wraps_model_cache():
         layer = Glm5NextTailCache.__new__(Glm5NextTailCache)
         torch.nn.Module.__init__(layer)
         if binding is patch_bind_kv_cache.bind_kv_cache:
-            runner_caches = []
+            runner_caches: list[object] = []
             binding(registered, {layer_name: layer}, runner_caches)
             assert runner_caches[0] is tensor
         else:
