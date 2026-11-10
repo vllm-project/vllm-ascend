@@ -60,9 +60,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         self._failed_dma_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def check_available(self) -> None:
+        from vllm_ascend.hisparse.host_pool import install
         from vllm_ascend.hisparse.resolver import _load_resolver
         from vllm_ascend.hisparse.row_dma import install as install_row_dma
-        from vllm_ascend.patch.worker.patch_hisparse_host_pool import install
         from vllm_ascend.utils import bootstrap_custom_op_env
 
         install()
@@ -83,7 +83,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         install_row_dma(AscendHiSparseBackend)
 
     def allocate_private_host_pool(self, size: int) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm_ascend.hisparse.cache_ops import allocate_mapped_host
+        from vllm_ascend.hisparse.host_pool import allocate_mapped_host
 
         payload = allocate_mapped_host((size,), torch.int8)
         registration = payload._hisparse_registration
@@ -92,7 +92,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         return registered[:size], registered
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
-        from vllm_ascend.hisparse.cache_ops import MappedHostTensor
+        from vllm_ascend.hisparse.host_pool import MappedHostTensor
 
         tensor._hisparse_registration = MappedHostTensor(tensor)
 

@@ -12,10 +12,10 @@ from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
-    allocate_mapped_host,
     gather_valid_resident_rows,
     scatter_packed_kv,
 )
+from vllm_ascend.hisparse.host_pool import allocate_mapped_host
 from vllm_ascend.hisparse.prefill import build_hisparse_prefill_staging_plan
 
 

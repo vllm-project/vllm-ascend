@@ -565,7 +565,7 @@ class NPUModelRunner(GPUModelRunner):
             self._bind_hisparse_direct_prolog()
 
         # Bind after Core seals all cache and stream owners.
-        from vllm_ascend.hisparse.mirror_overlap import overlap_mtp_host_mirror
+        from vllm_ascend.hisparse.host_mirror import overlap_mtp_host_mirror
 
         overlap_connector = overlap_mtp_host_mirror(self)
         self._sampling_mirror = overlap_connector if overlap_connector is not self.kv_connector else None

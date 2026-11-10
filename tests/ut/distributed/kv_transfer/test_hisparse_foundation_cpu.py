@@ -19,6 +19,7 @@ from vllm_ascend.attention.sfa_hisparse import (
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.hisparse import cache_ops as hisparse_ops
+from vllm_ascend.hisparse import host_pool
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
@@ -90,7 +91,7 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
             if len(events) == 1:
                 raise RuntimeError("driver did not retire registration")
 
-    monkeypatch.setattr(hisparse_ops, "MappedHostTensor", Registration)
+    monkeypatch.setattr(host_pool, "MappedHostTensor", Registration)
     backend = AscendHiSparseBackend()
     backend.pin_tensor(tensor)
     registration = tensor._hisparse_registration
@@ -107,7 +108,7 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     from vllm.v1.hisparse import backend as core_backend
     from vllm.v1.hisparse import runtime
 
-    from vllm_ascend.patch.worker.patch_hisparse_host_pool import install
+    from vllm_ascend.hisparse.host_pool import install
 
     class OtherBackend(core_backend.HiSparseBackend):
         def pin_tensor(self, tensor):
@@ -131,7 +132,7 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
 
 def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
     backing = torch.arange(128, dtype=torch.uint8)
-    mapping = hisparse_ops.MappedHostTensor.__new__(hisparse_ops.MappedHostTensor)
+    mapping = host_pool.MappedHostTensor.__new__(host_pool.MappedHostTensor)
     mapping.tensor = backing
     mapping.host_address = backing.data_ptr()
     mapping.nbytes = backing.numel()

@@ -28,7 +28,7 @@
 
 # What's Patched and how it works:
 # --------------------------------
-# * worker/patch_hisparse_host_pool.py:
+# * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
 #   Why: AIV mapping alone does not enable DMA to pageable Host storage.
 #   How: Installed only by the HiSparse backend; allocate private pinned storage

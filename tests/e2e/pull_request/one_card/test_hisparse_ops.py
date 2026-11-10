@@ -9,12 +9,11 @@ import torch_npu  # noqa: F401
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend, capture_aware_stream
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
-    MappedHostTensor,
     ResolverWorkspace,
-    allocate_mapped_host,
     pack_attention_rows,
     scatter_packed_kv,
 )
+from vllm_ascend.hisparse.host_pool import MappedHostTensor, allocate_mapped_host
 
 
 @pytest.fixture(autouse=True)
