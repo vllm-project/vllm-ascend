@@ -13,7 +13,7 @@ from vllm.forward_context import get_forward_context
 from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan as build_core_prefill_plan
 
-from vllm_ascend.hisparse.cache_ops import gather_valid_resident_rows
+from vllm_ascend.hisparse.cache_ops import gather_resident_rows
 
 _PREFILL_LOOKAHEAD = "ascend_hisparse_prefill_lookahead"
 
@@ -165,7 +165,7 @@ def stage_prefill_rows(group, layer_index, metadata):
         slot.tensor.record_stream(main)
         # The follower has now written its current KV. Patch its Resident
         # rows without overwriting the prefetched Host bytes.
-        gather_valid_resident_rows(cache.view.cache, slot.tensor, plan.gpu_row_ids[0])
+        gather_resident_rows(cache.view.cache, slot.tensor, plan.gpu_row_ids[0], skip_invalid=True)
         staged, table = slot.tensor, plan.block_table
         req_ids = metadata.req_id_per_token[metadata.num_decode_tokens :]
         if metadata.num_decodes:

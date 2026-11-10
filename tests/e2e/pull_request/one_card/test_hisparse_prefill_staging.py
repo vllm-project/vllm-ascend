@@ -12,7 +12,7 @@ from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
-    gather_valid_resident_rows,
+    gather_resident_rows,
     scatter_packed_kv,
 )
 from vllm_ascend.hisparse.host_pool import allocate_mapped_host
@@ -95,29 +95,42 @@ def test_resident_prefill_plan_shared_layers(resident_block_size, host_pages):
 
 
 @pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.float8_e4m3fn, 656)])
-def test_backend_resident_payload_graph_replay(dtype, width):
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("num_rows", [0, 1, 4, 9])
+def test_backend_resident_payload_graph_replay(dtype, width, index_dtype, num_rows):
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse resident gather currently targets Ascend 950")
     torch.npu.set_device(0)
     stride = 3 * width
     raw = torch.arange(7 * width * dtype.itemsize, dtype=torch.int64).to(torch.uint8).to("npu:0")
     source = raw.view(dtype).as_strided((2, 2, width), (stride, width, 1), storage_offset=width)
-    rows = torch.tensor([3, 0, 2, -1], dtype=torch.int32, device="npu:0")
-    destination = torch.empty((4, width), dtype=dtype, device="npu:0")
+    rows = torch.empty(num_rows, dtype=index_dtype, device="npu:0")
+    destination = torch.empty((num_rows, width), dtype=dtype, device="npu:0")
+    rows.copy_((torch.arange(num_rows, dtype=index_dtype, device="npu:0") % 5) - 1)
     backend = AscendHiSparseBackend()
     backend.gather_resident_rows(source, destination, rows)
     torch.npu.synchronize()
+    if not num_rows:
+        assert destination.numel() == 0
+        return
     graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
-        backend.gather_resident_rows(source, destination, rows)
-    for values in ([3, 0, 2, -1], [0, 3, 1, 2]):
-        rows.copy_(torch.tensor(values, dtype=torch.int32, device="npu:0"))
-        raw.bitwise_xor_(1)
-        graph.replay()
+    try:
+        with torch.npu.graph(graph):
+            backend.gather_resident_rows(source, destination, rows)
+        for offset in (0, 2):
+            values = (torch.arange(num_rows, dtype=index_dtype) + offset) % 5 - 1
+            if index_dtype == torch.int64:
+                values[0] = -(1 << 34)
+            rows.copy_(values.to("npu:0"))
+            raw.bitwise_xor_(1)
+            graph.replay()
+            torch.npu.synchronize()
+            safe = values.long().clamp_min(0)
+            expected = source.view(torch.uint8).cpu()[safe // 2, safe % 2]
+            assert torch.equal(destination.view(torch.uint8).cpu(), expected)
+    finally:
         torch.npu.synchronize()
-        safe = torch.tensor(values).clamp_min(0)
-        expected = source.view(torch.uint8).cpu()[safe // 2, safe % 2]
-        assert torch.equal(destination.view(torch.uint8).cpu(), expected)
+        graph.reset()
 
 
 @pytest.mark.parametrize("row_bytes", [37, 656])
@@ -136,13 +149,13 @@ def test_prefill_resident_patch_changing_extents(row_bytes, capture):
         source_view, destination_view = source[:, 0], destination[:, 0]
 
         indices.fill_(-1)
-        gather_valid_resident_rows(source_view, destination_view, indices)
+        gather_resident_rows(source_view, destination_view, indices, skip_invalid=True)
         torch.npu.synchronize()
         graph = None
         if capture:
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):
-                gather_valid_resident_rows(source_view, destination_view, indices)
+                gather_resident_rows(source_view, destination_view, indices, skip_invalid=True)
         for iteration in range(2):
             values = (torch.arange(rows, dtype=torch.int32) + iteration * 3) % (source_blocks * block + 2) - 1
             current_source = source_cpu + iteration * 13
@@ -150,7 +163,7 @@ def test_prefill_resident_patch_changing_extents(row_bytes, capture):
             indices.copy_(values)
             destination.fill_(7)
             if graph is None:
-                gather_valid_resident_rows(source_view, destination_view, indices)
+                gather_resident_rows(source_view, destination_view, indices, skip_invalid=True)
             else:
                 graph.replay()
             torch.npu.synchronize()

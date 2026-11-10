@@ -16,8 +16,8 @@ from vllm.triton_utils import triton
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.hisparse.host_pool import MappedHostTensor
 from vllm_ascend.ops.triton.hisparse import (
+    gather_resident_rows_kernel,
     gather_rows_kernel,
-    gather_valid_resident_rows_kernel,
     invalidate_kernel,
     invalidate_written_slots_sorted,
     pack_attention_rows_kernel,
@@ -399,24 +399,35 @@ class HiSparseNPUOps:
         )
 
 
-def gather_valid_resident_rows(source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor) -> None:
-    """Fill only Resident rows in a staging cache that already holds Host rows."""
+def gather_resident_rows(
+    source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor, *, skip_invalid: bool = False
+) -> None:
+    """Copy packed Resident rows using Core's negative-ID-to-row0 convention.
+
+    With ``skip_invalid``, retain staged Host bytes at invalid IDs instead.
+    Source and destination may use different dtypes with the same byte width.
+    """
     _check_packed_cache(source)
-    _check_packed_cache(destination)
+    if destination.ndim == 2:
+        destination = destination.unsqueeze(1)
+    if destination.ndim != 3:
+        raise ValueError("HiSparse Resident staging must contain flat or paged token rows")
     rows = destination.size(0) * destination.size(1)
-    _check_tensor(row_ids, "row_ids", source.device, (torch.int32,), shape=(rows,))
+    _check_tensor(row_ids, "row_ids", source.device, (torch.int32, torch.int64), shape=(rows,))
+    row_bytes = source.size(2) * source.element_size()
     if (
         source.device != destination.device
-        or source.dtype != destination.dtype
-        or source.size(2) != destination.size(2)
+        or row_bytes != destination.size(2) * destination.element_size()
         or source.untyped_storage().data_ptr() == destination.untyped_storage().data_ptr()
     ):
         raise ValueError("HiSparse Resident gather requires matching, separate source and staging rows")
-    row_bytes = source.size(2) * source.element_size()
+    if rows == 0:
+        return
+    _check_packed_cache(destination)
     block_rows = 8
     block_bytes = min(1024, triton.next_power_of_2(row_bytes))
     grid = (triton.cdiv(rows, block_rows), triton.cdiv(row_bytes, block_bytes))
-    gather_valid_resident_rows_kernel[grid](
+    gather_resident_rows_kernel[grid](
         source.view(torch.uint8),
         destination.view(torch.uint8),
         row_ids,
@@ -429,6 +440,7 @@ def gather_valid_resident_rows(source: torch.Tensor, destination: torch.Tensor, 
         ROW_BYTES=row_bytes,
         BLOCK_ROWS=block_rows,
         BLOCK_BYTES=block_bytes,
+        SKIP_INVALID=skip_invalid,
         multibuffer=False,
     )
 

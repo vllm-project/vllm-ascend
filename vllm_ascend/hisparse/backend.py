@@ -223,14 +223,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         return torch.npu.is_current_stream_capturing()
 
     def gather_resident_rows(self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor) -> None:
-        # NPU advanced indexing does not support FP8. Copy all packed components
-        # as bytes, retaining Core's addressing and completion ownership.
-        fp8 = (torch.float8_e4m3fn, torch.float8_e5m2)
-        if source.dtype in fp8:
-            source = source.view(torch.uint8)
-        if destination.dtype in fp8:
-            destination = destination.view(torch.uint8)
-        super().gather_resident_rows(source, destination, row_ids)
+        from .cache_ops import gather_resident_rows
+
+        gather_resident_rows(source, destination, row_ids)
 
     def swap_blocks_batch(self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor) -> None:
         if self._failed_dma_batches:
