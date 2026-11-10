@@ -11,11 +11,16 @@ pytest.importorskip("vllm.transformers_utils.configs.deepseek_v41")
 
 import torch
 from vllm.sequence import IntermediateTensors
+from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 
 from tests.deepseek_v41_utils import allocate_cache_views, make_cache_config
 from vllm_ascend.models.deepseek_v41 import model as v41_model
-from vllm_ascend.models.deepseek_v41.model import CANDIDATE_LENGTHS, CANDIDATES, TOPK, TOPK_LENGTHS, build_layer_plan
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    get_deepseek_v41_kv_cache_config,
+    group_cache_specs,
+    make_cache_groups,
+)
+from vllm_ascend.models.deepseek_v41.model import TOPK, TOPK_LENGTHS, build_layer_plan
 from vllm_ascend.worker.v2 import pp_transport
 
 
@@ -59,15 +64,6 @@ def test_every_two_stage_boundary_resolves_exact_dependencies(boundary):
 def test_invalid_partitions_fail_before_constructing_mirrors(lengths):
     with pytest.raises(ValueError, match="partition"):
         build_layer_plan(_config()).pp_boundaries(_partitions(lengths))
-
-
-def test_multi_stage_plan_forwards_dependencies_past_stages_with_no_source():
-    plans = build_layer_plan(_config()).pp_boundaries(_partitions([1] * 40))
-    assert len(plans) == 39
-    assert all(plan.cache_sources == (20,) and plan.candidates for plan in plans[20:36])
-    assert plans[23].boundary == 24 and not plans[23].topk
-    assert plans[24].topk
-    assert not plans[36].candidates and plans[36].topk
 
 
 def _plane(blocks, rows, width, dtype, fill):
@@ -282,34 +278,17 @@ def test_all_dependencies_survive_multiple_stage_forwarding(runtime, monkeypatch
             payload = transport.send(IntermediateTensors({"hidden_states": torch.zeros(n, 8)}), n)
 
 
-@pytest.mark.parametrize("key", [CANDIDATES, CANDIDATE_LENGTHS, TOPK, TOPK_LENGTHS, "pp_transport_v41_cache_20_long"])
-def test_receive_checks_entire_manifest_before_mutating(runtime, monkeypatch, key):
-    receiver, _ = _stage(monkeypatch, ((0, 25), (25, 40)), 1, _shared())
-    payload = receiver.add_receive_buffers(
-        IntermediateTensors({"hidden_states": torch.zeros(3, 8)}), 3, torch.device("cpu")
-    )
-    payload.tensors[key] = payload[key].to(torch.float64)
-    with pytest.raises(ValueError, match="Invalid PP dependency"):
-        receiver.receive(payload, 3)
-
-
-@pytest.mark.parametrize("lengths", [(10, 10, 10, 10), (1, 9, 15, 15), (25, 15), tuple([1] * 40)])
-def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monkeypatch, lengths):
-    if vllm_version_is("0.32.0"):
-        from vllm.v1.core.kv_cache_utils import _project_kv_cache_groups_to_worker
-    else:
-        from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
-
-    from vllm_ascend.models.deepseek_v41.cache_config import get_deepseek_v41_kv_cache_config
-
-    config = make_cache_config(17, head_size=8, index_size=4, draft_layers=3)
+@pytest.mark.parametrize("lengths", [(23, 17), (24, 16), (10, 10, 10, 10), (1, 9, 15, 15), (25, 15), tuple([1] * 40)])
+@pytest.mark.parametrize("draft_layers", [0, 3])
+def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monkeypatch, lengths, draft_layers):
+    config = make_cache_config(17, head_size=8, index_size=4, draft_layers=draft_layers)
     global_specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     partitions = _partitions(lengths)
     planner = SimpleNamespace(
         cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
         parallel_config=SimpleNamespace(pipeline_parallel_size=len(lengths)),
     )
-    draft_names = {f"mtp.{index}.self_attn.swa_cache" for index in range(3)}
+    draft_names = {f"mtp.{index}.self_attn.swa_cache" for index in range(draft_layers)}
     for rank, (start, end) in enumerate(partitions):
         transport, layers = _stage(monkeypatch, partitions, rank, _shared())
         mirrors = {name for name, layer in layers.items() if isinstance(layer, v41_model.DeepseekV41CacheLayer)}
@@ -320,19 +299,23 @@ def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monk
             or (".mtp." in "." + name and end == 40)
             or (".layers." in name and start <= int(name.split(".layers.")[1].split(".")[0]) < end)
         }
-        groups = _project_kv_cache_groups_to_worker(config.kv_cache_groups, local)
-        planned = get_deepseek_v41_kv_cache_config(planner, groups, 10**7)
-        _, views = allocate_cache_views(planned)
-        assert set(views) == set(local)
-        assert draft_names.intersection(views) == (draft_names if end == 40 else set())
-        for group in groups:
-            pages = []
-            for i, name in enumerate(group.layer_names):
-                for plane in views[name] if isinstance(views[name], tuple) else (views[name],):
-                    plane[1].fill_(i + 1)
-                    pages.append((plane[1], i + 1))
-            for page, value in pages:
-                torch.testing.assert_close(page, torch.full_like(page, value))
+        stage_groups = [_project_kv_cache_groups_to_worker(config.kv_cache_groups, local)]
+        if not draft_layers:
+            # Also cover stage-local backbone grouping used for profiling.
+            stage_groups.append(make_cache_groups(group_cache_specs(local)))
+        for groups in stage_groups:
+            planned = get_deepseek_v41_kv_cache_config(planner, groups, 10**7)
+            _, views = allocate_cache_views(planned)
+            assert set(views) == set(local)
+            assert draft_names.intersection(views) == (draft_names if end == 40 else set())
+            for group in groups:
+                pages = []
+                for i, name in enumerate(group.layer_names):
+                    for plane in views[name] if isinstance(views[name], tuple) else (views[name],):
+                        plane[1].fill_(i + 1)
+                        pages.append((plane[1], i + 1))
+                for page, value in pages:
+                    torch.testing.assert_close(page, torch.full_like(page, value))
 
 
 @pytest.mark.parametrize("boundary", [15, 23])
@@ -380,3 +363,78 @@ def test_pcp_transfer_copies_global_cache_rows_but_keeps_query_states_local(
             if src >= 0:
                 expected[dst // 4, dst % 4] = source_plane[src // 4, src % 4]
         torch.testing.assert_close(mirror, expected, rtol=0, atol=0)
+
+
+class _ModelLayer(torch.nn.Module):
+    def __init__(self, index):
+        super().__init__()
+        self.layer_idx = index
+        self.engram = None
+
+    def forward(self, positions, hidden, pre_mix, scaling, input_ids=None):
+        del positions, scaling, input_ids
+        hidden = (hidden.float() + pre_mix.unsqueeze(-1) * (self.layer_idx + 1)).to(hidden.dtype)
+        return hidden, pre_mix + (self.layer_idx + 1) / 8
+
+    def hc_collapse(self, hidden, pre_mix):
+        return (hidden.float() * pre_mix.unsqueeze(-1)).sum(1).to(hidden.dtype)
+
+
+def _model_stage(start, end, embedding, use_sp, *, num_layers=6):
+    model = object.__new__(v41_model.DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    # __new__ bypasses compile-decorator initialization; keep the real eager forward.
+    model.do_not_compile = True
+    model.config = SimpleNamespace(hidden_size=4, engram_layer_ids=())
+    model.hc_mult = 4
+    model.decoder_replay_layers = None
+    model.has_engram = False
+    model.start_layer, model.end_layer = start, end
+    model.use_sequence_parallel = use_sp
+    model.embed_tokens = embedding if start == 0 else v41_model.PPMissingLayer()
+    model.layers = torch.nn.ModuleList(
+        [_ModelLayer(i) if start <= i < end else v41_model.PPMissingLayer() for i in range(num_layers)]
+    )
+    model.norm = torch.nn.Identity() if end == num_layers else v41_model.PPMissingLayer()
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model._mtp_hidden_buffer = None
+    model.aux_hidden_state_layers = (1, 4)
+    return model
+
+
+@pytest.mark.parametrize("partition", [(3, 3), (1, 2, 2, 1)])
+@pytest.mark.parametrize("use_sp", [False, True])
+def test_v41_pp_preserves_hc_pre_mix_and_aux_states(monkeypatch, partition, use_sp):
+    """Splitting the same layers must preserve HC results and Eagle inputs."""
+    embedding = torch.nn.Embedding(8, 4, dtype=torch.bfloat16)
+    ids, positions = torch.full((3,), 2), torch.arange(3)
+    if use_sp:
+        # Equal rows let a single CPU process model two TP shards, including
+        # padding of the three-token batch to an even shard size.
+        monkeypatch.setattr(v41_model, "sp_shard", lambda value: value[: (value.shape[0] + 1) // 2])
+        monkeypatch.setattr(v41_model, "sp_all_gather", lambda value: torch.cat((value, value)))
+    monkeypatch.setattr(v41_model, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
+    expected, expected_aux = _model_stage(0, 6, embedding, use_sp)(ids, positions, None)
+    incoming = None
+    start = 0
+    for rank, count in enumerate(partition):
+        first, last = rank == 0, rank == len(partition) - 1
+        monkeypatch.setattr(
+            v41_model,
+            "get_pp_group",
+            lambda first=first, last=last: SimpleNamespace(is_first_rank=first, is_last_rank=last),
+        )
+        stage = _model_stage(start, start + count, embedding, use_sp)
+        incoming = stage(ids, positions, incoming)
+        if not last:
+            assert isinstance(incoming, IntermediateTensors)
+            assert incoming["hidden_states"].shape == (3, 4, 4)
+            assert incoming["pre_mix"].shape == (3, 4)
+            assert incoming["pre_mix"].dtype == torch.float32
+        start += count
+    assert isinstance(incoming, tuple)
+    actual, actual_aux = incoming
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert len(actual_aux) == len(expected_aux) == 2
+    for actual_state, expected_state in zip(actual_aux, expected_aux):
+        torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)

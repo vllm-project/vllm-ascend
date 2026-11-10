@@ -76,18 +76,11 @@ def make_model():
     return model
 
 
-def test_pp_engram_buffers_only_cover_locally_owned_tables(runtime):
-    model = make_model()
-    model.layers[1] = PPMissingLayer()
-    assert model.local_engram_layer_ids == (2,)
-    result = model.prime_engram_v2_graph_inputs(4)
-    assert set(result["engram_lookups"]) == {2}
-    assert set(result["engram_pending"]) == {2}
-
-
 def test_pp_engram_uses_global_hash_slot_for_the_local_table(runtime, monkeypatch):
     model = make_model()
     model.layers[1] = PPMissingLayer()
+    buffers = model.prime_engram_v2_graph_inputs(4)
+    assert set(buffers["engram_lookups"]) == set(buffers["engram_pending"]) == {2}
     table = model.layers[2].engram.embed_tokens
     table.dp_size = table.tp_size = 1
     table.embed_gathered = Mock(side_effect=lambda hashes, count: hashes.unsqueeze(-1).expand(-1, -1, 2))

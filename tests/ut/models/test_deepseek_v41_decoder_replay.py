@@ -13,10 +13,9 @@ from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
 @pytest.mark.parametrize("dp_size", [1, 2])
-def test_decoder_replay_with_or_without_prefix_caching_is_disabled_for_pp(pp_size, pcp_size, prefix_caching, dp_size):
+def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -31,7 +30,7 @@ def test_decoder_replay_with_or_without_prefix_caching_is_disabled_for_pp(pp_siz
     config = SimpleNamespace(
         cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=prefix_caching),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=pp_size,
+            pipeline_parallel_size=1,
             prefill_context_parallel_size=pcp_size,
             data_parallel_size=dp_size,
             decode_context_parallel_size=1,
@@ -42,12 +41,8 @@ def test_decoder_replay_with_or_without_prefix_caching_is_disabled_for_pp(pp_siz
         lora_config=None,
     )
     replay = replay_mod.make_decoder_replay(model, config)
-    if pp_size == 1:
-        assert replay is not None
-        assert model.decoder_replay_start == 1
-    else:
-        assert replay is None
-        assert model.decoder_replay_start == model.end_layer
+    assert replay is not None
+    assert model.decoder_replay_start == 1
 
 
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):

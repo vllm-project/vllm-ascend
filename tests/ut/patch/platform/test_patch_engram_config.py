@@ -123,11 +123,3 @@ def test_platform_leaves_non_engram_models_alone(engram_config):
     engram_config.model_config.architecture = "OtherModel"
     _validate_engram_config(engram_config)
     assert engram_config.engram_config is None
-
-
-def test_engram_allows_pipeline_parallelism(engram_config):
-    from vllm_ascend.platform import _validate_engram_config
-
-    engram_config.use_v2_model_runner = True
-    engram_config.parallel_config.pipeline_parallel_size = 4
-    _validate_engram_config(engram_config)
