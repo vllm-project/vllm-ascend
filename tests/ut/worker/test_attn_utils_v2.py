@@ -3249,7 +3249,7 @@ def test_attn_metadata_hooks_shadow_legacy_dispatch(kind, expected_provider, exp
         "model_specific_extra_kwargs": model_specific_extra_kwargs,
         "formatted_slot_mapping": formatted_slot_mapping,
     }
-    legacy_extra_kwargs = {}
+    legacy_extra_kwargs: dict[str, Any] = {}
     if is_dsa:
         legacy_extra_kwargs.update(
             num_actual_reqs=2,

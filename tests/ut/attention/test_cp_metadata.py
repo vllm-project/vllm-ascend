@@ -2,6 +2,7 @@
 
 """Tests for the backend-agnostic DCP metadata math in the attention layer."""
 
+import importlib.util
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,11 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from vllm_ascend.attention.context_parallel import dcp_metadata
 from vllm_ascend.attention.utils import AscendDCPMetadata
 from vllm_ascend.worker.dcp_utils import DCPManager
+
+# Upstream main removed the model-runner-v1 block table with MRV1 (#20097);
+# the v2 AscendBlockTables needs the NPU triton slot-mapping kernel, so the
+# CPU parity oracle is only available while the legacy module exists.
+_HAS_V1_BLOCK_TABLE = importlib.util.find_spec("vllm_ascend.worker.block_table") is not None
 
 _BLOCK_SIZE = 128
 
@@ -30,7 +36,7 @@ def _create_block_table(
         mock_dcp_group.rank_in_group = dcp_rank
         mock_get_dcp_group.return_value = mock_dcp_group
 
-        from vllm_ascend.worker.block_table import BlockTable
+        from vllm_ascend.worker.block_table import BlockTable  # type: ignore[import-untyped]
 
         return BlockTable(
             block_size=_BLOCK_SIZE,
@@ -78,6 +84,10 @@ def test_reference_dcp_slot_offsets_matches_doc_formula(dcp_size, cp_kv_cache_in
         torch.testing.assert_close(block_offset, expected_block_offset)
 
 
+@pytest.mark.skipif(
+    not _HAS_V1_BLOCK_TABLE,
+    reason="vllm_ascend.worker.block_table was removed with MRV1; the v2 AscendBlockTables needs the NPU triton kernel",
+)
 @pytest.mark.parametrize("dcp_size", [2, 4])
 @pytest.mark.parametrize("cp_kv_cache_interleave_size", [1, 128])
 def test_reference_matches_v1_block_table_dcp_slot_mapping(dcp_size, cp_kv_cache_interleave_size) -> None:
