@@ -373,6 +373,17 @@ A few important things to consider when using DFlash2 draft models:
    target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
    `enforce_eager` is unset or false.
 
+    On A5, GLM (`glm_moe_dsa`) targets paired with `DFlash2DraftModel` use
+    device-length CANN FlashAttn for both eager and full-graph drafts when the
+    draft has supported FP16/BF16 queries and unquantized KV. Full graphs
+    capture length preparation and FlashAttn metadata generation once per
+    compatible attention group in each captured forward, so replay
+    reads the latest rejection-corrected device lengths without converting
+    them to Python lists or updating FIA tasks on the host. Unsupported
+    hardware, head sizes, cache types, and attention features retain their
+    existing backend. This removes that draft length synchronization path;
+    it does not remove all CPU-NPU transfers or guarantee a lower TPOT.
+
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size

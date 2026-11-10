@@ -1,0 +1,5 @@
+pr: 21281
+entries:
+  - category: performance
+    text: Enabled device-length CANN FlashAttn for supported GLM DFlash2 full-graph drafts on A5, avoiding draft length transfers to Python lists and host FIA task updates during replay. Compatible layers share length preparation and tiling within each captured forward without reusing warmup or independent-capture plans.
+    hardware: [A5]
