@@ -873,3 +873,178 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
     finally:
         if graph is not None:
             graph.reset()
+
+
+@pytest.mark.parametrize("graph_producer,shared_group", [(False, True), (True, False)])
+def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared_group, record_property):
+    from types import SimpleNamespace
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.hisparse import runtime
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle, PagedCacheView
+    from vllm.v1.hisparse.types import SparseKVRowMirror
+    from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, _DirectMirrorSources
+
+    width, block, gpu_blocks, host_blocks = 656, 128, 5, 3
+    page = block * width
+    stride = 3 * page
+    names = ("target0", "target1", "draft")
+    layer_offsets = (0, page, 2 * page if shared_group else 0)
+    source_groups = (0, 0, 0 if shared_group else 1)
+    pool = BlockPool(gpu_blocks, enable_caching=False, hash_block_size=block)
+    target_pages = pool.get_new_blocks(2)
+    draft_pages = target_pages if shared_group else pool.get_new_blocks(2)
+    target_ids = [page.block_id for page in target_pages]
+    draft_ids = [page.block_id for page in draft_pages]
+    assert (set(target_ids).isdisjoint(draft_ids)) is not shared_group
+    spans = ((126, 2), (2, 1))
+    mirrors = tuple(
+        SparseKVRowMirror(
+            (target_ids[i] * block + offset,)
+            if shared_group
+            else (target_ids[i] * block + offset, draft_ids[i] * block + offset),
+            (i + 1) * block + offset,
+            count,
+        )
+        for i, (offset, count) in enumerate(spans)
+    )
+    backend = AscendHiSparseBackend()
+    host_rows = host_blocks * block
+    payload, registered = runtime.allocate_pinned_host_pool(len(names) * host_rows * width)
+    graph = None
+    worker = None
+    try:
+        assert payload.is_pinned() and registered.is_pinned()
+        mapping = registered._hisparse_registration
+        # Include both page and layer in the CPU oracle. Plain uint8 arange
+        # repeats across these aligned pages and could miss a wrong page ID.
+        byte = torch.arange(gpu_blocks * stride, dtype=torch.int32)
+        cpu_source = (byte + (byte // stride) * 19 + ((byte % stride) // page) * 31).to(torch.uint8)
+        source = cpu_source.to("npu")
+        staging = source.clone()
+        states = torch.zeros(1, dtype=torch.int32, device=source.device)
+        written = torch.tensor(
+            [m.destination_start + j for m in mirrors for j in range(m.num_rows)],
+            dtype=torch.int32,
+            device=source.device,
+        )
+        requests = torch.zeros_like(written)
+        owners, handles = [], []
+        for index, (group, offset) in enumerate(zip(source_groups, layer_offsets)):
+            span = slice(index * host_rows * width, (index + 1) * host_rows * width)
+            view = PagedCacheView.bind(
+                source,
+                dtype=torch.uint8,
+                row_width=width,
+                byte_offset=offset,
+                block_stride=stride,
+                num_blocks=gpu_blocks,
+                block_size=block,
+            )
+            owner = SimpleNamespace(
+                resident_source_index=group,
+                request_state_indices=states,
+                hot=view,
+                host_cache=payload[span].view(host_rows, width),
+                eager_host_mirror=True,
+                is_group_leader=index != 1,
+                cache_ops=HiSparseNPUOps(mapping),
+            )
+            handle = HiSparseCacheHandle(owner)
+            handle.view = view
+            handle.slot_mapping = torch.tensor(
+                [m.source_starts[group] + j for m in mirrors for j in range(m.num_rows)],
+                dtype=torch.int32,
+                device=source.device,
+            )
+            handle.draft_layer = index == 2
+            owners.append(owner)
+            handles.append(handle)
+        for leader, followers in ((owners[0], [owners[1]]), (owners[2], [])):
+            group = SimpleNamespace(
+                leader=leader,
+                followers=followers,
+                device_global_indices=torch.full((1, 16), -1, dtype=torch.int32, device=source.device),
+            )
+            for owner in [leader, *followers]:
+                owner.index_group = group
+        worker = HiSparseConnectorWorker.__new__(HiSparseConnectorWorker)
+        worker.backend, worker._initialized = backend, False
+        worker.vllm_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+            num_lookahead_tokens=1,
+            kernel_config=SimpleNamespace(enable_jit_warmup=False),
+        )
+        worker.initialize(handles, list(names), source, 1, host_blocks, source.device, [registered])
+        sources = _DirectMirrorSources.bind(worker, SimpleNamespace(draft_attn_layer_names={"draft"}))
+        assert sources is not None
+        connector = HiSparseConnector.__new__(HiSparseConnector)
+        connector.connector_worker = worker
+        inner = ActiveKVConnector.__new__(ActiveKVConnector)
+        inner.kv_connector, inner._disabled = connector, False
+        output_stream = torch.Stream(device=source.device)
+        proxy = HostMirrorConnector(inner, worker, output_stream, sources)
+        values = torch.full((written.numel(), width), 237, dtype=torch.uint8, device=source.device)
+        valid = torch.tensor([written.numel()], dtype=torch.int32, device=source.device)
+        if graph_producer:
+            source.copy_(staging)
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                source.copy_(staging)
+        pending_observed = 0
+        for change in (1, 3, 7):
+            proxy.begin_execution(True)
+            proxy._eligible_forward = True  # Fixed decode metadata for this transport-only test.
+            worker._set_row_mirrors(mirrors)
+            for handle in handles:
+                handle.num_actual_tokens = handle.num_decode_tokens = written.numel()
+                handle.decode_batch = handle.host_mirror_required = True
+                handle.mirror_slot_mapping, handle.req_id_per_token = written, requests
+            payload.fill_(-1)
+            cpu_source.bitwise_xor_(change)
+            staging.copy_(cpu_source, non_blocking=True)
+            source.copy_(staging) if graph is None else graph.replay()
+            expected = torch.full_like(payload, -1).view(torch.uint8).view(len(names), host_rows, width)
+            for i, (offset, count) in enumerate(spans):
+                for layer in (0, 1):
+                    start = target_ids[i] * stride + layer_offsets[layer] + offset * width
+                    end = start + count * width
+                    dest = mirrors[i].destination_start
+                    expected[layer, dest : dest + count] = cpu_source[start:end].view(count, width)
+            proxy.finish_forward()  # Real Target-only descriptor DMA from Resident pages.
+            assert proxy._overlap_draft and proxy._pending_event is worker.host_write_event
+            draft = handles[2]
+            draft.num_actual_tokens = written.numel()
+            destination, slots, count = draft.write_target(written.numel(), written.numel())
+            assert count == written.numel()
+            # Submit only the actual draft layer's writable rows; do not join
+            # or overwrite the full slab before this same-round write.
+            scatter_packed_kv(values, values[:, :0], destination, slots, valid)
+            pending_observed += int(not worker.host_write_event.query())
+            proxy.finalize_step()
+            output_done = torch.Event()
+            output_done.record(output_stream)
+            output_done.synchronize()
+            torch.testing.assert_close(payload.view(torch.uint8).view_as(expected), expected, rtol=0, atol=0)
+            for draft_block, (offset, size) in zip(draft_ids, spans):
+                actual = destination[draft_block, offset : offset + size].cpu()
+                torch.testing.assert_close(actual, torch.full_like(actual, 237), rtol=0, atol=0)
+        assert torch.npu.is_initialized()
+        record_property("actual_NPU_initialized", True)
+        record_property("direct_mirror_submissions", 3)
+        record_property("shared_resident_group", shared_group)
+        record_property("host_event_pending_after_draft_submit", pending_observed)
+    finally:
+        torch.npu.synchronize()
+        dma_stream = getattr(worker, "dma_stream", None)
+        if dma_stream is not None:
+            dma_stream.synchronize()
+        if graph is not None:
+            graph.reset()
+        backend.unpin_tensor(registered)
+        pool.free_blocks(target_pages if shared_group else [*target_pages, *draft_pages])
