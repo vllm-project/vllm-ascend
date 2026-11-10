@@ -234,6 +234,7 @@ a3:
         config_file_path: DeepSeek-V4-Flash-w8a8-bugtest-acc.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
         size: 2
+<<<<<<< HEAD
       - name: DeepSeek-V4.1-Flash-W8A8-1M-PD
         config_file_path: DeepSeek-V4.1-Flash-W8A8-1M-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
@@ -241,6 +242,11 @@ a3:
       - name: GLM-5.3-Flash-W8A8-1M-1P1D
         config_file_path: GLM-5.3-Flash-W8A8-1M-1P1D.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
+=======
+      - name: DeepSeek-V4.1-Flash-W8A8-Mooncake
+        config_file_path: DeepSeek-V4.1-Flash-W8A8-Mooncake.yaml
+        config_base_path: tests/SIT/cases/features/kv_pool
+>>>>>>> 66dba8bcc... update
         size: 2
   single_node:
     test_config:
