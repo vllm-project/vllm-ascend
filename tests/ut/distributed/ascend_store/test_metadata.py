@@ -16,9 +16,12 @@
 #
 
 import unittest
+from copy import copy
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
@@ -408,6 +411,30 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 2000 + 5 * 320)
 
+    def test_prepare_value_layer_selects_group_with_segmented_partial_range(self):
+        db = ChunkedTokenDatabase([self.meta, self.meta], [16, 16], None)
+        db.set_group_buffers(
+            {1: [1000, 2000, 3000]},
+            {1: [80, 80, 160]},
+            {1: [100, 100, 200]},
+            group_num_layers={1: 2},
+            group_layer_cache_entry_offsets={1: [0, 2, 3]},
+            group_cache_entry_segments={1: [(0, 2), (1, 2), (0, 1)]},
+        )
+        self.assertEqual(db.prepare_value_layer(4, 12, [2], 0, kv_cache_group_id=1), ([1240, 2200], [40, 40], 2))
+        self.assertEqual(db.prepare_value_layer(4, 12, [2], 1, kv_cache_group_id=1), ([3440], [80], 2))
+        self.assertEqual(db.prepare_value(4, 12, [2], kv_cache_group_id=1), ([1240, 2200, 3440], [40, 40, 80], 2))
+
+    def test_prepare_value_layer_broadcasts_descriptor_lengths_and_strides(self):
+        db = ChunkedTokenDatabase([self.meta, self.meta], [16, 16], None)
+        db.set_group_buffers(
+            {1: [1000, 2000, 3000, 4000]},
+            {1: [160]},
+            {1: [200]},
+            group_num_layers={1: 2},
+        )
+        self.assertEqual(db.prepare_value_layer(0, 8, [2], 1, kv_cache_group_id=1), ([3400, 4400], [80, 80], 2))
+
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
         self.assertEqual(key, ["k1"])
@@ -546,6 +573,69 @@ class TestRequestTracker(unittest.TestCase):
 
 
 class TestReqMeta(unittest.TestCase):
+    def test_save_decision_does_not_advance_tracker(self):
+        tracker = RequestTracker("r1", 256, allocated_block_ids=[1, 2], num_saved_tokens=0)
+        decision = tracker.plan_save(128, block_hash_count=1, save_partial_block=True)
+        self.assertEqual(decision.save_end_token, 128)
+        self.assertEqual(decision.target_token_len, 256)
+        self.assertEqual(decision.snapshot_start_block, 1)
+        self.assertEqual(decision.snapshot_block_index, 1)
+        self.assertEqual(tracker.num_saved_tokens, 0)
+        self.assertIsNone(tracker.last_layerwise_snapshot_end_token)
+
+    def test_transfer_preparation_is_independent_for_copied_views(self):
+        original = ReqMeta("r1", block_ids_np=np.array([1]), block_gvas_np=np.array([100]))
+        original.transfer.load_keys = ["original"]
+        view = copy(original)
+        view.transfer.load_keys = ["view"]
+        view.transfer.block_gvas_np = np.array([200])
+        other = ReqMeta("r2")
+        other.transfer.load_keys.append("other")
+        self.assertEqual(original.transfer.load_keys, ["original"])
+        self.assertEqual(view.transfer.load_keys, ["view"])
+        np.testing.assert_array_equal(original.get_transfer_arrays(0)[1], [100])
+        np.testing.assert_array_equal(view.get_transfer_arrays(0)[1], [200])
+        self.assertEqual(ReqMeta("r3").transfer.load_keys, [])
+
+    def test_group_arrays_prefer_selected_group(self):
+        meta = ReqMeta(
+            "r1",
+            block_ids_np=np.array([99]),
+            block_ids_by_group_np=[np.array([10]), np.array([20, 21])],
+            block_gvas_np=np.array([999]),
+            block_gvas_by_group_np=[np.array([100]), np.array([200, 210])],
+            load_block_gvas_np=np.array([888]),
+            load_block_gvas_by_group_np=[np.array([300]), np.array([400, 410])],
+        )
+        np.testing.assert_array_equal(meta.get_block_ids_array(1), [20, 21])
+        ids, gvas = meta.get_transfer_arrays(1)
+        np.testing.assert_array_equal(ids, [20, 21])
+        np.testing.assert_array_equal(gvas, [200, 210])
+        ids, gvas = meta.get_transfer_arrays(1, is_save=False)
+        np.testing.assert_array_equal(ids, [20, 21])
+        np.testing.assert_array_equal(gvas, [400, 410])
+
+    def test_transfer_arrays_fall_back_as_a_pair(self):
+        meta = ReqMeta(
+            "r1",
+            block_ids_np=np.array([99]),
+            block_ids_by_group_np=[np.array([10]), np.array([20])],
+            block_gvas_np=np.array([999]),
+            block_gvas_by_group_np=[np.array([100])],
+            load_block_gvas_np=np.array([888]),
+        )
+        for is_save, expected in ((True, [999]), (False, [888])):
+            with self.subTest(is_save=is_save):
+                ids, gvas = meta.get_transfer_arrays(1, is_save=is_save)
+                np.testing.assert_array_equal(ids, [99])
+                np.testing.assert_array_equal(gvas, expected)
+
+    def test_group_arrays_preserve_empty_groups_and_missing_data(self):
+        meta = ReqMeta("r1", block_ids_np=np.array([99]), block_ids_by_group_np=[np.array([], dtype=np.int64)])
+        np.testing.assert_array_equal(meta.get_block_ids_array(0), [])
+        np.testing.assert_array_equal(meta.get_block_ids_array(1), [99])
+        self.assertEqual(ReqMeta("empty").get_transfer_arrays(0), (None, None))
+
     def test_from_request_tracker_basic_save(self):
         tracker = RequestTracker(
             req_id="r1",
