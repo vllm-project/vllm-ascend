@@ -218,6 +218,26 @@ to fit the largest checkpoint tensor. Leave additional NPU memory for the
 trainer to stage an input tensor. If memory is tight, use unpacked IPC or move
 the trainer to a separate NPU and use HCCL.
 
+### Speculative draft weight updates
+
+With a model-based speculative decoder and a weight-transfer backend that
+supports draft updates, call `start_draft_weight_update()` instead of
+`start_weight_update()`. Send the draft model's weight chunks through the same
+`update_weights()` interface, then call `finish_weight_update()`. The worker
+selects the draft model and its model configuration for that session and
+restores the transfer engine's target model afterward.
+
+Draft weight updates are validated with Model Runner V2. The worker reuses
+upstream helpers to temporarily select source LM heads and restore or refresh
+online-quantized copies afterward. Select the validated runner with
+`VLLM_USE_V2_MODEL_RUNNER=1`. A draft that shares the target LM head also updates
+that shared source when its LM-head weights are transferred.
+
+Generation must remain paused throughout the update. Overlapping target and
+draft update sessions are rejected. A failed update restores routing and head
+references, but does not roll back partially loaded weights; complete a fresh
+update before resuming generation.
+
 #### Sparse HCCL
 
 For sparse checkpoint updates, follow the upstream [Sparse NCCL guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl) for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl` and enable RL mode:

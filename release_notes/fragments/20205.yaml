@@ -1,0 +1,4 @@
+pr: 20205
+entries:
+  - category: feature
+    text: Added support for updating speculative draft model weights through Ascend weight-transfer sessions.
