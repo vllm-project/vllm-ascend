@@ -14,14 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Register the Ascend FP8 scaled-MM kernel in every NPU worker process.
+"""Register the Ascend FP8 scaled-MM kernels in every NPU worker process.
 
 The upstream platform FP8 kernel table is per process: every worker that
-loads a model with an online FP8 method must register the OOT kernel before
-``Fp8PtpcOnlineLinearMethod.create_weights`` runs, which is why this is a
-worker patch imported from ``vllm_ascend.patch.worker``. The registration,
-the batch-invariance binding and the vLLM version guard live with the kernel
-in ``vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm``.
+loads a model with an online FP8 method must register the OOT kernels
+before ``Fp8PtpcOnlineLinearMethod.create_weights`` runs, which is why this
+is a worker patch imported from ``vllm_ascend.patch.worker``. The
+registration, the batch-invariance binding and the vLLM version guard live
+with the kernels in
+``vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm``; the two
+kernels' mutually exclusive hardware gates select MXFP8 execution on
+A5 (Ascend 950) and INT8 execution on A3/A2.
 """
 
 try:
