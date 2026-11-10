@@ -3,12 +3,15 @@ from typing import Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
 from vllm_ascend.utils import FP8_METHOD
@@ -41,6 +44,28 @@ class AscendFp8Config(Fp8Config):
     @classmethod
     def get_min_capability(cls) -> int:
         raise NotImplementedError('Ascend hardware dose not support "get_min_capability" feature.')
+
+    @staticmethod
+    def _mxfp_c8_enabled() -> bool:
+        vllm_config = get_current_vllm_config_or_none()
+        return (
+            vllm_config is not None
+            and vllm_config.cache_config is not None
+            and vllm_config.cache_config.cache_dtype == "mxfp8"
+        )
+
+    def get_cache_scale_mapper(self) -> WeightsMapper:
+        mapper = super().get_cache_scale_mapper()
+        if not self._mxfp_c8_enabled():
+            return mapper
+
+        # Native block-FP8 checkpoints may carry the same ModelSlim C8 recipe
+        # as MXFP8 checkpoints. Route the static per-channel V scale to the
+        # parameter installed by AscendC8MXFPKVCacheAttentionMethod.
+        c8_mapper = WeightsMapper(
+            orig_to_new_suffix={".fa_v.scale": ".attn.v_cache_scale"}
+        )
+        return c8_mapper | mapper
 
     def _verify_block_quantization(self) -> None:
         if self.weight_block_size is None:
@@ -101,8 +126,20 @@ class AscendFp8Config(Fp8Config):
 
         from ..method_adapters import (
             AscendFusedMoEMethod,
+            AscendKVCacheMethod,
             AscendLinearMethod,
         )
+
+        if isinstance(layer, Attention):
+            if not self._mxfp_c8_enabled():
+                return None
+
+            from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
+
+            logger.info_once(
+                "C8-MXFP KV cache enabled for native block-wise FP8 weights."
+            )
+            return AscendKVCacheMethod(AscendC8MXFPKVCacheAttentionMethod({}, prefix))
 
         is_linear = isinstance(layer, LinearBase)
         is_moe = is_fused_moe_layer(layer)
