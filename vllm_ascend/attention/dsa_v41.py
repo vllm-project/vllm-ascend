@@ -403,7 +403,7 @@ class AscendDSAV41Impl:
 
     @staticmethod
     def _can_fuse_swa_cache(attn, metadata, projected_kv, cos, sin):
-        """Whether the A2/A3 Triton store exactly matches this SWA layout."""
+        """Whether the A2 (910B) Triton store exactly matches this SWA layout."""
         if not HAS_TRITON or not get_current_hardware_profile().supports(HardwareCapability.DSV41_SWA_CACHE_FUSION):
             return False
         if getattr(attn, "packed_cache_ops", None) is not None:

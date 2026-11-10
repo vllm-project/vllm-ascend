@@ -37,14 +37,14 @@ uses the same even-element negative sine convention as
 
 ## Selection and fallback
 
-The model selects this path automatically on A2/A3 when Triton is available,
+The model selects this path automatically on A2 (910B) when Triton is available,
 the WKV output and SWA cache are BF16 NPU tensors, the cache has the standard
 four-dimensional single-head layout, the two-dimensional slot mapping is
 compatible, the RMSNorm has no loaded bias, and the batch contains at most
 8192 rows. The supported DeepSeek-V4.1 head width is 512 with an even,
 non-empty rotary suffix.
 
-A5 packed caches, larger batches, other dtypes/layouts, and unsupported
+A3, A5 packed caches, larger batches, other dtypes/layouts, and unsupported
 devices retain the original RMSNorm, partial RoPE, and cache-scatter chain.
 Long KV, C1/C2 compressor, and indexer cache writes do not call this operator.
 

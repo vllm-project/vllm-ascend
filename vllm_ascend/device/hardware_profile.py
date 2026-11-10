@@ -85,7 +85,7 @@ class HardwareCapability(Enum):
     # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
     DSV41_PACKED_CACHE = auto()
     # Fuse DeepSeek-V4.1 BF16 SWA RMSNorm, interleaved RoPE, and strided
-    # paged-cache publication in the Triton kernel used by the standard path.
+    # paged-cache publication in the Triton kernel validated on A2 (910B).
     DSV41_SWA_CACHE_FUSION = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
@@ -271,7 +271,6 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
-        HardwareCapability.DSV41_SWA_CACHE_FUSION,
         HardwareCapability.FLA_GDN_PREFILL,
         HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
@@ -319,7 +318,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=_STANDARD_CAPABILITIES
-            | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.NPU_TOP_K_TOP_P},
+            | {
+                HardwareCapability.DSV41_SWA_CACHE_FUSION,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+                HardwareCapability.RMS_NORM_CAST,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,

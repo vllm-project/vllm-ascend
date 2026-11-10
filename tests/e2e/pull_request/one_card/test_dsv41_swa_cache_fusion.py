@@ -27,7 +27,7 @@ def _reference(projected, weight, cos, sin):
 
 def _require_fusion_hardware():
     if not get_current_hardware_profile().supports(HardwareCapability.DSV41_SWA_CACHE_FUSION):
-        pytest.skip("The DSV4.1 Triton fusion targets A2/A3 standard SWA caches")
+        pytest.skip("The DSV4.1 Triton fusion targets A2 (910B) standard SWA caches")
 
 
 @pytest.mark.parametrize("tokens", [1, 8, 192, 1024, 8192])

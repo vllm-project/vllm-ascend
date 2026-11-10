@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Microbenchmark DeepSeek-V4.1 SWA cache preparation on Ascend A2/A3.
+"""Microbenchmark DeepSeek-V4.1 SWA cache preparation on Ascend A2 (910B).
 
 Example:
     python benchmarks/dsv41_swa_cache.py --tokens 1 8 32 128 512 2048 8192
