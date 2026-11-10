@@ -2064,6 +2064,13 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                         raise ValueError(
                             f"{name}: expected {expected_shape}, got {tuple(loaded_weight.shape)}"
                         )
+                    # The loader owns placement; checkpoint tensors may be on CPU.
+                    # Never guess a target device or silently copy into a meta tensor.
+                    if param.is_meta:
+                        raise RuntimeError(
+                            f"Cannot load C2 projection weights into meta parameter {fused_name}. "
+                            "Materialize the model on the configured load device before loading weights."
+                        )
                     with torch.no_grad():
                         param.narrow(0, shard_id * width, width).copy_(loaded_weight)
                     c2_loaded_shards.setdefault(fused_name, set()).add(shard_id)
