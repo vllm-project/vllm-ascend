@@ -1,0 +1,314 @@
+test_name: "GLM-5.3-W8A8C8-A3-200k-PP-PD-Memcache"
+model: "vllm-ascend/GLM-5.3-W8A8C8"
+num_nodes: 4
+npu_per_node: 16
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0, 1]
+    decoder: [2, 3]
+
+kv_pool:
+  type: "memcache"
+  meta_service_port: 5002
+  config_store_port: 6002
+  config:
+    meta:
+      ock.mmc.meta_service.metrics_url: "http://${MASTER_IP}:8002"
+      ock.mmc.log_level: "info"
+    local:
+      ock.mmc.log_level: "info"
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: "device_sdma"
+      ock.mmc.local_service.dram.size: "5GB"
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 13389
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    dp_address: "${NODE_0_IP}"
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 13389
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 16
+    dp_address: "${NODE_0_IP}"
+  - node_index: 2
+    port_start: 7200
+    dp_rpc_port: 13390
+    dp_size: 16
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
+    dp_address: "${NODE_2_IP}"
+  - node_index: 3
+    port_start: 7200
+    dp_rpc_port: 13390
+    dp_size: 16
+    dp_size_local: 8
+    dp_rank_start: 8
+    tp_size: 2
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
+  ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "1800"
+  HCCL_CONNECT_TIMEOUT: "1800"
+  ASCEND_TRANSFER_TIMEOUT: "10000"
+  HCCL_BUFFSIZE: "1024"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "0"
+  PYTHONHASHSEED: "0"
+  ACL_OP_INIT_MODE: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  SERVER_PORT: "${PORT}"
+  LD_LIBRARY_PATH: "/usr/local/python3.11.10/lib:/usr/local/lib:${LD_LIBRARY_PATH}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  VLLM_USE_FASTOKENS: "1"
+  VLLM_PP_LAYER_PARTITION: "42,36"
+
+env_decode: &env_decode
+  <<: *env_common
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+
+prefill_master_cmd: &prefill_master_cmd
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--tensor-parallel-size"
+  - "16"
+  - "--enable-expert-parallel"
+  - "--pipeline-parallel-size"
+  - "2"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--master-addr"
+  - "${NODE_0_IP}"
+  - "--master-port"
+  - "7060"
+  - "--nnodes"
+  - "2"
+  - "--node-rank"
+  - "0"
+  - "--enable-chunked-prefill"
+  - "--async-scheduling"
+  - "--seed"
+  - "1024"
+  - "--max-model-len"
+  - "200000"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--trust-remote-code"
+  - "--max-num-seqs"
+  - "64"
+  - "--gpu-memory-utilization"
+  - "0.92"
+  - "--quantization"
+  - "ascend"
+  - "--safetensors-load-strategy"
+  - "prefetch"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "glm47"
+  - "--reasoning-parser"
+  - "glm47"
+  - "--enforce-eager"
+  - "--kv-cache-dtype"
+  - "int8"
+  - "--no-enable-prefix-caching"
+  - "--attention_config.indexer_kv_dtype"
+  - "int8"
+  - "--additional-config"
+  - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
+  - "--kv-transfer-config"
+  - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache", "use_layerwise": true}}]}}'
+
+prefill_worker_cmd: &prefill_worker_cmd
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--tensor-parallel-size"
+  - "16"
+  - "--enable-expert-parallel"
+  - "--pipeline-parallel-size"
+  - "2"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--master-addr"
+  - "${NODE_0_IP}"
+  - "--master-port"
+  - "7060"
+  - "--nnodes"
+  - "2"
+  - "--node-rank"
+  - "1"
+  - "--headless"
+  - "--enable-chunked-prefill"
+  - "--async-scheduling"
+  - "--seed"
+  - "1024"
+  - "--max-model-len"
+  - "200000"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--trust-remote-code"
+  - "--max-num-seqs"
+  - "64"
+  - "--gpu-memory-utilization"
+  - "0.92"
+  - "--quantization"
+  - "ascend"
+  - "--safetensors-load-strategy"
+  - "prefetch"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "glm47"
+  - "--reasoning-parser"
+  - "glm47"
+  - "--enforce-eager"
+  - "--kv-cache-dtype"
+  - "int8"
+  - "--no-enable-prefix-caching"
+  - "--attention_config.indexer_kv_dtype"
+  - "int8"
+  - "--additional-config"
+  - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
+  - "--kv-transfer-config"
+  - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache", "use_layerwise": true}}]}}'
+
+decode_server_cmd: &decode_server_cmd
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--data-parallel-size"
+  - "${DP_SIZE}"
+  - "--data-parallel-rank"
+  - "${DP_RANK}"
+  - "--data-parallel-address"
+  - "${DP_ADDRESS}"
+  - "--data-parallel-rpc-port"
+  - "${DP_RPC_PORT}"
+  - "--tensor-parallel-size"
+  - "${TP_SIZE}"
+  - "--enable-expert-parallel"
+  - "--enable-chunked-prefill"
+  - "--seed"
+  - "1024"
+  - "--max-model-len"
+  - "200000"
+  - "--max-num-batched-tokens"
+  - "256"
+  - "--trust-remote-code"
+  - "--max-num-seqs"
+  - "64"
+  - "--gpu-memory-utilization"
+  - "0.92"
+  - "--async-scheduling"
+  - "--quantization"
+  - "ascend"
+  - "--safetensors-load-strategy"
+  - "prefetch"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "glm47"
+  - "--reasoning-parser"
+  - "glm47"
+  - "--kv-cache-dtype"
+  - "int8"
+  - "--attention_config.indexer_kv_dtype"
+  - "int8"
+  - "--additional-config"
+  - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--kv-transfer-config"
+  - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "0", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache"}}]}}'
+
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template: *prefill_master_cmd
+  - node_index: 1
+    envs:
+      <<: *env_prefill
+    server_cmd_template: *prefill_worker_cmd
+  - node_index: 2
+    envs:
+      <<: *env_decode
+    server_cmd_template: *decode_server_cmd
+  - node_index: 3
+    envs:
+      <<: *env_decode
+    server_cmd_template: *decode_server_cmd
+
+benchmarks:
+  perf_warmup_HBM:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_warm_prefix_num1
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_num1
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1
+    batch_size: 32
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+#  perf_warmup:
+#    case_type: performance
+#    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_warm_prefix_num16
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 1
+#    max_out_len: 1
+#    batch_size: 1
+#    request_rate: 0
+#    baseline: 0
+#    threshold: 0.97
+#  perf_2:
+#    case_type: performance
+#    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_num16
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 256
+#    max_out_len: 1
+#    batch_size: 64
+#    request_rate: 0
+#    baseline: 0
+#    threshold: 0.97
