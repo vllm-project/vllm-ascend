@@ -113,6 +113,7 @@ def eagle_proposal_scope(owner, input_batch, dummy_run=False, is_profile=False, 
             if dummy_run or is_profile or getattr(input_batch, "is_dummy", False)
             else num_speculative_tokens,
         )
+    assert runtime is not None
     if runtime._owner is not None or runtime._bypass:
         raise RuntimeError("A Draft Window proposal scope is already active")
     return runtime.proposal_context(input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens)
