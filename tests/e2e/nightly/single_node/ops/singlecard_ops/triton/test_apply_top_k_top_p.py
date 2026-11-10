@@ -116,20 +116,20 @@ def test_scalar_and_none_variants():
 
 
 # -----------------------------------------------------------------------------
-# full_vocab mode (default): equivalence to the current default PyTorch path
+# full_vocab mode (legacy compatibility, explicit opt-in)
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("B,V", [(1, 32000), (8, 32000), (8, 151936), (32, 4097)])
 def test_full_vocab_bit_exact_pytorch_fp32(B, V, pytorch_baseline):
-    """Default mode must be a drop-in of _apply_top_k_top_p_pytorch:
+    """Legacy full_vocab must be a drop-in of _apply_top_k_top_p_pytorch:
     fp32 bit-exact with k and p both enabled (AE-3 regression)."""
     init_device_properties_triton()
     logits = torch.randn(B, V, dtype=torch.float32, device="npu") * 4.0
     k = torch.randint(1, 200, (B,), dtype=torch.int32, device="npu")
     p = torch.rand(B, device="npu") * 0.09 + 0.90
 
-    out = apply_top_k_top_p(logits.clone(), k, p)
+    out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="full_vocab")
     ref = pytorch_baseline(logits.clone(), k, p)
     assert torch.equal(out, ref)
 
@@ -145,7 +145,7 @@ def test_full_vocab_ties_kept(dtype, bucket, pytorch_baseline):
     k = torch.full((B,), 20, dtype=torch.int32, device="npu")
     p = torch.full((B,), 0.95, dtype=torch.float32, device="npu")
 
-    out = apply_top_k_top_p(logits.clone(), k, p)
+    out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="full_vocab")
     ref = pytorch_baseline(logits.clone(), k, p)
     if dtype == torch.float32:
         assert torch.equal(out, ref)
@@ -164,10 +164,23 @@ def test_full_vocab_low_precision_kept_tolerance(dtype, pytorch_baseline):
     k = torch.randint(1, 200, (B,), dtype=torch.int32, device="npu")
     p = torch.rand(B, device="npu") * 0.09 + 0.90
 
-    out = apply_top_k_top_p(logits.clone(), k, p)
+    out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="full_vocab")
     ref = pytorch_baseline(logits.clone(), k, p)
     diff = (out != float("-inf")).sum(-1) - (ref != float("-inf")).sum(-1)
     assert diff.abs().max() <= 3
+
+
+def test_default_mode_is_topk_renorm():
+    """The default must match CANN/upstream semantics, not legacy full_vocab."""
+    init_device_properties_triton()
+    B, V = 8, 32000
+    logits = torch.randn(B, V, dtype=torch.float32, device="npu") * 4.0
+    k = torch.randint(1, 200, (B,), dtype=torch.int32, device="npu")
+    p = torch.rand(B, device="npu") * 0.09 + 0.90
+
+    out_default = apply_top_k_top_p(logits.clone(), k, p)
+    out_renorm = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="topk_renorm")
+    assert torch.equal(out_default, out_renorm)
 
 
 # -----------------------------------------------------------------------------
