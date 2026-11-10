@@ -115,8 +115,13 @@ jobs:
           a3_template = next(
               group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2
           )
+          # TEMPORARY (fork smoke validation only, do not merge): 线下 karc 的
+          # 910B 缓存里 OpenBMB/MiniCPM4-0.5B 只有 46 字节的 .mdl（无 config.json
+          # 与权重），而容器又设置了 HF_HUB_OFFLINE=1，测试必然报
+          # "Cannot find the requested files in the cached path"。这里换成
+          # 缓存完整（config.json + safetensors）的 Qwen3.5-0.8B 用例。
           a2_tests = [
-              "tests/e2e/pull_request/one_card/test_minicpm.py",
+              "tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py",
               "tests/e2e/pull_request/two_card/test_prefix_caching.py",
           ]
           a3_tests = [
