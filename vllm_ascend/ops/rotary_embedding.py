@@ -153,12 +153,22 @@ def get_cos_and_sin_mla(positions, use_cache=False, *, use_rope=True):
 
 
 class MLARopeMetadataCache:
-    """Share a persistent RoPE slice across compatible builders in one forward."""
+    """Share RoPE within one metadata build, between position/storage writers.
+
+    The caller invalidates sharing across custom providers and other builders.
+    Inference tensors have no version counter, so these write boundaries also
+    protect their contents. A new cache is used for every metadata build.
+    """
 
     def __init__(self) -> None:
-        self._positions: torch.Tensor | None = None
         self._num_tokens = 0
         self._value: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._owners: tuple = ()
+        self._versions: tuple = ()
+
+    @staticmethod
+    def _versions_of(tensors: tuple) -> tuple:
+        return tuple(None if tensor is None or tensor.is_inference() else tensor._version for tensor in tensors)
 
     @staticmethod
     def _uses_persistent_buffers(value: tuple[torch.Tensor, torch.Tensor]) -> bool:
@@ -176,16 +186,19 @@ class MLARopeMetadataCache:
 
     def get(self, positions: torch.Tensor, input_positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = input_positions.shape[0]
+        owners = (positions, _cos_cache, _sin_cache, _cos_sin_flat, _cos_mla, _sin_mla)
         if (
-            self._positions is positions
-            and self._num_tokens == num_tokens
+            self._num_tokens == num_tokens
             and self._value is not None
+            and all(previous is current for previous, current in zip(self._owners, owners))
+            and self._versions == self._versions_of(owners)
             and self._uses_persistent_buffers(self._value)
         ):
             return self._value
         value = get_cos_and_sin_mla(input_positions, use_cache=True)
-        self._positions = positions
         self._num_tokens = num_tokens
+        self._owners = owners
+        self._versions = self._versions_of(owners)
         # Preserve the original fallback for absent, empty or mismatched graph
         # buffers. Only slices of the stable destinations may be reused.
         self._value = value if self._uses_persistent_buffers(value) else None
