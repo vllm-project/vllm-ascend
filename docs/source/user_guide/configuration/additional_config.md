@@ -130,7 +130,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. |
 | `enable_super_kernel` | bool | Inherits `enable_static_kernel` | Whether to enable Super Kernel optimization. When omitted, it follows `enable_static_kernel`; set it explicitly to override that behavior. Super Kernel requires static kernel. |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
-| `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
+| `fuse_qknorm_rope` | bool | `True` | Whether to enable the QKNorm/RoPE fusion pass. The pass is skipped with a warning when Triton is unavailable or unsupported by the hardware, including 310P. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
 
 **ascend_warmup_config**

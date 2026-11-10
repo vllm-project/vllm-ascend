@@ -7,7 +7,6 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -37,12 +36,11 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
-from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
 from vllm_ascend.utils import (
     _round_up,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
+    supports_triton,
 )
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
@@ -335,7 +333,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
+        if supports_triton():
+            from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
             k_li = rope_forward_triton_siso(
@@ -429,6 +429,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         if fuse_store:
             assert k_li_scale is not None
+            from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
+
             store_indexer_key_scale(
                 k_li,
                 k_li_scale,
@@ -482,7 +484,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
+        if supports_triton():
+            from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+
             q_li = rope_forward_triton_siso(
                 q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )

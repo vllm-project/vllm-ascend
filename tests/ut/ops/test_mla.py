@@ -162,9 +162,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         q_c = torch.zeros(2, 16)
         k_hidden_states = torch.zeros(2, 32)
         with (
-            patch("vllm_ascend.attention.indexer.HAS_TRITON", True),
+            patch("vllm_ascend.attention.indexer.supports_triton", return_value=True),
             patch(
-                "vllm_ascend.attention.indexer.rope_forward_triton_siso",
+                "vllm_ascend.ops.triton.rope.rope_forward_triton_siso",
                 side_effect=lambda x, *args, **kwargs: x,
             ),
             patch(

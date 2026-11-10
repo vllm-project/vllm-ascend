@@ -125,7 +125,10 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     residual = torch.randn_like(x)
     expected = (torch.empty_like(x), torch.empty_like(x))
 
-    with patch("vllm_ascend.ops.fused_rms_norm_gated.rms_norm_gated", return_value=expected) as fused_norm_gate:
+    with (
+        patch("vllm_ascend.ops.fused_rms_norm_gated.supports_triton", return_value=True),
+        patch("vllm_ascend.ops.triton.kda.kda.rms_norm_gated", return_value=expected) as fused_norm_gate,
+    ):
         actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True)
 
     assert isinstance(layer, AscendFusedRMSNormGated)
@@ -170,10 +173,13 @@ def test_LayerNormFn_forwards_sigmoid_to_npu_kernel(default_vllm_config):
     expected = torch.empty_like(x)
     rstd = torch.ones(2)
 
-    with patch(
-        "vllm_ascend.ops.layernorm.layer_norm_fwd_npu",
-        return_value=(expected, None, rstd),
-    ) as npu_kernel:
+    with (
+        patch("vllm_ascend.ops.layernorm.supports_triton", return_value=True),
+        patch(
+            "vllm_ascend.ops.triton.layernorm_gated.layer_norm_fwd_npu",
+            return_value=(expected, None, rstd),
+        ) as npu_kernel,
+    ):
         actual = LayerNormFn.apply(
             x,
             weight,

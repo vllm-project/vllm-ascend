@@ -77,7 +77,7 @@ def register_patterns(pass_module, layer_shapes, device_type=AscendDeviceType.A2
     with (
         patch.object(pass_module, "get_layers_from_vllm_config", return_value=layers),
         patch.object(pass_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
-        patch.object(pass_module, "HAS_TRITON", True),
+        patch.object(pass_module, "supports_triton", return_value=True),
         patch.object(pass_module, "qkv_rmsnorm_rope_vnorm_fits_ub", qkv_rmsnorm_rope_vnorm_fits_ub, create=True),
         patch.object(pass_module.QKVNormRopeFusionPattern, "register", autospec=True) as qkv_register,
         patch.object(pass_module.QKNormRopeFusionPattern, "register", autospec=True) as qk_register,

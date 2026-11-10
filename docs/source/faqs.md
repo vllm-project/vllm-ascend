@@ -319,3 +319,27 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 26. Why is a Triton optimization disabled on 310P?
+
+Atlas 300I DUO and Atlas 200I Pro use the 310P compatibility path and do not
+support Triton Ascend. vLLM Ascend therefore disables Triton kernels from the
+hardware capability profile before worker patches, custom-op registration, or
+kernel warmup runs. Installing `triton` or `triton-ascend` does not enable those
+kernels on 310P.
+
+When a native implementation exists, vLLM Ascend selects it automatically. A
+Triton-only configuration is either skipped with a warning (for example, a
+graph fusion pass) or rejected during initialization with a supported
+alternative in the error message. For example, use `ngram` instead of
+`ngram_gpu` for 310P speculative decoding. Do not install Triton to work around
+these messages; verify that the environment uses a 310P build and select the
+documented 310P implementation instead.
+
+Use `dtype="float16"` for 310P models whose configuration defaults to BF16.
+If ACL graph capture exhausts stream resources, follow FAQ 17 and reduce capture
+coverage or concurrency, or use `enforce_eager=True` while diagnosing the issue.
+For a small text-generation smoke test, start with `max_model_len=128`,
+`max_num_seqs=1`, and `max_num_batched_tokens=128`, then validate eager and
+supported ACL graph modes separately. These settings are not a hardware
+concurrency limit or a recommended production configuration.

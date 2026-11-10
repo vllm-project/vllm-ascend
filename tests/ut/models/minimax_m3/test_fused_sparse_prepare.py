@@ -52,7 +52,7 @@ def test_fusion_guard(unsupported):
         hidden.shape = (262145, 128)
     elif unsupported == "cache_dtype":
         layer.kv_cache_torch_dtype = torch.float8_e5m2
-    with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", unsupported != "triton"):
+    with patch("vllm_ascend.models.minimax_m3.minimax_m3.supports_triton", return_value=unsupported != "triton"):
         assert MiniMaxM3SparseAttention._can_fuse_sparse_prepare(layer, positions, hidden) == (unsupported is None)
 
 
@@ -92,7 +92,7 @@ def test_fused_forward_skips_materialized_prepare_and_insert():
 )
 def test_fusion_token_limit(tokens, supported):
     hidden = SimpleNamespace(device=SimpleNamespace(type="npu"), dtype=torch.bfloat16, shape=(tokens, 128))
-    with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", True):
+    with patch("vllm_ascend.models.minimax_m3.minimax_m3.supports_triton", return_value=True):
         assert (
             MiniMaxM3SparseAttention._can_fuse_sparse_prepare(make_layer(), torch.arange(tokens), hidden) == supported
         )
@@ -122,7 +122,7 @@ def test_separate_index_projection_uses_fusion_without_concatenation():
     guard_layer = make_layer()
     guard_layer.indexer_proj = layer.indexer_proj
     hidden_meta = SimpleNamespace(device=SimpleNamespace(type="npu"), dtype=torch.bfloat16, shape=(4, 128))
-    with patch("vllm_ascend.models.minimax_m3.minimax_m3.HAS_TRITON", True):
+    with patch("vllm_ascend.models.minimax_m3.minimax_m3.supports_triton", return_value=True):
         assert MiniMaxM3SparseAttention._can_fuse_sparse_prepare(guard_layer, positions, hidden_meta)
 
 

@@ -2370,8 +2370,10 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
     with (
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.supports_triton", return_value=True),
+        patch.object(torch.Tensor, "is_npu", property(lambda _: False), create=True),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.prepare_query_head_major",
+            "vllm_ascend.ops.triton.dcp.sfa_dcp_query.prepare_query_head_major",
             side_effect=lambda nope, rope: torch.cat((nope, rope), dim=-1).transpose(0, 1).contiguous(),
         ),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async", side_effect=gather) as collective,

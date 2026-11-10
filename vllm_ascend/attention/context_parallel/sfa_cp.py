@@ -5,11 +5,9 @@ from typing import Any, NamedTuple, TypeVar
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -39,10 +37,10 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query
 from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
     is_pd_decode_recompute_scheduler_enabled,
+    supports_triton,
 )
 
 
@@ -706,6 +704,10 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         if context.handle is not None:
             context.handle.wait()
         if context.query_prepared and not keep_view:
+            if not supports_triton():
+                raise RuntimeError("Prepared SFA DCP queries require Triton-Ascend and are not supported on 310P.")
+            from vllm_ascend.ops.triton.dcp.sfa_dcp_query import unpack_query
+
             return unpack_query(context.gathered, context.split_sizes)
         gathered = context.gathered
         if context.restore_perm is not None:
@@ -755,7 +757,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         if topk_indices.numel() == 0:
             return topk_indices
 
-        if HAS_TRITON and topk_indices.is_npu:
+        if supports_triton() and topk_indices.is_npu:
             from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
 
             return remap_sparse_indices_triton(
@@ -851,13 +853,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # its separate TP-group override.
         nope_dim, rope_dim = ql_nope.shape[-1], q_pe.shape[-1]
         if (
-            ql_nope.dtype in (torch.bfloat16, torch.float16, torch.float32)
+            supports_triton()
+            and ql_nope.dtype in (torch.bfloat16, torch.float16, torch.float32)
             and ql_nope.shape[0] > 0
             and nope_dim > 0
             and rope_dim > 0
             and nope_dim & (nope_dim - 1) == 0  # Each fragment uses a full tl.arange vector.
             and rope_dim & (rope_dim - 1) == 0
         ):
+            from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major
+
             prepared = prepare_query_head_major(ql_nope, q_pe)
             gathered, handle = all_gather_async(prepared, self.dcp_group)
             return DCPGatherContext(
@@ -872,7 +877,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # fragments. On Ascend the separate gathers can leave SFA with an
         # incomplete stream dependency on the first prefill. Native DCP
         # restores query shards on dim 1.
-        if getattr(ql_nope, "is_npu", False):
+        if supports_triton() and getattr(ql_nope, "is_npu", False):
             try:
                 from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
 

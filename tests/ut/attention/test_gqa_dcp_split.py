@@ -187,7 +187,11 @@ def test_single_token_draft_reads_complete_cache_without_current_attention():
     with (
         patch(module + "._EXTRA_CTX", SimpleNamespace(is_draft_model=True, is_draft_model_prefill=False)),
         patch(module + ".cp_decode_comm_stream", side_effect=AssertionError("No split stream for draft decode")),
-        patch(module + ".fused_dcp_lse_combine", side_effect=AssertionError("No history/current merge")),
+        patch(module + ".supports_triton", return_value=True),
+        patch(
+            "vllm_ascend.ops.triton.dcp.dcp_a2a.fused_dcp_lse_combine",
+            side_effect=AssertionError("No history/current merge"),
+        ),
     ):
         actual = impl._forward_decode_dcp(query, make_metadata(query=(1, 1)))
     assert actual is merged
@@ -284,7 +288,8 @@ def test_decode_only_historical_shards_are_exchanged_current_contributes_once(dc
         patch.object(torch.npu, "stream", side_effect=on_stream),
         patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
         patch("torch.ops.vllm.dcp_a2a_fused", side_effect=communicate) as a2a,
-        patch(module + ".fused_dcp_lse_combine", side_effect=merge) as combine,
+        patch(module + ".supports_triton", return_value=True),
+        patch("vllm_ascend.ops.triton.dcp.dcp_a2a.fused_dcp_lse_combine", side_effect=merge) as combine,
     ):
         result = impl._forward_decode_dcp(query, make_metadata(), query, query)
     assert result is query

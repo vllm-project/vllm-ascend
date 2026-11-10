@@ -14,7 +14,7 @@ the module cache preserves class identity across repeated requests.
 from vllm.model_executor.custom_op import CustomOp
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
+from vllm_ascend.utils import supports_triton
 
 
 @CustomOp.register_oot(name="FusedRMSNormGated")
@@ -22,6 +22,10 @@ class AscendFusedRMSNormGated(FusedRMSNormGated):
     """Use Ascend's fused kernel at the upstream FLA CustomOp boundary."""
 
     def forward_oot(self, x, g, residual=None, prenorm=False, residual_in_fp32=False, out=None):
+        if not supports_triton():
+            raise RuntimeError("Fused gated RMSNorm requires Triton-Ascend and is not supported on Ascend 310P.")
+        from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
+
         return rms_norm_gated(
             x,
             g,

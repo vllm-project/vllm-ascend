@@ -107,7 +107,7 @@ class TestMLAPrefillMerge(unittest.TestCase):
         with (
             patch.object(mla_v1, "torch_npu", SimpleNamespace(npu_fused_infer_attention_score=attention)),
             patch.object(attention_utils, "torch_npu", SimpleNamespace(npu_attention_update=update)),
-            patch.object(attention_utils, "prepare_attention_update", _prepare_update),
+            patch("vllm_ascend.ops.triton.attention_update.prepare_attention_update", _prepare_update),
             patch.object(mla_v1.DeviceOperator, "kv_cache_load"),
         ):
             result, result_lse = impl._compute_prefill_context(

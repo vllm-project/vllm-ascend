@@ -679,8 +679,8 @@ class TestAscendSFAKPathFusion(TestBase):
         self.assertIs(first_slots, second_slots)
 
     @patch("vllm_ascend.attention.indexer.DeviceOperator.indexer_select_post_process")
-    @patch("vllm_ascend.attention.indexer.HAS_TRITON", True)
-    @patch("vllm_ascend.attention.indexer.rope_forward_triton_siso", side_effect=lambda x, *a, **k: x)
+    @patch("vllm_ascend.attention.indexer.supports_triton", new=lambda: True)
+    @patch("vllm_ascend.ops.triton.rope.rope_forward_triton_siso", side_effect=lambda x, *a, **k: x)
     def test_indexer_forward_reuses_wk_weights_proj(self, mock_rope, mock_devop):
         """forward_k + forward must run wk_weights_proj only once."""
         num_tokens, head_dim, weights_dim = 4, 128, 32

@@ -22,14 +22,13 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import Range
 from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.utils import get_rope_dim
+from vllm_ascend.utils import get_rope_dim, supports_triton
 
-if HAS_TRITON:
+if supports_triton():
     from vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_vnorm import qkv_rmsnorm_rope_vnorm_fits_ub
 
 
@@ -330,7 +329,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
                 eps=epsilon,
             ).register(self.pattern_match_passes)
 
-        if not HAS_TRITON:
+        if not supports_triton():
             logger.debug("QKVNorm and Rope fusion not enabled: triton is unavailable")
             return
         # The q/k-only patterns above stay available here: DeviceOperator routes

@@ -205,3 +205,10 @@ After completing any of the three installation methods, install the kernel packa
     ```bash
     pip uninstall -y triton triton-ascend
     ```
+
+    vLLM Ascend also enforces this at runtime: a 310P build never imports or
+    launches Ascend Triton kernels, even if a Triton package is accidentally
+    present in the Python environment. Features that require Triton are
+    disabled when a native fallback exists; configurations without a 310P
+    fallback fail during initialization with guidance to select a supported
+    alternative.

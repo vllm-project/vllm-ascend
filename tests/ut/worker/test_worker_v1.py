@@ -813,22 +813,24 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
-    @patch("vllm_ascend.worker.worker.init_device_properties_triton")
+    @patch("vllm_ascend.worker.worker.supports_triton", return_value=False)
     @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.worker.worker.torch.npu.set_device")
     @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
     @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.torch.npu.device_count", return_value=1)
     @patch("vllm_ascend.worker.worker.torch.npu.is_available", return_value=True)
+    @patch("vllm_ascend.worker.worker.enable_custom_op", return_value=False)
     def test_init_device(
         self,
+        mock_enable_custom_op,
         mock_is_available,
         mock_device_count,
         mock_mem_get_info,
         mock_empty_cache,
         mock_set_device,
         mock_get_device_type,
-        mock_init_triton,
+        mock_supports_triton,
         mock_init_dist_env,
         mock_snapshot_cls,
         mock_current_platform,

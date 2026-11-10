@@ -153,7 +153,7 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
                 SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
             ),
             patch("torch_npu.npu_grouped_matmul", return_value=["gmm1_out"], create=True) as mock_gmm,
-            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.HAS_TRITON", False),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.supports_triton", return_value=False),
             patch("torch_npu.npu_swiglu", return_value="silu_out", create=True),
             patch("torch_npu.npu_dynamic_quant", return_value=("quant_out", "qscale"), create=True),
         ):

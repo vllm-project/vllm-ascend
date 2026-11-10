@@ -73,3 +73,63 @@ Before writing a patch, following the principle above, we should patch the least
 
 1. In V1 Engine, vLLM starts three kinds of processes: Main process, EngineCore process and Worker process. Now vLLM Ascend can only patch the code in Main process and Worker process by default. If you want to patch the code running in EngineCore process, you should patch EngineCore process entirely during setup. Find the entire code in `vllm.v1.engine.core`. Please override `EngineCoreProc` and `DPEngineCoreProc` entirely.
 2. If you are running edited vLLM code, the version of vLLM may be changed automatically. For example, if you run the edited vLLM based on v0.9.n, the version of vLLM may be changed to v0.9.nxxx. In this case, the patch for v0.9.n in vLLM Ascend would not work as expected, because vLLM Ascend can't distinguish the version of the vLLM you're using. In this case, you can set the environment variable `VLLM_VERSION` to specify the version of the vLLM you're using, and then the patch for that version (e.g., v0.9.n) should work.
+
+## Gate Triton patches before importing them
+
+Use `vllm_ascend.utils.supports_triton()` when selecting a Triton implementation.
+It combines Python package availability with the hardware profile's
+`TRITON_KERNELS` capability. Package discovery alone must not enable Triton on
+310P, even if `triton` or `triton-ascend` is installed.
+
+Keep Triton imports inside the capability branch. Apply the same rule before
+worker patch registration, custom-op registration, and kernel warmup. The worker
+bundle imports `patch_ascend_ops` before `patch_triton` on supported hardware
+because the latter overrides the causal-convolution implementation.
+
+Select a native fallback when one exists. If a requested feature has no fallback,
+validate it before initializing the model runner or allocating device resources,
+and include a supported alternative in the error. For example, a KDA state-copy
+plan rejects hardware without Triton support before importing its compiled
+launchers. Select a model supported by 310P.
+Environment switches may select optimizations only within the hardware's
+capabilities; they must not override an unsupported capability.
+
+Cover patch order and combinations in `tests/ut/patch/worker/test_triton_gate.py`.
+Test 310P with both an absent Triton package and a discoverable package, and test
+supported hardware with Triton enabled and disabled. Use real hardware E2E runs
+to verify the selected fallback; mocked capabilities do not establish kernel
+correctness or performance.
+
+Run the capability, patch-combination, warmup, and fallback tests together:
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -q \
+  tests/ut/device/test_hardware_profile.py \
+  tests/ut/device/test_pcp_kv_cache_gate.py \
+  tests/ut/device/test_paged_mla_cache_read.py \
+  tests/ut/patch/worker/test_triton_gate.py \
+  tests/ut/model_executor/warmup/test_sampling_warmup_gate.py \
+  tests/ut/ops/test_kda_state_copy_gate.py \
+  tests/ut/models/test_triton_fallbacks.py \
+  tests/ut/attention/test_sfa_dcp.py
+```
+
+SFA and paged MLA cache preparation must import the device-level PCP wrapper,
+which selects the Triton implementation lazily. Its native path preserves
+strided cache rows and packed FP8 bytes, and fills negative padding slots with
+zeros. Importing the Triton PCP module directly bypasses the hardware gate.
+
+For hardware validation, record the plugin and vLLM revisions, CANN, Torch,
+TorchNPU, Triton versions, model revision, device, and complete engine settings.
+On 310P, inspect the worker process as well as the parent: `supports_triton()`
+must be false and no `vllm_ascend.ops.triton.*` implementation should be loaded.
+Compare generated token IDs and log probabilities in eager and supported graph
+modes. A text-only run of a vision model does not validate its vision path.
+
+On supported hardware, verify that the selected operator actually invokes its
+Triton implementation and compare its output with a native reference. Benchmark
+the baseline and candidate with the same dependencies, model, inputs, engine
+settings, and device. Warm up before collecting repeated operator timings,
+throughput, and request latency. Keep compilation and model-loading time separate
+from steady-state measurements; retain raw samples and report measurement noise
+before judging a performance regression.

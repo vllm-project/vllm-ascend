@@ -17,29 +17,55 @@ import builtins
 import json
 import math
 import os
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 import torch_npu
 
+import vllm_ascend
 from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
+@pytest.mark.parametrize(
+    ("device_type", "expected"),
+    [("_310P", False), ("A2", True), ("A3", True), ("A5", True)],
+)
+def test_build_gate_disables_triton_before_plugin_initialization(device_type, expected):
+    with mock.patch.object(vllm_ascend._build_info, "__device_type__", device_type):
+        assert vllm_ascend._build_supports_triton() is expected
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+@pytest.mark.parametrize("has_triton", [False, True])
+def test_supports_triton_combines_hardware_and_software_capability(device_type, has_triton):
+    with (
+        mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        mock.patch("vllm.triton_utils.HAS_TRITON", has_triton),
+    ):
+        utils.supports_triton.cache_clear()
+        try:
+            assert utils.supports_triton() is (has_triton and device_type is not AscendDeviceType._310P)
+        finally:
+            utils.supports_triton.cache_clear()
+
+
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
+    # Registration selects an implementation; loading the optional FLA backend
+    # belongs to that implementation's tests, not this dispatch test.
+    standard_gdn = ModuleType("vllm_ascend.ops.gdn")
+    standard_gdn.__dict__["AscendGatedDeltaNetAttention"] = mock.sentinel.standard_gdn
     if device_type == AscendDeviceType._310P:
         expected_gdn = AscendGatedDeltaNetAttention310
     else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-
-        expected_gdn = AscendGatedDeltaNetAttention
+        expected_gdn = mock.sentinel.standard_gdn
 
     original_import = builtins.__import__
 
@@ -51,6 +77,7 @@ def test_register_customop_selects_gdn_before_import(device_type):
         return original_import(name, *args, **kwargs)
 
     with (
+        mock.patch.dict("sys.modules", {standard_gdn.__name__: standard_gdn}),
         mock.patch.object(utils, "_ASCEND_CUSTOMOP_IS_REIGISTERED", False),
         mock.patch.object(utils, "REGISTERED_ASCEND_OPS", {}),
         mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),

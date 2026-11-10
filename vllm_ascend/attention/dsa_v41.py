@@ -41,11 +41,11 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
-from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    supports_triton,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -1351,6 +1351,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
         return req
 
     def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        """Schedule ring metadata using a supported fused kernel or native ops."""
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None
@@ -1375,7 +1376,14 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
             skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
-                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
+                if (
+                    self._uses_a5_packed_cache
+                    and full_source_cos is not None
+                    and full_source_sin is not None
+                    and supports_triton()
+                ):
+                    from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+
                     build_c2_ring_metadata(
                         common.query_start_loc,
                         req.seq_lens,
