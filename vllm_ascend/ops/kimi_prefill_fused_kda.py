@@ -83,7 +83,15 @@ class PrefillKDAMetadataContext:
                 or metadata.dtype != workspace.buffer.dtype
                 or metadata.device != workspace.buffer.device
             ):
-                raise RuntimeError("FlashKDA metadata does not match its capacity/dtype/device contract")
+                raise RuntimeError(
+                    "FlashKDA metadata does not match its capacity/dtype/device contract: "
+                    f"actual(shape={tuple(metadata.shape)}, numel={metadata.numel()}, "
+                    f"dtype={metadata.dtype}, device={metadata.device}); "
+                    f"expected(numel={required}, dtype={workspace.buffer.dtype}, device={workspace.buffer.device}); "
+                    f"buffer_capacity={workspace.buffer.numel()}, q_shape={tuple(q.shape)}, "
+                    f"v_shape={tuple(v.shape)}, initial_state_shape={tuple(initial_state.shape)}, "
+                    f"cu_seqlens_shape={tuple(self.query_start_loc.shape)}"
+                )
             view = workspace.buffer[:required]
             view.copy_(metadata)
             del metadata

@@ -212,14 +212,25 @@ def test_capacity_exhaustion_fails_before_launch(runtime):
     operator.prefill.assert_not_called()
 
 
-@pytest.mark.parametrize("bad_result", [torch.zeros(7), torch.zeros(6, dtype=torch.int32)])
+@pytest.mark.parametrize(
+    "bad_result", [torch.zeros(7), torch.zeros(6, dtype=torch.int32), torch.zeros(8, dtype=torch.int32)]
+)
 def test_metadata_contract_is_checked_before_consumer(runtime, bad_result):
     context = _workspace(runtime).new_context(torch.tensor([0, 2, 5], dtype=torch.int32))
     operator = _operators(runtime)
     operator.metadata.side_effect = None
     operator.metadata.return_value = bad_result
-    with pytest.raises(RuntimeError, match="capacity/dtype/device"):
+    with pytest.raises(RuntimeError, match="capacity/dtype/device") as error:
         _invoke(runtime, operator, context)
+    message = str(error.value)
+    assert (
+        f"actual(shape={tuple(bad_result.shape)}, numel={bad_result.numel()}, dtype={bad_result.dtype}, device=cpu)"
+        in message
+    )
+    assert "expected(numel=7, dtype=torch.int32, device=cpu)" in message
+    assert "buffer_capacity=20" in message
+    assert "q_shape=(5, 2, 4)" in message
+    assert "initial_state_shape=(2, 2, 4, 4)" in message
     operator.prefill.assert_not_called()
 
 
