@@ -4,6 +4,16 @@ e2e-upstream_pr:
 e2e-upstream_singlecard:
   - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
     estimated_time: 20
+  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
+    estimated_time: 20
+  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
+    estimated_time: 20
+  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
+    estimated_time: 20
+  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
+    estimated_time: 20
+  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
+    estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/watermarking/test_parallel_compatibility.py
     estimated_time: 20
