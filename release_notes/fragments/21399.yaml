@@ -1,0 +1,6 @@
+pr: 21399
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek-V4.1-Flash W4A8-MXFP4 MoE weight loading crashing when a tensor-parallel shard leaves an odd scale-group count.
+    model: deepseek-v4.1
+    hardware: [A5]
