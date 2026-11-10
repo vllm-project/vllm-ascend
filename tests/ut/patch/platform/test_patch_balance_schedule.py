@@ -68,6 +68,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
@@ -819,6 +820,79 @@ def test_balance_schedule_waiting_and_running_paths():
     out2 = scheduler.schedule()
     assert out2.total_num_scheduled_tokens >= 0
     scheduler.schedule(throttle_prefills=True)
+
+
+@pytest.mark.parametrize(
+    "external_tokens, load_kv_async, expected",
+    [
+        # A synchronous external load must be flagged: the KV cache has to be
+        # restored before the forward pass reads it.
+        (16, False, True),
+        # No external hit at all: nothing is loaded, nothing is flagged.
+        (0, False, False),
+        # An asynchronous external load is restored later, not during this
+        # forward pass, so it must not be flagged as a synchronous load.
+        (16, True, False),
+    ],
+)
+def test_balance_schedule_reports_sync_kv_loads(external_tokens, load_kv_async, expected):
+    """A request served by an external KV cache must flag the synchronous load.
+
+    Regression guard for #20725: this fork of ``schedule()`` dropped upstream's
+    ``has_sync_kv_loads`` bookkeeping. The worker derives
+    ``start_after_forward = not scheduler_output.has_sync_kv_loads`` from the
+    flag, so with it left at its ``False`` default the external KV load was
+    deferred until after the forward pass and the model read KV cache that had
+    never been restored.
+
+    The flag tracks synchronous loads only: an asynchronous load
+    (``load_kv_async=True``) leaves the request in ``WAITING_FOR_REMOTE_KVS``
+    instead of admitting it, so it must not raise the flag.
+    """
+    scheduler = _make_balance_scheduler()
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (external_tokens, load_kv_async)
+    scheduler.connector = connector
+
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    if load_kv_async:
+        # The async load is still in flight: the request is not admitted in
+        # this step, so this forward pass does not read its KV cache.
+        assert output.total_num_scheduled_tokens == 0
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    else:
+        assert output.total_num_scheduled_tokens > 0
+    assert output.has_sync_kv_loads is expected
+
+
+def test_balance_schedule_reports_sync_kv_loads_for_mixed_batch():
+    """A batch mixing a sync and an async external load must flag the sync one.
+
+    The flag is per-step, not per-request: a single synchronous load in the
+    batch is enough to require the KV cache to be restored before the forward
+    pass, even when the same batch also carries an asynchronous load.
+    """
+    scheduler = _make_balance_scheduler()
+    connector = MagicMock()
+
+    def get_num_new_matched_tokens(request, num_local_tokens):
+        if request.request_id == "0":
+            return 16, False
+        return 16, True
+
+    connector.get_num_new_matched_tokens.side_effect = get_num_new_matched_tokens
+    scheduler.connector = connector
+
+    requests = _create_requests(2, num_tokens=32, max_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert output.total_num_scheduled_tokens > 0
+    assert output.has_sync_kv_loads is True
 
 
 def test_balance_schedule_pause_freeze_and_v2():
