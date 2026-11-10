@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.metadata import ReqMeta
 
 
-def kv_head_groups(*, num_key_value_heads: int, use_mla: bool, use_sparse: bool, tp_size: int) -> list[tuple[int, ...]]:
+def kv_head_groups(*, num_key_value_heads: int, use_mla: bool, use_sparse: bool, tp_size: int) -> list[tuple[int, ...]]:  # type: ignore[return]
     """Split KV heads into per-TP-rank groups.
 
     Note: when neither ``num_key_value_heads // tp_size >= 1`` nor
