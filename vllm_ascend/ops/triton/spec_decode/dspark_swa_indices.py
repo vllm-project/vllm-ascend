@@ -50,18 +50,29 @@ def build_dspark_swa_indices_triton(
     num_tokens: int,
     index_width: int,
     window_size: int,
+    indices_output: torch.Tensor | None = None,
+    lengths_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build request-local DSpark SWA indices with one kernel launch."""
-    indices = torch.empty(
-        (num_tokens, 1, index_width),
-        dtype=torch.int32,
-        device=query_start_loc.device,
-    )
-    lengths = torch.empty(
-        (num_tokens, 1),
-        dtype=torch.int32,
-        device=query_start_loc.device,
-    )
+    """Build request-local DSpark SWA indices with one kernel launch.
+
+     ``indices_output``/``lengths_output`` accept persistent buffer views so
+     that ACL-graph capture keeps stable addresses and per-step rebuilds write
+     in place instead of copying freshly allocated temporaries.
+     """
+    indices = indices_output
+    lengths = lengths_output
+    if indices is None:
+        indices = torch.empty(
+            (num_tokens, 1, index_width),
+            dtype=torch.int32,
+            device=query_start_loc.device,
+        )
+    if lengths is None:
+        lengths = torch.empty(
+            (num_tokens, 1),
+            dtype=torch.int32,
+            device=query_start_loc.device,
+        )
     if num_tokens == 0:
         return indices, lengths
 
