@@ -2108,7 +2108,7 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
         }' > ./minimax-m3-1m-a3.log 2>&1 &
     ```
 
-    `--long-prefill-token-threshold 8192` sets the long-prefill threshold used with chunked prefill. The scheduler uses this threshold to limit the prefill tokens scheduled for a long request in one iteration, while `--max-num-batched-tokens 8192` bounds the total token budget for the iteration. In this single-request example both values are 8192, so the 1M prompt is processed in chunks within that budget. This parameter does not reduce the total context limit configured by `--max-model-len`. See the [vLLM scheduler arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#--long-prefill-token-threshold) for details.
+    `--long-prefill-token-threshold 8192` sets the long-prefill threshold used with chunked prefill. The scheduler uses this threshold to limit the prefill tokens scheduled for a long request in one iteration, while `--max-num-batched-tokens 8192` bounds the total token budget for the iteration. In this single-request example both values are 8192, so the 1M prompt is processed in chunks within that budget. This parameter does not reduce the total context limit configured by `--max-model-len`. See the [vLLM scheduler arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#-long-prefill-token-threshold) for details.
 
 === "950DT Products (MXFP8)"
 

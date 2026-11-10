@@ -530,6 +530,7 @@ vllm bench serve \
     --save-result \
     --result-dir ./
 ```
+
 After the benchmark finishes (usually after several minutes for 200 requests), vLLM prints a summary that includes `Request throughput (req/s)`, `Output token throughput (tok/s)`, `Mean TTFT (ms)`, `Mean TPOT (ms)`, and their P99 values. With `--save-result`, the same metrics are written to a JSON file in `--result-dir`, which makes it easy to compare runs.
 
 ## 9 Performance Tuning
@@ -557,6 +558,7 @@ Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [v
 | High Throughput | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
+
 >For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>High Throughput Configuration:</u>

@@ -12,7 +12,7 @@ This document describes how to quickly get started with `Step-5-Preview` model i
 
     - `Step-5-Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5-openeuler`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
     - Only **950DT products** are supported for this experimental release. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step-5-Preview`.
-    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step-5-Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
+    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step-5-Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#102-declaration)).
 
 This document is written based on the custom vLLM Ascend Docker image built on v0.27.0. The supported runtime versions are listed in [Hardware and Software Preparation](#32-hardware-and-software-preparation). The model is supported only in the experimental configuration described in this guide.
 

@@ -27,7 +27,7 @@ The following model variants are available. It is recommended to download the mo
 | Eagle3 Draft Model   | NA                                                                   | [Hugging Face](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3) |
 
 > The Qwen3-30B-A3B-W8A8 weight is currently published on ModelScope only, and the Eagle3 draft model on Hugging Face only, so no mirror link is provided for these two rows.
-
+>
 >**Path description**: Download the model weights to a directory of your choice and record it. In the deployment commands below, `your_model_path` and `your_eagle3_model_path` are placeholders: replace them with the directories recorded here.
 
 **Quantized Versions for Atlas 300I DUO:**
