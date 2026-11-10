@@ -13,9 +13,9 @@ def _require(condition: bool, message: str) -> None:
 def validate_dflash2_graph_source(owner: Any, group: Any = None) -> None:
     """Qualify actual TP2/K7 Graph inputs after loading, before capture.
 
-    Window ON calls this from its read-source admission; OFF calls it from
-    manager construction. Fixed constructors own selector/conv probability
-    storage; set_attn has already qualified the actual native consumers.
+    Only Window ON calls this read-source/manager admission. OFF retains
+    the original manager and native cache policy. Fixed constructors own
+    selector/conv probability storage; set_attn qualifies native consumers.
     """
     vllm_config = owner.vllm_config
     config = owner.speculative_config
@@ -56,10 +56,6 @@ def validate_dflash2_graph_source(owner: Any, group: Any = None) -> None:
     # The fixed DFlash2 constructors use this same config for Q=K+1,
     # selector/sampler top-k, per-layer convolution blocks and tensor storage.
     _require(0 < owner.top_k <= owner.vocab_size, "selector top-k exceeds the actual vocabulary")
-    _require(
-        getattr(owner, "_dflash2_full_kv_retention", False) is True,
-        "the actual DFlash2 full-retention loader contract is missing",
-    )
     # Real set_attn qualified loaded implementations and native mask bindings
     # in its native-attention pass before this manager/source is constructed.
 

@@ -410,8 +410,6 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        from vllm_ascend.worker.v2.spec_decode.dflash2.resident_kv import apply_dflash2_resident_kv_specs
-
         specs = apply_dspark_resident_kv_specs(
             super().get_kv_cache_spec(),
             self.vllm_config,
@@ -420,6 +418,13 @@ class NPUModelRunner(GPUModelRunner):
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
+        if (
+            getattr(self.speculator, "_draft_window_policy", None) is None
+            and getattr(self.speculator, "draft_window_policy", None) is None
+        ):
+            return specs
+        from vllm_ascend.worker.v2.spec_decode.dflash2.resident_kv import apply_dflash2_resident_kv_specs
+
         return apply_dflash2_resident_kv_specs(specs, self.speculator)
 
     def _init_kv_zero_meta(self) -> None:

@@ -126,8 +126,6 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
     # outside sample_draft; reject lmhead TP at construction (as DSpark).
     _lmhead_tp_sample_draft_supported = False
-    # Native SWA masking remains upstream; this route retains complete KV history.
-    _dflash2_full_kv_retention = True
 
     def _score_candidates(
         self,
@@ -151,6 +149,8 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
             return super()._score_candidates(candidate_ids, unary_logits, hidden_states)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if getattr(self, "_draft_window_policy", None) is None:
+            return super().init_cudagraph_manager(cudagraph_mode)
         if self.speculative_config.enforce_eager or cudagraph_mode is CUDAGraphMode.NONE:
             # Preserve the existing typed eager path and its independent owner.
             super().init_cudagraph_manager(CUDAGraphMode.NONE)

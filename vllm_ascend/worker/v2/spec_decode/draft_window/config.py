@@ -193,12 +193,14 @@ def _consumer_profile(speculative):
 
 
 def resolve_graph_support(vllm_config) -> Literal[True] | None:
-    """Parse startup support without changing the upstream configuration.
+    """Check Window-ON Graph support without changing upstream configuration.
 
     Return True only for the protected qualified routes, and None otherwise.
     Method/capacity facts remain on the actual speculator; VllmConfig receives
     no undeclared fields because upstream DFlash loading copies it with replace.
     """
+    if (vllm_config.additional_config or {}).get("draft_window_size") is None:
+        return None
     speculative = vllm_config.speculative_config
     if speculative is None or speculative.method not in ("dflash", "eagle3") or draft_uses_eager(vllm_config):
         return None
@@ -265,8 +267,8 @@ def _validate_graph_consumer_config(vllm_config, profile):
         or (eagle and getattr(draft_parallel, "enable_expert_parallel", None) is not False)
         or not target_phase_valid
         or getattr(compilation.cudagraph_mode, "name", None) != "FULL_DECODE_ONLY"
-        or additional.get("draft_window_size") not in (None, window)
-        or (additional.get("draft_window_size") is not None and type(additional["draft_window_size"]) is not int)
+        or additional.get("draft_window_size") != window
+        or type(additional.get("draft_window_size")) is not int
         or additional.get("enable_dsa_cp", False) is not False
         or type(additional.get("enable_flashcomm1", False)) is not bool
         or not captures
@@ -279,7 +281,7 @@ def _validate_graph_consumer_config(vllm_config, profile):
     ):
         raise NotImplementedError(
             f"Qualified {method} Draft Graph requires TP4, DP1 local capacity 1/2 or DP2 local capacity 1, "
-            f"static K{k}, Window OFF/W{window}, exact admitted padded rows and corresponding Q{query} buckets; "
+            f"static K{k}, Window W{window}, exact admitted padded rows and corresponding Q{query} buckets; "
             "larger/unknown shapes remain protected. No eager fallback is selected."
         )
     if not eagle:
@@ -367,7 +369,7 @@ def validate_eagle_graph_exact(owner, input_batch, exact, *, num_reqs, padded, s
 
 
 def validate_eagle_graph_descriptor(owner, *, first, n, tokens):
-    """Check the executed Graph shape, including Window OFF consumers."""
+    """Check the executed shape within the admitted Window Graph owner."""
     scope = getattr(owner, "_draft_window_graph_support", None)
     if scope is None or owner.method != "eagle3":
         return
@@ -505,7 +507,7 @@ def validate_draft_window_graph_config(vllm_config: Any, *, support: Any) -> Non
     if get_current_hardware_profile().attention_backend_family is not AttentionBackendFamily.STANDARD:
         raise NotImplementedError("Draft Window Graph requires the STANDARD hardware family")
     # The qualified consumer contract already validates its exact topology,
-    # buckets, static K and OFF/ON window. Do not parse/check it a second time.
+    # buckets, static K and window. Do not parse/check it a second time.
     if support is not None:
         return
     parallel = vllm_config.parallel_config

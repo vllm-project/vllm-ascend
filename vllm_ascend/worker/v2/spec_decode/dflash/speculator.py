@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -19,7 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
-from vllm_ascend.utils import get_rotation_path, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.draft_window.graph import (
     install_parallel_graph,
@@ -151,22 +150,6 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # target layers, using the restored target configuration.
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
-        elif (rotation_path := get_rotation_path(self.vllm_config)) is not None and model.model.use_aux_hidden_state:
-            # The fixed generic DFlash model has no post_process hook. Keep
-            # its auxiliary projection aligned; models with a hook own this.
-            from vllm_ascend.models.qwen3_dspark import align_draft_weights
-
-            projection = getattr(model.model, "fc", None)
-            if projection is None:
-                raise ValueError("DFlash with a QuaRot target requires an auxiliary-hidden-state projection")
-            if projection.weight.ndim != 2 or projection.weight.dtype not in (
-                torch.float16,
-                torch.bfloat16,
-                torch.float32,
-            ):
-                raise ValueError("QuaRot DFlash alignment requires an unquantized floating-point fc weight")
-            align_draft_weights(model, projection, self.vllm_config)
-            logger.info("[spec_decode/quarot] Aligned MRV2 DFlash fc and owned vocab layers for %s", rotation_path)
         return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
@@ -331,34 +314,35 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             self, input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens
         )
         self.input_batch = input_batch
-        sync_state = dp_sync_state
-        if dummy_run and skip_attn_for_dummy_run:
-            # Profiling runs the draft with its own query token count, which
-            # can differ from the target batch. Let forward_context coordinate
-            # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
-            # #54856 (facd9a74a1), which resets the profiling DP counts.
-            sync_state = None
-        with build_attn_metadata_wrapper(proposal_scope=owner_scope):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-                num_speculative_tokens=num_speculative_tokens,
-            )
+        with owner_scope:
+            sync_state = dp_sync_state
+            if dummy_run and skip_attn_for_dummy_run:
+                # Profiling runs the draft with its own query token count, which
+                # can differ from the target batch. Let forward_context coordinate
+                # the actual draft counts instead of reusing the target DP state.
+                # TODO: Remove this guard once main2main includes upstream vLLM
+                # #54856 (facd9a74a1), which resets the profiling DP counts.
+                sync_state = None
+            with build_attn_metadata_wrapper():
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
+                )
 
 
 def prepare_dflash_inputs(

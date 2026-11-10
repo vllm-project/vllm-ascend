@@ -36,7 +36,7 @@ def _select_read_provider(
     uncompressed: bool,
     native_window: int | None,
     uniform_windows: bool,
-    full_retention_dflash2: bool,
+    dflash2_consumer: bool,
 ) -> DraftWindowProviderStatus:
     """Match one actual consumer, then apply its layout-specific restrictions."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
@@ -53,7 +53,7 @@ def _select_read_provider(
             backend is backend_type and type(builder) is builder_type and all(type(item) is spec_type for item in specs)
         )
 
-    if full_retention_dflash2 and any(
+    if dflash2_consumer and any(
         type(item) is not FullAttentionSpec or getattr(item, "attention_chunk_size", None) is not None for item in specs
     ):
         raise NotImplementedError("DFlash2 requires Full-retention FullAttentionSpec without chunked attention")
@@ -61,7 +61,7 @@ def _select_read_provider(
     if matches(AscendAttentionBackend, AscendAttentionMetadataBuilder, FullAttentionSpec):
         if any(getattr(item, "attention_chunk_size", None) is not None for item in specs) or not uniform_windows:
             raise NotImplementedError("Dense chunked or nonuniform native attention needs a separate provider")
-        if not full_retention_dflash2 or native_window is None:
+        if not dflash2_consumer or native_window is None:
             return DraftWindowProviderStatus.DIRECT_DENSE
     elif matches(AscendMLABackend, AscendMLAMetadataBuilder, AscendMLAAttentionSpec):
         if builder.flashmla_state is not None:
@@ -101,7 +101,8 @@ def inventory_draft_window_groups(speculator: Any) -> tuple[DraftWindowGroupRout
     config = speculator.attn_vllm_config
     parallel_config = config.parallel_config
     context = config.compilation_config.static_forward_context
-    full_retention_dflash2 = getattr(speculator, "_dflash2_full_kv_retention", False)
+    draft_model = getattr(speculator, "draft_model_config", None)
+    dflash2_consumer = tuple(getattr(draft_model, "architectures", ())) == ("DFlash2DraftModel",)
     if parallel_config.prefill_context_parallel_size != 1 or parallel_config.decode_context_parallel_size != 1:
         raise NotImplementedError("Context-parallel read coordinates need a separate provider")
     cache_groups = kv_cache_config.kv_cache_groups
@@ -159,7 +160,7 @@ def inventory_draft_window_groups(speculator: Any) -> tuple[DraftWindowGroupRout
                     uncompressed=ratio == 1 and storage_size == scheduler_span,
                     native_window=native_window,
                     uniform_windows=len(windows) == 1,
-                    full_retention_dflash2=full_retention_dflash2,
+                    dflash2_consumer=dflash2_consumer,
                 )
             except NotImplementedError as error:
                 raise NotImplementedError(f"Draft Window gid={gid}: {error}") from error
@@ -173,7 +174,7 @@ def inventory_draft_window_groups(speculator: Any) -> tuple[DraftWindowGroupRout
                     cast(AscendAttentionBackendImpl, impl).sliding_window != native_window for impl in implementations
                 ):
                     raise NotImplementedError(f"Draft Window native SWA gid={gid} has no coverage certificate")
-            elif full_retention_dflash2 and any(
+            elif dflash2_consumer and any(
                 impl is None or impl.sliding_window != native_window for impl in implementations
             ):
                 raise NotImplementedError("DFlash2 inventory native band differs from its actual Draft consumer")
@@ -365,8 +366,8 @@ def report_owner_draft_native_attention(owner: Any) -> None:
     # or a hypothetical already-created manager.
     graph_requested = not eager
     architectures = getattr(owner.draft_model_config.hf_config, "architectures", ()) or ()
-    new_dflash2_graph = graph_requested and tuple(architectures) == ("DFlash2DraftModel",)
-    kind, windows, issues = inspect_draft_native_attention(owner, dflash2_graph=new_dflash2_graph)
+    dflash2_window_graph = window is not None and graph_requested and tuple(architectures) == ("DFlash2DraftModel",)
+    kind, windows, issues = inspect_draft_native_attention(owner, dflash2_graph=dflash2_window_graph)
     logger.info_once(
         "Draft native attention=%s; native windows=%s; extra Draft window=%s; "
         "Draft Graph requested=%s; complete actual inventory=%s; issues=%s. "
@@ -391,9 +392,7 @@ def report_owner_draft_native_attention(owner: Any) -> None:
             window,
             scope="global",
         )
-    # Detection must not turn an original Window-OFF Graph route (for example
-    # built-in MTP) into a newly rejected configuration. Additional Window
-    # owners always need the contract; DFlash2 Graph is itself new admission
-    # in this change and needs it even when the additional Window is OFF.
-    if (window is not None or new_dflash2_graph) and kind == "UNKNOWN":
+    # Only an additional Window owner requires this consumer contract. The
+    # original Graph/eager managers retain their own eligibility when OFF.
+    if window is not None and kind == "UNKNOWN":
         raise NotImplementedError("Draft Window/Graph requires a known native attention contract: " + "; ".join(issues))

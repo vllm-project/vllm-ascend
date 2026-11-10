@@ -203,11 +203,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             ret = self._updatable_graph_replay(desc, ())
             window.provider.finish_update()
             return ret
-        # Without an active Window proposal the ordinary graph still needs the finite
-        # admitted consumer shape. Target input padding alone does not
-        # constrain the AR graph bucket selected by the fixed core dispatcher.
-        # Source-created dummy/profile batches retain their original behavior.
-        if getattr(getattr(self.speculator, "input_batch", None), "is_dummy", False) is not True:
+        # An admitted Window owner still checks Full-read proposals: Target
+        # padding does not constrain the AR descriptor selected by the core.
+        # OFF owners have no Window support marker and retain the original path.
+        if window is not None and getattr(getattr(self.speculator, "input_batch", None), "is_dummy", False) is not True:
             from vllm_ascend.worker.v2.spec_decode.draft_window.config import (
                 validate_eagle_graph_descriptor,
             )

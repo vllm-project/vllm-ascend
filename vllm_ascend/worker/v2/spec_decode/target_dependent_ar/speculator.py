@@ -18,7 +18,7 @@
 #
 import logging
 from collections.abc import Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +57,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.draft_window.runtime import eagle_proposal_scope
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -367,61 +368,41 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         we need to cache input_batch, so we can use it later in
         generate_draft.
         """
-        if getattr(self, "method", None) == "eagle3":
-            from vllm_ascend.worker.v2.spec_decode.draft_window.config import validate_graph_requests
-
-            validate_graph_requests(self, input_batch, dummy_run=dummy_run, is_profile=bool(is_profile))
+        owner_scope = eagle_proposal_scope(
+            self, input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens
+        )
         self.input_batch = input_batch
-        self._eplb_dummy_run = dummy_run
-        # Replicated drafts use global tokens, unlike the PCP-local target.
-        # Every DP rank must take the draft sync, including decode and idle ranks.
-        sync_state = None if self.replicated_pcp else dp_sync_state
-        # wrap build_attn_metadata to use Ascend attention metadata building.
-        # so we can call super().propose() directly.
-        runtime = getattr(self, "_draft_window_runtime", None)
-        window = getattr(self, "_draft_window_eagle", None)
-        graph_scope = window.proposal_scope if window is not None else None
-        with (
-            graph_scope(
-                input_batch,
-                dummy_run=dummy_run,
-                is_profile=bool(is_profile),
-                num_speculative_tokens=None
-                if dummy_run or is_profile or getattr(input_batch, "is_dummy", False)
-                else num_speculative_tokens,
-            )
-            if graph_scope is not None
-            else runtime.proposal_context(
-                input_batch,
-                dummy_run,
-                is_profile,
-                num_speculative_tokens=num_speculative_tokens,
-            )
-            if runtime is not None
-            else nullcontext(),
-            disable_target_pcp_for_replicated_draft(self),
-            build_attn_metadata_wrapper(),
-            torch_gather_wrapper(),
-        ):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-                num_speculative_tokens=num_speculative_tokens,
-            )
+        with owner_scope:
+            self._eplb_dummy_run = dummy_run
+            # Replicated drafts use global tokens, unlike the PCP-local target.
+            # Every DP rank must take the draft sync, including decode and idle ranks.
+            sync_state = None if self.replicated_pcp else dp_sync_state
+            # wrap build_attn_metadata to use Ascend attention metadata building.
+            # so we can call super().propose() directly.
+            with (
+                disable_target_pcp_for_replicated_draft(self),
+                build_attn_metadata_wrapper(),
+                torch_gather_wrapper(),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
+                )
 
     def set_attn(
         self,

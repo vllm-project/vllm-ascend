@@ -86,12 +86,18 @@ def test_invalid_read_does_not_publish(columns, ends, starts, error):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_complete_draft_kv_retention_does_not_change_native_or_target(enabled):
+@pytest.mark.parametrize("policy_field", ["draft_window_policy", "_draft_window_policy"])
+def test_complete_draft_kv_retention_does_not_change_native_or_target(enabled, policy_field):
     native = SlidingWindowSpec(block_size=128, num_kv_heads=4, head_size=128, dtype=torch.bfloat16, sliding_window=2048)
     target = FullAttentionSpec(block_size=128, num_kv_heads=4, head_size=128, dtype=torch.bfloat16)
     original = {"draft": native, "target": target}
-    owner = SimpleNamespace(_dflash2_full_kv_retention=enabled, draft_attn_layer_names={"draft"})
+    owner = SimpleNamespace(
+        draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+        draft_attn_layer_names={"draft"},
+    )
+    setattr(owner, policy_field, 1024 if enabled else None)
     result = apply_dflash2_resident_kv_specs(original, owner)
+    assert (result is original) is not enabled
     assert type(result["draft"]) is (FullAttentionSpec if enabled else SlidingWindowSpec)
     assert result["target"] is target and original["draft"] is native
     assert native.sliding_window == 2048

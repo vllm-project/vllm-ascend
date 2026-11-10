@@ -45,6 +45,8 @@ def parallel_proposal_scope(owner, input_batch, dummy_run=False, is_profile=Fals
     """Choose exactly one existing proposal owner at the Ascend boundary."""
     runtime = getattr(owner, "_draft_window_runtime", None)
     graph_runtime = getattr(owner, "_draft_window_graph_binding_provider", None)
+    if runtime is None and graph_runtime is None:
+        return nullcontext()
     limit = getattr(owner, "_draft_window_graph_support", None)
     context_kv_only = num_speculative_tokens == 0
     if limit is not None:
@@ -79,8 +81,41 @@ def parallel_proposal_scope(owner, input_batch, dummy_run=False, is_profile=Fals
             return graph_runtime.proposal_scope(())
         return parallel_graph_proposal_scope(owner, input_batch, dummy_run=effective_dummy, is_profile=is_profile)
     if runtime is not None:
+        if runtime._owner is not None or runtime._bypass:
+            raise RuntimeError("A Draft Window proposal scope is already active")
         return runtime.proposal_context(input_batch, dummy_run, is_profile, context_kv_only=context_kv_only)
     return nullcontext()
+
+
+def eagle_proposal_scope(owner, input_batch, dummy_run=False, is_profile=False, *, num_speculative_tokens=None):
+    """Resolve only the active Eagle owner before replacing the input batch.
+
+    Fixed upstream begin/end hooks do not cover failed preparation or forward.
+    The existing Ascend propose therefore keeps one scope around its super call.
+    """
+    runtime = getattr(owner, "_draft_window_runtime", None)
+    window = getattr(owner, "_draft_window_eagle", None)
+    if runtime is None and window is None:
+        return nullcontext()
+    if runtime is not None and window is not None:
+        raise RuntimeError("Draft Window eager and Graph owners cannot share one proposal")
+    from vllm_ascend.worker.v2.spec_decode.draft_window.config import validate_graph_requests
+
+    validate_graph_requests(owner, input_batch, dummy_run=dummy_run, is_profile=bool(is_profile))
+    if window is not None:
+        if window.provider.proposal is not None:
+            raise RuntimeError("A Draft Window proposal scope is already active")
+        return window.proposal_scope(
+            input_batch,
+            dummy_run=dummy_run,
+            is_profile=bool(is_profile),
+            num_speculative_tokens=None
+            if dummy_run or is_profile or getattr(input_batch, "is_dummy", False)
+            else num_speculative_tokens,
+        )
+    if runtime._owner is not None or runtime._bypass:
+        raise RuntimeError("A Draft Window proposal scope is already active")
+    return runtime.proposal_context(input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens)
 
 
 class DraftWindowRuntime:
@@ -496,25 +531,26 @@ class DraftWindowRuntime:
 
 def initialize_draft_window_owner(owner) -> None:
     """Install the resolved read owner once, after actual Draft attention exists."""
+    graph = getattr(owner, "_draft_window_policy", None)
+    eager = getattr(owner, "draft_window_policy", None)
+    if graph is None and eager is None:
+        return
+    if graph is not None and eager is not None:
+        raise RuntimeError("Draft Window eager and Graph owners must be mutually exclusive")
+    if hasattr(owner, "_draft_window_runtime") or hasattr(owner, "_draft_window_graph_binding_provider"):
+        raise RuntimeError("Draft Window ownership is already initialized")
     from vllm_ascend.worker.v2.spec_decode.draft_window.backends import report_owner_draft_native_attention
 
     report_owner_draft_native_attention(owner)
-    graph = getattr(owner, "_draft_window_policy", None)
-    eager = getattr(owner, "draft_window_policy", None)
-    if graph is not None and eager is not None:
-        raise RuntimeError("Draft Window eager and Graph owners must be mutually exclusive")
-    if graph is not None or eager is not None:
-        if hasattr(owner, "_draft_window_runtime") or hasattr(owner, "_draft_window_graph_binding_provider"):
-            raise RuntimeError("Draft Window ownership is already initialized")
-        if graph is not None:
-            from vllm_ascend.worker.v2.spec_decode.draft_window.graph import create_draft_window_graph_provider
+    if graph is not None:
+        from vllm_ascend.worker.v2.spec_decode.draft_window.graph import create_draft_window_graph_provider
 
-            owner._draft_window_graph_binding_provider = create_draft_window_graph_provider(owner)
-            if owner.method == "eagle3":
-                from vllm_ascend.worker.v2.spec_decode.draft_window.eagle import EagleDraftWindow
+        owner._draft_window_graph_binding_provider = create_draft_window_graph_provider(owner)
+        if owner.method == "eagle3":
+            from vllm_ascend.worker.v2.spec_decode.draft_window.eagle import EagleDraftWindow
 
-                owner._draft_window_eagle = EagleDraftWindow(owner, owner._draft_window_graph_binding_provider)
-            else:
-                owner._draft_window_dp_dummy_active = False
+            owner._draft_window_eagle = EagleDraftWindow(owner, owner._draft_window_graph_binding_provider)
         else:
-            owner._draft_window_runtime = DraftWindowRuntime(owner, eager)
+            owner._draft_window_dp_dummy_active = False
+    else:
+        owner._draft_window_runtime = DraftWindowRuntime(owner, eager)

@@ -188,14 +188,13 @@ def test_ar_banks_survive_together_and_failed_submission_quarantines(capture_inp
 
 @pytest.mark.parametrize("has_hook", [True, False])
 @pytest.mark.parametrize("second_generation", [False, True])
-def test_fresh_dflash_load_aligns_exactly_once(monkeypatch, has_hook, second_generation):
+def test_dflash_load_preserves_the_original_post_process_contract(monkeypatch, has_hook, second_generation):
     calls = []
     model = NS(model=NS(use_aux_hidden_state=True, fc=NS(weight=torch.ones(2, 2))))
     if has_hook:
         model.post_process = lambda config: calls.append(("post_process", config))
     monkeypatch.setattr(dflash.DFlashSpeculator, "load_draft_model", lambda *args: model)
     monkeypatch.setattr(dflash, "disable_profiling_chunk_for_draft", lambda config: nullcontext())
-    monkeypatch.setattr(dflash, "get_rotation_path", lambda config: "quarot")
     from vllm_ascend.models import qwen3_dspark
 
     monkeypatch.setattr(qwen3_dspark, "align_draft_weights", lambda actual, fc, config: calls.append(("align", config)))
@@ -204,9 +203,7 @@ def test_fresh_dflash_load_aligns_exactly_once(monkeypatch, has_hook, second_gen
     owner = object.__new__(AscendDFlash2Speculator if second_generation else dflash.AscendDFlashSpeculator)
     owner.vllm_config = object()
     assert owner.load_draft_model(object(), set()) is model
-    assert calls == [("post_process" if has_hook else "align", owner.vllm_config)]
-    if second_generation:
-        assert owner._dflash2_full_kv_retention is True
+    assert calls == ([("post_process", owner.vllm_config)] if has_hook else [])
 
 
 @pytest.fixture
@@ -493,3 +490,58 @@ def test_real_graph_manager_replay_uses_owned_source_and_original_order(capture_
         expected = module.ContextSource if kind == "dflash" else module.SharedSource
         assert isinstance(sources[0], expected)
     graph.update.assert_called_once_with(manager.update_stream, "resolved")
+
+
+@pytest.mark.parametrize(
+    "kind,failure", [("dflash", "upstream"), ("dspark", "prepare"), ("dspark", "upstream"), ("eagle", "upstream")]
+)
+def test_real_propose_scope_restores_metadata_and_quarantines_failed_work(
+    capture_inputs, eagle, monkeypatch, kind, failure
+):
+    from vllm_ascend.worker.v2 import attn_utils
+    from vllm_ascend.worker.v2.spec_decode.dspark import speculator as dspark
+    from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import speculator as ar
+
+    c = capture_inputs
+    owner = (
+        eagle
+        if kind == "eagle"
+        else object.__new__(dflash.AscendDFlashSpeculator if kind == "dflash" else dspark.AscendDSparkSpeculator)
+    )
+    batch = eagle.input_batch
+    batch.is_prefilling_np = np.array([False, False])
+    batch.num_reqs_after_padding, batch.req_ids = 2, ["b", "a"]
+    owner.input_batch = object()
+    owner._draft_window_graph_binding_provider = c.provider
+    owner.num_speculative_steps, owner.num_query_per_req, owner.max_num_reqs = 7, 8, 2
+    owner.method = kind if kind != "eagle" else "eagle3"
+    owner.replicated_pcp, owner.enable_adaptive_verification = False, False
+    owner.pcp_manager = None
+    owner.use_dcp, owner.attn_architecture = failure == "prepare", "GQA"
+    owner.input_buffers, owner.max_num_tokens = c.buffers, 16
+    monkeypatch.setattr(type(owner), "attn_vllm_config", property(lambda self: NS(parallel_config=NS())))
+    original = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    slots_before = c.tables.slot_mappings.clone()
+    calls = []
+
+    def fail(*args, **kwargs):
+        assert c.provider.proposal == (False, False)
+        calls.append(failure)
+        raise RuntimeError("proposal failed")
+
+    if failure == "prepare":
+        monkeypatch.setattr(owner, "_prepare_draft_dcp_metadata_inputs", fail)
+    else:
+        parent = (
+            dflash.DFlashSpeculator
+            if kind == "dflash"
+            else (dspark.DSparkSpeculator if kind == "dspark" else ar.TargetDependentARSpeculator)
+        )
+        monkeypatch.setattr(parent, "propose", fail)
+    with pytest.raises(RuntimeError, match="proposal failed"):
+        owner.propose(batch, *([None] * 10))
+    assert calls == [failure]
+    assert attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata is original
+    assert c.provider.proposal is None and c.provider.quarantined
+    assert not getattr(owner, "_draft_window_dp_dummy_active", False)
+    torch.testing.assert_close(c.tables.slot_mappings, slots_before, rtol=0, atol=0)

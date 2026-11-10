@@ -37,10 +37,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device, req_states: "
     """Resolve the window policy before choosing ordinary or Graph ownership."""
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    policy = _resolve_window_policy(vllm_config)
+    if policy is None:
+        return _init_speculator(vllm_config, device, req_states)
     graph_support = None
     if getattr(speculative_config.draft_model_config, "model", None) is not None:
         graph_support = resolve_graph_support(vllm_config)
-    policy = _resolve_window_policy(vllm_config)
     use_graph_owner = _use_graph_window_owner(vllm_config, policy, graph_support)
     if graph_support is not None and req_states is None:
         raise ValueError("Qualified Draft Graph requires the runner's actual RequestState")
@@ -57,11 +59,10 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device, req_states: "
             speculative_config.num_speculative_tokens,
             vllm_config.model_config.max_model_len,
         )
-    if policy is not None:
-        if use_graph_owner:
-            speculator._draft_window_policy = policy
-        else:
-            speculator.draft_window_policy = policy
+    if use_graph_owner:
+        speculator._draft_window_policy = policy
+    else:
+        speculator.draft_window_policy = policy
     return speculator
 
 

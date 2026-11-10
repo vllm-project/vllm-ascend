@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Retain Draft history required by the DFlash2 native consumer."""
+"""Retain canonical Draft history only for the additional DFlash2 read window."""
 
 from typing import Any
 
@@ -8,7 +8,11 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, SlidingWi
 
 
 def apply_dflash2_resident_kv_specs(specs: dict[str, KVCacheSpec], speculator: Any) -> dict[str, KVCacheSpec]:
-    if not getattr(speculator, "_dflash2_full_kv_retention", False):
+    policy = getattr(speculator, "_draft_window_policy", None)
+    if policy is None:
+        policy = getattr(speculator, "draft_window_policy", None)
+    draft = getattr(speculator, "draft_model_config", None)
+    if policy is None or tuple(getattr(draft, "architectures", ())) != ("DFlash2DraftModel",):
         return specs
     result = specs.copy()
     for name in speculator.draft_attn_layer_names:
@@ -19,5 +23,5 @@ def apply_dflash2_resident_kv_specs(specs: dict[str, KVCacheSpec], speculator: A
             # groups or disable other engine cache optimizations.
             result[name] = replace_as(spec, FullAttentionSpec, drop=("extra_retained_tokens",))
         elif type(spec) is not FullAttentionSpec:
-            raise NotImplementedError("DFlash2 reference needs an ordinary Full/SWA cache spec")
+            raise NotImplementedError("DFlash2 Window needs an ordinary Full/SWA cache spec")
     return result

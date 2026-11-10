@@ -665,7 +665,7 @@ MRV2 supports an additional Draft read window for admitted `eagle3`, `dflash`
 (including DFlash2), and external `dspark` consumers. Full KV writes,
 absolute positions, and Target attention retain their original coordinates.
 Omitting `draft_window_size`, or setting it to `null`, disables the additional
-window and preserves the Draft's native attention.
+window and preserves the official Draft execution, cache and eligibility rules.
 
 For Draft eager execution, use the example above with
 `VLLM_USE_V2_MODEL_RUNNER=1` and speculative `enforce_eager=true`. This does
@@ -683,16 +683,22 @@ capacity must cover both Target query tokens and the method's Draft query
 geometry.
 Unsupported models, buckets, and request shapes fail explicitly; the window
 does not select an eager fallback.
-Admission currently covers the GLM DSpark/DFlash parallel consumers,
+Admission currently covers supported DSpark/DFlash parallel consumers,
 the qualified Qwen Full-attention DFlash and Eagle3 consumers at TP4 with
 DP1 local capacity 1/2 or DP2 local capacity 1, and Qwen DFlash2 at TP2 with
 static K7/Q8. These capacities describe actual requests per DP rank, not
-client concurrency. Preempted and unqualified shapes remain protected.
+client concurrency. These restrictions apply to the additional window;
+OFF retains the original managers' admission and capture behavior.
+Preempted and unqualified ON shapes remain protected.
+Target/Draft checkpoints must already be compatible under the official model
+loader. This feature does not correct model weight alignment; generic DFlash
+with a rotated Target needs independent model compatibility qualification.
 
 The Draft's loaded attention determines whether it is Full, native SWA,
-mixed, or unknown. Startup reports this distinction. Full KV retention does
-not imply Full attention: DFlash2 retains its native window with Full KV
-backing. An explicit smaller window can reduce acceptance or throughput;
+mixed, or unknown. Window startup reports this distinction. Full KV retention
+does not imply Full attention: enabling a DFlash2 window retains canonical
+Draft history for this reader while preserving its native attention band.
+OFF retains the official cache specification. An explicit smaller window can reduce acceptance or throughput;
 prefer the native window unless workload measurements justify narrowing it.
 Unknown consumers cannot enable an additional window. DFlash2's non-causal
 window, block alignment, and query width must fit its native attention band.

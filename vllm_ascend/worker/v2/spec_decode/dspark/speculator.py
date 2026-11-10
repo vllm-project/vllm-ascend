@@ -465,54 +465,59 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             self, input_batch, dummy_run, is_profile, num_speculative_tokens=num_speculative_tokens
         )
         self.input_batch = input_batch
-        assert self.input_batch is not None
-        # Replicated drafts consume global requests, unlike sharded targets.
-        # Adaptive verification also negotiates the draft shape independently.
-        # Every DP rank must synchronize the draft batch independently.
-        sync_state = dp_sync_state
-        if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
-            sync_state = None
-        if dummy_run and skip_attn_for_dummy_run:
-            # Profiling runs the draft with its own query token count, which
-            # can differ from the target batch. Let forward_context coordinate
-            # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
-            # #54856 (facd9a74a1), which resets the profiling DP counts.
-            sync_state = None
-        seq_lens_cpu = None
-        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
-        if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
-            # DSpark drafts one block with a fixed step; zero unused request slots
-            # before upstream selects the padded batch size and slices this view.
-            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-                input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
-            )
-        with (
-            build_attn_metadata_wrapper(proposal_scope=owner_scope),
-            build_attn_metadata_factory(
-                self.input_buffers.positions,
-                self.max_num_tokens,
-                is_prefilling,
-                seq_lens_cpu=seq_lens_cpu,
-                parallel_config=self.attn_vllm_config.parallel_config,
-            ),
-        ):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-                num_speculative_tokens=num_speculative_tokens,
-            )
+        with owner_scope:
+            assert self.input_batch is not None
+            # Replicated drafts consume global requests, unlike sharded targets.
+            # Adaptive verification also negotiates the draft shape independently.
+            # Every DP rank must synchronize the draft batch independently.
+            sync_state = dp_sync_state
+            if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
+                sync_state = None
+            if dummy_run and skip_attn_for_dummy_run:
+                # Profiling runs the draft with its own query token count, which
+                # can differ from the target batch. Let forward_context coordinate
+                # the actual draft counts instead of reusing the target DP state.
+                # TODO: Remove this guard once main2main includes upstream vLLM
+                # #54856 (facd9a74a1), which resets the profiling DP counts.
+                sync_state = None
+            seq_lens_cpu = None
+            is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+            if (
+                self.use_dcp
+                and self.attn_architecture in ("GQA", "MLA")
+                and not (dummy_run and skip_attn_for_dummy_run)
+            ):
+                # DSpark drafts one block with a fixed step; zero unused request slots
+                # before upstream selects the padded batch size and slices this view.
+                seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
+                    input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
+                )
+            with (
+                build_attn_metadata_wrapper(),
+                build_attn_metadata_factory(
+                    self.input_buffers.positions,
+                    self.max_num_tokens,
+                    is_prefilling,
+                    seq_lens_cpu=seq_lens_cpu,
+                    parallel_config=self.attn_vllm_config.parallel_config,
+                ),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
+                )

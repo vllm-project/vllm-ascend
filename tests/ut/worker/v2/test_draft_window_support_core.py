@@ -192,6 +192,7 @@ def test_dflash2_unsupported_graph_mode_remains_closed():
 
     owner = object.__new__(AscendDFlash2Speculator)
     owner.speculative_config = NS(enforce_eager=False)
+    owner._draft_window_policy = 1024
     with pytest.raises(NotImplementedError):
         owner.init_cudagraph_manager(CUDAGraphMode.PIECEWISE)
 
@@ -283,3 +284,68 @@ def test_graph_pcp_keeps_replicated_dspark_boundary(monkeypatch, field, value):
     else:
         with pytest.raises((NotImplementedError, RuntimeError)):
             validate_draft_window_graph_config(config, support=None)
+
+
+@pytest.mark.parametrize("additional", [None, {}, {"draft_window_size": None}])
+def test_window_off_skips_window_admission_and_owner_creation(monkeypatch, additional):
+    import torch
+
+    import vllm_ascend.worker.v2.spec_decode as factory
+    from vllm_ascend.worker.v2.spec_decode.draft_window import config
+
+    monkeypatch.setattr(config, "get_ascend_config", lambda: NS(draft_window_size=None))
+    actual = object()
+    calls = []
+    original = NS(speculative_config=NS(), additional_config=additional)
+
+    def original_factory(vllm_config, device, req_states):
+        assert vllm_config is original and req_states is None
+        calls.append(device)
+        return actual
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Window OFF must not inspect Window-only model/topology/capacity")
+
+    monkeypatch.setattr(factory, "_init_speculator", original_factory)
+    monkeypatch.setattr(factory, "resolve_graph_support", unexpected)
+    monkeypatch.setattr(factory, "_use_graph_window_owner", unexpected)
+    assert factory.init_speculator(original, torch.device("cpu")) is actual
+    assert calls == [torch.device("cpu")]
+
+
+@pytest.mark.parametrize("mode_name", ["NONE", "FULL_DECODE_ONLY", "PIECEWISE"])
+def test_dflash2_window_off_preserves_the_official_manager_choice(monkeypatch, mode_name):
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.worker.v2.spec_decode.dflash import speculator as dflash
+    from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
+
+    owner = object.__new__(AscendDFlash2Speculator)
+    calls = []
+    monkeypatch.setattr(
+        dflash.AscendDFlashSpeculator, "init_cudagraph_manager", lambda self, mode: calls.append((self, mode))
+    )
+    mode = getattr(CUDAGraphMode, mode_name)
+    owner.init_cudagraph_manager(mode)
+    assert calls == [(owner, mode)]
+
+
+def test_window_off_does_not_inspect_draft_native_consumers(monkeypatch):
+    from vllm_ascend.worker.v2.spec_decode.draft_window import backends, runtime
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Window OFF must not scan or qualify native consumer inventory")
+
+    monkeypatch.setattr(backends, "report_owner_draft_native_attention", unexpected)
+    owner = NS()
+    runtime.initialize_draft_window_owner(owner)
+    assert vars(owner) == {}
+
+
+def test_window_off_preserves_eagle_ar_capture_config(monkeypatch):
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import _eagle_ar_capture_config
+
+    config = NS(additional_config={}, speculative_config=NS(method="eagle3"))
+    assert _eagle_ar_capture_config(config, CUDAGraphMode.FULL_DECODE_ONLY, 1) is config
