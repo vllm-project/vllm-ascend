@@ -12,6 +12,7 @@ from vllm_ascend.utils import (
 
 TARGET_EMBED_WEIGHT_NAMES = (
     "language_model.model.embed_tokens.weight",
+    "model.language_model.embed_tokens.weight",
     "model.embed_tokens.weight",
 )
 TARGET_LM_HEAD_WEIGHT_NAMES = (
