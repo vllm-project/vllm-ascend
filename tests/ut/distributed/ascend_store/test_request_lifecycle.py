@@ -239,6 +239,8 @@ def test_raw_sequence_lifecycle(
     )
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.prefix_match_unit = prefix_unit
+    # The hit-boundary assertions below exercise dense prefix retention.
+    config.cache_config.prefix_cache_retention_interval = None
     config.cache_config.num_gpu_blocks = plan.num_blocks
     # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
     plan.kv_transfer_config = config.kv_transfer_config

@@ -67,7 +67,6 @@ env_prefill: &env_prefill
   <<: *env_common
   HCCL_CONNECT_TIMEOUT: "6000"
   HCCL_BUFFSIZE: "1024"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
   <<: *env_common
@@ -79,6 +78,8 @@ templates:
     envs:
       <<: *env_prefill
     server_cmd_template:
+      - "--prefix-cache-retention-interval"
+      - "4096"
       - --host
       - "0.0.0.0"
       - --port
@@ -135,6 +136,8 @@ templates:
     envs:
       <<: *env_prefill
     server_cmd_template:
+      - "--prefix-cache-retention-interval"
+      - "4096"
       - --host
       - "0.0.0.0"
       - --port
