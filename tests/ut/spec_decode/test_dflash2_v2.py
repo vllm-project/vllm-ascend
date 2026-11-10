@@ -62,7 +62,8 @@ REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("hardware", ["A2", "A3", "A5"])
-def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail, hardware):
+@pytest.mark.parametrize("target_family", ["qwen", "glm"])
+def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail, hardware, target_family):
     from vllm.compilation import backends
     from vllm.config import AttentionConfig, CacheConfig, set_current_vllm_config
     from vllm.v1.attention import selector as selector_module
@@ -73,7 +74,12 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     from vllm_ascend.device.hardware import AscendDeviceType
     from vllm_ascend.device.hardware_profile import get_hardware_profile
 
-    target_config = SimpleNamespace(runner_type="generate", hf_text_config=SimpleNamespace(model_type="glm_moe_dsa"))
+    is_glm = target_family == "glm"
+    target_config = SimpleNamespace(
+        runner_type="generate",
+        architecture="GlmMoeDsaForCausalLM" if is_glm else "Qwen3_5ForConditionalGeneration",
+        hf_text_config=SimpleNamespace(model_type="glm_moe_dsa" if is_glm else "qwen3_5_text"),
+    )
     draft_config = SimpleNamespace(
         architectures=["DFlash2DraftModel"],
         hf_config=SimpleNamespace(num_hidden_layers=6, is_causal=causal),
@@ -124,8 +130,19 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     monkeypatch.setattr(selector_module, "resolve_obj_by_qualname", lambda path: path)
     select = selector_module._cached_get_attn_backend
     target_selector = AttentionSelectorConfig(
-        head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="fp8", use_mla=True, use_sparse=True
+        head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="fp8", use_mla=is_glm, use_sparse=is_glm
     )
+    target_backend = (
+        "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+        if is_glm
+        else "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+    )
+    if is_glm and hardware == "A5":
+        draft_backend = "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+    elif not is_glm and hardware in ("A2", "A3"):
+        draft_backend = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+    else:
+        draft_backend = "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
     initial_tag = backends.model_tag
 
     def get_model(*, vllm_config, model_config):
@@ -138,8 +155,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
             use_mla=False, use_sparse=False, kv_cache_dtype="auto", use_non_causal=not causal
         )
         with set_current_vllm_config(vllm_config):
-            module = "fa_v1" if hardware == "A5" else "flash_attention_v3"
-            assert select(None, selector) == f"vllm_ascend.attention.{module}.AscendFlashAttentionBackend"
+            assert select(None, selector) == draft_backend
         if fail:
             raise RuntimeError("draft load failed")
         return draft_model
@@ -150,12 +166,12 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     select.cache_clear()
     try:
         with set_current_vllm_config(config):
-            assert select(None, target_selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+            assert select(None, target_selector) == target_backend
             expected = pytest.raises(RuntimeError, match="draft load failed") if fail else nullcontext()
             with expected:
                 assert speculator.load_draft_model(target_model, set()) is draft_model
             assert backends.model_tag == initial_tag
-            assert select(None, target_selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+            assert select(None, target_selector) == target_backend
         assert config.model_config is target_config
         assert config.cache_config.cache_dtype == "fp8"
         assert not config.attention_config.use_non_causal

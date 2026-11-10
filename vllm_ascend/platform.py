@@ -1755,7 +1755,7 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Use optional A2/A3 device-length FA3 only for V2 DFlash2 draft layers."""
+    """Use A2/A3 FA3 for V2 DFlash2 with the audited Qwen3.5 target architecture."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1770,9 +1770,12 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     if config is None or not getattr(config, "use_v2_model_runner", False):
         return False
     spec = config.speculative_config
+    # The verified Qwen3.8 checkpoint declares this dense Qwen3.5 architecture.
+    # Read the target explicitly: a loader scope can expose the draft config.
     if (
         spec is None
         or spec.method != "dflash"
+        or getattr(spec.target_model_config, "architecture", None) != "Qwen3_5ForConditionalGeneration"
         or spec.draft_model_config is None
         or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
         or backends.model_tag != "dflash_head"

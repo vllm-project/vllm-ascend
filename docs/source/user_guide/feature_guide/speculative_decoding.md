@@ -391,7 +391,11 @@ A few important things to consider when using DFlash2 draft models:
    optional `flash_attn_npu` distribution exposing `flash_attn_npu_3` with the
    `get_scheduler_metadata` and `flash_attn_with_kvcache` APIs (the 0.4.2.post2
    scheduler ABI, also available in 0.5.0) enables the device-length FA3
-   backend for compatible DFlash2 draft layers. This is a
+   backend only for `DFlash2DraftModel` draft layers paired with a
+   `Qwen3_5ForConditionalGeneration` target, as declared by the verified
+   Qwen3.8-27B checkpoint. Selection checks the target architecture, not the
+   model directory name or the draft's `model_type`. Other target architectures,
+   including Qwen MoE, retain their existing backend. This is a
    different package from the training-consistency `flash_attn_npu_v3` backend.
    It consumes exact device lengths after rejection without the draft
    attention builder's `seq_lens.tolist()` synchronization. Identical layers

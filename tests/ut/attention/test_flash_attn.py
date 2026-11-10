@@ -271,6 +271,11 @@ def dflash2_fa3_runtime(monkeypatch, dflash2_config):
     from vllm_ascend.device.hardware_profile import get_hardware_profile
 
     config = dflash2_config
+    config.speculative_config.target_model_config = SimpleNamespace(
+        architecture="Qwen3_5ForConditionalGeneration",
+        hf_text_config=SimpleNamespace(model_type="qwen3_5_text"),
+    )
+    config.model_config = config.speculative_config.target_model_config
     config.use_v2_model_runner = True
     config.parallel_config = SimpleNamespace(
         pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
@@ -305,17 +310,37 @@ def dflash2_fa3_runtime(monkeypatch, dflash2_config):
 
 @pytest.mark.parametrize("hardware", ["A2", "A3"])
 @pytest.mark.parametrize("eager", [False, True])
-@pytest.mark.parametrize("target_model_type", ["glm_moe_dsa", "qwen3"])
+@pytest.mark.parametrize("draft_config_scope", [False, True])
 @pytest.mark.parametrize("head_size", [128, 192])
-def test_a2_a3_dflash2_uses_device_length_fa3(dflash2_fa3_runtime, hardware, eager, target_model_type, head_size):
+def test_a2_a3_qwen_dflash2_uses_device_length_fa3(dflash2_fa3_runtime, hardware, eager, draft_config_scope, head_size):
     runtime = dflash2_fa3_runtime
     runtime.hardware = hardware
     runtime.config.speculative_config.enforce_eager = eager
-    runtime.config.speculative_config.target_model_config.hf_text_config.model_type = target_model_type
+    if draft_config_scope:
+        runtime.config.model_config = runtime.config.speculative_config.draft_model_config
     runtime.selector = runtime.selector._replace(head_size=head_size)
     # A quantized target does not describe the draft's unquantized cache.
     runtime.config.cache_config.cache_dtype = "fp8"
     assert runtime.select() == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+
+
+@pytest.mark.parametrize("hardware", ["A2", "A3"])
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "GlmMoeDsaForCausalLM",
+        "Qwen3ForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "MiniMaxM3SparseForCausalLM",
+        None,
+    ],
+)
+def test_a2_a3_fa3_rejects_other_targets(dflash2_fa3_runtime, hardware, architecture):
+    runtime = dflash2_fa3_runtime
+    runtime.hardware = hardware
+    # The current loader config alone must not enable FA3 for another target.
+    runtime.config.speculative_config.target_model_config = SimpleNamespace(architecture=architecture)
+    assert runtime.select() == "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
 
 @pytest.mark.parametrize(
@@ -343,6 +368,7 @@ def test_a2_a3_fa3_requires_matching_q_and_kv_dtype(dflash2_fa3_runtime, query_d
         "method",
         "draft_architecture",
         "missing_draft",
+        "missing_target",
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",
@@ -380,6 +406,8 @@ def test_a2_a3_fa3_preserves_unsupported_paths(monkeypatch, dflash2_fa3_runtime,
         spec.draft_model_config.architectures = ["Qwen3DFlashForCausalLM"]
     elif fault == "missing_draft":
         spec.draft_model_config = None
+    elif fault == "missing_target":
+        spec.target_model_config = None
     elif fault.endswith("parallel_size"):
         setattr(runtime.config.parallel_config, fault, 2)
     elif fault == "adaptive":
