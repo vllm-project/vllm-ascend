@@ -89,7 +89,9 @@ def pre_transfer_weight_processing(model: nn.Module):
 
     for module in model.modules():
         if AscendMoERunner is not None and isinstance(module, AscendMoERunner):
-            _unwrap_quant_method(module._quant_method)
+            # 新基线用私有 _quant_method，v0.18.0 基线是公开 quant_method
+            quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
+            _unwrap_quant_method(quant_method)
 
     try:
         yield
@@ -201,6 +203,18 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _is_draft_model(model_config: ModelConfig) -> bool:
         """Check whether the model_config corresponds to a draft model for speculative decoding."""
         return getattr(model_config, "runner_type", None) == "draft"
+
+    @staticmethod
+    def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
+        """与 rfork 相同的判定: EPLB 重平衡会重新绑定权重存储，缓存的 donor 传输清单会失效。"""
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        if bool(getattr(parallel_config, "enable_eplb", False)):
+            return True
+
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        eplb_config = get_ascend_config().eplb_config
+        return eplb_config.dynamic_eplb or bool(eplb_config.expert_map_record_path)
 
     @staticmethod
     def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
@@ -357,7 +371,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
             for module in model.modules():
                 if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                    module.cleanup()
+                    # v0.18.0 基线的 wrapper 没有 cleanup()；有则调用，无则跳过
+                    cleanup = getattr(module, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
         except Exception as exc:
             logger.warning("Netloader fallback: failed to remove compilation bytecode hooks: %s", exc)
 
@@ -367,9 +384,17 @@ class ModelNetLoaderElastic(BaseModelLoader):
         vllm_config: VllmConfig,
         device_type: str,
     ) -> _FallbackCleanupContext:
-        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+        # 该函数服务于兜底路径（保证模型始终能加载），任何 import 失败都不应
+        # 在这里升级为崩溃——降级为无 EPLB 清理
+        try:
+            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+        except Exception as exc:
+            logger.debug("Netloader fallback: EPLB adaptor unavailable, skipping: %s", exc)
+            VllmEplbAdaptor = None  # type: ignore[misc, assignment]
 
-        eplb_layers = VllmEplbAdaptor._registered_moe_layers
+        # 移植兼容: v0.18.0 基线的 VllmEplbAdaptor 没有 _registered_moe_layers
+        # 类属性（bigtensors 新基线才有）；旧基线下无静态注册表，等价于空列表
+        eplb_layers = getattr(VllmEplbAdaptor, "_registered_moe_layers", []) if VllmEplbAdaptor else []
         return _FallbackCleanupContext(
             context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
             static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
@@ -477,6 +502,16 @@ class ModelNetLoaderElastic(BaseModelLoader):
             logger.warning(
                 "Target netloader already fell back to DefaultModelLoader; "
                 "skip draft elastic load and use DefaultModelLoader"
+            )
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config, prefix
+            )
+        elif self._is_dynamic_eplb_enabled(vllm_config):
+            # 与 rfork 同款的动态 EPLB 防护: donor 注册的传输清单在 EPLB 重平衡
+            # （重新绑定权重存储）后会指向已失效的字节，因此动态 EPLB 场景下
+            # 一律回退默认加载器
+            logger.warning(
+                "Netloader transfer is disabled when dynamic EPLB is enabled; using the default model loader."
             )
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix

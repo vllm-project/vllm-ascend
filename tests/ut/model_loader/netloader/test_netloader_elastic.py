@@ -793,5 +793,43 @@ def test_server_start(server_config):
         handler_thread_instance.start.assert_called_once()
 
 
+# Test pre-HCCL manifest validation: count and order must match the donor's
+# registration exactly, otherwise positional HCCL send/recv pairing would
+# silently corrupt weights when numels happen to line up.
+@pytest.mark.parametrize(
+    "items,manifest,expected",
+    [
+        # matching count, order and numel -> valid
+        (
+            [("a", torch.zeros(2, 2)), ("b", torch.zeros(4))],
+            {"a": (2, 2), "b": (4,)},
+            True,
+        ),
+        # client is missing one tensor the donor registered -> abort
+        (
+            [("a", torch.zeros(2, 2))],
+            {"a": (2, 2), "b": (4,)},
+            False,
+        ),
+        # same tensor set, different order -> abort (positional pairing)
+        (
+            [("b", torch.zeros(4)), ("a", torch.zeros(2, 2))],
+            {"a": (2, 2), "b": (4,)},
+            False,
+        ),
+        # numel mismatch -> abort
+        (
+            [("a", torch.zeros(2, 3))],
+            {"a": (2, 2)},
+            False,
+        ),
+    ],
+)
+def test_validate_transfer_items_numel_against_manifest(items, manifest, expected):
+    from vllm_ascend.model_loader.netloader.executor.elastic_load import validate_transfer_items_numel_against_manifest
+
+    assert validate_transfer_items_numel_against_manifest(items, manifest) is expected
+
+
 if __name__ == "__main__":
     pytest.main()

@@ -157,8 +157,8 @@ def _iter_ascend_moe_quant_methods(model: Module) -> Iterator[Any]:
         if not isinstance(module, AscendMoERunner):
             continue
 
-        # AscendMoERunner exposes the routed experts' method via private _quant_method.
-        quant_method = getattr(module, "_quant_method", None)
+        # v0.18.0 基线公开属性是 quant_method；新基线（bigtensors）才是私有 _quant_method
+        quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
         if quant_method is None or id(quant_method) in seen_quant_methods:
             continue
 
@@ -199,7 +199,11 @@ def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
 def _rfork_skip_unquantized_moe_post_load_processing(model: Module):
     """Suppress unquantized MoE post-load processing; dense layers still run theirs."""
 
-    from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+    try:
+        from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+    except ImportError:
+        # v0.18.0 基线没有 routed_experts 模块，类在 fused_moe.py 里
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
     restored_methods: list[tuple[Any, object]] = []
     for quant_method in _iter_ascend_moe_quant_methods(model):

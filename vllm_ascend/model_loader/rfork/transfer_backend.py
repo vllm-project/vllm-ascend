@@ -24,6 +24,8 @@ from torch import nn
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
+from vllm_ascend.model_loader.weight_state import iter_tensors_in_value as _iter_tensors_in_value
+
 MAX_TRANSFER_CHUNK_BYTES = 1024**3
 MAX_TRANSFER_CHUNK_WEIGHTS = 512
 
@@ -113,37 +115,6 @@ def _is_transferable_tensor(tensor: torch.Tensor) -> bool:
 
 def _is_tensor_on_transfer_device(tensor: torch.Tensor) -> bool:
     return tensor.device.type == "npu"
-
-
-def _iter_tensors_in_value(prefix: str, value: Any, visited_object_ids: set[int], scan_objects: bool = False):
-    if isinstance(value, torch.Tensor):
-        yield prefix, value
-        return
-
-    if isinstance(value, (nn.Module, str, bytes)) or callable(value):
-        return
-
-    if isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            yield from _iter_tensors_in_value(f"{prefix}.{index}", item, visited_object_ids, scan_objects)
-        return
-
-    if isinstance(value, dict):
-        for key, item in value.items():
-            yield from _iter_tensors_in_value(f"{prefix}.{key}", item, visited_object_ids, scan_objects)
-        return
-
-    if not scan_objects or not hasattr(value, "__dict__"):
-        return
-
-    value_id = id(value)
-    if value_id in visited_object_ids:
-        return
-    visited_object_ids.add(value_id)
-    for attr_name, attr_value in vars(value).items():
-        if attr_name.startswith("_"):
-            continue
-        yield from _iter_tensors_in_value(f"{prefix}.{attr_name}", attr_value, visited_object_ids, scan_objects)
 
 
 def _try_collect_transferable_tensor(
