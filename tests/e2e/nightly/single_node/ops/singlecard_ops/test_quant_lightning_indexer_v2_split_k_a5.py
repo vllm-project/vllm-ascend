@@ -155,7 +155,10 @@ def _make_a5_case(
                     scores = scale_cpu[table[request].long()].flatten()[:valid_length].float()
                     if quant_mode == 2:
                         scores = scores / 1024
-                    scores = scores.bfloat16()
+                    # A5 casts its positive finite scores with CAST_ROUND
+                    # (ties away from zero); torch.bfloat16() uses ties to even.
+                    score_bits = (scores.view(torch.int32) + 0x8000) >> 16
+                    scores = score_bits.to(torch.int16).view(torch.bfloat16)
                     returned = scores[selected.long()]
                     golden = scores.float().topk(min(topk, valid_length)).values.bfloat16()
                     torch.testing.assert_close(returned.sort().values, golden.sort().values, rtol=0, atol=0)
