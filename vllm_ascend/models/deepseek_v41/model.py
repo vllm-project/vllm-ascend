@@ -55,6 +55,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -68,6 +69,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -102,6 +104,30 @@ from .indexer import DeepseekV41Indexer
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
     return engram_enabled(config) and vllm_config.engram_config is not None
+
+
+def _can_skip_moe_padding(vllm_config: VllmConfig) -> bool:
+    """Mask replicated routes only when all ranks use the same SP row layout."""
+    parallel = vllm_config.parallel_config
+    speculative = vllm_config.speculative_config
+    ascend_config = get_ascend_config()
+    return (
+        envs.VLLM_MOE_SKIP_PADDING
+        and use_v2_model_runner(vllm_config)
+        and parallel.use_sequence_parallel_moe
+        and parallel.enable_expert_parallel
+        and parallel.tensor_parallel_size > 1
+        and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
+        and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
+        and not parallel.use_ubatching
+        and parallel.expert_placement_strategy == "linear"
+        and not parallel.enable_eplb
+        and not ascend_config.mix_placement
+        and not ascend_config.enable_force_eplb
+        and (speculative is None or not speculative.enable_adaptive_verification)
+        # Check the low-token regime too: a model that switches to MC2 on decode is ineligible.
+        and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
+    )
 
 
 class DeepseekV41MLP(nn.Module):
@@ -1017,6 +1043,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
+        self.skip_moe_padding = _can_skip_moe_padding(vllm_config)
+        if self.skip_moe_padding:
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                moe = layer.mlp
+                # InitRouting excludes IDs outside this rank's linear expert range.
+                moe.experts.routed_experts.padding_expert_id = moe.n_local_physical_experts if moe.ep_rank == 0 else 0
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
             (max_tokens, 1, topology.candidate_topk_blocks),
@@ -1761,6 +1793,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         return EngramModelState
 
     @property
+    def skip_moe_padding(self) -> bool:
+        return self.model.skip_moe_padding
+
+    @property
     def supports_engram_graph_producer(self) -> bool:
         return self.model.can_capture_engram_producer()
 
@@ -1778,7 +1814,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_mask_ready_event=None,
         engram_query_start_loc=None,
         engram_valid_token_count=None,
+        routing_padding_mask=None,
     ):
+        if routing_padding_mask is not None:
+            get_forward_context().additional_kwargs["routing_padding_mask"] = routing_padding_mask
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count

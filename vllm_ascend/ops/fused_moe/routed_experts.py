@@ -394,6 +394,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     """
 
     moe_counter = -1
+    padding_expert_id: int | None = None
 
     def __init__(
         self,
@@ -674,7 +675,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 device=topk_ids.device,
             )
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
-
+        elif self.padding_expert_id is not None:
+            padding_mask = get_forward_context().additional_kwargs.get("routing_padding_mask")
+            if padding_mask is not None:
+                # AllGather can trim the SP tail before routing.
+                topk_ids = topk_ids.masked_fill(padding_mask[: topk_ids.shape[0], None], self.padding_expert_id)
         return topk_weights, topk_ids
 
     def forward_impl(

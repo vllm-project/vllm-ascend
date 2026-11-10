@@ -92,6 +92,7 @@ def test_piecewise_dummy_keeps_queries_and_pads_only_inputs(buffers, num_reqs, v
         assert len(getattr(batch, name)) == padded_tokens
         assert getattr(batch, name).data_ptr() == getattr(buffers, name).data_ptr()
     assert torch.count_nonzero(batch.input_ids) == torch.count_nonzero(batch.positions) == 0
+    assert batch.is_padding_only
     assert batch.is_padding.all()
     assert torch.all(buffers.input_ids[padded_tokens:] == 99)
     assert torch.all(buffers.positions[padded_tokens:] == 99)
@@ -107,6 +108,13 @@ def test_capture_without_dummy_scope_keeps_existing_layout(buffers):
     assert batch.num_scheduled_tokens.tolist() == [16]
 
 
+def test_warmup_dummy_keeps_valid_tokens(buffers):
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        batch = AscendInputBatch.make_dummy(1, 4, buffers, is_padding=False)
+    assert batch.is_dummy and not batch.is_padding_only
+    assert not batch.is_padding.any()
+
+
 def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
     with (
         patch.object(buffers, "profile_cpp", True),
@@ -116,6 +124,7 @@ def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
 
     assert batch.is_dummy
     assert batch.is_cpp_profile
+    assert not batch.is_padding_only
     assert batch.has_prefill
     assert batch.attn_state == AscendAttentionState.PrefillNoCache
     np.testing.assert_array_equal(batch.is_prefilling_np, [True])

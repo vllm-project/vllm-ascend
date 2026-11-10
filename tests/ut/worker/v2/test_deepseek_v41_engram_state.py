@@ -3,7 +3,7 @@
 """MRV2 history preparation must not perform context-dependent lookups."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -17,6 +17,7 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
 class EngramModel(torch.nn.Module):
+    skip_moe_padding = False
     token_lookback_depth = 3
 
     def __init__(self):
@@ -38,7 +39,7 @@ class EngramModel(torch.nn.Module):
 
 
 @pytest.fixture
-def state(monkeypatch, request):
+def make_state(monkeypatch):
     def init(self, config, model, encoder_cache, device):
         self.vllm_config = config
         self.model = model
@@ -48,15 +49,99 @@ def state(monkeypatch, request):
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda *args: {})
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1))
-    )
-    return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
+
+    def build(pcp=1, skip_padding=False, depth=3):
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, tensor_parallel_size=8),
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=13),
+        )
+        model = EngramModel()
+        model.skip_moe_padding = skip_padding
+        model.token_lookback_depth = depth
+        return deepseek_v41.EngramModelState(config, model, None, torch.device("cpu"))
+
+    return build
+
+
+@pytest.fixture
+def state(make_state, request):
+    return make_state(pcp=getattr(request, "param", 1))
+
+
+@pytest.mark.parametrize("skip_padding", [False, True])
+def test_routing_buffer_follows_batch_sizes_without_engram(make_state, skip_padding):
+    state = make_state(skip_padding=skip_padding, depth=0)
+    capture = state.prepare_dummy_inputs(4, 12)
+    if not skip_padding:
+        assert not hasattr(state, "routing_padding_mask")
+        assert "routing_padding_mask" not in capture
+        assert "routing_padding_mask" not in state.prepare_inputs(batch(), None)
+        return
+
+    storage = state.routing_padding_mask
+    assert storage.shape == (16,) and storage.dtype == torch.bool
+    captured_mask = capture["routing_padding_mask"]
+    assert captured_mask.data_ptr() == storage.data_ptr() and captured_mask.all()
+    for rows, scheduled, padding_only in ((13, 13, False), (12, 7, False), (8, 8, False), (9, 3, True)):
+        step = SimpleNamespace(num_tokens_after_padding=rows, num_tokens=scheduled, is_padding_only=padding_only)
+        mask = state.prepare_inputs(step, None)["routing_padding_mask"]
+        expected = torch.arange(((rows + 7) // 8) * 8) >= (0 if padding_only else scheduled)
+        assert mask.data_ptr() == captured_mask.data_ptr()
+        torch.testing.assert_close(mask, expected)
+        torch.testing.assert_close(captured_mask[: mask.numel()], expected)
+    state.prepare_inputs(SimpleNamespace(num_tokens_after_padding=12, num_tokens=12, is_padding_only=False), None)
+    state.prepare_dummy_inputs(4, 12)
+    assert captured_mask.all()
+
+
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("prompt_tokens", [1, 7, 12])
+def test_eager_prefill_skips_mask_and_graph_prefill_refreshes_it(make_state, monkeypatch, graph_mode, prompt_tokens):
+    state = make_state(skip_padding=True, depth=0)
+    state._replay_groups = (0, torch.empty(0, dtype=torch.int32))
+    monkeypatch.setattr(AscendModelState, "prepare_attn", lambda *args, **kwargs: {})
+    captured = state.prepare_dummy_inputs(2, 12)["routing_padding_mask"]
+
+    def step(mode, phases, valid, padded):
+        request_phases = np.array(phases, dtype=bool)
+        input_batch = SimpleNamespace(
+            num_reqs=len(phases),
+            num_reqs_after_padding=2,
+            idx_mapping_np=np.arange(len(phases)),
+            has_prefill=bool(request_phases.any()),
+            is_prefilling_np=request_phases,
+            num_tokens=valid,
+            num_tokens_after_padding=padded,
+            is_padding_only=False,
+            is_dummy=False,
+        )
+        state.prepare_attn(input_batch, mode, (), torch.empty((0, 1), dtype=torch.int32), [], None)
+        return state.prepare_inputs(input_batch, None)
+
+    # Decode and mixed eager steps keep the regular mask.
+    for phases, valid in (([False], 1), ([True, False], 5)):
+        mask = step(CUDAGraphMode.NONE, phases, valid, 12)["routing_padding_mask"]
+        assert mask.data_ptr() == captured.data_ptr()
+        torch.testing.assert_close(captured, torch.arange(16) >= valid)
+
+    # Neither SP alignment nor graph padding should trigger mask work for eager prefill.
+    with patch.object(state, "prepare_routing_padding_mask", side_effect=AssertionError("unexpected mask update")):
+        for padded in (prompt_tokens, 12):
+            assert "routing_padding_mask" not in step(CUDAGraphMode.NONE, [True], prompt_tokens, padded)
+    torch.testing.assert_close(captured, torch.arange(16) >= 5)
+
+    # Prefill hitting the same graph bucket must refresh the mask at the captured address.
+    mask = step(graph_mode, [True], prompt_tokens, 12)["routing_padding_mask"]
+    assert mask.data_ptr() == captured.data_ptr()
+    torch.testing.assert_close(captured, torch.arange(16) >= prompt_tokens)
+    step(graph_mode, [False], 2, 12)
+    torch.testing.assert_close(captured, torch.arange(16) >= 2)
 
 
 def batch():
     return SimpleNamespace(
         num_tokens=3,
+        is_padding_only=False,
         is_dummy=False,
         num_tokens_after_padding=8,
         num_reqs=2,

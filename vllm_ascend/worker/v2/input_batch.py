@@ -82,6 +82,8 @@ class AscendInputBatch(InputBatch):
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
     is_cpp_profile: bool = False
+    # Profiling dummies can route valid tokens; ordinary dummies are all padding.
+    is_padding_only: bool = False
 
     @staticmethod
     def _prepare_cpp_profile_dummy(
@@ -162,5 +164,6 @@ class AscendInputBatch(InputBatch):
             seq_lens_np=seq_lens_np,
             attn_state=(AscendAttentionState.PrefillNoCache if is_cpp_profile else AscendAttentionState.DecodeOnly),
             is_dummy=True,
+            is_padding_only=is_padding and not is_cpp_profile,
             is_cpp_profile=is_cpp_profile,
         )

@@ -264,6 +264,10 @@ class AscendDeepseekV41ForCausalLM(
         return self.language_model.token_lookback_depth
 
     @property
+    def skip_moe_padding(self) -> bool:
+        return self.language_model.skip_moe_padding
+
+    @property
     def supports_engram_graph_producer(self) -> bool:
         return self.language_model.supports_engram_graph_producer
 

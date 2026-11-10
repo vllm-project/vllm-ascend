@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
@@ -81,6 +82,32 @@ class EngramModelState(AscendModelState):
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
     _engram_inputs: dict[str, Any] | None = None
 
+    def prepare_routing_padding_mask(self, valid_tokens: int, padded_tokens: int) -> torch.Tensor:
+        rows = round_up(padded_tokens, self.vllm_config.parallel_config.tensor_parallel_size)
+        mask = self.routing_padding_mask[:rows]
+        mask[:valid_tokens].fill_(False)
+        mask[valid_tokens:].fill_(True)
+        return mask
+
+    def prepare_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
+        inputs = super().prepare_inputs(input_batch, req_states)
+        if not self.model.skip_moe_padding:
+            return inputs
+        # Captured MoE layers read this buffer even if a prompt tail hits a decode graph.
+        if self._cg_mode == CUDAGraphMode.NONE and input_batch.has_prefill and input_batch.is_prefilling_np.all():
+            return inputs
+        valid_tokens = 0 if input_batch.is_padding_only else input_batch.num_tokens
+        inputs["routing_padding_mask"] = self.prepare_routing_padding_mask(
+            valid_tokens, input_batch.num_tokens_after_padding
+        )
+        return inputs
+
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        if self.model.skip_moe_padding:
+            inputs["routing_padding_mask"] = self.prepare_routing_padding_mask(0, num_tokens)
+        return inputs
+
     def _initialize_decoder_replay(self) -> None:
         # Engram uses the model-specific replay state instead of preparing
         # a second replay batch in AscendModelState.
@@ -88,6 +115,12 @@ class EngramModelState(AscendModelState):
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
+        if model.skip_moe_padding:
+            # Captured graphs read this storage; each step updates its active rows in place.
+            capacity = round_up(
+                vllm_config.scheduler_config.max_num_batched_tokens, vllm_config.parallel_config.tensor_parallel_size
+            )
+            self.routing_padding_mask = torch.ones(capacity, dtype=torch.bool, device=device)
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
         # PCP represents each prefill's front/back chunks as separate local
         # requests. Only the gathered replay metadata uses that local layout.
