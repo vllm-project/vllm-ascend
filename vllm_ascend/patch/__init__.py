@@ -893,6 +893,23 @@
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
+#   2. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model.__init__`
+#    Why:
+#       GLM-5.3 uses the generic DeepseekV2Model on Ascend, where the last PP
+#       stage lacks the target embedding required by DFlash2's sharing check.
+#    How:
+#       In the existing constructor wrapper, create a missing embedding when
+#       upstream spec_decode_needs_target_embed requests it. Keep the target
+#       quantization config and parameter prefix, and let the normal target
+#       checkpoint loader load the TP shard. Do not replace an existing layer.
+#       DFlash sharing and draft QuaRot post-processing remain unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; the generic DeepseekV2Model needs the same embedding
+#       construction condition already used by other upstream target models.
+#    Future Plan:
+#       Remove only this embedding provisioning when the minimum supported vLLM
+#       version provides it in DeepseekV2Model; keep the unrelated PP transport.
+#
 # ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
