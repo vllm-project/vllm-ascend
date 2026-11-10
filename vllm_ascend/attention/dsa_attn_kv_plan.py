@@ -4,6 +4,8 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -28,6 +30,27 @@ _BF16_KV_CACHE_DTYPES = frozenset({"auto", "bfloat16", "bf16"})
 
 def _supports_dsv4_compressed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+
+
+@lru_cache(maxsize=1)
+def _get_kv_compress_epilog_op() -> Callable:
+    """Load the ops-transformer package and return ``kv_compress_epilog``.
+
+    ``torch.ops.cann_ops_transformer.*`` only exists once the package has
+    been imported in the current process. Every in-tree import site is a
+    lazy function-level import in another backend, and in the FP8 DSA
+    forward the compressor scatter runs before the first sparse-attention
+    op -- the only other importer on this path -- so the registration must
+    not depend on import side effects (e.g. a fork parent that happened to
+    import the package; spawned workers start with a clean registry).
+    """
+    try:
+        import_module("cann_ops_transformer")
+        return torch.ops.cann_ops_transformer.kv_compress_epilog
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "DeepSeek-V4 FP8 KV cache requires kv_compress_epilog from a matching cann_ops_transformer package."
+        ) from exc
 
 
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
@@ -207,7 +230,8 @@ class DsaAttnKvPlan:
         # (same 8-bit storage; the in-place update lands in the original
         # tensor). quant_mode="fp8_bf16" (int 0): group(64) FP8(e4m3) with
         # bf16 scale, rope kept bf16.
-        torch.ops.cann_ops_transformer.kv_compress_epilog(
+        kv_compress_epilog = _get_kv_compress_epilog_op()
+        kv_compress_epilog(
             cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
             slot_mapping=slot_mapping,
