@@ -808,7 +808,8 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         patch.object(torch.npu, "stream", side_effect=on_stream),
         patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
         patch("torch.ops.vllm.dcp_a2a_fused", side_effect=communicate) as history_update,
-        patch.object(mla_cp, "fused_dcp_lse_combine", side_effect=merge) as update,
+        patch.object(mla_cp, "supports_triton", return_value=True),
+        patch("vllm_ascend.ops.triton.dcp.dcp_a2a.fused_dcp_lse_combine", side_effect=merge) as update,
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
         metadata = SimpleNamespace(external_flashmla=None, decode=decode, causal=True)

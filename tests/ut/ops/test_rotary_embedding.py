@@ -151,7 +151,7 @@ class TestAscendMRotaryEmbedding:
         emb.cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.float32)
         return emb
 
-    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("vllm_ascend.ops.rotary_embedding.supports_triton", new=lambda: False)
     @patch("torch_npu.npu_mrope", create=True)
     def test_npu_mrope_output_is_copied_back_to_input_buffers(self, mock_npu_mrope):
         """Caller-facing query/key buffers must hold the rotated values."""
@@ -170,7 +170,7 @@ class TestAscendMRotaryEmbedding:
         torch.testing.assert_close(query, rotated_q)
         torch.testing.assert_close(key, rotated_k)
 
-    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("vllm_ascend.ops.rotary_embedding.supports_triton", new=lambda: False)
     def test_super_forward_oot_output_is_copied_back_to_input_buffers(self):
         """Non-[16,24,24] MRoPE (e.g. Qwen3.8) must still copy back into inputs."""
         emb = self._make_emb([11, 11, 10])

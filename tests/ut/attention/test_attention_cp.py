@@ -255,7 +255,8 @@ def test_gqa_pcp_dcp_merges_history_only_for_local_query_fragments(has_history, 
         patch.object(attention_cp, "cp_chunkedprefill_comm_stream", return_value=stream),
         patch.object(torch.npu, "current_stream", return_value=stream),
         patch.object(attention_cp.torch_npu.npu, "stream", side_effect=lambda *_: nullcontext()),
-        patch.object(attention_cp, "fused_dcp_lse_combine", return_value=current_output) as combine,
+        patch.object(attention_cp, "supports_triton", return_value=True),
+        patch("vllm_ascend.ops.triton.dcp.dcp_a2a.fused_dcp_lse_combine", return_value=current_output) as combine,
     ):
         actual = impl.forward_impl(query, query, query, (), metadata, output)
     assert actual is output
@@ -331,7 +332,8 @@ def test_gqa_chunked_prefill_uses_shared_dcp_merge_for_pcp_overlap() -> None:
             module + ".torch_npu.npu_fused_infer_attention_score",
             return_value=(current_output, current_lse),
         ),
-        patch(module + ".fused_dcp_lse_combine", return_value=merged) as combine,
+        patch(module + ".supports_triton", return_value=True),
+        patch("vllm_ascend.ops.triton.dcp.dcp_a2a.fused_dcp_lse_combine", return_value=merged) as combine,
     ):
         actual = impl.forward_impl(query, key, value, (object(), object()), metadata, output)
 
