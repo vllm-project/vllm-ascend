@@ -364,7 +364,7 @@ def local_remote_cp_params(
             )
             # Ensure that the blocks of each P cp rank belong to the same D rank.
             assert (remote_cp_size // local_cp_size) % (block_size // remote_block_size) == 0, (
-                f"remote_cp_size({remote_cp_size}) must be an integer multiple of"
+                f"remote_cp_size({remote_cp_size}) must be an integer multiple of "
                 f"r({block_size // remote_block_size}) * local_cp_size({local_cp_size})"
             )
 

@@ -561,7 +561,7 @@ def test_local_remote_cp_params_rejects_p_block_larger_under_dcp():
 def test_local_remote_cp_params_rejects_dcp_shard_misalignment():
     with pytest.raises(AssertionError) as excinfo:
         local_remote_cp_params(remote_block_size=8, block_size=16, dcp_rank=0, dcp_size=2, remote_dcp_size=2)
-    assert str(excinfo.value) == "remote_cp_size(2) must be an integer multiple ofr(2) * local_cp_size(2)"
+    assert str(excinfo.value) == "remote_cp_size(2) must be an integer multiple of r(2) * local_cp_size(2)"
 
 
 # ------------------------------------------------------------- kernel params
