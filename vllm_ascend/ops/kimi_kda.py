@@ -992,14 +992,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if has_initial_state.numel() != state_indices.numel():
             raise ValueError("Kimi KDA prefill flags must match the state indices")
         keep = prebuilt_metadata.keep_meta
+        metadata_context = getattr(prebuilt_metadata, "flash_kda_metadata", None)
         if keep is not None:
             state_indices = state_indices[keep]
             has_initial_state = has_initial_state[keep]
-            query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:][keep]))
+            if metadata_context is None:
+                query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:][keep]))
         if state_indices.numel() == 0:
             return torch.empty_like(v)
         # Reuse V2's device offsets; do not upload host lengths in every layer.
-        query_start_loc = query_start_loc.to(dtype=torch.int32).contiguous()
+        query_start_loc = (
+            metadata_context.query_start_loc
+            if metadata_context is not None
+            else query_start_loc.to(dtype=torch.int32).contiguous()
+        )
 
         state_copy = getattr(self, "_ascend_kda_state_copy", None)
         if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
@@ -1020,6 +1026,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.dt_bias.reshape(self.local_num_heads, self.head_dim),
             scale=self.head_dim**-0.5,
             lower_bound=self.gate_lower_bound,
+            metadata_context=metadata_context,
         )
         # Publish only a successful result. Conv has already advanced; errors
         # propagate without retrying the batch against partly updated caches.

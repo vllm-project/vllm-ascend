@@ -13,6 +13,30 @@ int32，初始及最终 SSM 状态为 FP32 `[B,H,V,K]`。Q/K normalization、gat
 beta sigmoid 在算子内部完成。混合 decode/verify 批次仍为 recurrent 路径单独计算
 sigmoid，避免重复激活 prefill beta。
 
+## metadata 跨层复用
+
+参考 [recipe PR #29](https://gitcode.com/haittbakerhall/cann-recipes-infer_kimik3/pull/29)，
+本仓的 FlashKDA prefill 默认使用 metadata 副流，并在同一次 forward、同一个
+attention group 的兼容层间共享 metadata，无需额外配置开关。
+
+metadata 算子只从 Q/V/initial_state 读取描述信息，从 `cu_seqlens` 读取请求边界；
+首层生成的调度信息可以供张量规格相同的后续层使用。每层仍传入自己的 Q/K/V 和状态，
+仍执行必要的 cache gather/scatter。共享上下文挂在本次调度新建的 GDN prefill metadata 上，
+包括空请求压缩后的 int32 边界；不同 forward、attention group、模型/草稿阶段不共享调度内容。
+跨层规格或 metadata 接口不一致时明确报错。
+
+环境中的 `ops.flash_kda_metadata` 需要额外导出 `metadata_capacity_upper_bound`，缺失时启动报错。
+builder 初始化时，按 `max_num_seqs` 和 `max_num_batched_tokens` 在 metadata 副流预分配
+int32 缓冲区。每次 forward 的首层在副流生成临时 metadata，拷入固定缓冲区后释放临时结果；
+后续层只读复用。流事件保证边界准备完成后生成、生成完成后消费，以及前一轮消费者结束后
+才覆盖缓冲区；不进行设备全局同步，不在推理中扩容。容量不足或算子返回的 dtype/device/大小
+不符合容量接口约定时立即报错。
+
+在单个 attention group 包含 10 个兼容 KDA 层、每 step 只有一次模型 forward 的情况下，
+迁移前预期 metadata kernel 10 次、FlashKDA kernel 10 次；当前默认预期分别为 1 次和 10 次，
+另有一次 metadata 设备内拷贝。多个 group、microbatch 或多次模型 forward 需分别计数，
+不能把 scheduler step 与单次模型 forward 混为一谈。真实收益需在目标 NPU 上 profiling 验证。
+
 ## cache 生命周期
 
 1. 沿用已有 connector wait，等待本层 cache 可用。
@@ -34,6 +58,7 @@ CPU 契约回归（无需导入 NPU/vLLM runtime）：
 
 ```bash
 python -m pytest --noconftest -q \
+  tests/ut/ops/test_kimi_prefill_metadata.py \
   tests/ut/ops/test_kimi_prefill_fused_kda.py \
   tests/ut/ops/test_kimi_mega_kda.py \
   tests/ut/worker/test_mega_kda_v2.py
@@ -58,3 +83,10 @@ MegaKDA verify，并记录含 gather/scatter 的 prefill 延迟。依赖缺失�
 本机为 Windows CPU 环境，完成 CPU 调用契约与 MegaKDA/V2 回归、Python lint 和语法检查。
 NPU 数值、吞吐、ACLGraph、TP/SP、PD 传输及真实权重服务尚未验证；
 合成算子测试也不能替代真实权重验收。
+
+本次 PR #29 的 metadata 迁移已通过 lint、格式、语法和使用生产代码的 mock 生命周期检查，
+覆盖 10 层复用、下一轮刷新、流依赖、布局不匹配、消费异常及容量检查。
+新增 PyTorch CPU 回归 `tests/ut/ops/test_kimi_prefill_metadata.py`，以及 NPU 跨层/跨轮
+精度对照与性能记录。尝试在隔离 Python 3.12 环境运行 CPU 回归时，PyTorch 在导入
+`c10.dll` 时发生 Windows `WinError 1114`，测试收集失败，尚未执行测试代码。
+Windows 当前未提供 Bash/pre-commit，无法执行完整的 `bash format.sh ci`。

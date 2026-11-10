@@ -33,6 +33,10 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ops.kimi_mega_kda import MegaKDAFirstVerifyTracker
+from vllm_ascend.ops.kimi_prefill_fused_kda import (
+    PrefillKDAMetadataContext,
+    create_prefill_kda_metadata_workspace,
+)
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -129,6 +133,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    flash_kda_metadata: PrefillKDAMetadataContext | None = None
 
 
 @dataclass
@@ -474,6 +479,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
             initial_state_mode = initial_state_mode.clone()
             initial_state_mode[prefill_seq_offset:] = True
+        workspace = getattr(self, "_flash_kda_metadata_workspace", None)
+        if workspace is not None:
+            # V2 shares this metadata object across the group's layers and
+            # builds a fresh one for each scheduled forward, including MTP.
+            chunk_metadata.flash_kda_metadata = workspace.new_context(
+                attn_metadata.prefill_query_start_loc, chunk_metadata.keep_meta
+            )
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
@@ -1001,6 +1013,10 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     """Build only the descriptors consumed by AscendC host-metadata paths."""
 
     build_device_chunk_metadata = False
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._flash_kda_metadata_workspace = create_prefill_kda_metadata_workspace(vllm_config, layer_names, device)
 
 
 class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):

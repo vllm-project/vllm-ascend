@@ -7,6 +7,8 @@ exercise real operators; real-checkpoint V2 serving remains a separate gate.
 """
 
 from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -30,11 +32,88 @@ from tests.e2e.nightly.single_node.ops.test_mega_kda import (
 from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 from vllm_ascend.ops.kimi_mega_kda import load_mega_kda_operator, run_mega_recurrent_kda
-from vllm_ascend.ops.kimi_prefill_fused_kda import load_prefill_fused_kda_operator
+from vllm_ascend.ops.kimi_prefill_fused_kda import (
+    PrefillFusedKDAOperators,
+    create_prefill_kda_metadata_workspace,
+    load_prefill_fused_kda_operator,
+    run_prefill_fused_kda,
+)
 
 BATCH = 4
 SPEC_LEN = 8
 GUARD_BYTES = 64
+
+
+@torch.inference_mode()
+def test_flash_kda_metadata_reuse_across_layers_and_forwards(record_property):
+    """Real NPU gate: different layer payloads share only the schedule."""
+    operator = load_prefill_fused_kda_operator()
+    assert operator is not None, "Install the reference ops.flash_kda package"
+    counted = PrefillFusedKDAOperators(operator.prefill, MagicMock(wraps=operator.metadata))
+    tokens = 194
+    num_layers = 3
+    vc = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"kimi": SimpleNamespace(_prefill_fused_kda_operator=counted)}
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=tokens),
+    )
+    workspace = create_prefill_kda_metadata_workspace(vc, ["kimi"], torch.device("npu"))
+    address = workspace.buffer.data_ptr()
+    starts = torch.tensor([0, 65, tokens], dtype=torch.int32, device="npu")
+    a_log = torch.zeros(NUM_HEADS, dtype=torch.float32, device="npu")
+    dt_bias = torch.zeros(NUM_HEADS, HEAD_DIM, dtype=torch.float32, device="npu")
+    inputs = []
+    for _ in range(num_layers):
+        q, k, v, gate = (
+            torch.randn(tokens, NUM_HEADS, HEAD_DIM, device="npu", dtype=torch.bfloat16) * 0.1 for _ in range(4)
+        )
+        beta = torch.randn(tokens, NUM_HEADS, device="npu", dtype=torch.bfloat16)
+        state = torch.randn(2, NUM_HEADS, HEAD_DIM, HEAD_DIM, device="npu") * 0.1
+        inputs.append((q, k, v, gate, beta, state))
+
+    def run_layer(op, args, context=None):
+        return run_prefill_fused_kda(
+            op,
+            *args,
+            starts,
+            a_log,
+            dt_bias,
+            scale=HEAD_DIM**-0.5,
+            lower_bound=GATE_LOWER_BOUND,
+            metadata_context=context,
+        )
+
+    for middle in (65, 129):
+        # Keep the boundaries' address, but change their contents each forward.
+        starts[1] = middle
+        context = workspace.new_context(starts)
+        for args in inputs:
+            expected = run_layer(operator, args)
+            actual = run_layer(counted, args, context)
+            torch.npu.synchronize()
+            torch.testing.assert_close(actual[0], expected[0], rtol=OUTPUT_RTOL, atol=OUTPUT_ATOL)
+            torch.testing.assert_close(actual[1], expected[1], rtol=STATE_RTOL, atol=STATE_ATOL)
+        assert workspace.buffer.data_ptr() == address
+    assert counted.metadata.call_count == 2
+
+    for name, reuse in (("per_layer_metadata", False), ("shared_metadata", True)):
+
+        def run_forward(reuse=reuse):
+            context = workspace.new_context(starts) if reuse else None
+            for args in inputs:
+                run_layer(operator, args, context)
+
+        for _ in range(BENCHMARK_WARMUP_ROUNDS):
+            run_forward()
+        torch.npu.synchronize()
+        start, end = (torch.npu.Event(enable_timing=True) for _ in range(2))
+        start.record()
+        for _ in range(BENCHMARK_MEASURE_ROUNDS):
+            run_forward()
+        end.record()
+        end.synchronize()
+        record_property(f"{name}_{num_layers}_layers_us", start.elapsed_time(end) * 1000 / BENCHMARK_MEASURE_ROUNDS)
 
 
 def _bind_cache(layer, layout):

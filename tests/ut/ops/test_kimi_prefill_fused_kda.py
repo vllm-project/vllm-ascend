@@ -22,7 +22,14 @@ def runtime():
     ns = contracts.runtime.__wrapped__()
     contracts._definitions(
         "vllm_ascend/ops/kimi_prefill_fused_kda.py",
-        {"PrefillFusedKDAOperators", "load_prefill_fused_kda_operator", "run_prefill_fused_kda"},
+        {
+            "PrefillFusedKDAOperators",
+            "PrefillKDAMetadataWorkspace",
+            "PrefillKDAMetadataContext",
+            "create_prefill_kda_metadata_workspace",
+            "load_prefill_fused_kda_operator",
+            "run_prefill_fused_kda",
+        },
         ns,
     )
     ns.update(
