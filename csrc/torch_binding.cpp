@@ -1944,6 +1944,367 @@ at::Tensor npu_sparse_attention_score_prefill(
     return output;
 }
 
+void attn_metadata_update(
+    const at::Tensor &req_ids,
+    const at::Tensor &discard_label,
+    const at::Tensor &positions,
+    const at::Tensor &slot_mapping,
+    const at::Tensor &block_table,
+    const at::Tensor &seq_lens,
+    const at::Tensor &discard_positions,
+    const at::Tensor &discard_slot_mapping,
+    const at::Tensor &discard_context_lens,
+    const at::Tensor &discard_block_tables,
+    const at::Tensor &discard_attn_cnt,
+    const at::Tensor &discard_req_ids,
+    const at::Tensor &original_bs,
+    int64_t max_bs,
+    int64_t layer_idx,
+    at::Tensor &out_positions,
+    at::Tensor &out_slots,
+    at::Tensor &out_seq_lens,
+    at::Tensor &out_block_table)
+{
+    TORCH_CHECK(req_ids.dim() == 1 && req_ids.size(0) == max_bs,
+                "req_ids must have shape (max_bs,)");
+    TORCH_CHECK(discard_label.dim() == 1 && discard_label.size(0) == max_bs,
+                "discard_label must have shape (max_bs,)");
+    // TORCH_CHECK(positions.dim() == 1 && positions.size(0) >= original_bs,
+    //             "positions must have shape (original_bs,)");
+    // TORCH_CHECK(block_table.dim() == 2 && block_table.size(0) >= original_bs,
+    //             "block_table must have shape (original_bs, table_size)");
+    int64_t table_size = block_table.size(1);
+    auto device = req_ids.device();
+    // auto out_positions   = at::zeros({max_bs},             at::dtype(at::kLong).device(device));
+    // auto out_slots       = at::zeros({max_bs},             at::dtype(at::kInt).device(device));
+    // auto out_seq_lens    = at::zeros({max_bs},             at::dtype(at::kInt).device(device));
+    // auto out_block_table = at::zeros({max_bs, table_size}, at::dtype(at::kInt).device(device));
+    EXEC_NPU_CMD(aclnnAttnMetadataUpdate,
+        req_ids,
+        discard_label,
+        positions,
+        slot_mapping,
+        block_table,
+        seq_lens,
+        discard_positions,
+        discard_slot_mapping,
+        discard_context_lens,
+        discard_block_tables,
+        discard_attn_cnt,
+        discard_req_ids,
+        original_bs, 
+        max_bs,
+        layer_idx,
+        out_positions,
+        out_slots,
+        out_seq_lens,
+        out_block_table);
+}
+
+void combine_and_dispatch_rebatch(
+    const at::Tensor& batch_before_dispatch,
+    const at::Tensor& residuals_before_dispatch,
+    const at::Tensor& cut_idx,
+    const at::Tensor& discard_label,
+    const at::Tensor& discard_tokens,
+    const at::Tensor& discard_moe_req_id_tensor,
+    const at::Tensor& req_id_list,
+    const at::Tensor& discard_residuals,
+    const at::Tensor& running_topk,
+    const at::Tensor& discard_topk,
+    const at::Tensor& running_topk_weight,
+    const at::Tensor& discard_topk_weight,
+    const at::Tensor& moe_cnt_input,
+    const at::Tensor& actual_bs,
+    const at::Tensor& history_bs,
+    const at::Tensor& running_bs,
+    const at::Tensor &original_bs,
+    int64_t is_combine_rebatch,
+    int64_t max_bs,
+    int64_t k)
+{
+    
+    TORCH_CHECK(batch_before_dispatch.dim() == 2,
+                "batch_before_dispatch must be 2D [bs, hidden_size]");
+    // TORCH_CHECK(residuals_before_dispatch.dim() == 2,
+    //              "residuals_before_dispatch must be 2D [bs, hidden_size]");
+    TORCH_CHECK(batch_before_dispatch.scalar_type() == at::kBFloat16,
+                "batch_before_dispatch must be BF16");
+    // TORCH_CHECK(residuals_before_dispatch.scalar_type() == at::kBFloat16,
+    //              "residuals_before_dispatch must be BF16");
+    TORCH_CHECK(running_topk_weight.scalar_type() == at::kBFloat16,
+                "running_topk_weight must be kBFloat16");
+
+    int64_t hidden_size = batch_before_dispatch.size(1);
+
+    // at::Tensor rebatch_output = at::empty({max_bs, hidden_size},
+    //                                       batch_before_dispatch.options());
+    at::Tensor rebatch_residuals = at::empty({max_bs, hidden_size},
+                                            residuals_before_dispatch.options());
+    
+    EXEC_NPU_CMD(aclnnCombineAndDispatchRebatch,
+        batch_before_dispatch,
+        residuals_before_dispatch,
+        cut_idx,
+        discard_label,
+        discard_tokens,
+        discard_moe_req_id_tensor,
+        req_id_list,
+        discard_residuals,
+        running_topk,
+        discard_topk,
+        running_topk_weight,
+        discard_topk_weight,
+        moe_cnt_input,
+        actual_bs,
+        history_bs,
+        running_bs,
+        original_bs,
+        is_combine_rebatch,
+        max_bs,
+        k,
+        rebatch_residuals);
+
+    // return std::tuple<at::Tensor, at::Tensor>(rebatch_output, rebatch_residuals);
+}
+
+void rebatch_and_update(
+    const at::Tensor &batch_before_dispatch,
+    const at::Tensor &residuals_before_dispatch,
+    const at::Tensor &cut_idx,
+    const at::Tensor &prefix_index,
+    const at::Tensor &discard_label,
+    const at::Tensor &discard_tokens,
+    const at::Tensor &discard_moe_req_id_tensor,
+    const at::Tensor &req_id_list,
+    const at::Tensor &discard_residuals,
+    const at::Tensor &running_topk,
+    const at::Tensor &discard_topk,
+    const at::Tensor &running_topk_weight,
+    const at::Tensor &discard_topk_weight,
+    const at::Tensor &moe_cnt_input,
+    const at::Tensor &actual_bs,
+    const at::Tensor &history_bs,
+    const at::Tensor &running_bs,
+    const at::Tensor &original_bs,
+    const at::Tensor &positions,
+    const at::Tensor &slot_mapping,
+    const at::Tensor &block_table,
+    const at::Tensor &seq_lens,
+    const at::Tensor &discard_positions,
+    const at::Tensor &discard_slot_mapping,
+    const at::Tensor &discard_context_lens,
+    const at::Tensor &discard_block_tables,
+    const at::Tensor &discard_attn_cnt,
+    const at::Tensor &discard_req_ids,
+    int64_t is_combine_rebatch,
+    int64_t max_bs,
+    int64_t k,
+    int64_t layer_idx,
+    at::Tensor &out_rebatch_residuals,
+    at::Tensor &out_positions,
+    at::Tensor &out_slots,
+    at::Tensor &out_seq_lens,
+    at::Tensor &out_block_table)
+{
+    TORCH_CHECK(batch_before_dispatch.dim() == 2,
+                "batch_before_dispatch must be 2D [bs, hidden_size]");
+    TORCH_CHECK(batch_before_dispatch.scalar_type() == at::kBFloat16,
+                "batch_before_dispatch must be BF16");
+    TORCH_CHECK(block_table.dim() == 2,
+                "block_table must be 2D [bs, table_size]");
+    TORCH_CHECK(out_block_table.dim() == 2,
+                "out_block_table must be 2D [max_bs, table_size]");
+    const int64_t hidden_size = batch_before_dispatch.size(1);
+    EXEC_NPU_CMD(
+        aclnnRebatchAndUpdate,
+        batch_before_dispatch,
+        residuals_before_dispatch,
+        cut_idx,
+        prefix_index,
+        discard_label,
+        discard_tokens,
+        discard_moe_req_id_tensor,
+        req_id_list,
+        discard_residuals,
+        running_topk,
+        discard_topk,
+        running_topk_weight,
+        discard_topk_weight,
+        moe_cnt_input,
+        actual_bs,
+        history_bs,
+        running_bs,
+        original_bs,
+        positions,
+        slot_mapping,
+        block_table,
+        seq_lens,
+        discard_positions,
+        discard_slot_mapping,
+        discard_context_lens,
+        discard_block_tables,
+        discard_attn_cnt,
+        discard_req_ids,
+        is_combine_rebatch,
+        max_bs,
+        k,
+        layer_idx,
+        out_rebatch_residuals,
+        out_positions,
+        out_slots,
+        out_seq_lens,
+        out_block_table);
+}
+
+void moe_token_cut(
+    const at::Tensor &topk_ids,
+    const at::Tensor &topk_weights,
+    const at::Tensor& hidden,
+    at::Tensor &cutidx,
+    at::Tensor &new_topk,
+    at::Tensor &new_topkweight,
+    at::Tensor& new_hidden,
+    at::Tensor& new_residuals,
+    at::Tensor &actual_bs,
+    at::Tensor &prefix_index,
+    at::Tensor &no_cut_rank_num,
+    at::Tensor &active_mask,
+    const at::Tensor &local_cut_count,
+    const at::Tensor &batch_size,
+    const at::Tensor &enable_cut,
+    at::Tensor& residuals,
+    at::Tensor& discard_label,
+    const at::Tensor& discard_tokens,
+    const at::Tensor& discard_moe_req_id,
+    at::Tensor& req_id_list,
+    const at::Tensor& discard_residuals,
+    const at::Tensor& discard_topk,
+    const at::Tensor& discard_topk_weight,
+    at::Tensor& moe_cnt,
+    at::Tensor& history_bs,
+    const at::Tensor& original_bs,
+    c10::string_view group_ep,
+    int64_t topk,
+    int64_t rank_id,
+    int64_t layer_idx,
+    int64_t rank_num,
+    int64_t expert_num,
+    int64_t expert_per_rank,
+    int64_t level_limit,
+    int64_t cut_count_threshold,
+    int64_t small_expert_token_threshold,
+    int64_t send_aiv_num,
+    int64_t recv_aiv_num)
+{
+    //constexpr int64_t max_batch_size = 64;
+    TORCH_CHECK(topk_ids.dim() == 2 && topk_ids.is_contiguous(),
+                "moe_token_cut: topk_ids must be contiguous 2D [64, K].");
+    TORCH_CHECK(topk_ids.scalar_type() == at::kInt, "moe_token_cut: topk_ids must be int32.");
+    TORCH_CHECK(topk > 0, "moe_token_cut: topk must be positive.");
+    // TORCH_CHECK(topk_ids.size(0) == max_batch_size && topk_ids.size(1) == topk,
+    //             "moe_token_cut: topk_ids shape must be [64, topk].");
+    TORCH_CHECK(rank_num > 0 && rank_id >= 0 && rank_id < rank_num,
+                "moe_token_cut: rank_id/rank_num is invalid.");
+    TORCH_CHECK(expert_num > 0 && expert_per_rank > 0 &&
+                    expert_num == expert_per_rank * rank_num,
+                "moe_token_cut: expert_num must equal expert_per_rank * rank_num.");
+    TORCH_CHECK(layer_idx >= 0 && level_limit >= 0 &&
+                    cut_count_threshold >= 0 && small_expert_token_threshold >= 0,
+                "moe_token_cut: level/count parameters must be non-negative.");
+    TORCH_CHECK(send_aiv_num > 0 && recv_aiv_num > 0,
+                "moe_token_cut: send/recv AIV counts must be positive.");
+    TORCH_CHECK(topk_weights.sizes() == topk_ids.sizes() && topk_weights.is_contiguous(),
+                "moe_token_cut: topk_weights shape must match topk_ids.");
+    TORCH_CHECK(topk_weights.scalar_type() == at::kHalf ||
+                    topk_weights.scalar_type() == at::kBFloat16 ||
+                    topk_weights.scalar_type() == at::kFloat,
+                "moe_token_cut: topk_weights must be float16/bfloat16/float32.");
+    // TORCH_CHECK(cutidx.sizes() == at::IntArrayRef({max_batch_size}) &&
+    //                 cutidx.scalar_type() == at::kChar && cutidx.is_contiguous(),
+    //             "moe_token_cut: cutidx must be contiguous int8 [64].");
+    // TORCH_CHECK(new_topk.sizes() == at::IntArrayRef({max_batch_size, topk}) &&
+    //                 new_topk.scalar_type() == at::kInt && new_topk.is_contiguous(),
+    //             "moe_token_cut: new_topk must be contiguous int32 [64, topk].");
+    // TORCH_CHECK(new_topkweight.sizes() == at::IntArrayRef({max_batch_size, topk}) &&
+    //                 new_topkweight.scalar_type() == topk_weights.scalar_type() &&
+    //                 new_topkweight.is_contiguous(),
+    //             "moe_token_cut: new_topkweight must be contiguous [64, topk] with the same dtype as topk_weights.");
+    // TORCH_CHECK(actual_bs.sizes() == at::IntArrayRef({1}) &&
+    //                 actual_bs.scalar_type() == at::kInt && actual_bs.is_contiguous(),
+    //             "moe_token_cut: actual_bs must be contiguous int32 [1].");
+    // TORCH_CHECK(prefix_index.sizes() == at::IntArrayRef({max_batch_size}) &&
+    //                 prefix_index.scalar_type() == at::kInt && prefix_index.is_contiguous(),
+    //             "moe_token_cut: prefix_index must be contiguous int32 [64].");
+    TORCH_CHECK(no_cut_rank_num.sizes() == at::IntArrayRef({1}) &&
+                    no_cut_rank_num.scalar_type() == at::kInt &&
+                    no_cut_rank_num.is_contiguous(),
+                "moe_token_cut: no_cut_rank_num must be contiguous int32 [1].");
+    // TORCH_CHECK(active_mask.sizes() == at::IntArrayRef({max_batch_size}) &&
+    //                 active_mask.scalar_type() == at::kBool &&
+    //                 active_mask.is_contiguous(),
+    //             "moe_token_cut: active_mask must be contiguous bool [64].");
+    TORCH_CHECK(local_cut_count.sizes() == at::IntArrayRef({1}) &&
+                    local_cut_count.scalar_type() == at::kInt &&
+                    local_cut_count.is_contiguous(),
+                "moe_token_cut: local_cut_count must be contiguous int32 [1].");
+    TORCH_CHECK(batch_size.sizes() == at::IntArrayRef({1}) &&
+                    batch_size.scalar_type() == at::kInt &&
+                    batch_size.is_contiguous(),
+                "moe_token_cut: batch_size must be contiguous int32 [1].");
+    TORCH_CHECK(enable_cut.sizes() == at::IntArrayRef({1}) &&
+                    enable_cut.scalar_type() == at::kInt &&
+                    enable_cut.is_contiguous(),
+                "moe_token_cut: enable_cut must be contiguous int32 [1].");
+    TORCH_CHECK(!group_ep.empty(), "moe_token_cut: group_ep must not be empty.");
+
+    std::vector<char> group_ep_chrs(group_ep.begin(), group_ep.end());
+    group_ep_chrs.push_back('\0');
+    char *group_ep_ptr = group_ep_chrs.data();
+
+    EXEC_NPU_CMD(aclnnMoeTokenCut,
+                 topk_ids,
+                 topk_weights,
+                 hidden,
+                 cutidx,
+                 new_topk,
+                 new_topkweight,
+                 new_hidden,
+                 new_residuals,
+                 actual_bs,
+                 prefix_index,
+                 no_cut_rank_num,
+                 active_mask,
+                 local_cut_count,
+                 batch_size,
+                 enable_cut,
+                 residuals,
+                 discard_label,
+                 discard_tokens,
+                 discard_moe_req_id,
+                 req_id_list,
+                 discard_residuals,
+                 discard_topk,
+                 discard_topk_weight,
+                 moe_cnt,
+                 history_bs,
+                 original_bs,
+                 group_ep_ptr,
+                 topk,
+                 rank_id,
+                 layer_idx,
+                 rank_num,
+                 expert_num,
+                 expert_per_rank,
+                 level_limit,
+                 cut_count_threshold,
+                 small_expert_token_threshold,
+                 send_aiv_num,
+                 recv_aiv_num);
+
+}
+
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -2752,5 +3113,79 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_msa_index_score", torch::kPrivateUse1,
              &vllm_ascend::npu_msa_index_score);
+    
+    ops.def(
+        "attn_metadata_update("
+        "Tensor req_ids, Tensor discard_label, Tensor positions, Tensor slot_mapping, "
+        "Tensor block_table, Tensor seq_lens, Tensor discard_positions, "
+        "Tensor discard_slot_mapping, Tensor discard_context_lens, "
+        "Tensor discard_block_tables, Tensor discard_attn_cnt, Tensor discard_req_ids,Tensor original_bs, "
+        "int max_bs, int layer_idx, "
+        "Tensor! out_positions, Tensor! out_slots, Tensor! out_seq_lens, Tensor! out_block_table"
+        ") -> ()"
+    );
+    ops.impl("attn_metadata_update", torch::kPrivateUse1, &vllm_ascend::attn_metadata_update);
+
+    ops.def(
+        "combine_and_dispatch_rebatch("
+        "Tensor! batch_before_dispatch, "
+        "Tensor! residuals_before_dispatch, "
+        "Tensor cut_idx, "
+        "Tensor! discard_label, "
+        "Tensor! discard_tokens, "
+        "Tensor! discard_moe_req_id_tensor, "
+        "Tensor! req_id_list, "
+        "Tensor! discard_residuals, "
+        "Tensor! running_topk, "
+        "Tensor! discard_topk, "
+        "Tensor! running_topk_weight, "
+        "Tensor! discard_topk_weight, "
+        "Tensor! moe_cnt_input, "
+        "Tensor actual_bs, "
+        "Tensor! history_bs, "
+        "Tensor! running_bs, "
+        "Tensor original_bs, "
+        "int is_combine_rebatch, "
+        "int max_bs, "
+        "int k) -> ()"
+    );
+    //Tensor rebatch_output, Tensor rebatch_residuals
+    ops.impl("combine_and_dispatch_rebatch", torch::kPrivateUse1,&vllm_ascend::combine_and_dispatch_rebatch);
+
+    ops.def(
+        "rebatch_and_update("
+        "Tensor! batch_before_dispatch, Tensor! residuals_before_dispatch, "
+        "Tensor cut_idx, Tensor prefix_index,Tensor! discard_label, Tensor! discard_tokens, "
+        "Tensor! discard_moe_req_id_tensor, Tensor! req_id_list, "
+        "Tensor! discard_residuals, Tensor! running_topk, "
+        "Tensor! discard_topk, Tensor! running_topk_weight, "
+        "Tensor! discard_topk_weight, Tensor! moe_cnt_input, "
+        "Tensor actual_bs, Tensor! history_bs, Tensor! running_bs, "
+        "Tensor original_bs, Tensor positions, Tensor slot_mapping, "
+        "Tensor block_table, Tensor seq_lens, Tensor discard_positions, "
+        "Tensor discard_slot_mapping, Tensor discard_context_lens, "
+        "Tensor discard_block_tables, Tensor! discard_attn_cnt, "
+        "Tensor! discard_req_ids, int is_combine_rebatch, int max_bs, "
+        "int k, int layer_idx, Tensor! out_rebatch_residuals, Tensor! out_positions, Tensor! out_slots, "
+        "Tensor! out_seq_lens, Tensor! out_block_table) -> ()"
+    );
+    ops.impl("rebatch_and_update", torch::kPrivateUse1,
+             &vllm_ascend::rebatch_and_update);
+
+    ops.def(
+        "moe_token_cut(Tensor topk_ids, Tensor topk_weights, Tensor hidden, Tensor! cutidx, "
+        "Tensor! new_topk, Tensor! new_topkweight, Tensor! new_hidden, "
+        "Tensor! new_residuals, Tensor! actual_bs, "
+        "Tensor! prefix_index, Tensor! no_cut_rank_num, Tensor! active_mask, "
+        "Tensor local_cut_count, Tensor batch_size, Tensor enable_cut, "
+        "Tensor! residuals, Tensor! discard_label, Tensor discard_tokens, "
+        "Tensor discard_moe_req_id, Tensor! req_id_list, Tensor discard_residuals, "
+        "Tensor discard_topk, Tensor discard_topk_weight, Tensor! moe_cnt, "
+        "Tensor! history_bs, Tensor original_bs, "
+        "str group_ep, int topk, int rank_id, int layer_idx, int rank_num, "
+        "int expert_num, int expert_per_rank, int level_limit, "
+        "int cut_count_threshold, int small_expert_token_threshold, "
+        "int send_aiv_num, int recv_aiv_num) -> ()");
+    ops.impl("moe_token_cut", torch::kPrivateUse1, &vllm_ascend::moe_token_cut);
 }
 #endif

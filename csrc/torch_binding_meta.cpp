@@ -1979,6 +1979,179 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
 }
 #endif
 
+void attn_metadata_update_meta(
+    const at::Tensor &req_ids,
+    const at::Tensor &discard_label,
+    const at::Tensor &positions,
+    const at::Tensor &slot_mapping,
+    const at::Tensor &block_table,
+    const at::Tensor &seq_lens,
+    const at::Tensor &discard_positions,
+    const at::Tensor &discard_slot_mapping,
+    const at::Tensor &discard_context_lens,
+    const at::Tensor &discard_block_tables,
+    const at::Tensor &discard_attn_cnt,
+    const at::Tensor &discard_req_ids,
+    const at::Tensor &original_bs,
+    int64_t max_bs,
+    int64_t layer_idx,
+    at::Tensor &out_positions,
+    at::Tensor &out_slots,
+    at::Tensor &out_seq_lens,
+    at::Tensor &out_block_table)
+{
+    //return std::tie(out_positions, out_slots, out_seq_lens, out_block_table);
+}
+void combine_and_dispatch_rebatch_meta(
+    const at::Tensor& batch_before_dispatch,
+    const at::Tensor& residuals_before_dispatch,
+    const at::Tensor& cut_idx,
+    const at::Tensor& discard_label,
+    const at::Tensor& discard_tokens,
+    const at::Tensor& discard_moe_req_id_tensor,
+    const at::Tensor& req_id_list,
+    const at::Tensor& discard_residuals,
+    const at::Tensor& running_topk,
+    const at::Tensor& discard_topk,
+    const at::Tensor& running_topk_weight,
+    const at::Tensor& discard_topk_weight,
+    const at::Tensor& moe_cnt_input,
+    const at::Tensor& actual_bs,
+    const at::Tensor& history_bs,
+    const at::Tensor& running_bs,
+    const at::Tensor &original_bs,
+    int64_t is_combine_rebatch,
+    int64_t max_bs,
+    int64_t k)
+{
+    int64_t hidden_size = batch_before_dispatch.size(1);
+
+    at::Tensor rebatch_residuals = at::empty({max_bs, hidden_size},
+                                             residuals_before_dispatch.options().device(at::kMeta));
+    // return {rebatch_output, rebatch_residuals};
+}
+
+void rebatch_and_update_meta(
+    const at::Tensor &batch_before_dispatch,
+    const at::Tensor &residuals_before_dispatch,
+    const at::Tensor &cut_idx,
+    const at::Tensor &prefix_index,
+    const at::Tensor &discard_label,
+    const at::Tensor &discard_tokens,
+    const at::Tensor &discard_moe_req_id_tensor,
+    const at::Tensor &req_id_list,
+    const at::Tensor &discard_residuals,
+    const at::Tensor &running_topk,
+    const at::Tensor &discard_topk,
+    const at::Tensor &running_topk_weight,
+    const at::Tensor &discard_topk_weight,
+    const at::Tensor &moe_cnt_input,
+    const at::Tensor &actual_bs,
+    const at::Tensor &history_bs,
+    const at::Tensor &running_bs,
+    const at::Tensor &original_bs,
+    const at::Tensor &positions,
+    const at::Tensor &slot_mapping,
+    const at::Tensor &block_table,
+    const at::Tensor &seq_lens,
+    const at::Tensor &discard_positions,
+    const at::Tensor &discard_slot_mapping,
+    const at::Tensor &discard_context_lens,
+    const at::Tensor &discard_block_tables,
+    const at::Tensor &discard_attn_cnt,
+    const at::Tensor &discard_req_ids,
+    int64_t is_combine_rebatch,
+    int64_t max_bs,
+    int64_t k,
+    int64_t layer_idx,
+    at::Tensor &out_rebatch_residuals,
+    at::Tensor &out_positions,
+    at::Tensor &out_slots,
+    at::Tensor &out_seq_lens,
+    at::Tensor &out_block_table)
+{
+}
+
+void moe_token_cut_meta(
+    const at::Tensor &topk_ids,
+    const at::Tensor &topk_weights,
+    const at::Tensor &hidden,
+    at::Tensor &cutidx,
+    at::Tensor &new_topk,
+    at::Tensor &new_topkweight,
+    at::Tensor &new_hidden,
+    at::Tensor &new_residuals,
+    at::Tensor &actual_bs,
+    at::Tensor &prefix_index,
+    at::Tensor &no_cut_rank_num,
+    at::Tensor &active_mask,
+    const at::Tensor &local_cut_count,
+    const at::Tensor &batch_size,
+    const at::Tensor &enable_cut,
+    at::Tensor &residuals,
+    at::Tensor &discard_label,
+    const at::Tensor &discard_tokens,
+    const at::Tensor &discard_moe_req_id,
+    at::Tensor &req_id_list,
+    const at::Tensor &discard_residuals,
+    const at::Tensor &discard_topk,
+    const at::Tensor &discard_topk_weight,
+    at::Tensor &moe_cnt,
+    at::Tensor &history_bs,
+    const at::Tensor &original_bs,
+    c10::string_view group_ep,
+    int64_t topk,
+    int64_t rank_id,
+    int64_t layer_idx,
+    int64_t rank_num,
+    int64_t expert_num,
+    int64_t expert_per_rank,
+    int64_t level_limit,
+    int64_t cut_count_threshold,
+    int64_t small_expert_token_threshold,
+    int64_t send_aiv_num,
+    int64_t recv_aiv_num)
+{
+    (void)topk_ids;
+    (void)topk_weights;
+    (void)hidden;
+    (void)cutidx;
+    (void)new_topk;
+    (void)new_topkweight;
+    (void)new_hidden;
+    (void)new_residuals;
+    (void)actual_bs;
+    (void)prefix_index;
+    (void)no_cut_rank_num;
+    (void)active_mask;
+    (void)local_cut_count;
+    (void)group_ep;
+    (void)batch_size;
+    (void)enable_cut;
+    (void)residuals;
+    (void)discard_label;
+    (void)discard_tokens;
+    (void)discard_moe_req_id;
+    (void)req_id_list;
+    (void)discard_residuals;
+    (void)discard_topk;
+    (void)discard_topk_weight;
+    (void)moe_cnt;
+    (void)history_bs;
+    (void)original_bs;
+    (void)topk;
+    (void)rank_id;
+    (void)layer_idx;
+    (void)rank_num;
+    (void)expert_num;
+    (void)expert_per_rank;
+    (void)level_limit;
+    (void)cut_count_threshold;
+    (void)small_expert_token_threshold;
+    (void)send_aiv_num;
+    (void)recv_aiv_num;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -2108,6 +2281,14 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+        // attn_metadata_update
+    ops.impl("attn_metadata_update", &vllm_ascend::meta::attn_metadata_update_meta);
+    // combine_and_dispatch_rebatch
+    ops.impl("combine_and_dispatch_rebatch", &vllm_ascend::meta::combine_and_dispatch_rebatch_meta);
+    // rebatch_and_update
+    ops.impl("rebatch_and_update",
+             &vllm_ascend::meta::rebatch_and_update_meta);
+    ops.impl("moe_token_cut", &vllm_ascend::meta::moe_token_cut_meta);
 }
 }
 #endif
