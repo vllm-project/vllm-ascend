@@ -1,0 +1,4 @@
+pr: 21384
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4 vision preprocessing with current vLLM versions by reusing the upstream processor instead of the obsolete v0.27 interface.
