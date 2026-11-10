@@ -313,7 +313,7 @@ class MultiNodeConverter(BaseConverter):
 #
 # These read the external-DP YAML schema directly (``model`` / ``routing`` /
 # ``config`` / ``templates``) used by
-# external-DP configs under tests/e2e/cases/. They are tightly
+# external-DP configs under tests/SIT/cases/. They are tightly
 # coupled to that schema by design.
 # ============================================================================
 
