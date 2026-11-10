@@ -9,8 +9,8 @@ surface most likely to drift between the pluggable builder on main and the
 release-lane monkey patches.
 """
 
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
