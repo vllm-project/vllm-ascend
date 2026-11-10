@@ -18,7 +18,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   PYTHONHASHSEED: "0"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 routing:
   type: "disaggregated_prefill"
@@ -73,6 +72,8 @@ templates:
     envs:
       <<: *env_prefill
     server_cmd_template:
+      - "--prefix-cache-retention-interval"
+      - "4096"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -129,6 +130,8 @@ templates:
     envs:
       <<: *env_decode
     server_cmd_template:
+      - "--prefix-cache-retention-interval"
+      - "4096"
       - "--host"
       - "0.0.0.0"
       - "--port"

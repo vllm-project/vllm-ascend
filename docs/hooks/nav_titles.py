@@ -59,6 +59,10 @@ TITLES = {
     "developer_guide/contribution/multi_node_test.md": {"en": "Multi-Node Test", "zh": "多节点测试"},
     "developer_guide/contribution/nightly_ci_test.md": {"en": "Nightly CI Test", "zh": "夜间 CI 测试"},
     "developer_guide/contribution/testing.md": {"en": "Testing", "zh": "测试"},
+    "developer_guide/contribution/dependency_version_management.md": {
+        "en": "Dependency Version Management",
+        "zh": "依赖版本管理",
+    },
     "developer_guide/evaluation/using_ais_bench.md": {"en": "Using AISBench", "zh": "使用 AISBench"},
     "developer_guide/evaluation/using_evalscope.md": {"en": "Using EvalScope", "zh": "使用 EvalScope"},
     "developer_guide/evaluation/using_lm_eval.md": {"en": "Using lm_eval", "zh": "使用 lm_eval"},
