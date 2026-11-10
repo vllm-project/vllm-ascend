@@ -265,12 +265,6 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        self._combine_sampled_and_draft_tokens = combine_sampled_and_draft_tokens
-        if self.vllm_config.attention_config.hisparse_config is not None:
-            # Draft/PCP input providers retain their separate ownership. Sampling
-            # consumes this target prefix before the next input preparation.
-            self.input_buffers.bind_logits_indices_workspace()
-            self._combine_sampled_and_draft_tokens = self.input_buffers.combine_sampled_and_draft_tokens
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
@@ -1088,7 +1082,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
-        logits_indices = self._combine_sampled_and_draft_tokens(
+        logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
             idx_mapping,
             self.req_states.last_sampled_tokens,

@@ -1567,7 +1567,6 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     runner.num_computed_tokens_event = MagicMock()
     runner.num_computed_tokens_cpu = torch.tensor([3, 4, 0, 0], dtype=torch.int32)
     runner.input_buffers = AscendInputBuffers(4, 16, runner.device)
-    runner._combine_sampled_and_draft_tokens = vllm_model_runner.combine_sampled_and_draft_tokens
     runner.input_buffers.dcp_local_seq_lens = torch.zeros(4, dtype=torch.int32)
     runner.req_states = SimpleNamespace(
         req_id_to_index={"r0": 0, "r1": 1},
@@ -1640,9 +1639,8 @@ def _run_prepare_inputs(
         patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs", side_effect=prefill_inputs),
         patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_dcp_local_seq_lens", create=True),
-        patch.object(
-            runner,
-            "_combine_sampled_and_draft_tokens",
+        patch(
+            "vllm_ascend.worker.v2.model_runner.combine_sampled_and_draft_tokens",
             return_value=torch.tensor([0, 1], dtype=torch.int32),
             side_effect=combine_tokens,
         ),
