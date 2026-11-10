@@ -5,6 +5,10 @@ and `TestPreloadNightly` has eight extended cases. `conftest.py` provides fixtur
 and CI selection, `helpers.py` manages processes and assertions, and `runner.py`
 executes models in fresh subprocesses and returns JSON measurements.
 
+Preload supports Atlas A2 and Atlas A3 hardware. Other hardware families,
+including A5 (950PR/950DT), are rejected before weight loading in both zero-copy
+and copy modes; this is the current preload support scope.
+
 The tests use one NPU and a non-quantized dense text model. The default model is
 `Qwen/Qwen3-0.6B`; pass `--preload-model /path/to/checkpoint` to use a local copy.
 Run from the repository root with the supported vLLM/CANN/torch_npu environment.

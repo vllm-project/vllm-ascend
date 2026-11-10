@@ -103,7 +103,14 @@ def _rebind_rope_caches(model: torch.nn.Module) -> None:
 
 
 class AscendIpcModelLoader(IpcModelLoader):
-    """Keep upstream transport/lifecycle and specialize NPU model binding."""
+    """Keep upstream transport/lifecycle and specialize NPU model binding.
+
+    Zero-copy daemon loss follows upstream's warn-and-continue policy; it does
+    not trigger a runtime disk fallback. With expandable_segments=True, the
+    engine retains imported physical-memory handles after the daemon exits.
+    CANN releases shared physical memory only after all handle owners release
+    it. A replacement daemon may allocate a second copy of the cached weights.
+    """
 
     def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         validate_preload_config(vllm_config, mode=self.mode)

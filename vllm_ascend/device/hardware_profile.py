@@ -150,6 +150,9 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
+    # Enable the preload weight-cache Tensor IPC path on supported A2/A3 stacks.
+    # This is the preload support scope, not a general hardware IPC capability.
+    PRELOAD_WEIGHT_CACHE = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -282,6 +285,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.PRELOAD_WEIGHT_CACHE,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,

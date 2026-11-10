@@ -6,7 +6,7 @@ from vllm.config import VllmConfig
 from vllm.config.load import LoadConfig
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.device.hardware_profile import WeightLayoutPolicy, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 
 def validate_preload_config(vllm_config: VllmConfig, *, mode: str = "zero_copy") -> None:
@@ -14,12 +14,15 @@ def validate_preload_config(vllm_config: VllmConfig, *, mode: str = "zero_copy")
     model = vllm_config.model_config
     parallel = vllm_config.parallel_config
     ascend = init_ascend_config(vllm_config)
+    hardware_profile = get_current_hardware_profile()
     reasons = []
+    if not hardware_profile.supports(HardwareCapability.PRELOAD_WEIGHT_CACHE):
+        reasons.append("preload is currently supported only on Atlas A2 and Atlas A3 hardware")
     if not vllm_config.use_v2_model_runner:
         reasons.append("Model Runner V2 is required")
     if ascend.weight_nz_mode != 0:
         reasons.append("set --additional-config '{\"weight_nz_mode\": 0}' on both preload and serve")
-    if get_current_hardware_profile().weight_layout_policy is WeightLayoutPolicy.FORCE_NZ:
+    if hardware_profile.weight_layout_policy is WeightLayoutPolicy.FORCE_NZ:
         reasons.append("hardware requiring NZ weights is unsupported")
     if model.dtype not in (torch.bfloat16, torch.float16):
         reasons.append("only BF16 and FP16 weights are supported")

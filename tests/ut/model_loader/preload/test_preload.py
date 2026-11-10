@@ -14,6 +14,8 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry, WeightCacheState
 
 from vllm_ascend.ascend_config import FinegrainedTPConfig
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.model_loader.preload import config, transport
 from vllm_ascend.model_loader.preload.loader import AscendIpcModelLoader
 
@@ -53,8 +55,19 @@ def _config():
 @pytest.fixture
 def valid_config(monkeypatch):
     monkeypatch.setattr(config, "init_ascend_config", lambda _: SimpleNamespace(weight_nz_mode=0))
-    monkeypatch.setattr(config, "get_current_hardware_profile", lambda: SimpleNamespace(weight_layout_policy=None))
+    monkeypatch.setattr(config, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
     return _config()
+
+
+@pytest.mark.parametrize("mode", ["zero_copy", "copy"])
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_preload_hardware_support_scope(valid_config, monkeypatch, device_type, mode):
+    monkeypatch.setattr(config, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    if device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
+        config.validate_preload_config(valid_config, mode=mode)
+    else:
+        with pytest.raises(ValueError, match="supported only on Atlas A2 and Atlas A3"):
+            config.validate_preload_config(valid_config, mode=mode)
 
 
 def test_supported_dense_config_retains_tp_placement(valid_config):
