@@ -1264,9 +1264,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._dspark_swa_indices = torch.empty(
                     (self._max_tokens, 1, index_width), dtype=torch.int32, device=seq_lens.device
                 )
-                self._dspark_swa_lengths = torch.empty(
-                    (self._max_tokens, 1), dtype=torch.int32, device=seq_lens.device
-                )
+                self._dspark_swa_lengths = torch.empty((self._max_tokens, 1), dtype=torch.int32, device=seq_lens.device)
             indices_view = self._dspark_swa_indices[:num_actual_tokens]
             assert self._dspark_swa_lengths is not None
             lengths_view = self._dspark_swa_lengths[:num_actual_tokens]
