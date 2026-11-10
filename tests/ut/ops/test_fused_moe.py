@@ -3025,7 +3025,9 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
+def _stub_moe_runner_init(
+    monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None, use_shared_output_buffers=False
+):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -3084,7 +3086,72 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         routed_experts=routed_experts,
         gate=gate,
         shared_experts=shared_experts,
+        use_shared_output_buffers=use_shared_output_buffers,
     )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("mode", list(SharedExpertParallelMode))
+def test_shared_graph_output_adapter_is_opt_in(monkeypatch, enabled, mode):
+    monkeypatch.setattr(AscendMoERunner, "_can_overlap_sp_shared_with", lambda *args: False)
+    monkeypatch.setattr(AscendMoERunner, "_get_shared_expert_parallel_mode", lambda self: mode)
+    runner = _stub_moe_runner_init(monkeypatch, shared_experts=object(), use_shared_output_buffers=enabled)
+    expected = enabled and mode in (
+        SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY,
+        SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP,
+    )
+    assert (runner._forward_entry is fused_moe_module._ascend_moe_shared_graph_entry) is expected
+
+
+def test_shared_graph_output_adapter_preserves_sp_overlap_entry(monkeypatch):
+    monkeypatch.setattr(AscendMoERunner, "_can_overlap_sp_shared_with", lambda *args: True)
+    runner = _stub_moe_runner_init(monkeypatch, shared_experts=object(), use_shared_output_buffers=True)
+    assert runner._forward_entry is torch.ops.vllm.ascend_moe_forward_shared_sp
+
+
+def test_shared_graph_out_matches_native_schema_including_layer_name_type():
+    native = torch.ops.vllm.moe_forward_shared.default._schema
+    explicit_out = torch.ops.vllm.ascend_moe_forward_shared_out.default._schema
+    assert [argument.type for argument in explicit_out.arguments[:6]] == [
+        argument.type for argument in native.arguments
+    ]
+    assert not explicit_out.returns
+    assert all(argument.alias_info.is_write for argument in explicit_out.arguments[-2:])
+
+
+def test_shared_graph_out_keeps_buffers_when_native_outputs_change(monkeypatch):
+    hidden, logits = torch.randn(3, 4), torch.randn(3, 2)
+    shared_out, routed_out = torch.empty_like(hidden), torch.empty_like(hidden)
+    addresses = shared_out.data_ptr(), routed_out.data_ptr()
+    for _ in range(3):
+        native_shared, native_routed = torch.randn_like(hidden), torch.randn_like(hidden)
+        native = MagicMock(return_value=(native_shared, native_routed))
+        monkeypatch.setattr(fused_moe_module, "_moe_forward_shared", native)
+        result = fused_moe_module._ascend_moe_forward_shared_out(
+            hidden, logits, None, None, "model.layers.0.mlp", 0, shared_out, routed_out
+        )
+        assert result is None
+        assert (shared_out.data_ptr(), routed_out.data_ptr()) == addresses
+        assert shared_out.data_ptr() != native_shared.data_ptr()
+        assert routed_out.data_ptr() != native_routed.data_ptr()
+        torch.testing.assert_close(shared_out, native_shared, rtol=0, atol=0)
+        torch.testing.assert_close(routed_out, native_routed, rtol=0, atol=0)
+
+
+def test_shared_graph_out_rejects_shape_broadcast(monkeypatch):
+    hidden = torch.randn(3, 4)
+    monkeypatch.setattr(fused_moe_module, "_moe_forward_shared", lambda *args: (torch.ones(1, 4), hidden))
+    with pytest.raises(ValueError, match="preallocated buffer"):
+        fused_moe_module._ascend_moe_forward_shared_out(
+            hidden,
+            torch.randn(3, 2),
+            None,
+            None,
+            "model.layers.0.mlp",
+            0,
+            torch.empty_like(hidden),
+            torch.empty_like(hidden),
+        )
 
 
 def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):

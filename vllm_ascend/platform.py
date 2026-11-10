@@ -1473,6 +1473,17 @@ def _setup_compile_backend(
                 "vllm::glm5next_kda_forward_with_output",
             ]
         )
+        union_options = additional_config.get("minimax_m3_union", {})
+        architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        if union_options.get("mode", "off") in ("union", "policy") and _MINIMAX_M3_ARCHITECTURES.intersection(
+            architectures
+        ):
+            # Keep the optional MoE out-op eager between captured graphs. Its
+            # explicit buffers belong to the preceding graph and must remain
+            # live across this boundary. Also cover non-fused sparse attention.
+            for op in ("vllm::ascend_moe_forward_shared_out", "vllm::minimax_m3_sparse_forward"):
+                if op not in compilation_config.splitting_ops:
+                    compilation_config.splitting_ops.append(op)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False

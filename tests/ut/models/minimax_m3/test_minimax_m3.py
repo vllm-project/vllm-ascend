@@ -340,7 +340,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         self.assertIs(output, quantized)
         self.assertIs(actual_scale, output_scale)
 
-    def test_moe_passes_swigluoai_config_during_construction(self) -> None:
+    def _check_moe_construction(self, union_options=None) -> None:
         config = PretrainedConfig(
             hidden_size=64,
             intermediate_size=32,
@@ -386,6 +386,10 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
                 "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoEFactory",
                 return_value=experts,
             ) as fused_moe,
+            patch(
+                "vllm_ascend.models.minimax_m3.minimax_m3.get_current_vllm_config_or_none",
+                return_value=SimpleNamespace(additional_config={"minimax_m3_union": union_options}),
+            ),
         ):
             MiniMaxM3MoE(
                 config=config,
@@ -399,6 +403,21 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         self.assertEqual(kwargs["activation"], "swigluoai_uninterleave")
         self.assertEqual(kwargs["swiglu_alpha"], config.swiglu_alpha)
         self.assertEqual(kwargs["swiglu_beta"], config.swiglu_beta)
+        enabled = bool(union_options and union_options.get("mode", "off") != "off")
+        self.assertEqual(kwargs["runner_args"], {"use_shared_output_buffers": enabled})
+
+    def test_moe_passes_swigluoai_config_during_construction(self) -> None:
+        self._check_moe_construction()
+
+    def test_moe_requests_union_graph_buffers_only_when_enabled(self) -> None:
+        for options in (
+            {},
+            {"mode": "off"},
+            {"mode": "union"},
+            {"mode": "policy", "policy_path": "/models/policy.json", "policy_sha256": "0" * 64},
+        ):
+            with self.subTest(options=options):
+                self._check_moe_construction(options)
 
     def test_attention_makes_value_states_contiguous(self) -> None:
         attention = _make_attention()

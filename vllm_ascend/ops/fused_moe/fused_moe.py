@@ -26,7 +26,11 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    _layer_name_type,
+    _moe_forward_shared,
+    _moe_forward_shared_fake,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -82,6 +86,74 @@ direct_register_custom_op(
 )
 
 
+def _ascend_moe_forward_shared_out(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+    shared_output: torch.Tensor,
+    routed_output: torch.Tensor,
+) -> None:
+    shared, routed = _moe_forward_shared(
+        hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded
+    )
+    for source, target in ((shared, shared_output), (routed, routed_output)):
+        if source.shape != target.shape or source.dtype != target.dtype or source.device != target.device:
+            raise ValueError("Shared MoE graph output does not match its preallocated buffer")
+        target.copy_(source)
+
+
+def _ascend_moe_forward_shared_out_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+    shared_output: torch.Tensor,
+    routed_output: torch.Tensor,
+) -> None:
+    pass
+
+
+direct_register_custom_op(
+    op_name="ascend_moe_forward_shared_out",
+    op_func=_ascend_moe_forward_shared_out,
+    mutates_args=["shared_output", "routed_output"],
+    fake_impl=_ascend_moe_forward_shared_out_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+def _ascend_moe_shared_graph_entry(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # The preceding captured graph owns these allocations. The opaque MoE op
+    # writes them in place, so the following graph replays with the addresses
+    # it saw during capture even when the native MoE allocates new outputs.
+    shared_output, routed_output = _moe_forward_shared_fake(
+        hidden_states, router_logits, shared_experts_input, input_ids, layer_name, hidden_dim_unpadded
+    )
+    torch.ops.vllm.ascend_moe_forward_shared_out(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        layer_name,
+        hidden_dim_unpadded,
+        shared_output,
+        routed_output,
+    )
+    return shared_output, routed_output
+
+
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def __init__(
         self,
@@ -96,6 +168,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         routed_input_transform=None,
         routed_output_transform=None,
         routed_scaling_factor=1,
+        use_shared_output_buffers: bool = False,
     ):
         super().__init__(
             layer_name,
@@ -133,6 +206,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
+            elif use_shared_output_buffers and self._get_shared_expert_parallel_mode() in (
+                SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY,
+                SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP,
+            ):
+                self._forward_entry = _ascend_moe_shared_graph_entry
 
         setup_moe_comm_method(self.moe_config)
         # Communication objects are shared across MoE layers. Keep the bound

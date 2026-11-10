@@ -502,6 +502,7 @@ class AscendConfig:
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
             "enable_sparse_li_c4": false,
+            "minimax_m3_union": {"mode": "off"},
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -680,6 +681,10 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    # Model-local routing options. MiniMax M3 validates modes, policy digests
+    # and topology at construction without importing model code during platform
+    # discovery. Other models never consume this opt-in mapping.
+    minimax_m3_union: dict[str, str | None] = dataclasses.field(default_factory=dict)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.

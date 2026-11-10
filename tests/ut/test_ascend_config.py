@@ -2112,6 +2112,32 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_union_options_survive_factory(self, mock_fix):
+        vc = VllmConfig()
+        options = {"mode": "policy", "policy_path": "/models/m3-union.json", "policy_sha256": "a" * 64}
+        vc.additional_config = {"minimax_m3_union": options}
+
+        config = init_ascend_config(vc)
+
+        self.assertEqual(config.minimax_m3_union, options)
+        self.assertEqual(vc.additional_config["minimax_m3_union"], options)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_union_defaults_to_empty_mapping(self, mock_fix):
+        config = init_ascend_config(VllmConfig())
+        self.assertEqual(config.minimax_m3_union, {})
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_union_rejects_non_mapping(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"minimax_m3_union": "union"}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_unknown_top_level_key_is_rejected(self, mock_fix):
         # A typo'd top-level key (not a declared field, not a bypass key) flows
         # into kwargs and extra="forbid" catches it. Previously the factory
