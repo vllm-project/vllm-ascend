@@ -1993,9 +1993,7 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
         GetOpApiFuncAddr("aclnnDequantSwigluQuantV2") != nullptr &&
         GetOpApiFuncAddr("aclnnDequantSwigluQuantV2GetWorkspaceSize") != nullptr;
 
-    // V2 rejects zero clamp on A5; both modes reduce to V1 for these standard parameters.
-    const bool standard_unclipped = clamp_limit == 0.0 && glu_alpha == 1.0 && glu_bias == 0.0;
-    if (standard_unclipped || (swiglu_mode == 0 && !is_v2_available)) {
+    if (swiglu_mode == 0 && !is_v2_available) {
         EXEC_NPU_CMD(aclnnDequantSwigluQuant, x, weight_scale_value, activation_scale_opt, bias_opt, quant_scale_opt,
                      quant_offset_opt, group_index_opt, activate_left, quant_mode_ptr, y, scale);
     } else {

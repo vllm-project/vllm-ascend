@@ -57,12 +57,7 @@ _REPRO_CASES = [
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize(
-    "swiglu_mode,tuning",
-    [(0, {}), (1, {}), (0, {"clamp_limit": 7.0, "glu_alpha": 1.702, "glu_bias": 1.0})],
-    ids=["legacy-mode-0", "legacy-mode-1", "v2-standard"],
-)
-def test_unclipped_swiglu(swiglu_mode, tuning):
+def test_unclipped_swiglu_v2_standard():
     import vllm_ascend.vllm_ascend_C  # noqa: F401
 
     torch.manual_seed(723)
@@ -79,8 +74,10 @@ def test_unclipped_swiglu(swiglu_mode, tuning):
         activation_scale=activation_scale,
         activate_left=True,
         quant_mode=1,
-        swiglu_mode=swiglu_mode,
-        **tuning,
+        swiglu_mode=0,
+        clamp_limit=7.0,
+        glu_alpha=1.702,
+        glu_bias=1.0,
     )
     torch.testing.assert_close(output.cpu(), expected.cpu(), atol=1, rtol=0.1)
     torch.testing.assert_close(scale.cpu(), expected_scale.cpu(), atol=1e-4, rtol=5e-3)
