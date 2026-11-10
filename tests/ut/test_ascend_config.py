@@ -447,7 +447,8 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
-        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
+        # 0 = let the MegaMoe operator auto-compute the receive capacity.
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -593,9 +594,10 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
-        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
-        # out-of-range values are invalid on main.
-        invalid_values = [0, -1]
+        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, and 0 is
+        # now a valid value (let the MegaMoe operator auto-compute), so only
+        # negative values are invalid.
+        invalid_values = [-1]
 
         for invalid_value in invalid_values:
             clear_ascend_config()
@@ -1923,6 +1925,82 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
         ):
             config.derive_and_validate(vc)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_fused_mc2_mode_3_rejects_a3(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        self.assertTrue(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "only supported on A5"):
+            config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_fused_mc2_mode_3_rejects_latent_moe(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(hidden_size=7168, routed_expert_hidden_size=3584),
+            ),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "does not support latent-MoE"):
+            config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_fused_mc2_mode_3_allows_a5_non_latent(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        # A5 with a non-latent (shared residual width) model must not raise.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_fused_mc2_mode_2_still_allowed_on_a3(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=2,
+        )
+        self.assertFalse(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        # Plain MegaMoe (=2) is not the shared-expert fusion and stays allowed on A3.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_derive_and_validate_invokes_shared_expert_fusion_check(self, mock_fix):
+        vc = VllmConfig()
+        with patch.object(AscendConfig, "_validate_megamoe_shared_expert_fusion") as mock_check:
+            init_ascend_config(vc)
+        mock_check.assert_called_once()
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

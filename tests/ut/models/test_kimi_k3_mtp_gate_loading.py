@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear
 
-from vllm_ascend.models.kimi_k3_mtp import AscendKimiK3MTP
+from vllm_ascend.models.kimi_k3.kimi_k3_mtp import AscendKimiK3MTP
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 
 

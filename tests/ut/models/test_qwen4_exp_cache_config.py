@@ -534,7 +534,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -583,7 +583,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -812,7 +812,12 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     groups = _groups()
     expected = get_qwen4_exp_pool_bytes_per_block(groups)
     assert expected is not None
-    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(SimpleNamespace(), groups) == expected
+    assert (
+        AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
+            SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp"))), groups
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])

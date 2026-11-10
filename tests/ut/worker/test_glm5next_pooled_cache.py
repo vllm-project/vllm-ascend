@@ -107,6 +107,7 @@ def _make_specs(main_head_size=4):
         ),
         STATE: AscendIndexerKPoolTailSpec(
             block_size=2,
+            ring_capacity=2,
             sliding_window=2,
             compress_ratio=2,
             num_kv_heads=1,
@@ -289,6 +290,27 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     torch.testing.assert_close(actual[1], torch.tensor([[5, 5, 7, 7], [5, 5, 7, 7]], dtype=torch.float32))
     torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
     torch.testing.assert_close(actual[2], torch.zeros_like(actual[2]))
+
+
+def test_speculative_tail_view_preserves_all_nine_physical_rows():
+    spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        ring_capacity=9,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=256,
+    )
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    view = view_kpool_tail_cache(STATE, spec, raw, 3)[0]
+    assert view.shape == (3, 9, 4)
+    assert view.stride() == (64, 4, 1)
+    view[1, 8].fill_(7)
+    torch.testing.assert_close(raw.view(torch.float32)[96:100], torch.full((4,), 7.0))
+    assert not torch.count_nonzero(view[0])
+    assert not torch.count_nonzero(view[2])
 
 
 def test_padded_page_layout_rejected_without_tail_caches():

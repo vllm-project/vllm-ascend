@@ -245,7 +245,10 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
     from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
 
     sentinel_config = SimpleNamespace()
-    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+        kv_transfer_config=kv_transfer_config,
+    )
     monkeypatch.setattr(
         kcu_patch,
         "_orig_get_kv_cache_config_from_groups",

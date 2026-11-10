@@ -4,8 +4,60 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker import cp_utils
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+@pytest.mark.parametrize("pcp,dcp", [(1, 1), (2, 1), (1, 2), (2, 2)])
+def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
+    draft = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+        cache_config=SimpleNamespace(cache_dtype="bfloat16"),
+        speculative_config=None,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: draft)
+    monkeypatch.setattr(mla_v1, "get_ascend_config", lambda: SimpleNamespace(enable_kv_nz=False))
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_: False)
+    monkeypatch.setattr(mla_v1, "enabling_mlapo", lambda *_: False)
+    monkeypatch.setattr(AscendMLAImpl, "_can_use_flashmla", lambda _: False)
+    impl = AscendMLAImpl(
+        num_heads=1,
+        head_size=16,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type=None,
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=8,
+        qk_nope_head_dim=8,
+        qk_rope_head_dim=2,
+        qk_head_dim=10,
+        v_head_dim=8,
+        rotary_emb=None,
+        q_proj=Mock(),
+        kv_b_proj=Mock(),
+        o_proj=Mock(),
+    )
+    target = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2, decode_context_parallel_size=1, cp_kv_cache_interleave_size=768
+        ),
+        speculative_config=object(),
+    )
+    monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: {"draft": SimpleNamespace(impl=impl)})
+    cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
+    assert impl.use_pcp == (pcp > 1)
+    assert impl.use_dcp == (dcp > 1)
 
 
 @pytest.mark.parametrize("tp_size,pcp_size", [(1, 2), (4, 2), (2, 4)])
