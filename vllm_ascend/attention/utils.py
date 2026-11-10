@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-from vllm_ascend.ops.triton.attention_update import prepare_attention_update
+from vllm_ascend.ops.triton.attention_update import ATTENTION_UPDATE_MAX_INPUTS, prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
@@ -40,8 +40,6 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-# Native npu_attention_update accepts at most 16 output/LSE pairs.
-ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
