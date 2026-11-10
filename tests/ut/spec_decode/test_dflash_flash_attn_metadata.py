@@ -10,6 +10,7 @@ import pytest
 import torch
 import vllm.v1.worker.gpu.cudagraph_utils as cudagraph_utils
 import vllm.v1.worker.gpu.spec_decode.dflash.speculator as upstream_dflash
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -41,7 +42,9 @@ def _make_speculator(backends):
     speculator.attn_backends = {}
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     for gid, backend in enumerate(backends):
-        builder_cls = backend.get_builder_cls()
+        # FIA selects its builder using the active parallel configuration.
+        with set_current_vllm_config(VllmConfig()):
+            builder_cls = backend.get_builder_cls()
         builder = builder_cls.__new__(builder_cls)
         layer_name = f"draft.{gid}"
         speculator.attn_groups.append(
