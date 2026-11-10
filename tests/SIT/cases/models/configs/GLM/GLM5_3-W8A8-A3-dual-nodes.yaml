@@ -42,7 +42,7 @@ deployment:
       --max-model-len 202752
       --max-num-batched-tokens 4096
       --trust-remote-code
-      --gpu-memory-utilization 0.90
+      --gpu-memory-utilization 0.92
       --quantization ascend
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --additional-config '{"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
