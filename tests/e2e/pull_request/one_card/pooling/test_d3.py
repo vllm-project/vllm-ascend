@@ -11,7 +11,7 @@ import pytest
 import requests
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
-from transformers import AutoModel, PreTrainedModel
+from transformers import AutoModel, modeling_utils
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -58,16 +58,18 @@ def _without_cpu_device_map() -> Iterator[None]:
 
     The runtime always loads its backbone with `device_map={"": <device>}`, and transformers needs `accelerate`
     for any `device_map`. On the CPU that map is only the default placement, so it is dropped there.
+    `check_and_set_device_map` is patched instead of `PreTrainedModel.from_pretrained`: modelscope's `patch_hub()`
+    replaces `from_pretrained` on the individual model classes, so a patch on the base class is never used.
     """
-    load = PreTrainedModel.from_pretrained.__func__
+    check_and_set_device_map = modeling_utils.check_and_set_device_map
 
-    def from_pretrained(cls, *args, device_map=None, **kwargs):
-        if device_map != {"": "cpu"}:
-            kwargs["device_map"] = device_map
-        return load(cls, *args, **kwargs)
+    def without_cpu_map(device_map):
+        if device_map == {"": "cpu"}:
+            return None
+        return check_and_set_device_map(device_map)
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(PreTrainedModel, "from_pretrained", classmethod(from_pretrained))
+        patch.setattr(modeling_utils, "check_and_set_device_map", without_cpu_map)
         yield
 
 
