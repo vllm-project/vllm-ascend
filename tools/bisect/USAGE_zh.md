@@ -146,7 +146,7 @@ python -m tools.bisect.auto_bisect \
 | 包 | 版本文件 | 读取内容 | 二分时是否切换 |
 |---|---|---|---|
 | vLLM | `.github/vllm-release-tag.commit` | vLLM release tag | 是 |
-| torch-npu | `requirements.txt`(回退 `pyproject.toml`) | `torch-npu` 的版本约束 | 是 |
+| torch-npu | `pyproject.toml` 的运行依赖（回退旧 `requirements.txt`、构建依赖） | `torch-npu` 的版本约束 | 是 |
 
 工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
 

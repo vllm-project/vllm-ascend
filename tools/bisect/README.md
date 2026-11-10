@@ -51,7 +51,8 @@ trigger (case FAIL)
   dies mid-run keeps its markers and the remaining rounds degrade to per-round
   SKIPs (liveness/heartbeat detection is future work).
 * **Dependency adaptation**: the tool reads vLLM from
-  `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
+  `.github/vllm-release-tag.commit`, torch-npu from `pyproject.toml` runtime
+  dependencies or the legacy `requirements.txt` (with
   `pyproject.toml` as fallback). If the good and bad endpoints declare the same
   vLLM and torch-npu versions AND the installed environment matches that common pin, no version
   checks run. Otherwise -- endpoint versions differ, or the installed
