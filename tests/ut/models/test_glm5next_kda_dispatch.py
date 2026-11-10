@@ -164,13 +164,14 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     if recover:
         layer.kv_cache += (torch.zeros(8, 1, 2, 128), torch.zeros(8, 1, 2, 256, dtype=torch.bfloat16))
     layer._conv_state_dim_first = dim_first
-    layer._merged_conv_weight = None
+    layer.register_buffer("_merged_conv_weight", None, persistent=False)
     # Checkpoints retain FP32 convolution weights; AscendC needs the activation
     # dtype and [width, q|k|v] ordering in the cached packed weight.
     for index, name in enumerate(("q_conv1d", "k_conv1d", "v_conv1d"), start=1):
         setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
+    layer.process_weights_after_loading(torch.bfloat16)
     tokens = 2 if spec_only else (5 if speculative else 4)
     metadata = object.__new__(model_kda.GDNAttentionMetadata)
     values = dict(

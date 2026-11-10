@@ -855,12 +855,24 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
     def num_cache_tensors(self) -> int:
         return 2 if self.enable_sparse_li_c8 else 1
 
+    @torch.inference_mode()
     def process_weights_after_loading(self) -> None:
-        self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
-        self._gate_weight = self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).contiguous()
-        self._head_weight_f32 = self.wk_weights_proj.weight[self.head_dim :].detach().float().contiguous()
-        self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
-        self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
+        weight = self.wk_weights_proj.weight
+        self._update_weight_buffer("_key_weight", weight[: self.head_dim], weight.dtype)
+        self._update_weight_buffer("_gate_weight", self.index_kpool_compress_gate, weight.dtype)
+        self._update_weight_buffer("_head_weight_f32", weight[self.head_dim :], torch.float32)
+        self._update_weight_buffer("_norm_weight_f32", self.k_norm.weight, torch.float32)
+        self._update_weight_buffer("_norm_bias_f32", self.k_norm.bias, torch.float32)
+
+    def _update_weight_buffer(self, name: str, weight: torch.Tensor | None, dtype: torch.dtype) -> None:
+        """Preserve buffer storage referenced by captured decode graphs."""
+        if weight is not None:
+            weight = weight.detach().to(dtype).contiguous()
+        cached = getattr(self, name, None)
+        if cached is None or weight is None:
+            setattr(self, name, weight)
+        else:
+            cached.copy_(weight)
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:

@@ -208,6 +208,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+    _merged_conv_weight: torch.Tensor | None
 
     def get_state_dtype(
         self,
@@ -360,9 +361,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward_core.
-        self._merged_conv_weight: torch.Tensor | None = None
+        # Owned by the layer for level-2 sleep; refreshed by the deferred
+        # post-load hook while retaining the address captured by ACL graphs.
+        self.register_buffer("_merged_conv_weight", None, persistent=False)
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
@@ -408,6 +409,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # eager KDA op between captured segments. Other modes can return the
         # op's own output and skip a hidden_size-wide copy per layer.
         self._needs_output_buffer = compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+
+    @torch.inference_mode()
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Refresh the q|k|v convolution after initial loading and weight refits.
+
+        GDN inherits AttentionLayerBase, so vLLM defers this hook until its
+        projection children have finished layerwise processing. Updating the
+        buffer in place preserves decode graph arguments across every reload.
+        """
+        weights = [projection.weight.squeeze(1) for projection in (self.q_conv1d, self.k_conv1d, self.v_conv1d)]
+        merged = torch.cat(weights, dim=0).transpose(0, 1).to(dtype=act_dtype).contiguous()
+        if self._merged_conv_weight is None:
+            self._merged_conv_weight = merged
+        else:
+            self._merged_conv_weight.copy_(merged)
 
     def _dt_bias_weight_loader(self, param, loaded_weight):
         shard_size = param.shape[0]
@@ -571,24 +587,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim preserves the independent q/k/v convolutions.
-        # The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = (
-                torch.cat(
-                    [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                    dim=0,
-                )
-                .transpose(0, 1)
-                .to(dtype=qkv_proj_states.dtype)
-                .contiguous()
-            )
         conv_weights = self._merged_conv_weight
+        assert conv_weights is not None, "KDA convolution weights must be processed before forward"
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
