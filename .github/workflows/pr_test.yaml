@@ -113,7 +113,7 @@ jobs:
           all_groups = json.loads(outputs["test_groups"])
           a2_template = next(group for group in all_groups if group["npu_type"] == "a2")
           a3_template = next(
-              group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 4
+              group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2
           )
           # TEMPORARY (fork smoke validation only, do not merge): 线下 karc 的
           # 910B 缓存里 OpenBMB/MiniCPM4-0.5B 只有 46 字节的 .mdl（无 config.json
@@ -149,9 +149,10 @@ jobs:
               ),
               "a3": dict(
                   a3_template,
-                  # 选测都是 2 卡用例，用业务同款 4 卡档位（a3-800i-fed-4）即可，
-                  # 线下 karc 的 a3-800i 已同时纳管 fed-2/4/8/16 四档。
-                  runner="linux-aarch64-a3-800i-fed-4",
+                  # 线下 karc 的 a3-800i 同时纳管 fed-2/4/8/16，但 fed-4 在 karc 上
+                  # 的 RB 迟迟不被分配，这里沿用已验证可跑的 fed-16 档位。
+                  runner="linux-aarch64-a3-800i-fed-16",
+                  num_npus=16,
                   partition_name="a3-smoke",
                   partition="1-1",
                   tests=" ".join(a3_tests),
