@@ -1,0 +1,15 @@
+pr: 21443
+entries:
+  - category: feature
+    text: >-
+      Speculative GDN decode on A2 now reads the recurrent kernel's per-sequence
+      verify window from the installed FLA NPU OPP instead of assuming the
+      legacy eight-token cap. When the OPP publishes an uncapped window, wide
+      verify widths use the AscendC kernel directly instead of falling back to
+      the Triton recurrent kernel.
+  - category: bugfix
+    text: >-
+      Removed a second, independently maintained eight-token gate in
+      `vllm_ascend/ops/gdn.py`; the OPP capability and the hardware-profile
+      workaround are now merged into a single dispatch decision, so an old OPP
+      still routes wide windows to Triton while a current OPP does not.

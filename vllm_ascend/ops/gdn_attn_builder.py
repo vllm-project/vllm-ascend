@@ -32,7 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
-from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.ops.gdn_capabilities import get_recurrent_gdn_limits
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -555,17 +555,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         use_upstream_recurrent = False
         if self._USE_COMMON_KERNEL_METADATA and self.speculative_config:
-            if getattr(self.speculative_config, "enable_adaptive_verification", False):
-                # Variable query lengths must retain the previous accepted
-                # state offset on every supported adaptive backend.
-                use_upstream_recurrent = True
-            else:
-                # Fixed-length verification only opts into the workaround
-                # on profiles with an observed native numerical failure.
-                fallback_min_query_len = get_current_hardware_profile().gdn_fixed_spec_recurrent_fallback_min_query_len
-                use_upstream_recurrent = (
-                    fallback_min_query_len is not None and self.num_spec + 1 >= fallback_min_query_len
-                )
+            # One decision for the whole batch: the installed OPP's window and
+            # the profile's numerical workaround are merged by
+            # ``gdn_capabilities``. Adaptive verification is width-independent.
+            use_upstream_recurrent = get_recurrent_gdn_limits().requires_upstream_recurrent(
+                self.num_spec + 1,
+                adaptive=bool(getattr(self.speculative_config, "enable_adaptive_verification", False)),
+            )
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             use_upstream_recurrent=use_upstream_recurrent,
             use_upstream_conv=bool(
