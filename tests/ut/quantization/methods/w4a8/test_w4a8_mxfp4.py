@@ -236,6 +236,12 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         torch.testing.assert_close(restored[..., :9], original_scale)
         torch.testing.assert_close(restored[..., 9], torch.zeros(8, 128, dtype=torch.uint8))
 
+        # restore_weights_for_rl_loading must drop the padding, not crash trying to
+        # reshape the padded (now even) tensor straight back to the odd original shape.
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertEqual(layer.w2_weight_scale.shape, (8, 128, 9))
+        torch.testing.assert_close(layer.w2_weight_scale.data, original_scale)
+
     @staticmethod
     def _make_moe_layer():
         layer = nn.Module()

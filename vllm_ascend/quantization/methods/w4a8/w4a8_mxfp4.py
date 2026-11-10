@@ -402,9 +402,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2).reshape(
             orig_shapes["w13_weight_scale"]
         )
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(-3, -2).reshape(
-            orig_shapes["w2_weight_scale"]
-        )
+        orig_w2_scale_shape = orig_shapes["w2_weight_scale"]
+        w2_scale = layer.w2_weight_scale.data.transpose(-3, -2).reshape(*orig_w2_scale_shape[:-1], -1)
+        # process_weights_after_loading may have appended one zero scale group to
+        # reach an even count (see the k % 2 != 0 branch above); drop it here so
+        # the reloaded weight matches the checkpoint's real, possibly-odd shape.
+        layer.w2_weight_scale.data = w2_scale[..., : orig_w2_scale_shape[-1]].contiguous()
         layer._mxfp4_transformed = False
 
     def _get_mlp_weights(self, layer):
