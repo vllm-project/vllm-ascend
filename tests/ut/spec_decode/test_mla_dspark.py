@@ -316,7 +316,11 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
 
     def capture(self, *received, **kwargs):
         assert self is manager
-        assert received == forward_args
+        assert received[1:] == forward_args[1:]
+        forward = forward_args[0]
+        attn_metadata = {}
+        assert received[0](1, 5, attn_metadata, slots="slots") is forward.return_value
+        forward.assert_called_once_with(1, 5, attn_metadata, slots="slots")
         # The Ascend wrapper forwards the trailing options as keywords.
         assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]

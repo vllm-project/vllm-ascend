@@ -326,7 +326,8 @@ def test_unsupported_gqa_features_retain_legacy_backend(select_flash_attn, dflas
     "window,causal,mask_mode,win_right",
     [(None, False, 0, -1), (None, True, 3, -1), (2048, False, 4, 2047), (2048, True, 4, 0)],
 )
-def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, causal, mask_mode, win_right):
+@pytest.mark.parametrize("capturing", [False, True])
+def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, causal, mask_mode, win_right, capturing):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
     plan = torch.empty(16, dtype=torch.int32)
@@ -336,6 +337,7 @@ def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, cau
     output = torch.empty_like(query)
     ops = SimpleNamespace(flash_attn_metadata=Mock(return_value=plan), flash_attn=Mock(return_value=(query, None)))
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
     metadata_args = dict(
         query_start_loc_gpu=torch.tensor([0, 6, 12, -1], dtype=torch.int32),
         block_tables=torch.tensor([[1, 0], [3, 2], [0, 0]], dtype=torch.int32),
@@ -345,8 +347,9 @@ def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, cau
     )
     for step, lengths in enumerate(([256, 254, 0], [253, 251, 0]), start=1):
         metadata = AscendFlashAttentionMetadata(seq_lens_gpu=torch.tensor(lengths, dtype=torch.int32), **metadata_args)
-        for _ in range(6):
-            impl.forward_impl(query, None, None, None, metadata, output)
+        with flash_attn_capture_context({"draft": metadata}):
+            for _ in range(6):
+                impl.forward_impl(query, None, None, None, metadata, output)
         assert ops.flash_attn_metadata.call_count == step
         assert ops.flash_attn.call_count == 6 * step
         meta_args = ops.flash_attn_metadata.call_args.kwargs
