@@ -64,11 +64,11 @@ SKIP_URLS = {
 class Settings:
     global_concurrency: int = 10
     initial_attempts: int = 3
-    recheck_attempts: int = 4
+    recheck_intervals: tuple[float, ...] = (2, 4, 8, 10)
     request_timeout: float = 15
     connect_timeout: float = 5
     total_timeout: float = 1200
-    retry_delay: float = 10
+    recheck_round_delay: float = 15
     excludes: tuple[str, ...] = ("docs/source/zh",)
 
 
@@ -325,14 +325,16 @@ class LinkChecker:
         try:
             async with asyncio.timeout(self.settings.total_timeout):
                 await self.check_batch([link for link in links if link.status == "pending"])
-                for round_no in range(self.settings.recheck_attempts):
+                for round_no, interval in enumerate(self.settings.recheck_intervals):
                     failed = interleave_links([link for link in links if link.retryable])
                     if not failed:
                         break
                     if round_no:
-                        await asyncio.sleep(self.settings.retry_delay)
+                        await asyncio.sleep(self.settings.recheck_round_delay)
                     # Give every remaining URL one GET before starting another round.
-                    for link in failed:
+                    for index, link in enumerate(failed):
+                        if index:
+                            await asyncio.sleep(interval)
                         await self.check_url(link, method="GET", phase="recheck")
         except TimeoutError:
             print("[timeout] Overall check deadline exceeded; keeping the last result for checked URLs.", flush=True)
