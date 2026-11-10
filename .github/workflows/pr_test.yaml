@@ -113,15 +113,17 @@ jobs:
           all_groups = json.loads(outputs["test_groups"])
           a2_template = next(group for group in all_groups if group["npu_type"] == "a2")
           a3_template = next(
-              group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2
+              group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 4
           )
           # TEMPORARY (fork smoke validation only, do not merge): 线下 karc 的
           # 910B 缓存里 OpenBMB/MiniCPM4-0.5B 只有 46 字节的 .mdl（无 config.json
           # 与权重），而容器又设置了 HF_HUB_OFFLINE=1，测试必然报
           # "Cannot find the requested files in the cached path"。这里换成
-          # 缓存完整（config.json + safetensors）的 Qwen3.5-0.8B 用例。
+          # a2 缓存里完整存在（Qwen3-8B / Qwen3-0.6B）且走 modelscope 的业务用例
+          # （one_card/test_qwen3_5_0_8b.py 会在用例内直接调用
+          # hf_snapshot_download，离线环境必然 LocalEntryNotFoundError）。
           a2_tests = [
-              "tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py",
+              "tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_draft_model.py",
               "tests/e2e/pull_request/two_card/test_prefix_caching.py",
           ]
           a3_tests = [
@@ -147,8 +149,9 @@ jobs:
               ),
               "a3": dict(
                   a3_template,
-                  runner="linux-aarch64-a3-800i-fed-16",
-                  num_npus=16,
+                  # 选测都是 2 卡用例，用业务同款 4 卡档位（a3-800i-fed-4）即可，
+                  # 线下 karc 的 a3-800i 已同时纳管 fed-2/4/8/16 四档。
+                  runner="linux-aarch64-a3-800i-fed-4",
                   partition_name="a3-smoke",
                   partition="1-1",
                   tests=" ".join(a3_tests),
