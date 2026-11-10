@@ -43,13 +43,29 @@ class _Glm5NextCacheLayout:
     full_group: KVCacheGroupSpec
     tail_group: KVCacheGroupSpec
     mamba_groups: tuple[KVCacheGroupSpec, ...]
+    aux_groups: tuple[KVCacheGroupSpec, ...]
     mla_names: tuple[str, ...]
     indexer_names: tuple[str, ...]
     tail_names: tuple[str, ...]
     main_page_size: int
+    aux_page_size: int
     small_page_size: int
     main_slot_count: int
+    aux_slot_count: int
     small_slot_count: int
+
+
+def _group_layer_specs(group: KVCacheGroupSpec) -> tuple[KVCacheSpec, ...]:
+    """Return the per-layer specs carried by one scheduler group."""
+    group_spec = group.kv_cache_spec
+    if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        return tuple(group_spec.kv_cache_specs.values())
+    return (group_spec,)
+
+
+def _is_glm5_next_group(group: KVCacheGroupSpec) -> bool:
+    specs = _group_layer_specs(group)
+    return bool(specs) and all(isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) for spec in specs)
 
 
 def _is_glm5_next_spec(spec: KVCacheSpec) -> bool:
@@ -150,8 +166,9 @@ def _create_glm5_next_attention_groups(
     tail_names = _sorted_layer_names([name for name, spec in kv_cache_spec.items() if _is_glm5_next_tail_spec(spec)])
 
     classified_names = {*main_names, *indexer_names, *tail_names}
-    if classified_names != set(kv_cache_spec):
-        raise ValueError("GLM-Next KV cache specs contain an unsupported cache role.")
+    # Remaining layers come from a speculative draft (or another auxiliary
+    # attention module) and keep their own scheduler groups.
+    aux_names = _sorted_layer_names([name for name in kv_cache_spec if name not in classified_names])
     if not (len(main_names) == len(indexer_names) == len(tail_names) > 0):
         raise ValueError(
             "Every GLM-Next MLA layer requires one main MLA, compressed indexer, and compressor-tail cache."
@@ -205,10 +222,26 @@ def _create_glm5_next_attention_groups(
     if tail_uniform_spec is None:
         raise ValueError("GLM-Next compressor-tail caches must have uniform fixed-block circular semantics.")
 
-    return [
+    groups = [
         KVCacheGroupSpec(full_names, full_uniform_spec),
         KVCacheGroupSpec(list(tail_names), tail_uniform_spec),
     ]
+    groups.extend(_create_aux_attention_groups({name: kv_cache_spec[name] for name in aux_names}))
+    return groups
+
+
+def _create_aux_attention_groups(
+    aux_specs: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    """Group non-GLM-Next attention caches (e.g. speculative-draft K/V)."""
+    names = _sorted_layer_names(list(aux_specs))
+    if not names:
+        return []
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(aux_specs)
+    if uniform_spec is not None:
+        return [KVCacheGroupSpec(list(names), uniform_spec)]
+    # Fall back to one group per layer so the layout can still place them.
+    return [KVCacheGroupSpec([name], aux_specs[name]) for name in names]
 
 
 def _get_glm5_next_cache_layout(
@@ -222,15 +255,14 @@ def _get_glm5_next_cache_layout(
     full_groups: list[KVCacheGroupSpec] = []
     tail_groups: list[KVCacheGroupSpec] = []
     mamba_groups: list[KVCacheGroupSpec] = []
+    aux_groups: list[KVCacheGroupSpec] = []
     for group in kv_cache_groups:
         group_spec = group.kv_cache_spec
         if isinstance(group_spec, MambaSpec):
             mamba_groups.append(group)
             continue
-        if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-            continue
 
-        values = list(group_spec.kv_cache_specs.values())
+        values = list(group_spec.kv_cache_specs.values()) if isinstance(group_spec, UniformTypeKVCacheSpecs) else []
         if (
             values
             and all(isinstance(spec, MLAAttentionSpec) and _is_glm5_next_spec(spec) for spec in values)
@@ -240,6 +272,12 @@ def _get_glm5_next_cache_layout(
             full_groups.append(group)
         elif values and all(_is_glm5_next_tail_spec(spec) for spec in values):
             tail_groups.append(group)
+        elif not _is_glm5_next_group(group):
+            # Speculative-draft (or other auxiliary) attention cache. These
+            # reuse the main physical slots through disjoint block IDs.
+            aux_groups.append(group)
+        else:
+            raise ValueError("GLM-Next KV cache groups contain an unsupported cache spec.")
 
     has_glm5_next_group = bool(full_groups or tail_groups)
     if not has_glm5_next_group:
@@ -248,7 +286,7 @@ def _get_glm5_next_cache_layout(
         raise ValueError(
             "GLM-Next requires exactly one combined main/indexer group and one compressor-tail KV cache group."
         )
-    if len(full_groups) + len(tail_groups) + len(mamba_groups) != len(kv_cache_groups):
+    if len(full_groups) + len(tail_groups) + len(mamba_groups) + len(aux_groups) != len(kv_cache_groups):
         raise ValueError("GLM-Next KV cache groups contain an unsupported cache spec.")
 
     full_group = full_groups[0]
@@ -284,22 +322,34 @@ def _get_glm5_next_cache_layout(
     if len(main_page_sizes) != 1 or len(small_page_sizes) != 1:
         raise ValueError("GLM-Next cache specs were not aligned to two physical page sizes.")
 
+    # Speculative-draft attention caches keep their own native page class and
+    # dedicated backing tensors: their K/V layout must not alias the target's
+    # MLA slots (different page geometry corrupts the draft attention).
+    aux_page_sizes = {spec.page_size_bytes for group in aux_groups for spec in _group_layer_specs(group)}
+    if len(aux_page_sizes) > 1:
+        raise ValueError("GLM-Next auxiliary/draft caches must share one page size.")
+    aux_page_size = next(iter(aux_page_sizes)) if aux_page_sizes else 0
+
     main_slot_count = max(
         (
             len(mla_names),
             *(len(group.layer_names) for group in mamba_groups),
         )
     )
+    aux_slot_count = max((len(group.layer_names) for group in aux_groups), default=0)
     return _Glm5NextCacheLayout(
         full_group=full_group,
         tail_group=tail_group,
         mamba_groups=tuple(mamba_groups),
+        aux_groups=tuple(aux_groups),
         mla_names=mla_names,
         indexer_names=indexer_names,
         tail_names=tail_names,
         main_page_size=next(iter(main_page_sizes)),
+        aux_page_size=aux_page_size,
         small_page_size=next(iter(small_page_sizes)),
         main_slot_count=main_slot_count,
+        aux_slot_count=aux_slot_count,
         small_slot_count=len(indexer_names),
     )
 
@@ -393,7 +443,11 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
-    return layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size
+    return (
+        layout.main_slot_count * layout.main_page_size
+        + layout.aux_slot_count * layout.aux_page_size
+        + layout.small_slot_count * layout.small_page_size
+    )
 
 
 def get_glm5_next_kv_cache_config(
@@ -436,6 +490,17 @@ def get_glm5_next_kv_cache_config(
                 layout.main_page_size * num_blocks,
                 shared_by,
                 layout.main_page_size,
+            )
+        )
+
+    # Dedicated speculative-draft slots, one backing tensor per draft slot.
+    for slot in range(layout.aux_slot_count):
+        draft_names = [group.layer_names[slot] for group in layout.aux_groups if slot < len(group.layer_names)]
+        tensors.append(
+            make_tensor(
+                layout.aux_page_size * num_blocks,
+                draft_names,
+                layout.aux_page_size,
             )
         )
 
