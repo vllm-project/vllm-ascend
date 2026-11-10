@@ -61,7 +61,7 @@ def test_zmq_ctx_allows_dealer():
     mock_socket = MagicMock()
     with (
         patch.object(transport, "make_zmq_socket", return_value=mock_socket) as mock_make_socket,
-        transport.zmq_ctx(zmq.DEALER, "tcp://localhost:1234") as sock,
+        transport.zmq_ctx(zmq.DEALER, "tcp://localhost:1234") as sock,  # type: ignore[attr-defined]  # pyzmq stubs omit DEALER
     ):
         assert sock is mock_socket
     mock_make_socket.assert_called_once()
@@ -69,7 +69,7 @@ def test_zmq_ctx_allows_dealer():
 
 def test_ensure_zmq_recv_retries_with_mock_socket():
     mock_socket = MagicMock()
-    mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")
+    mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore[attr-defined]  # pyzmq stubs omit ZMQError
     with (
         patch.object(transport, "logger") as mock_logger,
         patch.object(transport.time, "sleep") as mock_sleep,

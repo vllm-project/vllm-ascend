@@ -5,6 +5,7 @@ helpers under test are never used to build the expectations.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -234,7 +235,7 @@ def test_cp_group_meta_port_and_group_properties(
 
 
 def _port_mappings(**overrides):
-    params = {
+    params: dict[str, Any] = {
         "num_key_value_heads": 8,
         "use_mla": True,
         "use_sparse": False,
@@ -1045,7 +1046,7 @@ def test_hybrid_remote_rank_group_pulls_rejects_wrong_rank_count():
 
 
 def test_sfa_replicate_k_block_ids_disabled_returns_empty():
-    meta = SimpleNamespace(remote_dcp_size=2)
+    meta: Any = SimpleNamespace(remote_dcp_size=2)
     assert sfa_replicate_k_block_ids(
         meta=meta,
         use_sfa_sparse=False,
@@ -1056,7 +1057,7 @@ def test_sfa_replicate_k_block_ids_disabled_returns_empty():
 
 
 def test_sfa_replicate_k_block_ids_no_blocks_returns_empty():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=4,
         remote_block_ids=(),
@@ -1072,7 +1073,7 @@ def test_sfa_replicate_k_block_ids_no_blocks_returns_empty():
 
 
 def test_sfa_replicate_k_block_ids_equal_cp_hand_computed():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=32,
         remote_block_ids=[[10, 11]],
@@ -1091,7 +1092,7 @@ def test_sfa_replicate_k_block_ids_equal_cp_hand_computed():
 
 
 def test_sfa_replicate_k_block_ids_local_cp_one_expands_remote_cp_two():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=64,
         remote_block_ids=[[10, 11]],
@@ -1110,7 +1111,7 @@ def test_sfa_replicate_k_block_ids_local_cp_one_expands_remote_cp_two():
 
 
 def test_sfa_replicate_k_block_ids_prefix_free_slices_to_external_blocks():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=16,
         remote_block_ids=[[7, 8]],
@@ -1129,7 +1130,7 @@ def test_sfa_replicate_k_block_ids_prefix_free_slices_to_external_blocks():
 
 
 def test_sfa_replicate_k_block_ids_rejects_multiple_groups():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=16,
         remote_block_ids=[[1], [2]],
@@ -1149,7 +1150,7 @@ def test_sfa_replicate_k_block_ids_rejects_multiple_groups():
 
 
 def test_sfa_replicate_k_block_ids_rejects_indivisible_cp_sizes():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=3,
         num_external_tokens=16,
         remote_block_ids=[[1]],
@@ -1169,7 +1170,7 @@ def test_sfa_replicate_k_block_ids_rejects_indivisible_cp_sizes():
 
 
 def test_sfa_replicate_k_block_ids_rejects_missing_full_blocks_for_prefix():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=16,
         remote_block_ids=[[1]],
@@ -1190,7 +1191,7 @@ def test_sfa_replicate_k_block_ids_rejects_missing_full_blocks_for_prefix():
 
 
 def test_sfa_replicate_k_block_ids_rejects_external_blocks_not_covered():
-    meta = SimpleNamespace(
+    meta: Any = SimpleNamespace(
         remote_dcp_size=2,
         num_external_tokens=48,
         remote_block_ids=[[1]],

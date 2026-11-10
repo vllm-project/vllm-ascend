@@ -6,6 +6,7 @@ is required.
 """
 
 import threading
+from typing import Any
 from unittest.mock import MagicMock
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
@@ -30,7 +31,7 @@ def _make_scheduler(events):
 
 
 def test_scheduler_shutdown_order_and_idempotent():
-    events = []
+    events: list[Any] = []
     scheduler = _make_scheduler(events)
 
     scheduler.shutdown()
@@ -42,7 +43,7 @@ def test_scheduler_shutdown_order_and_idempotent():
 
 
 def test_scheduler_shutdown_tolerates_failures():
-    events = []
+    events: list[Any] = []
     scheduler = _make_scheduler(events)
     scheduler.executor.shutdown.side_effect = RuntimeError("executor failed")
     scheduler.metaserver_client.close.side_effect = RuntimeError("client failed")
@@ -85,7 +86,7 @@ def _make_worker(recv_thread, send_thread):
 
 
 def test_worker_shutdown_stops_layer_threads():
-    events = []
+    events: list[Any] = []
     recv_thread = _make_layer_thread_mock("recv", events)
     send_thread = _make_layer_thread_mock("send", events)
     worker = _make_worker(recv_thread, send_thread)
@@ -109,7 +110,7 @@ def test_worker_shutdown_without_threads_is_safe():
 
 
 def test_worker_shutdown_tolerates_failures():
-    events = []
+    events: list[Any] = []
     recv_thread = _make_layer_thread_mock("recv", events, join_error=RuntimeError("join failed"))
     send_thread = _make_layer_thread_mock("send", events, stop_error=RuntimeError("stop failed"))
     worker = _make_worker(recv_thread, send_thread)

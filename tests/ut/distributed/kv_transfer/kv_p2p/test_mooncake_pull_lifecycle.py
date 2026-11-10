@@ -7,6 +7,7 @@ network handshake is required. No ZMQ sockets are created here.
 
 import queue
 import threading
+from typing import Any
 from unittest.mock import MagicMock
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
@@ -49,7 +50,7 @@ def _make_thread_mock(name, events, stop_error=None, join_error=None):
 
 
 def test_worker_shutdown_stops_threads_and_resources():
-    events = []
+    events: list[Any] = []
     send_thread = _make_thread_mock("send", events)
     recv_thread = _make_thread_mock("recv", events)
     recv_thread.executor = MagicMock()
@@ -82,7 +83,7 @@ def test_worker_shutdown_without_registered_threads_is_safe():
 
 
 def test_worker_shutdown_tolerates_resource_failures():
-    events = []
+    events: list[Any] = []
     send_thread = _make_thread_mock("send", events, stop_error=RuntimeError("stop failed"))
     recv_thread = _make_thread_mock("recv", events, join_error=RuntimeError("join failed"))
     recv_thread.executor = MagicMock()
@@ -143,7 +144,7 @@ def test_recving_thread_run_consumes_requests_and_none_marker():
     thread._stop_event = threading.Event()
     thread.request_queue = queue.Queue()
     thread.ready_event = threading.Event()
-    received = []
+    received: list[Any] = []
     thread._submit_request = received.append
 
     thread.request_queue.put({"request_id": "r1"})
