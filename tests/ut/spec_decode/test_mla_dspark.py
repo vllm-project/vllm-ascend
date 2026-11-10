@@ -318,7 +318,7 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         assert self is manager
         assert received[1:] == forward_args[1:]
         forward = forward_args[0]
-        attn_metadata = {}
+        attn_metadata: dict[str, Any] = {}
         assert received[0](1, 5, attn_metadata, slots="slots") is forward.return_value
         forward.assert_called_once_with(1, 5, attn_metadata, slots="slots")
         # The Ascend wrapper forwards the trailing options as keywords.
