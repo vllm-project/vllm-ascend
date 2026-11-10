@@ -132,6 +132,69 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+@pytest.mark.parametrize(
+    ("num_computed_tokens", "num_new_local_computed_tokens", "num_external_computed_tokens"),
+    [(1152, 0, 0), (0, 1152, 0), (0, 0, 1152)],
+)
+def test_kv_both_prefill_prefix_still_splits_at_checkpoint(
+    uses_sparse_index_kpool,
+    num_computed_tokens,
+    num_new_local_computed_tokens,
+    num_external_computed_tokens,
+):
+    scheduler = _scheduler(
+        is_kv_consumer=True,
+        is_kv_producer=True,
+        uses_sparse_index_kpool=uses_sparse_index_kpool,
+    )
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    request = _request(num_computed_tokens=num_computed_tokens, num_prompt_tokens=2305, num_tokens=2305)
+
+    result = _mamba_block_aligned_split(
+        scheduler,
+        request,
+        num_new_tokens=1153,
+        num_new_local_computed_tokens=num_new_local_computed_tokens,
+        num_external_computed_tokens=num_external_computed_tokens,
+    )
+
+    assert result == 1152
+
+
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+def test_kv_both_chunked_prefill_materializes_last_checkpoint(uses_sparse_index_kpool):
+    scheduler = _scheduler(
+        is_kv_consumer=True,
+        is_kv_producer=True,
+        uses_sparse_index_kpool=uses_sparse_index_kpool,
+    )
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    request = _request(num_computed_tokens=0, num_prompt_tokens=2305, num_tokens=2305)
+    chunks = []
+    while request.num_computed_tokens < request.num_tokens:
+        remaining = request.num_tokens - request.num_computed_tokens
+        scheduled = _mamba_block_aligned_split(scheduler, request, min(2048, remaining))
+        assert scheduled > 0
+        chunks.append(scheduled)
+        request.num_computed_tokens += scheduled
+
+    assert chunks == [1152, 1152, 1]
+
+
+def test_pd_consumer_preserves_window_after_local_cache_hit():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True),
+        _request(num_computed_tokens=0),
+        num_new_tokens=8,
+        num_new_local_computed_tokens=379,
+    )
+
+    assert result == 8
+
+
 def test_producer_splits_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
