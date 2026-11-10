@@ -7,7 +7,13 @@ from collections.abc import Iterable, Iterator
 import torch
 from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
@@ -22,6 +28,7 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
 )
+from vllm.models.deepseek_v41.common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .model import AscendDeepseekV41LLMForCausalLM
@@ -44,6 +51,8 @@ def _vision_parameter_name(name: str) -> str | None:
 )
 class AscendDeepseekV41ForCausalLM(
     nn.Module,
+    DeepseekV4VLEncoderCudaGraphMixin,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     SupportsEagle3,
