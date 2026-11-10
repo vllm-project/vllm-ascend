@@ -42,6 +42,6 @@ The symbols used have the following meanings:
 - <sup>2</sup> MLAPO is only supported on the decode stage.
 - <sup>3</sup> Pipeline Parallel is supported on the prefill node; the decode node must use `PP1`.
 - <sup>4</sup> Eagle3 with Pipeline Parallel supports MiniMax-M3 sparse models only.
-- <sup>5</sup> KV Cache Pool with Decode Context Parallel is partially supported: standalone DCP is supported for non-layerwise complete-block transfers and for Mooncake block-key layerwise pooling (`prefill_context_parallel_size=1`), subject to the cache-group constraints in the [layerwise pooling guide](../feature_guide/mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
+- <sup>5</sup> KV Cache Pool with Decode Context Parallel is partially supported: standalone DCP is supported for non-layerwise complete-block transfers and for Mooncake block-key layerwise pooling (`prefill_context_parallel_size=1`), subject to the cache-group constraints in the [layerwise pooling guide](../feature_guide/mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp). Hybrid DCP support is experimental.
 
 See the detailed PP feature-stacking matrix in [Pipeline Parallelism](../feature_guide/pipeline_parallel.md).

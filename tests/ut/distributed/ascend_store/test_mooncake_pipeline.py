@@ -46,6 +46,8 @@ class TestMooncakePipeline(unittest.TestCase):
         pcp_rank=0,
         dcp_size=1,
         dcp_rank=0,
+        tp_size=2,
+        num_kv_heads=None,
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
@@ -81,9 +83,9 @@ class TestMooncakePipeline(unittest.TestCase):
                 use_layerwise=True,
                 pp_rank=stage,
                 pp_partition=(3, 4),
-                tp_size=2,
+                tp_size=tp_size,
                 tp_rank=tp_rank,
-                num_kv_heads=1 if mla else 2,
+                num_kv_heads=(1 if mla else 2) if num_kv_heads is None else num_kv_heads,
                 use_mla=mla,
                 cache_block_size=cache_block_size,
                 pcp_size=pcp_size,

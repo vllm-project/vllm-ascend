@@ -186,12 +186,15 @@ every PP stage and DCP rank has committed it.
 
 Sliding-window groups (including DeepSeek-V4 SWA and compressor caches),
 recurrent/align-state groups, circular-buffer groups and any other cache group
-with a full per-rank state do not support DCP. Upstream vLLM rejects DCP for
-sliding-window caches, and a full per-rank state would mean that a per-DCP-rank
-object is never completed, so a pooled block could never satisfy the hit check.
-Disable DCP for such models. The smallest cache-group block size must divide
-every other group block size, and `--prefix-match-unit` must not be set with
-DCP. PCP and DCP cannot be enabled together.
+whose block size is not scaled by DCP do not support DCP. The pool derives block
+hashes and transfer offsets from the DCP-scaled block size, so such groups would
+be addressed at the wrong granularity. Disable DCP for those models. The
+smallest cache-group block size must divide every other group block size, and
+`--prefix-match-unit` must be unset or set to the no-op value equal to the
+smallest prefix-cacheable block size. PCP and DCP cannot be enabled together.
+
+Hybrid DCP support is experimental: key construction and the startup rejection
+paths are unit-tested, but no hybrid end-to-end run has been validated yet.
 
 ## Configuration Parameters
 

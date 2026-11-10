@@ -183,11 +183,24 @@ only after every PP stage and DCP rank has committed it.
 
 PCP and DCP cannot be enabled together for layerwise pooling. DCP requires
 cache groups that vLLM shards across DCP, such as full-attention caches. Groups
-with a full per-rank state, including sliding-window, recurrent/align-state and
-circular-buffer caches (for example DeepSeek-V4 SWA/compressor caches), must
-keep DCP disabled. The smallest cache-group block size must divide every other
-group block size so that the pool hashes blocks at the same granularity as the
-scheduler, and `--prefix-match-unit` must not be set with DCP.
+whose block sizes are not scaled by DCP, including sliding-window,
+recurrent/align-state and circular-buffer caches (for example DeepSeek-V4
+SWA/compressor caches), must keep DCP disabled: the pool derives block hashes
+and transfer offsets from the DCP-scaled block size, so those groups would be
+addressed at the wrong granularity. The smallest cache-group block size must
+divide every other group block size, and `--prefix-match-unit` must be unset or
+set to the no-op value equal to the smallest prefix-cacheable block size.
+
+For GQA/MQA models, the number of TP ranks sharing one KV head
+(`tensor_parallel_size // num_key_value_heads`) must be at least the DCP size;
+otherwise some DCP shards have no saving rank and every block misses.
+
+In P/D disaggregation both sides must use the same DCP size. The layerwise
+worker can only verify this when the peer size is provided through
+`prefill_dcp_size` / `decode_dcp_size` in `kv_connector_extra_config`, so set
+the peer value on both sides. Without it a mismatch is not detected at startup
+and the consumer simply misses the pool (fail-closed; it never reads another
+shard's data).
 See the [hybrid attention guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
 
 ### Use Cached Prefixes
