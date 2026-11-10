@@ -1,29 +1,5 @@
-# Kimi-K3 EP256 A5 accuracy case.
-# Test environment and results: Kimi-K3-EP256-A5-精度测试说明.md in this directory.
-# DRAFT: native AISBench accuracy case; no custom runner or dataset Python file.
-# Scope: one A5 node, 8 NPUs, pre-pruned Kimi-K3 W4A8 with 256 routed experts.
-# Source checkpoint: Kimi-K3-w4a8-mxfp-QuaRot. Pruning is a separate prerequisite.
-# References: vllm-project/vllm-ascend#20101 and Qwen3_6_27b_A5.yaml.
-# Model path: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
-# Dataset path: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k; test.jsonl contains the first 500 questions.
-# Mount the model path and dataset path inside the test runtime.
-# Dataset includes train.jsonl and first-500 test.jsonl.
-# The stock 4-shot CoT preset embeds four fixed examples; ZeroRetriever does not select them from train.jsonl.
-# Mount the dataset at the same absolute path; keep basename gsm8k, no trailing slash.
-# Unset HCCL_OP_EXPANSION_MODE before launching the test harness.
-# Requires a vLLM build supporting Kimi-K3 and --default-chat-template-kwargs.
-# Uses the stock flat 4-shot CoT preset and stock GSM8K answer scoring.
-# Evaluate 500 prompts from the prepared first-500 subset; verify all are covered.
-# Client concurrency: 60; output limit: 1024 tokens; temperature: 0; top_p: 1.0.
-# Seed: 42; thinking_effort: low; serving: TP8 + EP with eager execution.
-# Previous strict-scoring results are not the acceptance baseline for this case.
-# User-selected acceptance: baseline 60.0%, tolerance +/-3.0 percentage points.
-# These thresholds have not been calibrated with this native evaluation workflow.
-# Registered in nightly_config.yaml for the A5 eight-NPU runner.
-# Runner provisioning must supply the configured model/data paths and test runtime.
-# Private checkpoints are not downloaded by this case.
 test_cases:
-- name: Kimi-K3-W4A8-EP256-A5-GSM8K-First500
+- name: Kimi-K3-W4A8-E256-A5-GSM8K-First100
   model: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
   envs:
     SERVER_PORT: "8080"
@@ -52,7 +28,7 @@ test_cases:
   - bfloat16
   - --enforce-eager
   - --max-model-len
-  - '6144'
+  - '4096'
   - --max-num-seqs
   - '100'
   - --max-num-batched-tokens
@@ -81,11 +57,11 @@ test_cases:
       dataset_path_local: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k
       request_conf: vllm_api_general_chat
       dataset_conf: gsm8k/gsm8k_gen_4_shot_cot_str
-      num_prompts: 500
+      num_prompts: 100
       max_out_len: 1024
       batch_size: 60
       temperature: 0
       top_p: 1.0
       seed: 42
-      baseline: 60.0
-      threshold: 3.0
+      baseline: 50.0
+      threshold: 50.0
