@@ -79,14 +79,13 @@ jobs:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3, 4, 5]
-            # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 0
+            HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
@@ -199,6 +198,8 @@ jobs:
               uv pip install datasets 
               uv pip install vllm_bnb_plugin
               uv pip install msguard openpyxl
+              uv pip install tilelang
+              uv pip install mhc
 
           - name: Install FLA NPU for A2 upstream tests
             run: |
@@ -227,7 +228,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [2, 4]
         container:
@@ -359,7 +359,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
