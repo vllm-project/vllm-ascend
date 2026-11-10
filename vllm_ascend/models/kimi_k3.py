@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -90,6 +91,7 @@ from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path, is_950
 from vllm_ascend.worker.v2.pp_transport import (
@@ -408,7 +410,16 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         disable_mlapo: bool = False,
     ) -> None:
         upstream_config = copy(config)
-        upstream_config.mla_use_output_gate = use_output_gate
+        split_output_gate = (
+            use_output_gate
+            and q_lora_rank is not None
+            and isinstance(quant_config, AscendModelSlimConfig)
+            and quant_config.uses_kimi_k3_mixed_mla_projection(prefix)
+        )
+        # vLLM 0.33 fuses the gate into Q/KV. ModelSlim checkpoints can keep
+        # this gate FLOAT while Q/KV are INT8; one packed quant method would
+        # silently cast the gate and leave its quantization scales unloaded.
+        upstream_config.mla_use_output_gate = use_output_gate and not split_output_gate
         super().__init__(
             config=upstream_config,
             hidden_size=hidden_size,
@@ -424,6 +435,17 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
             prefix=prefix,
         )
         attention_layer = self._attention_layer
+        if split_output_gate:
+            self.g_proj = ColumnParallelLinear(
+                hidden_size,
+                num_heads * v_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.g_proj",
+            )
+            self.use_output_gate = True
+            attention_layer.impl.g_proj = self.g_proj
+            attention_layer.impl.use_output_gate = True
         if disable_mlapo:
             attention_layer.impl.enable_mlapo = False
             mark_fused_preprocess_weights(attention_layer.impl)
@@ -890,6 +912,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     ) -> set[str]:
         """Reuse upstream loading with Ascend KDA gates and EPLB replicas."""
         params_dict = dict(self.named_parameters())
+        standalone_gate_params: set[str] = set()
         gate_mapping = (
             (".b_proj.weight", ".fused_bfg_proj.weight", 0),
             (".f_a_proj.weight", ".fused_bfg_proj.f_a_weight", None),
@@ -900,6 +923,16 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
+                # Upstream maps g_proj to fused Q/KV shard 2 whenever the
+                # model enables MLA gates. Consume standalone gates first,
+                # including quantization parameters, so mixed MLA layouts
+                # cannot be mistaken for the three-shard fused layout.
+                if ".self_attn.g_proj." in name and name in params_dict:
+                    param = params_dict[name]
+                    kwargs = dict(args[2]) if len(args) > 2 else {}
+                    param.weight_loader(param, loaded_weight, **kwargs)
+                    standalone_gate_params.add(name)
+                    continue
                 for source, target, shard_id in gate_mapping:
                     if source not in name:
                         continue
@@ -912,9 +945,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(
+        loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        return loaded_params | standalone_gate_params
 
     def forward(
         self,
