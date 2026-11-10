@@ -2181,7 +2181,7 @@ class MooncakeConnectorWorker:
             raise ValueError(
                 "MooncakeConnectorV1 requires exactly one KV transfer role "
                 f"(got {self.kv_role!r}): kv_role='kv_both' is not supported "
-                "by this connector (issue #20628). Use 'kv_producer' on "
+                "by this connector. Use 'kv_producer' on "
                 "prefill engines and 'kv_consumer' on decode engines."
             )
         if self.kv_role == "kv_consumer" and self.pcp_size > 1:

@@ -1303,8 +1303,8 @@ def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
     """MooncakeConnectorV1 does not support kv_role='kv_both'.
 
     Its worker branches on exact role strings, so kv_both silently starts only
-    the receive thread and prefill-to-decode KV transfer never happens
-    (issue #20628). Fail fast instead of degrading silently.
+    the receive thread and prefill-to-decode KV transfer never happens.
+    Fail fast instead of degrading silently.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:
@@ -1323,8 +1323,8 @@ def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
         if connector.get("kv_connector") == "MooncakeConnectorV1" and \
                 connector.get("kv_role") == "kv_both":
             raise ValueError(
-                "MooncakeConnectorV1 does not support kv_role='kv_both' "
-                "(issue #20628): only the receive thread would be started and "
+                "MooncakeConnectorV1 does not support kv_role='kv_both': "
+                "only the receive thread would be started and "
                 "prefill-to-decode KV transfer would silently never happen. "
                 "Use kv_role='kv_producer' on prefill engines and "
                 "kv_role='kv_consumer' on decode engines."
