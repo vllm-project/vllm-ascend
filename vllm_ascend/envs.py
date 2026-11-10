@@ -92,6 +92,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Cache the decode steady-state GDN attention metadata across steps. The
+    # builder runs once per GDN KV-cache group on every decode step; on hybrid
+    # (linear attention) models rebuilding the same object for several groups
+    # dominates the host-side step time when the batch composition is stable.
+    # Default: 1 (enabled). Set to 0 to rebuild on every step.
+    "VLLM_ASCEND_GDN_META_CACHE": lambda: os.getenv("VLLM_ASCEND_GDN_META_CACHE", "1").lower() in ("1", "true"),
+    # Emit GDN attention metadata cache hit/miss statistics (diagnostics only).
+    "VLLM_ASCEND_GDN_META_CACHE_STATS": lambda: (
+        os.getenv("VLLM_ASCEND_GDN_META_CACHE_STATS", "0").lower() in ("1", "true")
+    ),
 }
 
 # end-env-vars-definition

@@ -1934,3 +1934,104 @@ def test_adaptive_fused_descriptors_keep_prepared_conv_indices():
     assert spec.spec_causal_conv1d.cache_indices.data_ptr() == prepared_conv_indices.data_ptr()
     assert spec.spec_causal_conv1d.query_start_loc is metadata.spec_query_start_loc
     assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 1]
+
+
+def test_gdn_meta_key_tracks_request_identity_and_block_boundary() -> None:
+    """The GDN metadata cache must only hit for an unchanged decode batch."""
+    from types import SimpleNamespace
+
+    from vllm_ascend.ops import gdn_attn_builder as builder
+
+    def make_metadata(seq_lens: tuple[int, ...] = (10, 20)):
+        num_reqs = len(seq_lens)
+        return SimpleNamespace(
+            num_reqs=num_reqs,
+            num_actual_tokens=5 * num_reqs,
+            max_query_len=5,
+            seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 5, 10], dtype=torch.int32),
+            is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
+        )
+
+    builder.set_current_batch_req_ids(("req-a", "req-b"))
+    base = builder.gdn_meta_key(make_metadata(), 2, None, 128)
+    assert base is not None
+    assert builder.gdn_meta_key(make_metadata(), 2, None, 128) == base
+    assert builder.gdn_meta_key(make_metadata((11, 21)), 2, None, 128) == base
+    assert builder.gdn_meta_key(make_metadata((200, 210)), 2, None, 128) != base
+    builder.set_current_batch_req_ids(("req-a", "req-c"))
+    assert builder.gdn_meta_key(make_metadata(), 2, None, 128) != base
+
+
+def test_gdn_meta_key_requires_request_identity() -> None:
+    from types import SimpleNamespace
+
+    from vllm_ascend.ops import gdn_attn_builder as builder
+
+    metadata = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=5,
+        max_query_len=5,
+        seq_lens_cpu_upper_bound=torch.tensor([10], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 5], dtype=torch.int32),
+        is_prefilling=torch.zeros(1, dtype=torch.bool),
+    )
+    builder.set_current_batch_req_ids(None)
+    assert builder.gdn_meta_key(metadata, 1, None, 128) is None
+
+
+def test_gdn_meta_cache_hit_refreshes_nested_spec_accepted_tokens() -> None:
+    """A cache hit must refresh the nested spec-decode accepted-token view."""
+    from types import SimpleNamespace
+
+    from vllm_ascend.ops import gdn_attn_builder as builder_module
+
+    graph_requests = 4
+    spec_rows = 3
+    builder = object.__new__(builder_module.AscendGDNAttentionMetadataBuilder)
+    builder.num_accepted_tokens = torch.zeros(graph_requests, dtype=torch.int32)
+    builder.spec_sequence_indices = torch.arange(graph_requests, dtype=torch.int32)
+    builder._gdn_meta_cache = None
+
+    nested = SimpleNamespace(num_accepted_tokens=None)
+    metadata = SimpleNamespace(
+        num_accepted_tokens=None,
+        num_prefills=0,
+        num_spec_decodes=spec_rows,
+        num_decode_tokens=0,
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=nested),
+    )
+    key = ("reqs", graph_requests, 12, graph_requests, 5, (0, 3, 6, 9, 12), (), (), (), None, None)
+
+    metadata.num_accepted_tokens = builder_module._materialize_graph_request_tensor(
+        builder.num_accepted_tokens,
+        torch.tensor([1, 1, 1], dtype=torch.int32),
+        spec_rows,
+        graph_requests,
+        builder_module._GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT,
+    )
+    nested.num_accepted_tokens = metadata.num_accepted_tokens[:spec_rows]
+    builder._gdn_meta_cache_store(key, metadata, torch.zeros((graph_requests, 1), dtype=torch.int32))
+    assert nested.num_accepted_tokens.tolist() == [1, 1, 1]
+
+    hit = builder._gdn_meta_cache_lookup(key, torch.tensor([2, 3, 1, 1], dtype=torch.int32))
+    assert hit is metadata
+    assert metadata.num_accepted_tokens[:spec_rows].tolist() == [2, 3, 1]
+    assert nested.num_accepted_tokens.tolist() == [2, 3, 1]
+
+    # Cache-enabled result must match a build that used the same counts from
+    # the start (a "fresh build"): the nested view must carry the new counts
+    # and share the stable buffer with the refreshed top-level tensor.
+    fresh = builder_module._materialize_graph_request_tensor(
+        builder.num_accepted_tokens,
+        torch.tensor([2, 3, 1, 1], dtype=torch.int32),
+        spec_rows,
+        graph_requests,
+        builder_module._GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT,
+    )
+    assert nested.num_accepted_tokens.tolist() == fresh[:spec_rows].tolist()
+    assert nested.num_accepted_tokens.data_ptr() == metadata.num_accepted_tokens.data_ptr()
+
+    # Later in-place updates of the stable buffer must keep flowing through.
+    metadata.num_accepted_tokens[:spec_rows].copy_(torch.tensor([4, 5, 6], dtype=torch.int32))
+    assert nested.num_accepted_tokens.tolist() == [4, 5, 6]
