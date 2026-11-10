@@ -343,6 +343,29 @@ class TestAscendConfig(TestBase):
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
                     EplbConfig(stair_config={name: value})
 
+    def test_eplb_interval_must_be_positive(self):
+        # 0 silently disables EPLB (the wakeup flag is never reached), so it must
+        # be rejected rather than accepted as the old `< 0` check did.
+        for key in ("expert_heat_collection_interval", "algorithm_execution_interval"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, f"{key} must be greater than 0"):
+                    EplbConfig(**{key: 0})
+                with self.assertRaisesRegex(ValueError, f"{key} must be greater than 0"):
+                    EplbConfig(**{key: -1})
+
+    def test_eplb_interval_accepts_positive(self):
+        EplbConfig(expert_heat_collection_interval=1, algorithm_execution_interval=1)
+        EplbConfig(expert_heat_collection_interval=600, algorithm_execution_interval=50)
+
+    def test_eplb_num_redundant_experts_allows_zero(self):
+        # 0 is the default and means "no redundant experts"; it must stay valid.
+        self.assertEqual(EplbConfig(num_redundant_experts=0).num_redundant_experts, 0)
+        self.assertEqual(EplbConfig(num_redundant_experts=4).num_redundant_experts, 4)
+
+    def test_eplb_num_redundant_experts_rejects_negative(self):
+        with self.assertRaisesRegex(ValueError, "num_redundant_experts must be non-negative"):
+            EplbConfig(num_redundant_experts=-1)
+
     def test_eplb_config_rejects_algorithm_selection(self):
         for algorithm in ("default", "stair"):
             with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):

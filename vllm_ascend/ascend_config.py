@@ -318,12 +318,23 @@ class EplbConfig:
                 raise TypeError("The expert_map_record_path is not json.")
             dirname = os.path.dirname(self.expert_map_record_path)
             os.makedirs(dirname, exist_ok=True)
-        for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
+        for key in ["expert_heat_collection_interval", "algorithm_execution_interval"]:
             value = getattr(self, key)
             if not isinstance(value, int):
                 raise TypeError(f"{key} must be an integer")
-            if value < 0:
-                raise ValueError(f"{key} must greater than 0; got {value} instead")
+            if value <= 0:
+                raise ValueError(
+                    f"{key} must be greater than 0; got {value} instead. "
+                    f"Use a positive interval so EPLB heat collection and "
+                    f"algorithm execution actually trigger."
+                )
+        if not isinstance(self.num_redundant_experts, int):
+            raise TypeError("num_redundant_experts must be an integer")
+        if self.num_redundant_experts < 0:
+            raise ValueError(
+                f"num_redundant_experts must be non-negative; "
+                f"got {self.num_redundant_experts} instead"
+            )
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
         if self.dynamic_eplb:
@@ -913,7 +924,7 @@ class AscendConfig:
                 decode_tp_size = min(decode_tp_size, num_kv_head)
                 self.pd_head_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio == 0:
-                raise AssertionError("Only support P node tp size lagger then D node tp size")
+                raise AssertionError("Only support P node tp size larger than D node tp size")
 
         # enable_kv_nz preconditions
         if self.enable_kv_nz:
