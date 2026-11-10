@@ -192,6 +192,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         flash_attn=MagicMock(side_effect=lambda query, *_args, **_kwargs: (query, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.num_heads, impl.num_kv_heads, impl.sliding_window = 8, 1, None
     impl.use_bnsd_kv_cache, impl.sinks, impl.scale = True, None, 128**-0.5

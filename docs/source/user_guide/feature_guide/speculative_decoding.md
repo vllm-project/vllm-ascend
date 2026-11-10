@@ -373,7 +373,7 @@ A few important things to consider when using DFlash2 draft models:
    target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
    `enforce_eager` is unset or false.
 
-    On A5, GLM (`glm_moe_dsa`) targets paired with `DFlash2DraftModel` use
+    On 950DT Products, GLM (`glm_moe_dsa`) targets paired with `DFlash2DraftModel` use
     device-length CANN FlashAttn for both eager and full-graph drafts when the
     draft has supported FP16/BF16 queries and unquantized KV. Full graphs
     capture length preparation and FlashAttn metadata generation once per
