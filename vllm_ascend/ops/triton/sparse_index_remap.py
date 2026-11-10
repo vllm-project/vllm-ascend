@@ -17,12 +17,12 @@
 # Triton-Ascend implementation of AscendSFADCPImpl._remap_sparse_indices.
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.triton_utils import _resolve_triton_ascend_op, get_element
 
-_sort = _resolve_triton_ascend_op("sort")
+_sort = _resolve_triton_ascend_op("sort") if HAS_TRITON else None
 
 
 @triton.jit

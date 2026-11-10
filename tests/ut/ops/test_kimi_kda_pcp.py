@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.models import kimi_k3
+from vllm_ascend.models.kimi_k3 import kimi_k3
 from vllm_ascend.ops import kda_parallel, kda_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
