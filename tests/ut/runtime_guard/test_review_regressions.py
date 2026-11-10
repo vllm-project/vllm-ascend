@@ -2329,8 +2329,8 @@ def test_v29b_finished_index_survives_reuse_cycle():
 # ------------------------------------------------- V30 (purge on all detectors off)
 
 
-def test_v30_cascade_purges_store_when_all_detectors_disabled():
-    """Hot-reload True→False on needs_sample_phase_hooks clears Store; keeps deferred dumps."""
+def test_v30_cascade_soft_purges_outputs_keeps_prompts_when_all_detectors_disabled():
+    """All-detectors-off clears outputs/waves; keeps Store rows + prompts + deferred dumps."""
     from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
     from vllm_ascend.observability.runtime_guard.state import RequestGuardStore, WaveTracker
 
@@ -2338,8 +2338,10 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
     try:
         store = RequestGuardStore.get()
         store.get_or_create("r1")
+        store.set_prompt_token_ids("r1", [10, 20, 30])
         store.append_output_ids("r1", [1, 2])
         store.mark_finished(["r2"], wave=1)
+        store.set_prompt_token_ids("r2", [7, 8])
 
         wt = WaveTracker()
         wt.advance(has_scheduled_tokens=True)
@@ -2368,12 +2370,19 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
         ):
             RuntimeGuardBusMixin._apply_config_cascade(p, prev_needs_sample_hooks=True)
 
-        assert store.list_req_ids() == []
+        assert sorted(store.list_req_ids()) == ["r1", "r2"]
+        st1 = store.get_state("r1")
+        assert st1 is not None
+        assert st1.prompt_token_ids == [10, 20, 30]
+        assert st1.output_token_ids == []
+        st2 = store.get_state("r2")
+        assert st2 is not None
+        assert st2.prompt_token_ids == [7, 8]
         assert wt._sample_waves == {}
         assert p._kv_dump_jobs == []
         assert p._deferred_kv_dump_jobs == [{"req_id": "kept", "arm_id": "a0"}]
         p.quota.refund.assert_called_once_with(consume_quota=True)
-        p.detectors.clear_finished.assert_any_call("r1")
+        p.detectors.disable_all.assert_called_once()
     finally:
         RequestGuardStore.reset_for_tests()
 
@@ -2386,6 +2395,7 @@ def test_v30b_cascade_skips_purge_when_hooks_stay_on():
     try:
         store = RequestGuardStore.get()
         store.get_or_create("r1")
+        store.append_output_ids("r1", [9])
 
         p = _bare_processor()
         p.wave_tracker = MagicMock()
@@ -2405,8 +2415,10 @@ def test_v30b_cascade_skips_purge_when_hooks_stay_on():
         RuntimeGuardBusMixin._apply_config_cascade(p, prev_needs_sample_hooks=True)
 
         assert store.list_req_ids() == ["r1"]
+        assert store.get_state("r1").output_token_ids == [9]  # type: ignore[union-attr]
         assert p._kv_dump_jobs == [{"req_id": "r1"}]
         p.wave_tracker.discard_many.assert_not_called()
+        p.detectors.disable_all.assert_not_called()
     finally:
         RequestGuardStore.reset_for_tests()
 
