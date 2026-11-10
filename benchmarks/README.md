@@ -250,3 +250,55 @@ hashes, loaded module paths, and Git revisions when available. Use these fields
 to verify which implementations were compared. Compare results within the same
 environment and workload, including sparse cases that may have constant-factor
 tradeoffs; local metadata speedups do not establish end-to-end serving gains.
+
+## PCP hidden-state gather / local Q overlap experiment
+
+`benchmark_pcp_q_overlap.py` compares serial gather-then-Q with an auxiliary-stream
+local Q projection using the installed DSA implementation. It does not modify the
+attention forward path or serving defaults. Run inside the target prefill image
+on eight idle Ascend NPUs, with the DeepSeek V4 model configuration and ModelSlim
+quantization description mounted locally:
+
+```shell
+bash benchmarks/scripts/run_pcp_q_overlap.sh \
+  --model /data/models --output /bench/pcp-q-results
+```
+
+The experiment uses TP1 + PCP8, synthetic deterministic weights, BF16 Q down
+projection and W8A8 Q up projection. Both paths call the existing PCP
+all-gather/token-restoration and local Q prolog methods. Only Q computation moves
+to another stream; collectives remain on the caller stream. The caller waits
+before returning either output. Input buffers remain alive throughout capture,
+replay, and comparison.
+
+Defaults test 128, 512, and 1024 padded tokens per rank, plus uneven lengths,
+an empty rank, all-empty logical input, and noncontiguous input. Graph checks
+refresh input values, restoration indices, and RoPE buffers at fixed addresses
+and poison previous outputs before replay. Restoration is compared exactly with
+independently constructed CPU tensors; Q outputs record exact equality, maximum
+absolute error, and relative L2 error. Floating-point checks require both
+`allclose(atol=0.02, rtol=0.02)` and relative L2 below 0.005; integer outputs must
+match exactly. This is not a model accuracy evaluation.
+
+Each timing has seven alternating-order rounds of 50 executions, taking the
+slowest rank's wall time and reporting the round median. Gloo coordinates rounds
+outside timing. Rank 0 profiles 20 graph replays at 1024 tokens per rank after
+measurement; use `--profile-tokens 0` to skip profiling. Results are written per
+rank/case. Output directories must be unique per experiment to avoid mixing runs.
+This measures only gather/restoration plus the local Q prolog, not global cache
+updates, complete attention, torch.compile PIECEWISE integration, or serving
+latency/throughput.
+
+### Experimental serving integration
+
+The PCP Q projection experiment also has an opt-in serving path controlled by
+`--additional-config '{"pcp_q_projection_overlap": true}'` (default: `false`).
+It applies to DeepSeek V4 PCP batches with global prefill and a nonempty local
+query shard. Local Q projection runs on the existing DSA auxiliary stream while
+the caller stream prepares global PCP caches. The caller joins the Q stream
+before attention consumes the invocation-local Q intermediates. Decode and empty
+query shards keep the existing path and collective ordering.
+
+This switch is experimental. Isolated graph speedups do not establish an
+end-to-end serving benefit; validate complete PIECEWISE capture, real model
+answers and multi-turn serving throughput before enabling it in a deployment.
