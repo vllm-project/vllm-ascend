@@ -1204,10 +1204,14 @@
 #    How：
 #       Replace with a new bind_kv_cache.
 #       Skip the raise.
+#       Honour GLM tail binding hooks so connectors retain one tensor while
+#       the model keeps its engine list. Other materialized views stay as-is.
 #    Related PR (if no, explain why):
 #       It need discuss.
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
+#       The tail-specific dispatch can also go once Ascend uses the upstream
+#       per-layer bind_kv_cache hook without bypassing it for these views.
 #
 # ** 17. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

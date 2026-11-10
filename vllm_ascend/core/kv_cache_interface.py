@@ -19,7 +19,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -448,13 +447,14 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
+class AscendIndexerKPoolTailSpec(CircularBufferSpec):
     """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
     ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
     pool boundaries independently. The dedicated manager never slides or grows.
     """
 
+    sliding_window: int
     compress_ratio: int
     model_version: str = "glm5_next"
     cache_role: str = "indexer_tail"
@@ -462,6 +462,11 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
 
     @property
     def is_circular(self) -> bool:
+        return True
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        # GLM's compressor consumes the per-token ring slot mapping.
         return True
 
     @property

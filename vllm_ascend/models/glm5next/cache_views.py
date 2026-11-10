@@ -29,7 +29,7 @@ def view_kpool_tail_cache(
     kv_cache_spec: AscendIndexerKPoolTailSpec,
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     if not isinstance(raw_cache, torch.Tensor):
         raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
     typed_slot = raw_cache.view(kv_cache_spec.dtype)
@@ -41,13 +41,11 @@ def view_kpool_tail_cache(
             f"KPool tail cache for {layer_name} does not fit one small page: "
             f"tail={tail_block_el} elements, page={page_el} elements."
         )
-    return [
-        torch.as_strided(
-            typed_slot,
-            size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
-            stride=(page_el, 2 * kv_cache_spec.head_size, 1),
-        )
-    ]
+    return torch.as_strided(
+        typed_slot,
+        size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
+        stride=(page_el, 2 * kv_cache_spec.head_size, 1),
+    )
 
 
 def view_compressed_indexer_cache(
@@ -148,7 +146,7 @@ def view_glm5_next_cache(
     kernel_block_size: int,
     num_blocks: int,
     get_kv_cache_dims: Callable[[str, AttentionSpec], tuple[int, int]],
-) -> list[torch.Tensor] | tuple[torch.Tensor, ...] | None:
+) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None:
     """Build the pooled-cache views for one GLM-Next layer.
 
     Returns the view container the runner registers for the layer, or None
