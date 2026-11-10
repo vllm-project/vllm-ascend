@@ -351,7 +351,8 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ResolveQueryGroup(uint32_t group, u
 template <typename QLIV2T>
 __aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
 {
-    const uint32_t cores = GetBlockNum();
+    // The host supplies the AIC block dimension to both AIC and AIV instances.
+    const uint32_t cores = usedCoreNum;
     constexpr uint32_t MIN_SPLIT_KEY_LENGTH = 4096;
     constexpr uint32_t MIN_CORES_PER_GROUP = 2;
     constexpr uint32_t QUANT_MODE_FP8 = 1;
