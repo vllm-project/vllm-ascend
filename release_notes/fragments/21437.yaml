@@ -1,0 +1,4 @@
+pr: 21437
+entries:
+  - category: bugfix
+    text: Fixed stale prefix-cache block hashes after P-side prompt truncation in the hybrid and layerwise mooncake KV connectors, so prefix-cache lookups use the shortened prompt for compressed hybrid and attention+Mamba hybrid models.
