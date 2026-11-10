@@ -2031,7 +2031,7 @@ def test_forward_core_uses_checkpoint_recurrence_for_cold_and_cache_hit_prefills
     assert exporter.export.call_count == int(creates_checkpoint)
     if creates_checkpoint:
         raw = exporter.export.call_args.kwargs["raw_qkv"]
-        assert raw.data_ptr() != qkv.data_ptr()
+        assert raw.data_ptr() == qkv.data_ptr()
         torch.testing.assert_close(raw, qkv)
     scatter.assert_called_once()
     alternative.assert_not_called()

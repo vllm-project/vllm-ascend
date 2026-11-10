@@ -476,9 +476,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if getattr(self, "_ascend_internal_checkpoint_enabled", False):
             ensure_gdn_checkpoint_workspace(self, mixed_qkv)
-            if attn_metadata is None:
-                # Include the transient raw-convolution copy in peak profiling.
-                mixed_qkv.clone()
 
         if attn_metadata is None:
             # V1 profile run
@@ -525,8 +522,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         raw_prefill_qkv = None
         if checkpoint is not None:
             assert mixed_qkv_non_spec is not None
-            # Preserve the pre-convolution history used by the exporter.
-            raw_prefill_qkv = mixed_qkv_non_spec[attn_metadata.num_decode_tokens :].clone()
+            # Keep the pre-convolution input alive for export; FLA writes a separate output.
+            raw_prefill_qkv = mixed_qkv_non_spec[attn_metadata.num_decode_tokens :]
 
         # FLA's head-first convolution requires one common Q/K/V head width.
         # Other models retain the existing flat-output path.

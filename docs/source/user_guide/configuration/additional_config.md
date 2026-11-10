@@ -402,7 +402,8 @@ and performance qualification; skipping a model forward does not guarantee a
 net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
 `max_num_seqs * local_value_heads * 128 * 128 * 4` bytes. Eligible layers
 with the same VllmConfig, device and state shape share it; ubatching is excluded.
-A raw pre-convolution copy is also needed during checkpoint-bearing prefill.
+Checkpoint export retains a view of the pre-convolution input; the pinned FLA
+convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
