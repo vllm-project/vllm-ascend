@@ -134,6 +134,10 @@ estimated_times:
   tests/e2e/pull_request/two_card/epd/test_epd_encoder_only.py: 600
   # Initial estimate: four baseline + E+PD+proxy startup pairs.
   tests/e2e/pull_request/two_card/epd/test_epd_proxy_semantics.py: 1500
+  # Initial estimate: three fault cases with encoder kill/restart and SIGTERM teardown.
+  tests/e2e/pull_request/two_card/epd/test_epd_faults.py: 1200
+  # Initial estimate: one baseline plus one E+P+D Mooncake-layerwise cluster.
+  tests/e2e/pull_request/four_card/epd/test_epd_1e1p1d.py: 900
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 290
   tests/e2e/pull_request/two_card/test_hixl_eplb_registration.py: 300
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 650
