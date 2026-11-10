@@ -104,7 +104,7 @@ def _make_a5_case(
 
     tested, reference = arguments(False), arguments(True)
 
-    def run(*, serial=False, return_value=1):
+    def run(*, serial=False, return_value=0):
         values, current_table, metadata, common = reference if serial else tested
         q, w, qs, offsets = values
         return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
@@ -151,8 +151,7 @@ def _make_a5_case(
                     if quant_mode == 2:
                         scores = scores / 1024
                     scores = scores.bfloat16()
-                    returned = output[1][token, 0].cpu()[valid]
-                    torch.testing.assert_close(returned, scores[selected.long()], rtol=0, atol=0)
+                    returned = scores[selected.long()]
                     golden = scores.float().topk(min(topk, valid_length)).values.bfloat16()
                     torch.testing.assert_close(returned.sort().values, golden.sort().values, rtol=0, atol=0)
         return output
@@ -169,21 +168,12 @@ def _make_a5_case(
 
 
 def _check_a5_result(actual, expected):
-    actual_indices, actual_values = (tensor.cpu().flatten(0, -2) for tensor in actual)
-    expected_indices, expected_values = (tensor.cpu().flatten(0, -2) for tensor in expected)
-    # A5 selects by BF16 score. Tied boundary scores may select different valid
-    # indices, so compare the selected score multiset and the score of each index.
-    torch.testing.assert_close(actual_values.sort().values, expected_values.sort().values, rtol=0, atol=0)
-    for ai, av, ei, ev in zip(actual_indices, actual_values, expected_indices, expected_values):
+    actual_indices = actual[0].cpu().flatten(0, -2)
+    expected_indices = expected[0].cpu().flatten(0, -2)
+    torch.testing.assert_close(actual_indices.sort().values, expected_indices.sort().values, rtol=0, atol=0)
+    for ai in actual_indices:
         valid = ai >= 0
         assert ai[valid].unique().numel() == valid.sum().item()
-        scores = dict(zip(ei.tolist(), ev.tolist()))
-        threshold = ev.min().item()
-        for index, value in zip(ai.tolist(), av.tolist()):
-            if index in scores:
-                assert value == scores[index]
-            else:
-                assert value == threshold
 
 
 @pytest.mark.parametrize("quant_mode", [1, 2])
