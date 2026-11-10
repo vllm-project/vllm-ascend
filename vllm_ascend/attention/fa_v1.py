@@ -57,6 +57,13 @@ def flash_attn_capture_context(attn_metadata):
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     metadata_cls = AscendFlashAttentionMetadata
+    supports_draft_decode_metadata_update = True
+
+    def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
+        # Inputs alias persistent device buffers. Length preparation and tiling
+        # are captured in forward_impl, so no additional refresh is needed here.
+        # Opt in so upstream propose() skips the eager build before FULL replay.
+        pass
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         """Build from exact device lengths; CPU mirrors may be stale after rejection."""
