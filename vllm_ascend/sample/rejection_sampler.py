@@ -17,7 +17,6 @@ from vllm.v1.sample.rejection_sampler import (
     RejectionSampler,
     generate_uniform_probs,
 )
-from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -62,7 +61,9 @@ class AscendRejectionSampler(RejectionSampler):
                 "penalty implementation in rejection sampler. Rejection sampling performance "
                 "may be degraded on NPU. "
             )
-            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+            return RejectionSampler.apply_penalties(
+                logits, sampling_metadata, metadata, repeat_indices, output_token_ids
+            )
 
         assert sampling_metadata.prompt_token_ids is not None
         prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]

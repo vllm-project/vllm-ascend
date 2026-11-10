@@ -1,9 +1,11 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
@@ -266,6 +268,25 @@ class TestAscendRejectionSampler(TestBase):
             result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
             expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
             assert torch.equal(result, expected)
+
+    def test_apply_penalties_without_triton_uses_per_token_mapping(self):
+        logits = torch.zeros((1, 4), dtype=torch.float32)
+        sampling_metadata = SimpleNamespace(
+            no_penalties=False,
+            prompt_token_ids=torch.tensor([[0, 1], [2, 3]]),
+            presence_penalties=torch.zeros(2),
+            frequency_penalties=torch.zeros(2),
+            repetition_penalties=torch.ones(2),
+        )
+        # The first request has one draft token; the second has none.
+        metadata = SimpleNamespace(num_draft_tokens=[1, 0])
+        repeat_indices = torch.tensor([0])
+
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+            result = AscendRejectionSampler.apply_penalties(logits, sampling_metadata, metadata, repeat_indices, [[]])
+
+        assert result.shape == logits.shape
+        assert torch.equal(result, logits)
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
