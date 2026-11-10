@@ -182,7 +182,11 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
     original_weights = [layer.weight.float().clone() for layer in projections]
     original_scales = [layer.weight_scale.clone() for layer in projections]
     config = SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        model_config=SimpleNamespace(
+            runner_type="draft" if is_draft else "generate",
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="deepseek_v3"),
+        ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
@@ -1117,41 +1121,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
         self.assertEqual(metadata.decode.block_table.shape[0], 8)
-
-    def test_reorder_batch(self):
-        ascend_config = MagicMock()
-
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
-        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
-        mock_device = "cpu"
-
-        mock_vllm_config.speculative_config = None
-
-        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
-            builder.decode_threshold = 1
-
-        input_batch = MagicMock()
-        input_batch.req_ids = [0, 1, 2, 3]
-
-        scheduler_output = MagicMock()
-        scheduler_output.num_scheduled_tokens = {0: 1, 1: 3, 2: 1, 3: 2}
-        scheduler_output.scheduled_spec_decode_tokens = {0: [], 1: [1], 2: [], 3: []}
-
-        input_batch.swap_states = MagicMock()
-
-        modified = builder.reorder_batch(input_batch, scheduler_output)
-
-        self.assertTrue(modified)
-        input_batch.swap_states.assert_called_once_with(1, 2)
 
     def test_determine_chunked_prefill_workspace_size(self):
         mock_vllm_config = MagicMock()

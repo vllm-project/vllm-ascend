@@ -1157,7 +1157,8 @@ def test_worker_keeps_mamba_views_separate_from_attention(reverse, attention_sca
 def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_start):
     if glm_tail:
         spec = AscendIndexerKPoolTailSpec(
-            block_size=16,
+            block_size=4,
+            ring_capacity=16,
             num_kv_heads=1,
             head_size=8,
             dtype=torch.float32,

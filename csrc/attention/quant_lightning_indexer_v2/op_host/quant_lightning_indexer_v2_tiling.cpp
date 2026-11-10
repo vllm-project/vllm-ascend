@@ -241,6 +241,9 @@ void QLIV2InfoParser::GetOptionalInputParaInfo()
     opParamInfo_.metadata.desc = context_->GetOptionalInputDesc(METADATA_INDEX);
     opParamInfo_.candidateTopkIndex.tensor = context_->GetOptionalInputTensor(CANDIDATE_TOPK_INDEX_INPUT_INDEX);
     opParamInfo_.candidateTopkIndex.desc = context_->GetOptionalInputDesc(CANDIDATE_TOPK_INDEX_INPUT_INDEX);
+    // DCP (Decode Context Parallel, 解码上下文并行): 每请求全局 exclusive 上界 C
+    opParamInfo_.causalSeqLensKvGlobal.tensor = context_->GetOptionalInputTensor(CAUSAL_SEQLENS_KV_GLOBAL_INDEX);
+    opParamInfo_.causalSeqLensKvGlobal.desc = context_->GetOptionalInputDesc(CAUSAL_SEQLENS_KV_GLOBAL_INDEX);
 }
 
 void QLIV2InfoParser::GetInputParaInfo()
@@ -291,6 +294,11 @@ ge::graphStatus QLIV2InfoParser::GetAttrParaInfo()
     // 两路都空 = 紧凑存储
     opParamInfo_.keyStride0Attr = attrs->GetAttrPointer<int32_t>(ATTR_KEY_STRIDE0_INDEX);
     opParamInfo_.keyDequantScaleStride0Attr = attrs->GetAttrPointer<int32_t>(ATTR_KEY_DEQUANT_SCALE_STRIDE0_INDEX);
+    // ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+    opParamInfo_.enableDcp = attrs->GetAttrPointer<bool>(ATTR_ENABLE_DCP_INDEX);
+    opParamInfo_.cpWorld = attrs->GetAttrPointer<int32_t>(ATTR_CP_WORLD_INDEX);
+    opParamInfo_.cpRank = attrs->GetAttrPointer<int32_t>(ATTR_CP_RANK_INDEX);
+    opParamInfo_.cpInterleaveSize = attrs->GetAttrPointer<int32_t>(ATTR_CP_KV_CACHE_INTERLEAVE_SIZE_INDEX);
     auto keyStrides = context_->GetDynamicInputStride(KEY_INDEX, 0);
     auto keyDequantScaleStrides = context_->GetDynamicInputStride(KEY_DEQUANT_SCALE_INDEX, 0);
     if (keyStrides != nullptr && keyStrides->GetDimNum() > 0) {
@@ -409,13 +417,29 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
     }
 
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(*opParamInfo_.returnValue, OP_LOGE(opName_, "input attr returnValue only supported False."),
+        // return_value: 1 = DCP/普通 score 输出 (BF16, 无效槽 -inf); 2 = A3 本地候选模式 (FP32)。
+        OP_CHECK_IF((*opParamInfo_.returnValue != 0) && (*opParamInfo_.returnValue != 1) &&
+                        (*opParamInfo_.returnValue != 2),
+                    OP_LOGE(opName_, "Arch22 return_value supports 0, 1 (DCP score) or 2 (local candidates)."),
                     return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510) {
-        OP_CHECK_IF((*opParamInfo_.returnValue != 0) && (*opParamInfo_.returnValue != 1),
+        OP_CHECK_IF((*opParamInfo_.returnValue < 0) || (*opParamInfo_.returnValue > 2),
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "return_value",
                                                           std::to_string(*opParamInfo_.returnValue).c_str(),
-                                                          "Return_value only supports 0 or 1"),
+                                                          "Return_value only supports 0, 1 or private local-candidate mode 2"),
+                    return ge::GRAPH_FAILED);
+        if (*opParamInfo_.returnValue == 2) {
+            OP_CHECK_IF(*opParamInfo_.sparseMode != 0 || *opParamInfo_.cmpRatio != 1 ||
+                            *opParamInfo_.quantMode != QUANT_MODE_FP8 ||
+                            opParamInfo_.outputIdxOffset.tensor == nullptr,
+                        OP_LOGE(opName_, "Local candidates require FP8, mask_mode=0, cmp_ratio=1 and local visible lengths."),
+                        return ge::GRAPH_FAILED);
+        }
+    }
+    if (npuArch_ == NpuArch::DAV_2201 && *opParamInfo_.returnValue == 2) {
+        OP_CHECK_IF(*opParamInfo_.sparseMode != 0 || *opParamInfo_.cmpRatio != 1 ||
+                        opParamInfo_.outputIdxOffset.tensor == nullptr,
+                    OP_LOGE(opName_, "Local candidates require mask_mode=0, cmp_ratio=1 and local visible lengths."),
                     return ge::GRAPH_FAILED);
     }
     OP_CHECK_IF(
@@ -427,6 +451,10 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
     // -------------------candidate (two-level topk) 校验-------------------
     uint32_t candidateMode = (opParamInfo_.candidateMode != nullptr) ?
                                  static_cast<uint32_t>(*opParamInfo_.candidateMode) : CANDIDATE_MODE_OFF;
+    OP_CHECK_IF(npuArch_ == NpuArch::DAV_2201 && *opParamInfo_.returnValue == 2 &&
+                    candidateMode != CANDIDATE_MODE_OFF,
+                OP_LOGE(opName_, "Local candidates require candidate_mode=3 (off)."),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF((candidateMode != CANDIDATE_MODE_SOURCE) && (candidateMode != CANDIDATE_MODE_CONSUMER) &&
                     (candidateMode != CANDIDATE_MODE_OFF),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "candidate_mode",
@@ -477,6 +505,68 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
                                                                  "candidate_mode=2(consumer)"),
                         return ge::GRAPH_FAILED);
         }
+    }
+
+    // -------------------DCP (Decode Context Parallel, 解码上下文并行) 校验-------------------
+    // 关闭时做反向严格校验, 保证既有调用零变化; 开启时开放 arch22/arch35 的 TND + PA 路径。
+    bool enableDcp = (opParamInfo_.enableDcp != nullptr) ? *opParamInfo_.enableDcp : false;
+    int32_t cpWorld = (opParamInfo_.cpWorld != nullptr) ? *opParamInfo_.cpWorld : 1;
+    int32_t cpRank = (opParamInfo_.cpRank != nullptr) ? *opParamInfo_.cpRank : 0;
+    int32_t cpInterleaveSize =
+        (opParamInfo_.cpInterleaveSize != nullptr) ? *opParamInfo_.cpInterleaveSize : 1;
+    if (enableDcp) {
+        OP_CHECK_IF((npuArch_ != NpuArch::DAV_2201) && (npuArch_ != NpuArch::DAV_3510),
+                    OP_LOGE(opName_,
+                            "enable_dcp is only supported on ascend910b/ascend910_93/ascend950, but got "
+                            "NpuArch[%d].",
+                            static_cast<int32_t>(npuArch_)),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(std::string(opParamInfo_.layOutQuery) != "TND",
+                    OP_LOGE(opName_, "enable_dcp requires layout_q=TND, but got %s.",
+                            std::string(opParamInfo_.layOutQuery).c_str()),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(std::string(opParamInfo_.layOutKey) != "PA_BBND",
+                    OP_LOGE(opName_, "enable_dcp requires layout_k=PA_BBND, but got %s.",
+                            std::string(opParamInfo_.layOutKey).c_str()),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(*opParamInfo_.cmpRatio != 1,
+                    OP_LOGE(opName_, "enable_dcp requires cmp_ratio=1, but got %ld.", *opParamInfo_.cmpRatio),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            candidateMode != CANDIDATE_MODE_OFF,
+            OP_LOGE(opName_, "enable_dcp is mutually exclusive with candidate_mode, but got %u.", candidateMode),
+            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(*opParamInfo_.returnValue != 1,
+                    OP_LOGE(opName_, "enable_dcp requires return_value=1 (cross-rank global TopK needs scores)."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.causalSeqLensKvGlobal.tensor == nullptr,
+                    OP_LOGE(opName_, "causal_seqlens_kv_global is required when enable_dcp=true."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(cpWorld < 1, OP_LOGE(opName_, "cp_world must >= 1, but got %d.", cpWorld), return ge::GRAPH_FAILED);
+        OP_CHECK_IF((cpRank < 0) || (cpRank >= cpWorld),
+                    OP_LOGE(opName_, "cp_rank must be in [0, cp_world), but got rank=%d world=%d.", cpRank, cpWorld),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(cpInterleaveSize < 1,
+                    OP_LOGE(opName_, "cp_kv_cache_interleave_size must >= 1, but got %d.", cpInterleaveSize),
+                    return ge::GRAPH_FAILED);
+        // kernel 用 32 位 period = cp_world * cp_kv_cache_interleave_size 做可见长度计算;
+        // 限制在 int32 内, 保证 rem / rankOffset 的 int32 转换不溢出
+        OP_CHECK_IF(static_cast<int64_t>(cpWorld) * static_cast<int64_t>(cpInterleaveSize) > 0x7FFFFFFFLL,
+                    OP_LOGE(opName_, "cp_world * cp_kv_cache_interleave_size must fit in int32, but got %d * %d.",
+                            cpWorld, cpInterleaveSize),
+                    return ge::GRAPH_FAILED);
+        // DCP 下索引保持本地逻辑序号, 由框架统一转全局; 再叠加 output_idx_offset 会重复偏移。
+        OP_CHECK_IF(opParamInfo_.outputIdxOffset.tensor != nullptr,
+                    OP_LOGE(opName_, "output_idx_offset must be null when enable_dcp=true."), return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF((cpWorld != 1) || (cpRank != 0) || (cpInterleaveSize != 1),
+                    OP_LOGE(opName_, "cp_world/cp_rank/cp_kv_cache_interleave_size must be 1/0/1 when "
+                                     "enable_dcp=false, but got %d/%d/%d.",
+                            cpWorld, cpRank, cpInterleaveSize),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.causalSeqLensKvGlobal.tensor != nullptr,
+                    OP_LOGE(opName_, "causal_seqlens_kv_global must be null when enable_dcp=false."),
+                    return ge::GRAPH_FAILED);
     }
 
     return ge::GRAPH_SUCCESS;
@@ -579,10 +669,15 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
                                                       QLIV2DataTypeToSerialString(outputType_).c_str(),
                                                       "The dtype of sparse_indices must be int32"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(valuesOutType_ != ge::DT_BF16,
-                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "sparse_values",
-                                                      QLIV2DataTypeToSerialString(valuesOutType_).c_str(),
-                                                      "The dtype of sparse_values must be bfloat16"),
+    // arch22: return_value!=0 (DCP score 或 A3 本地候选) 统一直接输出 FP32;
+    // 950/arch35 保持 BF16; return_value=0 的空占位输出仍为 BF16。
+    const ge::DataType expectedValuesType =
+        (npuArch_ == NpuArch::DAV_2201 && *opParamInfo_.returnValue != 0) ? ge::DT_FLOAT : ge::DT_BF16;
+    OP_CHECK_IF(valuesOutType_ != expectedValuesType,
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                    opName_, "sparse_values", QLIV2DataTypeToSerialString(valuesOutType_).c_str(),
+                    expectedValuesType == ge::DT_FLOAT ? "The dtype of sparse_values must be float32 on arch22"
+                                                       : "The dtype of sparse_values must be bfloat16"),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -799,6 +894,16 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                         return ge::GRAPH_FAILED);
         }
     }
+    if (npuArch_ == NpuArch::DAV_2201 && *opParamInfo_.returnValue == 2) {
+        if (opParamInfo_.outputIdxOffset.tensor != nullptr) {
+            OP_CHECK_IF(opParamInfo_.outputIdxOffset.desc->GetDataType() != ge::DT_INT32,
+                        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                            opName_, "output_idx_offset",
+                            QLIV2DataTypeToSerialString(opParamInfo_.outputIdxOffset.desc->GetDataType()).c_str(),
+                            "The dtype of output_idx_offset only supports int32"),
+                        return ge::GRAPH_FAILED);
+        }
+    }
     // metadata 必传
     OP_CHECK_IF(opParamInfo_.metadata.tensor == nullptr,
                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "metadata", "Metadata must not be null"),
@@ -849,12 +954,34 @@ ge::graphStatus QLIV2InfoParser::CheckShapeDim()
                                          std::to_string(expectShapeDim - 1).c_str()),
             return ge::GRAPH_FAILED);
     }
-    if (npuArch_ == NpuArch::DAV_3510 && *opParamInfo_.returnValue == 1) {
+    if (npuArch_ == NpuArch::DAV_3510 && *opParamInfo_.returnValue != 0) {
         uint32_t sparseValuesShapeDim = opParamInfo_.sparseValues.shape->GetStorageShape().GetDimNum();
         OP_CHECK_IF(sparseValuesShapeDim != expectShapeDim,
                     OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "sparse_values", std::to_string(sparseValuesShapeDim).c_str(),
                                                  std::to_string(expectShapeDim).c_str()),
                     return ge::GRAPH_FAILED);
+    }
+    if (npuArch_ == NpuArch::DAV_2201 && *opParamInfo_.returnValue == 2) {
+        // The Arch22 private mode writes one score per index and reads one visible
+        // length per output row. Validate every dimension before GM access.
+        uint32_t sparseValuesShapeDim = opParamInfo_.sparseValues.shape->GetStorageShape().GetDimNum();
+        OP_CHECK_IF(sparseValuesShapeDim != expectShapeDim,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "sparse_values", std::to_string(sparseValuesShapeDim).c_str(),
+                                                 std::to_string(expectShapeDim).c_str()),
+                    return ge::GRAPH_FAILED);
+        const auto &indexShape = opParamInfo_.attenOut.shape->GetStorageShape();
+        const auto &valueShape = opParamInfo_.sparseValues.shape->GetStorageShape();
+        const auto &visibleShape = opParamInfo_.outputIdxOffset.tensor->GetStorageShape();
+        for (uint32_t dim = 0; dim < expectShapeDim; dim++) {
+            OP_CHECK_IF(valueShape.GetDim(dim) != indexShape.GetDim(dim),
+                        OP_LOGE(opName_, "Local candidate score shape must match sparse_indices."),
+                        return ge::GRAPH_FAILED);
+            if (dim + 1 < expectShapeDim) {
+                OP_CHECK_IF(visibleShape.GetDim(dim) != indexShape.GetDim(dim),
+                            OP_LOGE(opName_, "Local visible lengths must match sparse_indices row dimensions."),
+                            return ge::GRAPH_FAILED);
+            }
+        }
     }
     OP_CHECK_IF(!(weightsShapeDim == expectShapeDim - 1),
                 OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "w", std::to_string(weightsShapeDim).c_str(),
@@ -1144,7 +1271,7 @@ ge::graphStatus QLIV2InfoParser::ValidateInputShapesMatch()
                             " respectively, they must be same"),
                     return ge::GRAPH_FAILED);
         if (npuArch_ == NpuArch::DAV_3510) {
-            if (*opParamInfo_.returnValue == 1 && opParamInfo_.sparseValues.shape != nullptr) {
+            if (*opParamInfo_.returnValue != 0 && opParamInfo_.sparseValues.shape != nullptr) {
                 OP_CHECK_IF((opParamInfo_.sparseValues.shape->GetStorageShape().GetDim(0) != qTsize),
                             OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
                                 opName_, "q and sparse_values",
@@ -1285,9 +1412,26 @@ ge::graphStatus QLIV2InfoParser::ValidateInputShapesMatch()
                 "The shape size of cmp_residual_k must be equal to batch_size (" + std::to_string(bSize_) + ")"),
             return ge::GRAPH_FAILED);
     }
+    // -----------------------check causal_seqlens_kv_global (DCP)-------------------
+    if (opParamInfo_.causalSeqLensKvGlobal.tensor != nullptr) {
+        OP_CHECK_IF(
+            (opParamInfo_.causalSeqLensKvGlobal.desc == nullptr) ||
+                (opParamInfo_.causalSeqLensKvGlobal.desc->GetDataType() != ge::DT_INT32),
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "causal_seqlens_kv_global", "not int32",
+                                                  "The dtype of causal_seqlens_kv_global only supports int32"),
+            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            (opParamInfo_.causalSeqLensKvGlobal.tensor->GetShapeSize() != bSize_),
+            OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                opName_, "causal_seqlens_kv_global",
+                std::to_string(opParamInfo_.causalSeqLensKvGlobal.tensor->GetShapeSize()),
+                "The shape size of causal_seqlens_kv_global must be equal to batch_size (" +
+                    std::to_string(bSize_) + ")"),
+            return ge::GRAPH_FAILED);
+    }
     // -----------------------check sparse_values------------------
     if (npuArch_ == NpuArch::DAV_3510) {
-        if (*opParamInfo_.returnValue == 1) {
+        if (*opParamInfo_.returnValue != 0) {
             OP_CHECK_IF((opParamInfo_.sparseValues.shape->GetStorageShape().GetDim(outN2Dim) != n2Size_),
                         OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
                             opName_, "k and sparse_values",
@@ -1603,6 +1747,14 @@ void QLIV2InfoParser::GenerateInfo(QLIV2TilingInfo &QLIV2Info)
     QLIV2Info.candidateBlockSize = (opParamInfo_.candidateBlockSize != nullptr) ?
                                        static_cast<uint32_t>(*opParamInfo_.candidateBlockSize) :
                                        CANDIDATE_BLOCK_SIZE_DEFAULT;
+    // ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+    QLIV2Info.dcpEnable = (opParamInfo_.enableDcp != nullptr) ? *opParamInfo_.enableDcp : false;
+    QLIV2Info.cpWorld = (opParamInfo_.cpWorld != nullptr) ?
+                            static_cast<uint32_t>(*opParamInfo_.cpWorld) : 1U;
+    QLIV2Info.cpRank = (opParamInfo_.cpRank != nullptr) ?
+                           static_cast<uint32_t>(*opParamInfo_.cpRank) : 0U;
+    QLIV2Info.cpInterleaveSize = (opParamInfo_.cpInterleaveSize != nullptr) ?
+                                     static_cast<uint32_t>(*opParamInfo_.cpInterleaveSize) : 1U;
 
     QLIV2Info.keyStridesVec = keyStridesVec_;
     QLIV2Info.keyDequantScaleStridesVec = keyDequantScaleStridesVec_;
@@ -1762,6 +1914,11 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo *tilingI
     tilingData_.set_candidateMode(tilingInfo->candidateMode);
     tilingData_.set_candidateTopkBlocks(tilingInfo->candidateTopkBlocks);
     tilingData_.set_candidateBlockSize(tilingInfo->candidateBlockSize);
+    // ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+    tilingData_.set_dcpEnable(static_cast<uint32_t>(tilingInfo->dcpEnable));
+    tilingData_.set_cpWorld(tilingInfo->cpWorld);
+    tilingData_.set_cpRank(tilingInfo->cpRank);
+    tilingData_.set_cpInterleaveSize(tilingInfo->cpInterleaveSize);
     tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
 

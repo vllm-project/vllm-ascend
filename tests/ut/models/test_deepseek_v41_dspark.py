@@ -16,7 +16,6 @@ pytest.importorskip(
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
@@ -28,7 +27,6 @@ from vllm_ascend.models.deepseek_v41.dspark import (
     DSparkDeepseekV41ForCausalLM,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, DeepseekV41Model
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
@@ -59,17 +57,6 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
     monkeypatch.setattr(KVCacheSpecRegistry, "register", record)
     register_ascend_kv_cache_specs()
     assert registrations[type(draft)] is SlidingWindowManager
-
-
-def test_composite_config_selects_checkpoint_aux_layers():
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    text = SimpleNamespace(dspark_target_layer_ids=[37, 38, 39])
-    runner.speculative_config = SimpleNamespace(
-        use_dspark=lambda: True,
-        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(text_config=text)),
-    )
-    with patch.object(GPUModelRunner, "_get_eagle3_aux_layers_from_config", return_value=None):
-        assert runner._get_eagle3_aux_layers_from_config() == (38, 39, 40)
 
 
 def test_target_exports_residual_entering_selected_layers(monkeypatch):

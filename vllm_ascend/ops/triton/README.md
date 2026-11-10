@@ -1,19 +1,17 @@
 # Triton operator layout
 
-V1-only runner operators and their documentation live in `v1/` and `v1/docs/`.
-V2 operators use the main package, with their documentation in `docs/`.
-Operators shared by both runners, model-layer kernels, and general utilities
-keep their functional directories. A model supported by V2 alone does not make
-all of its mathematical kernels V2 runner operators.
+Runner operators live in the main package, with their documentation in `docs/`.
+Model-layer kernels and general utilities keep their functional directories. A
+model supported by a runner does not make all of its mathematical kernels runner
+operators.
 
-This inventory covers all 107 non-`__init__.py` Python modules under this package.
+This inventory covers every non-`__init__.py` Python module under this package.
 It includes launch wrappers and utilities as well as JIT definitions. Operators
 defined under `worker/v2/`, `models/`, or other packages are outside this layout
 change.
 
 Warmup uses the shared upstream JIT registry. The generic
-`ascend_jit_warmup.py` stays at the package root; V1 sampling wrappers register
-only through `register_v1_sampling_warmup` during V1 runner construction.
+`ascend_jit_warmup.py` stays at the package root.
 
 ## Adding or moving an operator
 
@@ -21,33 +19,19 @@ Paths below are relative to `vllm_ascend/ops/triton/`.
 
 | Operator ownership | Implementation | Operator document |
 | --- | --- | --- |
-| V1-only runner operator | `v1/<functional-dir>/<operator>.py` | `v1/docs/<operator>.md` |
 | V2 runner operator | `<functional-dir>/<operator>.py` | `docs/<operator>.md` |
 | Shared runner, model-layer, or utility operator | Existing functional directory | `docs/<operator>.md` |
 
 The functional subdirectory is optional for operators placed directly at the
-package root. New V2 code and documents use the main package rather than a
-`v2/` subdirectory. Choose ownership from the production callers; support for a
-V2 model alone does not make an operator V2-only.
+package root. New code and documents use the main package rather than a `v2/`
+subdirectory. Choose ownership from the production callers.
 
 Use the [operator documentation template](docs/triton_description_specification.md)
 for the operator document. When adding or moving a module, update this inventory,
 production imports, warmup registrations, tests and mock targets, and documentation
 examples and links together.
 
-## V1-only operators
-
-| Module | Runner ownership | Documentation |
-| --- | --- | --- |
-| [v1/bincount.py](v1/bincount.py) | Used by the V1 penalty implementation. | [apply_penalties.md](v1/docs/apply_penalties.md) |
-| [v1/compute_slot_mapping.py](v1/compute_slot_mapping.py) | Used by `worker/block_table.py`, the V1 block-table path. | [compute_slot_mapping.md](v1/docs/compute_slot_mapping.md) |
-| [v1/mamba/postprocess.py](v1/mamba/postprocess.py) | Patched into the legacy Mamba postprocess called by the V1 runner; V2 uses precopy. | [postprocess_mamba.md](v1/docs/postprocess_mamba.md) |
-| [v1/penalty.py](v1/penalty.py) | Used by `sample/penalties.py` and V1 kernel warmup. | [apply_penalties.md](v1/docs/apply_penalties.md) |
-| [v1/reject_sample.py](v1/reject_sample.py) | Used by `sample/rejection_sampler.py` and V1 kernel warmup. | [reject_sample.md](v1/docs/reject_sample.md) |
-| [v1/spec_decode/ngram.py](v1/spec_decode/ngram.py) | Called by `worker/v1/model_runner.py`. | [spec_decode.md](v1/docs/spec_decode.md) |
-| [v1/spec_decode/utils.py](v1/spec_decode/utils.py) | Used by the proposers under `worker/v1/spec_decode/`. | [spec_decode.md](v1/docs/spec_decode.md) |
-
-## V2 runner operators
+## Runner operators
 
 | Module | Runner ownership | Documentation |
 | --- | --- | --- |
@@ -55,6 +39,7 @@ examples and links together.
 | [apply_grammar_bitmask.py](apply_grammar_bitmask.py) | `patch/worker/patch_triton.py` | [apply_grammar_bitmask.md](docs/apply_grammar_bitmask.md) |
 | [block_table/compute_slot_mappings.py](block_table/compute_slot_mappings.py) | `worker/v2/block_table.py` | [compute_slot_mappings.md](docs/compute_slot_mappings.md) |
 | [mamba/precopy.py](mamba/precopy.py) | `patch/worker/patch_triton.py` | [mamba_precopy.md](docs/mamba_precopy.md) |
+| [mamba/postprocess.py](mamba/postprocess.py) | `patch/worker/patch_mamba_utils.py` | [mamba_postprocess.md](docs/mamba_postprocess.md) |
 | [metrics/num_nans.py](metrics/num_nans.py) | `patch/worker/patch_triton.py` | [num_nans.md](docs/num_nans.md) |
 | [sample/categorical_sample.py](sample/categorical_sample.py) | `patch/worker/patch_triton.py` | [categorical_sample.md](docs/categorical_sample.md) |
 | [sample/fill_logprob_token_idx.py](sample/fill_logprob_token_idx.py) | `patch/worker/patch_triton.py` | [fill_logprob_token_ids.md](docs/fill_logprob_token_ids.md) |
@@ -67,25 +52,27 @@ examples and links together.
 
 ## Shared runner support
 
-These kernels support both runner versions and keep their current paths.
+These kernels are used on runner-neutral paths and keep their current paths.
 
 | Module | Shared use |
 | --- | --- |
-| [batch_memcpy.py](batch_memcpy.py) | Mamba copying and the KDA fallback copy plan installed by both runners. |
-| [decoder_replay.py](decoder_replay.py) | Replay gathering in V1 and V2 model state. |
-| [kda_state_copy_kernel.py](kda_state_copy_kernel.py) | KDA state-copy plans initialized by both runners. |
+| [batch_memcpy.py](batch_memcpy.py) | Mamba copying and the KDA fallback copy plan installed by the model runner. |
+| [decoder_replay.py](decoder_replay.py) | Replay gathering in the V2 model state. |
+| [kda_state_copy_kernel.py](kda_state_copy_kernel.py) | KDA state-copy plans initialized by the model runner. |
 
 ## Runner-independent modules
 
 These model, attention, quantization, distributed, and utility modules retain
 their existing paths. Their use depends on model, hardware, and feature
-configuration rather than the V1/V2 runner input or sampling interface.
+configuration rather than the runner input or sampling interface.
 
 | Module | Functional area |
 | --- | --- |
 | [activation/swiglu_quant.py](activation/swiglu_quant.py) | Activation/quantization |
 | [activation/swiglustep.py](activation/swiglustep.py) | Activation/quantization |
 | [ascend_jit_warmup.py](ascend_jit_warmup.py) | Shared JIT warmup infrastructure |
+| [dcp/dcp_jit.py](dcp/dcp_jit.py) | DCP compile-only JIT owners |
+| [dcp/dcp_warmup.py](dcp/dcp_warmup.py) | SFA/MLA DCP owner registration and key coverage |
 | [attention_update.py](attention_update.py) | Model/attention primitive or shared utility |
 | [batch_invariant/matmul.py](batch_invariant/matmul.py) | Batch-invariant operations |
 | [batch_invariant/mean.py](batch_invariant/mean.py) | Batch-invariant operations |
@@ -98,7 +85,7 @@ configuration rather than the V1/V2 runner input or sampling interface.
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
-| [dcp/sfa_dcp_query.py](dcp/sfa_dcp_query.py) | Model/attention primitive or shared utility |
+| [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
 | [dspark_swa_indices.py](dspark_swa_indices.py) | Model/attention primitive or shared utility |
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |

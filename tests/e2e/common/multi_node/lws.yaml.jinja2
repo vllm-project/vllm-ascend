@@ -14,7 +14,7 @@ spec:
           role: leader
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
           ascend-ci.com/npu-resource-domain: "huawei.com"
-          ascend-ci.com/npu-resource-model: "ascend-1980"
+          ascend-ci.com/npu-resource-model: "{{ 'npu' if (soc_version | default('a3') | lower) == 'a5' else 'ascend-1980' }}"
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -154,7 +154,7 @@ spec:
         labels:
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
           ascend-ci.com/npu-resource-domain: "huawei.com"
-          ascend-ci.com/npu-resource-model: "ascend-1980"
+          ascend-ci.com/npu-resource-model: "{{ 'npu' if (soc_version | default('a3') | lower) == 'a5' else 'ascend-1980' }}"
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"

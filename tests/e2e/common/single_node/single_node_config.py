@@ -9,7 +9,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import KVPoolConfig, parse_kv_pool_config
 
-CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/e2e/cases/models/configs/Kimi"
+CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/SIT/cases/models/configs/Kimi"
 
 logger = logging.getLogger(__name__)
 

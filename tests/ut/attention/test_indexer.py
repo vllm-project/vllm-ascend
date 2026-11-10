@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -25,9 +26,10 @@ def _make_builder(
     pcp_size: int = 1,
     dcp_size: int = 1,
     num_speculative_tokens: int | None = None,
+    physical_block_size: int = 128,
 ) -> AscendSFAIndexerMetadataBuilder:
     kv_cache_spec = FullAttentionSpec(
-        block_size=128,
+        block_size=physical_block_size,
         num_kv_heads=1,
         head_size=160,
         dtype=torch.uint8,
@@ -37,7 +39,8 @@ def _make_builder(
     vllm_config.model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(index_topk=2048),
         hf_config=SimpleNamespace(),
-        max_model_len=1024,
+        # DCP fixtures below provide two 128-token columns per rank.
+        max_model_len=512,
     )
     vllm_config.parallel_config = SimpleNamespace(
         prefill_context_parallel_size=pcp_size,
@@ -129,6 +132,8 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     assert torch.equal(metadata.block_table, common.block_table_tensor[:2])
     assert metadata.block_size == _KERNEL_BLOCK_SIZE
     assert torch.equal(metadata.actual_seq_lengths_query, common.query_start_loc[1:3])
+    assert torch.equal(metadata.query_start_loc, common.query_start_loc[:3])
+    assert metadata.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
     assert torch.equal(metadata.actual_seq_lengths_key, common.seq_lens[:2])
     assert metadata.num_decode_tokens == 0
 
@@ -146,6 +151,57 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
 def _make_decode_pcp_context() -> SimpleNamespace:
     # Only the global-prefill flag is read when no request is prefilling.
     return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("rows", [8, 9, 10])
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
+    # Four PCP prefills become eight segments, plus one possible graph dummy.
+    builder = _make_builder(pcp_size=2)
+    builder.use_sharded_dcp = True
+    builder.use_native_dcp_qli = native
+    builder.vllm_config.parallel_config.cp_kv_cache_interleave_size = 2
+    mock_cos_sin.return_value = (torch.zeros(rows * 2, 1, 1, 8), torch.zeros(rows * 2, 1, 1, 8))
+    common = _make_common_metadata()
+    common.num_reqs = rows
+    common.num_actual_tokens = common.num_input_tokens = rows * 2
+    common.slot_mapping = torch.arange(rows * 2)
+    common.positions = torch.arange(rows * 2)
+    common.query_start_loc = torch.arange(0, rows * 2 + 1, 2, dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens = torch.arange(2, rows * 2 + 1, 2, dtype=torch.int32)
+    common.block_table_tensor = torch.zeros(rows, 2, dtype=torch.int32)
+    common.is_prefilling = torch.ones(rows, dtype=torch.bool)
+    expected_lengths = torch.tensor(
+        [sum(p // 2 % 2 == 1 for p in range(int(n))) for n in common.seq_lens], dtype=torch.int32
+    )
+
+    def lengths(seq_lens, out, *args):
+        assert out.numel() == seq_lens.numel(), "request output is smaller than the kernel write range"
+        out.copy_(expected_lengths)
+
+    ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    ops.build_local_key_lengths = Mock(side_effect=lengths)
+    ops.build_local_lengths = Mock(side_effect=lambda seq, query, out, visible, *args: lengths(seq, out))
+    with (
+        patch.dict("sys.modules", {ops.__name__: ops}),
+        patch(
+            "vllm_ascend.attention.indexer.get_dcp_group", return_value=SimpleNamespace(world_size=2, rank_in_group=1)
+        ),
+        patch(
+            "vllm_ascend.attention.indexer.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda capability: False),
+        ),
+    ):
+        if rows > 9:
+            with pytest.raises(ValueError, match="request.*capacity"):
+                builder.build(0, common)
+            ops.build_local_key_lengths.assert_not_called()
+            ops.build_local_lengths.assert_not_called()
+        else:
+            metadata = builder.build(0, common)
+            torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
@@ -254,6 +310,10 @@ def test_sfa_indexer_metadata_builder_owns_replicated_dcp_addresses(
         metadata.slot_mapping,
         torch.tensor([0, 1, 512, 513], dtype=torch.int32),
     )
+    torch.testing.assert_close(
+        metadata.cache_scatter_indices,
+        torch.tensor([[0, 0], [0, 1], [4, 0], [4, 1]], dtype=torch.int32),
+    )
     # The builder derives the replicated view without changing the local view
     # consumed by the SFA cache backend.
     torch.testing.assert_close(common.slot_mapping, torch.tensor([1, 2, 3, 4, 5]))
@@ -276,6 +336,7 @@ def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
     step_one = builder.build_for_drafting(common, 1)
     step_one_slots = step_one.slot_mapping.clone()
     step_one_blocks = step_one.block_table.clone()
+    step_one_indices = step_one.cache_scatter_indices.clone()
     # The proposer owns one persistent slot tensor per logical draft step;
     # its address is also the key for every derived metadata buffer.
     common.slot_mapping = common.slot_mapping.clone()
@@ -284,8 +345,10 @@ def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
 
     assert step_one.slot_mapping.data_ptr() != step_two.slot_mapping.data_ptr()
     assert step_one.block_table.data_ptr() != step_two.block_table.data_ptr()
+    assert step_one.cache_scatter_indices.data_ptr() != step_two.cache_scatter_indices.data_ptr()
     torch.testing.assert_close(step_one.slot_mapping, step_one_slots)
     torch.testing.assert_close(step_one.block_table, step_one_blocks)
+    torch.testing.assert_close(step_one.cache_scatter_indices, step_one_indices)
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
@@ -303,7 +366,7 @@ def test_sfa_indexer_graph_capture_owns_stable_per_step_buffers(mock_cos_sin, mo
     second = builder.build_for_graph_capture(common)
     second_runtime = builder.build_for_drafting(common, draft_index=1)
 
-    for field in ("slot_mapping", "cos", "sin"):
+    for field in ("slot_mapping", "cos", "sin", "cache_scatter_indices"):
         assert getattr(first, field).data_ptr() != getattr(second, field).data_ptr()
         assert getattr(first, field).data_ptr() == getattr(first_runtime, field).data_ptr()
         assert getattr(second, field).data_ptr() == getattr(second_runtime, field).data_ptr()
@@ -472,3 +535,68 @@ def test_pcp_builder_resolves_replicated_draft_layout_with_padding(
     metadata = _make_builder(pcp_size=2).build(0, common)
     assert not metadata.uses_pcp_sharded_layout
     assert metadata.slot_mapping.numel() == padded_tokens
+    assert metadata.cache_scatter_indices.shape == (actual_tokens, 2)
+
+
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "pcp_size,dcp_size,sharded,local_tokens,actual_tokens,decode_tokens,slots,write_slots",
+    [
+        (1, 1, False, 4, 3, 0, [127, 128, -1, 511], [127, 128, -1, 511]),
+        (1, 1, False, 0, 0, 0, [], []),
+        (2, 1, True, 2, 2, 2, [127, -1, 256, 511], [127, -1, 256, 511]),
+        (2, 2, True, 2, 2, 0, [127, -1, 256, 511], [127, -1, 256, 511]),
+        (2, 2, True, 3, 3, 1, [127, 128, -1, 127, 256, 511], [127, 128, -1, 256, 511]),
+        (2, 2, True, 2, 2, 2, [127, 128, 127, 128], [127, 128]),
+        (2, 1, False, 4, 1, 0, [127, -1, -1, -1], [127]),
+        (2, 1, False, 4, 0, 0, [-1, -1, -1, -1], []),
+    ],
+)
+def test_cache_scatter_indices_follow_final_pcp_write_order(
+    slot_dtype, pcp_size, dcp_size, sharded, local_tokens, actual_tokens, decode_tokens, slots, write_slots
+):
+    # Physical manager pages can span several kernel pages. Scatter addresses
+    # still use the cache view's 128-token axis, including negative pad slots.
+    builder = _make_builder(pcp_size=pcp_size, dcp_size=dcp_size, physical_block_size=256)
+    indices = builder._build_cache_scatter_indices(
+        torch.tensor(slots, dtype=slot_dtype), local_tokens, actual_tokens, decode_tokens, sharded, "step"
+    )
+    expected_slots = torch.tensor(write_slots, dtype=slot_dtype)
+    expected = torch.stack((expected_slots // 128, expected_slots % 128), dim=-1)
+    torch.testing.assert_close(indices, expected)
+
+
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_cache_scatter_indices_refresh_capture_storage_and_isolate_draft_steps(mock_cos_sin, mock_config):
+    mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
+    builder = _make_builder(num_speculative_tokens=3, physical_block_size=256)
+    common = _make_common_metadata()
+    captured = builder.build_for_graph_capture(common)
+    common.slot_mapping[:4] = torch.tensor([127, 128, -1, 511])
+    runtime = builder.build(0, common)
+    assert captured.cache_scatter_indices.data_ptr() == runtime.cache_scatter_indices.data_ptr()
+    expected_capture = torch.tensor([[0, 127], [1, 0], [-1, 127], [3, 127]])
+    torch.testing.assert_close(captured.cache_scatter_indices, expected_capture)
+
+    # A different persistent draft-step slot tensor must not overwrite the
+    # addresses retained by the target or another captured draft graph.
+    common.slot_mapping = torch.tensor([256, 257, 258, -1, -1])
+    draft = builder.build_for_drafting(common, 1)
+    assert draft.cache_scatter_indices.data_ptr() != captured.cache_scatter_indices.data_ptr()
+    torch.testing.assert_close(captured.cache_scatter_indices, expected_capture)
+    common.slot_mapping[:4] = torch.tensor([383, 384, -1, -1])
+    rebuilt = builder.build_for_drafting(common, 1)
+    assert rebuilt.cache_scatter_indices.data_ptr() == draft.cache_scatter_indices.data_ptr()
+    torch.testing.assert_close(draft.cache_scatter_indices, torch.tensor([[2, 127], [3, 0], [-1, 127], [-1, 127]]))
+
+
+def test_replicated_pcp_draft_invalidates_captured_padding_when_live_prefix_shrinks():
+    builder = _make_builder(pcp_size=2)
+    slots = torch.tensor([127, 128, 255, 256], dtype=torch.int64)
+    captured = builder._build_cache_scatter_indices(slots, 4, 4, 0, False, "draft")
+    slots.copy_(torch.tensor([511, -1, -1, -1]))
+    runtime = builder._build_cache_scatter_indices(slots, 4, 1, 0, False, "draft")
+    assert captured.data_ptr() == runtime.data_ptr()
+    assert runtime.shape == (1, 2)
+    torch.testing.assert_close(captured, torch.tensor([[3, 127], [-1, 127], [-1, 127], [-1, 127]]))
