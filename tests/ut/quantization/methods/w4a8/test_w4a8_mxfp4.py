@@ -225,9 +225,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         layer.w13_weight_scale = nn.Parameter(
             torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
         )
-        layer.w2_weight_scale = nn.Parameter(
-            torch.randint(1, 255, (8, 128, 9), dtype=torch.uint8), requires_grad=False
-        )
+        layer.w2_weight_scale = nn.Parameter(torch.randint(1, 255, (8, 128, 9), dtype=torch.uint8), requires_grad=False)
         original_scale = layer.w2_weight_scale.data.clone()
 
         self.scheme.process_weights_after_loading(layer)
