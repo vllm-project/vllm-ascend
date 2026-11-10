@@ -382,3 +382,11 @@ a3-560t:
           os: linux-aarch64-a5-8
           config_file_path: DeepSeek_V4_Flash_A5_weekly.yaml
           config_base_path: tests/e2e/cases/models/configs/DeepSeek
+
+a5:
+  multi_node:
+    test_config:
+      - name: GLM-5.3-Flash-W8A8-MXFP8-A5-PD-Combined
+        size: 2
+        config_file_path: GLM-5.3-Flash-W8A8-MXFP8-A5-PD-Combined.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
