@@ -32,10 +32,10 @@ sequence-parallel 行为；不修改 DeepSeek Engram backend。
 
 ## 配置
 
-默认关闭。私有表在既有服务参数上增加：
+包含 PLE 层的 Qwen4Exp 默认开启 GVA offload。未配置共享端点时使用私有表。可通过以下参数显式关闭 offload：
 
 ```bash
---engram-config '{"cpu_offload":true,"dp_shared_memory":false}'
+--engram-config '{"cpu_offload":false}'
 ```
 
 共享表使用 `dp_shared_memory=true`，并通过 additional-config 指定每个

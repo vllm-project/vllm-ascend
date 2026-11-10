@@ -120,11 +120,6 @@ def test_qwen_offload_uses_upstream_defaults(enabled, has_layers, dp_size, draft
     if not has_layers and enabled is not None:
         with pytest.raises(ValueError, match="non-empty"):
             VllmConfig._resolve_and_verify_engram_config(config)
-    elif enabled is None:
-        # Opt-in: Qwen4Exp never auto-creates EngramConfig when the user
-        # did not pass --engram-config, regardless of layers or draft mode.
-        VllmConfig._resolve_and_verify_engram_config(config)
-        assert config.engram_config is None
     else:
         VllmConfig._resolve_and_verify_engram_config(config)
         if has_layers:

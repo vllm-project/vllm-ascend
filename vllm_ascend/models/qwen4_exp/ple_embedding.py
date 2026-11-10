@@ -43,8 +43,10 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEEmbedding):
         self._host_table: PLEGvaTable | None = None
         self._shared_group = None
         self._prefix = kwargs.get("prefix", "")
-        config = get_current_vllm_config().engram_config
-        if config is not None and config.dp_shared_memory:
+        vllm_config = get_current_vllm_config()
+        config = vllm_config.engram_config
+        gva_config = (vllm_config.additional_config or {}).get("ple_gva", {})
+        if config is not None and config.dp_shared_memory and gva_config.get("store_urls"):
             group = get_engram_dp_group()
             if group is not None and group.world_size > 1:
                 if not all(in_the_same_node_as(group.cpu_group)):

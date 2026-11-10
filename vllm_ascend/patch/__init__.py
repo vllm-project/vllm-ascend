@@ -143,9 +143,6 @@
 #       Use the native EngramConfig and resolver. Ascend's normal platform hook
 #       supplies missing defaults and checks its model, topology and loader limits.
 #       Skip this patch when vLLM does not provide EngramConfig.
-#       For Qwen PLE, suppress automatic EngramConfig creation so GVA offload
-#       remains opt-in. The model-local pinned-host binding selects the Ascend
-#       adapter until upstream exposes a hardware-plugin storage factory.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/59171
 #       Tracks https://github.com/vllm-project/vllm/issues/59169.
@@ -154,9 +151,6 @@
 #       Once the pinned vLLM includes that change, remove this patch and
 #       platform-side default creation. Keep Ascend's
 #       model, topology and loader restrictions in the normal platform hook.
-#       Remove the Qwen resolver override once upstream supports a platform
-#       default for PLE offload, and the model-local binding once its factory
-#       can select the Ascend GVA adapter directly.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

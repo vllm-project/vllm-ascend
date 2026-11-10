@@ -1,4 +1,4 @@
 pr: 21448
 entries:
   - category: feature
-    text: Added opt-in MemFabric GVA offload for Qwen BF16 PLE tables on Model Runner V2, with private tables and same-node shared backing.
+    text: Enabled MemFabric GVA offload by default for Qwen BF16 PLE tables on Model Runner V2, with private tables and same-node shared backing.
