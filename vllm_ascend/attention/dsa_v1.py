@@ -2398,6 +2398,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         """Prepare cache updates and report whether local writes can be skipped."""
         return False
 
+    def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
+        """Prepare caches and optionally return invocation-local Q intermediates."""
+        return self._prepare_caches_before_attention(layer_name, hidden_states, kv_cache, attn_metadata), None
+
     def _get_o_proj_input_shape(
         self,
         attn_metadata: DSAMetadataDict | None,
@@ -2448,11 +2452,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
-        cache_is_prepared = self._prepare_caches_before_attention(
+        cache_is_prepared, prepared_query = self._prepare_caches_and_query(
             layer_name,
             hidden_states,
             kv_cache,
             attn_metadata,
+            layer_metadata,
         )
         if actual_tokens == 0:
             output.zero_()
@@ -2474,6 +2479,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             kv_cache,
             layer_metadata,
             cache_is_prepared,
+            prepared_query=prepared_query,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -2810,6 +2816,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
         cache_is_prepared: bool = False,
+        prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         # DSA PCP sets cache_is_prepared after global cache updates and forces
         # single-stream attention because there is no local KV update to overlap.
@@ -2855,7 +2862,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
+        if prepared_query is not None:
+            assert cache_is_prepared
+            q, qr, qr_pertoken_scale = prepared_query
+            compressor_overlap_output = None
+        elif self.multistream_dsv4_dsa_overlap:
             q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
                 hidden_states,
                 cos,
