@@ -1332,16 +1332,37 @@ class NPUModelRunner(GPUModelRunner):
             # Restore its rows before Mamba aligns the accepted recurrent state.
             # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
             self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
-        super().postprocess_sampled(
-            idx_mapping,
-            sampled_tokens,
-            num_sampled,
-            num_rejected,
-            query_start_loc,
-        )
+        # Issue the num_computed_tokens D2H before the RecoverSSM commit that
+        # model_state.postprocess_state enqueues. The snapshot only depends on
+        # the post_update kernel, so keeping the commit out of the copy's wait
+        # stream lets the CPU consumer unblock while the commit still executes,
+        # overlapping it with the next step's input preparation.
+        issue_copy = self.speculator is not None or self.sync_spec_pp_cpu_counts
+        model_state = self.model_state
+        orig_postprocess_state = model_state.postprocess_state
 
-        # Non-last PP stages receive rejections without owning a speculator.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        def _postprocess_state_after_early_copy(idx_mapping_, num_sampled_, num_computed_tokens_):
+            nonlocal issue_copy
+            if issue_copy:
+                self._copy_num_computed_tokens_to_cpu()
+                issue_copy = False
+            orig_postprocess_state(idx_mapping_, num_sampled_, num_computed_tokens_)
+
+        model_state.postprocess_state = _postprocess_state_after_early_copy
+        try:
+            super().postprocess_sampled(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+            )
+        finally:
+            model_state.postprocess_state = orig_postprocess_state
+
+        # Non-last PP stages receive rejections without owning a speculator;
+        # fallback for paths whose postprocess_state never runs this step.
+        if issue_copy:
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
