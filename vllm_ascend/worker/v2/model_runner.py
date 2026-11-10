@@ -1314,7 +1314,7 @@ class NPUModelRunner(GPUModelRunner):
             spec is not None
             and self.speculator is not None
             and spec.method == "dflash"
-            and self.model_config.hf_text_config.model_type == "glm_moe_dsa"
+            and self.model_config.hf_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
             and spec.draft_model_config is not None
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
