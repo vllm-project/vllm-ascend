@@ -314,7 +314,10 @@ def test_merge_rank_stride_is_runtime_and_offset_alignment_is_covered():
     # The no-Triton shim drops JIT metadata; inspect the actual declaration.
     kernel = dcp_warmup._fused_merge_kernel
     source = ast.parse(inspect.getsource(getattr(kernel, "fn", kernel)))
-    jit = source.body[0].decorator_list[0]
+    function = source.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    jit = function.decorator_list[0]
+    assert isinstance(jit, ast.Call)
     do_not_specialize = next(ast.literal_eval(kw.value) for kw in jit.keywords if kw.arg == "do_not_specialize")
     assert "lse_stride_rank" in do_not_specialize
 
