@@ -202,6 +202,7 @@ def quant_methods(monkeypatch, load_hook_class, request):
         native_cls,
         {
             "AscendFusedMoEMethod": native_cls,
+            "QuantType": QuantType,
             "torch": torch,
             "LayerOffloadBinding": binding_factory,
         },
@@ -243,6 +244,15 @@ def quant_methods(monkeypatch, load_hook_class, request):
         scheme=scheme,
         binding=binding_factory,
     )
+
+
+def test_quant_wrapper_rejects_non_mxfp_scheme(quant_methods):
+    q = quant_methods
+    q.scheme.quant_type = QuantType.W4A8
+    native = q.native_cls(q.scheme, q.layer.moe_config)
+    with pytest.raises(ValueError, match="supports only W4A8-MXFP and W8A8-MXFP"):
+        q.offload_cls(native, q.layer.moe_config, ExpertOffloadConfig(enabled=True, num_device_experts=2))
+    q.binding.assert_not_called()
 
 
 @pytest.mark.parametrize("enabled", [False, True])

@@ -1,4 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -71,3 +75,70 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
     manager.unsubscribe_graph_streams()
     native_runtime.npu._subscribe_report.assert_called_once_with(native_runtime.stream)
     native_runtime.npu._unsubscribe_report.assert_called_once_with(native_runtime.stream)
+
+
+@pytest.mark.parametrize("graph_callback", [False, True])
+def test_partial_transfer_failure_cannot_publish_residency(
+    expert_factory, manager_factory, native_runtime, monkeypatch, graph_callback
+):
+    import acl  # type: ignore[import-not-found]
+
+    layer, _ = expert_factory()
+    manager_factory(layer)
+    binding = layer._expert_offload_binding
+    binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
+    before = binding.slot_to_expert
+    host_map = binding.mapping.host_map.clone()
+    copy = acl.rt.memcpy_async
+    copies = []
+
+    def fail_second_expert(*args):
+        copies.append(args)
+        return 1 if len(copies) == len(binding.adapter.output_names) + 1 else copy(*args)
+
+    monkeypatch.setattr(acl.rt, "memcpy_async", fail_second_expert)
+    exit_worker = Mock(side_effect=SystemExit(1))
+    monkeypatch.setattr(os, "_exit", exit_worker)
+    if graph_callback:
+        binding.topk_ids_cpu[:2].copy_(torch.tensor([4, 5], dtype=torch.int32))
+        with pytest.raises(SystemExit):
+            binding.update_graph(2)
+        exit_worker.assert_called_once_with(1)
+    else:
+        slots, loads = binding.plan_expert_loads({4, 5})
+        with pytest.raises(RuntimeError, match="asynchronous expert host copy failed"):
+            binding.load_resident(slots, loads)
+        exit_worker.assert_not_called()
+    assert len(copies) == len(binding.adapter.output_names) + 1
+    assert native_runtime.calls[-1] == "sync"
+    assert binding.slot_to_expert == before
+    torch.testing.assert_close(binding.mapping.host_map, host_map)
+    assert binding.resident["w13_weight"][0].eq(5).all()  # The first expert really was overwritten.
+
+
+def test_graph_callback_failure_exits_even_if_callback_exceptions_are_swallowed():
+    program = textwrap.dedent("""
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        import torch
+        from vllm_ascend.expert_offload.expert_offload_manager import LayerOffloadBinding
+
+        binding = LayerOffloadBinding.__new__(LayerOffloadBinding)
+        binding.layer_name = "injected_failure"
+        binding.device = "cpu"
+        binding.manager = SimpleNamespace(graph_load_stream=None)
+        binding.topk_ids_cpu = torch.tensor([4])
+        binding.slot_to_expert = (0, 1)
+        torch.npu = SimpleNamespace(set_device=lambda _: None, stream=lambda _: nullcontext())
+        def fail(*args):
+            raise RuntimeError("injected transfer failure")
+        binding.load_resident = fail
+        try:
+            binding.update_graph(1)
+        except BaseException:
+            pass  # Model torch_npu clearing callback exceptions before continuing the graph.
+        raise SystemExit(99)
+    """)
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "terminating worker" in result.stdout + result.stderr

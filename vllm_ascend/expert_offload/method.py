@@ -5,6 +5,7 @@ import torch
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
+from vllm_ascend.quantization.quant_type import QuantType
 
 from .config import ExpertOffloadConfig
 from .expert_offload_manager import LayerOffloadBinding
@@ -21,6 +22,10 @@ class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
             raise ValueError(
                 "selected quantization method does not support expert offload; "
                 "a supported Ascend quantized routed-expert scheme is required"
+            )
+        if native_method.quant_method.quant_type not in (QuantType.W4A8MXFP, QuantType.W8A8MXFP):
+            raise ValueError(
+                f"expert offload supports only W4A8-MXFP and W8A8-MXFP; got {native_method.quant_method.quant_type}"
             )
         super().__init__(native_method.quant_method, moe_config)
         self.expert_offload_config = expert_offload_config
