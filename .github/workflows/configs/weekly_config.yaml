@@ -228,7 +228,7 @@ a3:
         size: 2
       - name: DeepSeek-V4.1-Flash-W8A8-Mooncake
         config_file_path: DeepSeek-V4.1-Flash-W8A8-Mooncake.yaml
-        config_base_path: tests/SIT/cases/models/configs/DeepSeek
+        config_base_path: tests/SIT/cases/models/configs/kv_pool
         size: 2
   single_node:
     test_config:
