@@ -50,7 +50,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
@@ -345,10 +345,13 @@ def test_hybrid_allocator_keeps_shared_backing_with_pa_configured(monkeypatch, p
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     raw_caches = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
 
-    assert all(isinstance(raw, torch.Tensor) for raw in raw_caches.values())
-    assert all(raw.numel() == backing_size for raw in raw_caches.values())
-    assert all(raw.untyped_storage().nbytes() == backing_size for raw in raw_caches.values())
-    assert raw_caches[attn_name].data_ptr() == raw_caches[mamba_name].data_ptr()
+    tensor_caches: dict[str, torch.Tensor] = {}
+    for name, raw_cache in raw_caches.items():
+        assert isinstance(raw_cache, torch.Tensor)
+        assert raw_cache.numel() == backing_size
+        assert raw_cache.untyped_storage().nbytes() == backing_size
+        tensor_caches[name] = raw_cache
+    assert tensor_caches[attn_name].data_ptr() == tensor_caches[mamba_name].data_ptr()
 
 
 def test_hybrid_attention_layout_preserves_padding(monkeypatch):
@@ -433,8 +436,9 @@ def test_padded_full_attention_allocation_preserves_backend_behavior(monkeypatch
             attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
     else:
         raw_caches = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
-        assert isinstance(raw_caches[name], torch.Tensor)
-        assert raw_caches[name].numel() == 3 * spec.page_size_bytes
+        raw_cache = raw_caches[name]
+        assert isinstance(raw_cache, torch.Tensor)
+        assert raw_cache.numel() == 3 * spec.page_size_bytes
 
 
 def test_mrv2_mamba_views_skip_physical_page_padding():
@@ -553,9 +557,6 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     (raw_cache,) = raw_caches[layer_name]
     assert raw_cache.numel() == num_blocks * 488448
 
-    flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
-    component_profile = SimpleNamespace(supports=lambda capability: False)
-
     def reshape():
         # Build both consumers from the current spec each time. The reshape
         # path reads the group directly and resolves layer specs through
@@ -583,7 +584,6 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
             kv_cache_config=current_config,
         )[layer_name]
 
-    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
     for q_heads in (8, 12, 64, 96):
         spec = replace(spec, num_heads=q_heads)
         fused = reshape()
@@ -628,7 +628,6 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     vllm_config.kv_transfer_config = None
     attn_module.impl.use_flashmla = False
 
-    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: component_profile)
     cache = reshape()
     nope, rope = cache
     assert nope.shape == (6, 128, 1, 512)
@@ -1311,11 +1310,6 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     )
     monkeypatch.setattr(
         attn_utils,
-        "get_current_hardware_profile",
-        lambda: get_hardware_profile(AscendDeviceType.A2),
-    )
-    monkeypatch.setattr(
-        attn_utils,
         "get_ascend_config",
         lambda: SimpleNamespace(
             is_sparse_li_c8_layer=lambda _layer_name: li_c8,
@@ -1404,11 +1398,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         "get_current_hardware_profile",
         lambda: get_hardware_profile(device_type),
     )
-    monkeypatch.setattr(
-        attn_utils,
-        "get_current_hardware_profile",
-        lambda: get_hardware_profile(device_type),
-    )
+    monkeypatch.setattr(dsa_v1, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
@@ -1452,42 +1442,17 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             )
         ],
     )
-    attn_group = AttentionGroup(
-        backend=AscendDSAC4Backend,
-        layer_names=[layer_name],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
     runner_kv_caches: list[Any] = []
 
-    # vLLM #51718 reworked upstream init_kv_cache to allocate generic 4D
-    # views via `allocate_kv_cache` + `create_kv_cache_views`; that layout
-    # cannot express the Ascend DSV4 page-strided cache. Route the
-    # allocation through the Ascend DSV4 path (the same wiring the v0.28.0
-    # patch applies) so the returned structure matches on both lanes.
+    # Exercise the unified allocator and backend runtime views through
+    # upstream initialization, including its binding/connector handoff.
     def _ascend_allocate_kv_cache(
         _kv_cache_config: KVCacheConfig,
         _device: torch.device,
         _layout: Any,
         _kernel_block_sizes: list[int],
     ) -> dict[str, Any]:
-        del _layout
-        raw_tensors = attn_utils._allocate_kv_cache(
-            _kv_cache_config,
-            shared_layers={},
-            device=_device,
-        )
-        # `_reshape_kv_cache_v2` expects the flat attention-group list,
-        # matching upstream v0.28.0 `init_kv_cache`, which flattens
-        # `attn_groups` before reshaping.
-        return attn_utils._reshape_kv_cache_v2(
-            attn_groups=[attn_group],
-            kv_cache_raw_tensors=raw_tensors,
-            cache_dtype=cache_config.cache_dtype,
-            kernel_block_sizes=_kernel_block_sizes,
-            shared_kv_cache_layers={},
-            kv_cache_config=_kv_cache_config,
-        )
+        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
 
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
@@ -1525,7 +1490,6 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert [component.dtype for component in cache_components] == [
         cache_dtype,
         scale_dtype,
-        *([cache_dtype] if device_type == AscendDeviceType.A5 else []),
     ]
     backing_storage = cache_components[0].untyped_storage().data_ptr()
     assert all(component.untyped_storage().data_ptr() == backing_storage for component in cache_components)
@@ -2162,8 +2126,9 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
 
     raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device="cpu")
-    assert isinstance(raw[layer_name], torch.Tensor)
-    assert raw[layer_name].numel() == tensor_size
+    raw_tensor = raw[layer_name]
+    assert isinstance(raw_tensor, torch.Tensor)
+    assert raw_tensor.numel() == tensor_size
 
     attn_groups = [
         AttentionGroup(
@@ -2313,7 +2278,6 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
         monkeypatch.setattr(module, "enable_sfa", lambda _: packed)
         monkeypatch.setattr(module, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=1))
-    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
     raw = {}
 
     def allocate(*args, **kwargs):
@@ -2394,7 +2358,6 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _cfg: False)
-    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
     monkeypatch.setattr(
         attn_utils,
         "get_ascend_config",
@@ -2750,11 +2713,6 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
         "get_ascend_config",
         lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
     )
-    monkeypatch.setattr(
-        attn_utils,
-        "get_current_hardware_profile",
-        lambda: get_hardware_profile(AscendDeviceType.A2),
-    )
     specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(specs) == {"fa", "sfa"}
     assert specs["fa"].head_size == 128
@@ -2820,12 +2778,12 @@ def test_mrv2_binding_wraps_only_v41_slots():
     other_layer = SimpleNamespace(kv_cache=None)
     other_layer.bind_kv_cache = lambda cache: setattr(other_layer, "kv_cache", cache)
     kv_caches = {
-        # V4.1 reshape output: one slot tensor per layer.
-        "model.layers.0.self_attn.attn": torch.zeros(4, 2),
+        # Unified V4.1 allocation exposes a list of runtime components.
+        "model.layers.0.self_attn.attn": [torch.zeros(4, 2)],
         # Non-V4.1 Ascend allocation: a (k, v) tuple.
         "model.layers.1.self_attn.attn": (torch.zeros(2, 2), torch.zeros(2, 2)),
-        # V4.1 indexer reshape output: a (kv, scale) tuple slot view.
-        "model.layers.2.self_attn.indexer.k_cache": (torch.zeros(2, 2), torch.zeros(2, 1)),
+        # The indexer binds its two components as a (kv, scale) tuple.
+        "model.layers.2.self_attn.indexer.k_cache": [torch.zeros(2, 2), torch.zeros(2, 1)],
     }
     forward_context = {
         "model.layers.0.self_attn.attn": v41_layer,
@@ -2839,7 +2797,7 @@ def test_mrv2_binding_wraps_only_v41_slots():
     # V4.1 slots dispatch to their own bind_kv_cache (kv_cache[0] contract)
     # while other layers keep the raw (k, v) allocation.
     assert isinstance(v41_layer.kv_cache, list)
-    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"]
+    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"][0]
     assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
     # The indexer consumer unpacks kv_cache[0] into (kv, scale).
     kv_view, scale_view = v41_indexer.kv_cache[0]

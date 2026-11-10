@@ -183,7 +183,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 local_kv_caches_base_addr=[0x1000],
                 block_len_per_addr=[1024],
                 block_stride_per_addr=[1024],
-                addr_group_idx=[0],
+                addr_group_idx=[[0]],
                 mamba_ssm_size=(0, 0),
                 use_hybrid=False,
                 has_mamba=False,
@@ -474,6 +474,7 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                         )
                         delay_free, params = scheduler.request_finished_all_groups(request, ([10, 11, 12], [30, 31]))
                         self.assertTrue(delay_free)
+                        assert params is not None
                         self.assertEqual(params["remote_block_ids"], ([10, 11], [30, 31]))
                         if pcp_size == 1:
                             # Old request metadata defaults to one replica.
@@ -509,7 +510,9 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                         send_metadata = scheduler.build_connector_meta(MagicMock())
                         for port, sender in senders.items():
                             sender.start_load_kv(send_metadata)
-                            tracker = sender.kv_send_thread.task_tracker
+                            send_thread = sender.kv_send_thread
+                            assert send_thread is not None
+                            tracker = send_thread.task_tracker
                             if port in source_ports:
                                 self.assertEqual(tracker.get_and_clear_finished_requests(), set())
                                 self.assertEqual(set(tracker.delayed_free_requests), {request_id})
@@ -522,6 +525,39 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_singleton_components_share_slot_with_different_page_sizes(self):
+        num_blocks = 2
+        backing = torch.empty(num_blocks * (80 + 96), dtype=torch.uint8)
+        descriptors = []
+        kv_caches = {}
+        slot_offset = 0
+        for slot, block_stride in enumerate((80, 96)):
+            for component, offset, width in (("kv", 0, 64), ("index", 64, 8), ("state", 0, block_stride)):
+                name = f"slot.{slot}.{component}"
+                descriptors.append(
+                    types.SimpleNamespace(
+                        size=backing.numel(),
+                        layers=[name],
+                        offset=slot_offset + offset,
+                        layer_stride=num_blocks * block_stride,
+                        block_stride=block_stride,
+                    )
+                )
+                kv_caches[name] = backing[slot_offset + offset :].as_strided((num_blocks, width), (block_stride, 1))
+            slot_offset += num_blocks * block_stride
+
+        pages = _reconstruct_shared_pages(
+            types.SimpleNamespace(num_blocks=num_blocks, kv_cache_tensors=descriptors), kv_caches
+        )
+
+        self.assertEqual(len(pages), 2)
+        for slot, page in enumerate(pages):
+            self.assertEqual(
+                page.placements,
+                ((f"slot.{slot}.kv", 0), (f"slot.{slot}.index", 64), (f"slot.{slot}.state", 0)),
+            )
+            self.assertEqual(page.block_stride, (80, 96)[slot])
+
     def test_zero_layer_stride_uses_descriptor_layers_as_shared_by(self):
         num_blocks = 2
         block_stride = 80
