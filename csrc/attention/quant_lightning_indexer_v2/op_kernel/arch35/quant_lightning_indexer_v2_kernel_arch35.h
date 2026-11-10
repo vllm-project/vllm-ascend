@@ -159,6 +159,9 @@ protected:
                                             __gm__ uint8_t *sequsedQ, __gm__ uint8_t *sequsedK,
                                             __gm__ uint8_t *cmpResidualK);
     // ================================Split Core================================
+    __aicore__ inline bool TrySplitQueryCore();
+    __aicore__ inline void ResolveQueryGroup(uint32_t group, uint32_t &batchIdx, uint32_t &localGroup,
+                                              uint32_t &queryCount, uint32_t &keyCount, uint32_t &originalKeyCount);
     __aicore__ inline void SplitCoreByAICPU(uint32_t cubeCoreIdx, uint32_t vecCoreIdx,
                                             GlobalTensor<uint32_t> &metadataGm);
     __aicore__ inline uint32_t GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size, uint32_t actS2SizeOrig);
@@ -327,6 +330,131 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_
     return (validS2Len + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
 }
 
+// Resolve request-local query and causal K coordinates for each global query group.
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Preload<QLIV2T>::ResolveQueryGroup(uint32_t group, uint32_t &batchIdx,
+                                                               uint32_t &localGroup, uint32_t &queryCount,
+                                                               uint32_t &keyCount, uint32_t &originalKeyCount)
+{
+    localGroup = group;
+    for (batchIdx = 0; batchIdx < constInfo.batchSize; ++batchIdx) {
+        GetS1S2ActualSeqLen(batchIdx, queryCount, keyCount, originalKeyCount);
+        const uint32_t batchGroups = CeilDiv(queryCount, constInfo.s1BaseSize);
+        if (localGroup < batchGroups) {
+            return;
+        }
+        localGroup -= batchGroups;
+    }
+}
+
+// Spread long K sequences across idle AICs, then reuse the A5 Top-K reduction.
+template <typename QLIV2T>
+__aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
+{
+    // The host supplies the AIC block dimension to both AIC and AIV instances.
+    const uint32_t cores = usedCoreNum;
+    constexpr uint32_t MIN_SPLIT_KEY_LENGTH = 4096;
+    constexpr uint32_t MIN_CORES_PER_GROUP = 2;
+    constexpr uint32_t AIVS_PER_AIC = 2;
+    constexpr uint32_t QUANT_MODE_FP8 = 1;
+    constexpr uint32_t QUANT_MODE_INT8 = 2;
+    // Bound scalar metadata reads; large batches retain the metadata schedule.
+    if ((constInfo.quantMode != QUANT_MODE_FP8 && constInfo.quantMode != QUANT_MODE_INT8) ||
+        constInfo.batchSize >= cores || constInfo.kHeadNum != 1 ||
+        constInfo.kSeqSize < MIN_SPLIT_KEY_LENGTH) {
+        return false;
+    }
+    uint32_t queryCount, keyCount, originalKeyCount;
+    uint32_t groups = 0;
+    for (uint32_t batchIdx = 0; batchIdx < constInfo.batchSize; ++batchIdx) {
+        GetS1S2ActualSeqLen(batchIdx, queryCount, keyCount, originalKeyCount);
+        if constexpr (Q_LAYOUT_T != LI_LAYOUT::TND) {
+            // Preserve unique ownership of BSND padding cleanup.
+            if (queryCount != constInfo.qSeqSize) {
+                return false;
+            }
+        }
+        if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
+            // Keep metadata ownership of padded TND rows, including empty requests.
+            if (queryCount != cuSeqlensQGm.GetValue(batchIdx + 1) - cuSeqlensQGm.GetValue(batchIdx)) {
+                return false;
+            }
+        }
+        groups += CeilDiv(queryCount, constInfo.s1BaseSize);
+        if (groups >= cores || (queryCount != 0 && keyCount < MIN_SPLIT_KEY_LENGTH)) {
+            return false;
+        }
+    }
+    // Avoid a single-core group becoming the latency bottleneck while other
+    // groups pay the additional reduction cost.
+    if (groups == 0 || groups > cores / MIN_CORES_PER_GROUP) {
+        return false;
+    }
+    const uint32_t coresPerGroup = cores / groups;
+    const uint32_t extraGroups = cores % groups;
+    const uint32_t largerGroupCores = (coresPerGroup + 1) * extraGroups;
+    const uint32_t group = aiCoreIdx < largerGroupCores ? aiCoreIdx / (coresPerGroup + 1) :
+        extraGroups + (aiCoreIdx - largerGroupCores) / coresPerGroup;
+    const uint32_t firstCore = group * coresPerGroup + Min(group, extraGroups);
+    const uint32_t shard = aiCoreIdx - firstCore;
+    uint32_t batchIdx = 0;
+    uint32_t localGroup = group;
+    if (constInfo.batchSize > 1) {
+        ResolveQueryGroup(group, batchIdx, localGroup, queryCount, keyCount, originalKeyCount);
+    }
+    const uint32_t tiles = constInfo.attenMaskFlag ?
+        GetS2BaseBlockNumOnMask(localGroup, queryCount, originalKeyCount) :
+        CeilDiv(keyCount, constInfo.s2BaseSize);
+    const uint32_t shards = Min(coresPerGroup + static_cast<uint32_t>(group < extraGroups), tiles);
+    isUsedCoreEqZero = false;
+    splitCoreInfo.isCoreEnable = shard < shards;
+    splitCoreInfo.bN2Start = batchIdx;
+    splitCoreInfo.bN2End = batchIdx;
+    splitCoreInfo.gS1Start = localGroup;
+    splitCoreInfo.gS1End = localGroup;
+    if (splitCoreInfo.isCoreEnable) {
+        splitCoreInfo.s2Start = shard * tiles / shards;
+        splitCoreInfo.s2End = (shard + 1) * tiles / shards - 1;
+    }
+    ldInfo.saveWorkSpaceIdx = aiCoreIdx;
+    if ASCEND_IS_AIV {
+        // Give each output row its own AIV whenever the vector budget permits.
+        // Two AIVs per group serialize the reduction of a four-row A5 tile.
+        const uint32_t reduceCoresPerGroup = Min(constInfo.s1BaseSize, cores * AIVS_PER_AIC / groups);
+        const uint32_t reduceGroup = tmpBlockIdx / reduceCoresPerGroup;
+        ldInfo.isLdCoreEnable = reduceGroup < groups;
+        if (ldInfo.isLdCoreEnable) {
+            localGroup = reduceGroup;
+            if (constInfo.batchSize > 1) {
+                ResolveQueryGroup(reduceGroup, batchIdx, localGroup, queryCount, keyCount, originalKeyCount);
+            }
+            const uint32_t rows = Min(constInfo.s1BaseSize, queryCount - localGroup * constInfo.s1BaseSize);
+            const uint32_t rowsPerCore = CeilDiv(rows, reduceCoresPerGroup);
+            ldInfo.mStart = (tmpBlockIdx % reduceCoresPerGroup) * rowsPerCore;
+            ldInfo.mNum = ldInfo.mStart < rows ? Min(rowsPerCore, rows - ldInfo.mStart) : 0;
+            ldInfo.isLdCoreEnable = ldInfo.mNum != 0;
+            ldInfo.bn2Idx = batchIdx;
+            ldInfo.bIdx = batchIdx;
+            ldInfo.n2Idx = 0;
+            ldInfo.mIdx = localGroup;
+            ldInfo.workspaceIdx = reduceGroup * coresPerGroup + Min(reduceGroup, extraGroups);
+            const uint32_t reduceTiles = constInfo.attenMaskFlag ?
+                GetS2BaseBlockNumOnMask(localGroup, queryCount, originalKeyCount) :
+                CeilDiv(keyCount, constInfo.s2BaseSize);
+            ldInfo.workspaceNum = Min(coresPerGroup + static_cast<uint32_t>(reduceGroup < extraGroups), reduceTiles);
+            ldInfo.isLdCoreEnable = ldInfo.isLdCoreEnable && ldInfo.workspaceNum > 1;
+            uint64_t queryPrefix;
+            if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
+                queryPrefix = batchIdx == 0 ? 0 : cuSeqlensQGm.GetValue(batchIdx);
+            } else {
+                queryPrefix = static_cast<uint64_t>(batchIdx) * constInfo.qSeqSize;
+            }
+            ldInfo.indiceOutCoreOffset = (queryPrefix + localGroup * constInfo.s1BaseSize) * constInfo.sparseCount;
+        }
+    }
+    return true;
+}
+
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Preload<QLIV2T>::SplitCoreByAICPU(uint32_t cubeCoreIdx, uint32_t vecCoreIdx,
                                                               GlobalTensor<uint32_t> &metadataGm)
@@ -489,7 +617,9 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
 
     // 获取分核信息
     metadataGm.SetGlobalBuffer((__gm__ uint32_t *)metadata);
-    SplitCoreByAICPU(aiCoreIdx, tmpBlockIdx, metadataGm);
+    if (!TrySplitQueryCore()) {
+        SplitCoreByAICPU(aiCoreIdx, tmpBlockIdx, metadataGm);
+    }
 
     pipe = tPipe;
 
