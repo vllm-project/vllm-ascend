@@ -1,0 +1,4 @@
+pr: 20722
+entries:
+  - category: performance
+    text: Reduced foreground synchronization during asynchronous EPLB migrations when using AllGather expert routing.

@@ -12,6 +12,31 @@ From the workflow perspective, we can see how the final test script is executed.
 
 ![alt text](../../assets/workflow.png)
 
+## Scheduling
+
+Single-node, multi-card, and multi-node jobs are not serialized with `needs`
+or throttled with `max-parallel`. All workloads are submitted at the same time,
+and the LWS pods set `schedulerName: npu-scheduler`, which queues pending pods
+in FIFO order. This applies to scheduled runs as well as `/nightly` and
+`/weekly` comment-triggered runs.
+
+The cluster does not use a dedicated-night taint, so the LWS template no longer
+sets `tolerations` and the workflows no longer run taint-cleanup steps.
+
+When two branches run at the same time, the concurrency group includes the
+`vllm_ascend_branch` input even though both runs are triggered from `main`, so
+one branch no longer cancels the other. Log cleanup is also scoped to
+`${ASCEND_LOG_PREFIX}/<branch>` and leaves the other branch's in-flight logs
+untouched.
+
+Scheduled runs are dispatched with `request_id` empty and `test_cases=all`.
+Before they create any workload, the `setup-vars` job force-cancels PR-triggered
+runs of the same workflow whose `run-name` contains `(PR)`, using
+`secrets.PAT_TOKEN`. This prevents an earlier PR run from keeping the shared
+FIFO queue busy past the nightly start time. `force-cancel` bypasses the
+`if: always()` `Post process` step, so LWS resources created by a
+force-cancelled run may need to be cleaned up separately.
+
 ## How to contribute
 
 1. Upload custom weights
@@ -20,7 +45,7 @@ From the workflow perspective, we can see how the final test script is executed.
 
 2. Add config yaml
 
-    Add the config YAML under `tests/e2e/cases/models/configs/<model-family>/`
+    Add the config YAML under `tests/SIT/cases/models/configs/<model-family>/`
     and pass that directory through `config_base_path` in the workflow or
     `CONFIG_BASE_PATH` locally. Set `dp_load_balancing` in the YAML to
     `internal` or `external` to select the corresponding runtime.
@@ -82,23 +107,23 @@ Currently, the multi-node test workflow is defined in `.github/workflows/schedul
 ```yaml
 multi-node-tests:
   name: multi-node
-  if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+  needs: [setup-vars, parse-trigger, build-image]
+  if: always() && needs.parse-trigger.outputs.run == 'true'
   strategy:
     fail-fast: false
-    max-parallel: 1
     matrix:
       test_config:
         - name: multi-node-deepseek-pd
           config_file_path: DeepSeek-V3.yaml
-          config_base_path: tests/e2e/cases/models/configs/DeepSeek
+          config_base_path: tests/SIT/cases/models/configs/DeepSeek
           size: 2
-        - name: multi-node-qwen3-vl-dp
-          config_file_path: Qwen3-VL-235B-disagg-pd.yaml
-          config_base_path: tests/e2e/cases/models/configs/Qwen
-          size: 2
+        - name: QWEN3_235B_PD_3_5K_1_5k
+          config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
+          config_base_path: tests/SIT/cases/models/configs/Qwen
+          size: 3
         - name: GLM5_1-W8A8-EP-external
           config_file_path: GLM5_1-W8A8-EP-external.yaml
-          config_base_path: tests/e2e/cases/models/configs/GLM
+          config_base_path: tests/SIT/cases/models/configs/GLM
           size: 4
   uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
   with:
@@ -158,7 +183,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
                   - name: CONFIG_BASE_PATH
-                    value: tests/e2e/cases/models/configs/DeepSeek
+                    value: tests/SIT/cases/models/configs/DeepSeek
                   - name: WORKSPACE
                     value: "/vllm-workspace"
                   - name: FAIL_TAG
@@ -213,7 +238,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
                   - name: CONFIG_BASE_PATH
-                    value: tests/e2e/cases/models/configs/DeepSeek
+                    value: tests/SIT/cases/models/configs/DeepSeek
                   - name: WORKSPACE
                     value: "/vllm-workspace"
                   - name: FAIL_TAG
@@ -309,7 +334,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
     collected 1 item
 
-    tests/e2e/common/multi_node/internal_dp/test_multi_node.py::test_multi_node [2025-12-30 11:01:01] INFO multi_node_config.py:294: Loading config yaml: tests/e2e/cases/models/configs/DeepSeek/DeepSeek-V3.yaml
+    tests/e2e/common/multi_node/internal_dp/test_multi_node.py::test_multi_node [2025-12-30 11:01:01] INFO multi_node_config.py:294: Loading config yaml: tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V3.yaml
     [2025-12-30 11:01:01] INFO multi_node_config.py:348: Resolving cluster IPs via DNS...
     [2025-12-30 11:01:01] INFO multi_node_config.py:212: Node 0 envs: {'VLLM_USE_MODELSCOPE': 'True', 'OMP_PROC_BIND': 'False', 'OMP_NUM_THREADS': '100', 'HCCL_BUFFSIZE': '1024', 'SERVER_PORT': '8080', 'NUMEXPR_MAX_THREADS': '128', 'DISAGGREGATED_PREFILL_PROXY_SCRIPT': 'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py', 'HCCL_IF_IP': '10.0.0.102', 'HCCL_SOCKET_IFNAME': 'eth0', 'GLOO_SOCKET_IFNAME': 'eth0', 'TP_SOCKET_IFNAME': 'eth0', 'LOCAL_IP': '10.0.0.102', 'NIC_NAME': 'eth0', 'MASTER_IP': '10.0.0.102'}
     [2025-12-30 11:01:01] INFO multi_node_config.py:159: Launching proxy: python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --host 10.0.0.102 --port 6000 --prefiller-hosts 10.0.0.102 --prefiller-ports 8080 --decoder-hosts 10.0.0.138 --decoder-ports 8080
@@ -353,7 +378,7 @@ hosts are part of a committed test environment.
 Edit the internal DP config you want to run, for example:
 
 ```text
-tests/e2e/cases/models/configs/DeepSeek/DeepSeek-V3.yaml
+tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V3.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -378,13 +403,13 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20261013-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -401,7 +426,7 @@ On node 1:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_YAML_PATH=DeepSeek-V3.yaml
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/DeepSeek
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/DeepSeek
 export LWS_WORKER_INDEX=1
 
 cd $WORKSPACE/vllm-ascend
@@ -414,7 +439,7 @@ On node 0:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_YAML_PATH=DeepSeek-V3.yaml
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/DeepSeek
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/DeepSeek
 export LWS_WORKER_INDEX=0
 
 cd $WORKSPACE/vllm-ascend
@@ -435,7 +460,7 @@ $LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
 Edit the external DP config you want to run. For example:
 
 ```text
-tests/e2e/cases/models/configs/GLM/GLM5_1-W8A8-EP-external.yaml
+tests/SIT/cases/models/configs/GLM/GLM5_1-W8A8-EP-external.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -461,13 +486,13 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20261013-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -488,7 +513,7 @@ On node 1, node 2, and node 3, set the matching `LWS_WORKER_INDEX`:
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/GLM
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/GLM
 export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=1  # Use 2 on node 2, and 3 on node 3.
 
@@ -501,7 +526,7 @@ On node 0:
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
-export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/GLM
+export CONFIG_BASE_PATH=tests/SIT/cases/models/configs/GLM
 export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=0
 

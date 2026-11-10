@@ -343,7 +343,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if pcp_manager is not None and model_uses_kpool_indexer(self.vllm_config.model_config):
+        if (
+            pcp_manager is not None
+            and model_uses_kpool_indexer(self.vllm_config.model_config)
+            and pcp_manager.is_target_attn_groups(attn_groups)
+        ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
         if pcp_context is not None and not input_batch.is_dummy:
             # PCP turns one prefill request into two rank-local segments. The
@@ -380,20 +384,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             )
             local_metadata.update(global_metadata)
             self.attn_metadata = local_metadata
-            return local_metadata
-
-        self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-            self,
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture,
-            use_pcp_padding=pcp_context is not None,
-            pcp_context=pcp_context,
-        )
+        else:
+            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                self,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+                use_pcp_padding=pcp_context is not None,
+                pcp_context=pcp_context,
+            )
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata
@@ -445,26 +448,32 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is not None:
-                is_decode = (
-                    input_batch.num_scheduled_tokens[: input_batch.num_reqs]
-                    == num_draft_tokens_per_req[: input_batch.num_reqs] + 1
+            if num_draft_tokens_per_req is None:
+                num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, dtype=np.int32)
+            # Match upstream request-state classification. Adaptive verification
+            # changes query lengths independently of the scheduled draft count.
+            scheduled_tokens = input_batch.num_scheduled_tokens[: input_batch.num_reqs]
+            spec_decode_mask = (
+                ~is_prefilling_np
+                & (scheduled_tokens > 0)
+                & (scheduled_tokens <= self.vllm_config.num_speculative_tokens + 1)
+            )
+            spec_config = getattr(self.vllm_config, "speculative_config", None)
+            if not (spec_config and getattr(spec_config, "enable_adaptive_verification", False)):
+                # Static graphs retain the native recurrent operator and its
+                # original no-draft decode route. Adaptive graphs use vLLM's
+                # strided operator even for one-token capture/replay rows.
+                spec_decode_mask &= (num_draft_tokens_per_req[: input_batch.num_reqs] > 0) & (
+                    scheduled_tokens == num_draft_tokens_per_req[: input_batch.num_reqs] + 1
                 )
-                spec_decode_mask = (num_draft_tokens_per_req[: input_batch.num_reqs] > 0) & is_decode
-                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask,
-                    num_draft_tokens_per_req[: input_batch.num_reqs],
-                    -1,
-                )
-                if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
-                    padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[input_batch.num_reqs :]
-                    expected_query_len = self.vllm_config.num_speculative_tokens + 1
-                    if np.all(padded_query_lens == expected_query_len):
-                        # Full graph capture represents every padded request as
-                        # a speculative decode request. Keep replay on the same
-                        # pure-spec GDN path so its persistent state metadata is
-                        # refreshed before graph replay.
-                        num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
+            num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+                spec_decode_mask, num_draft_tokens_per_req[: input_batch.num_reqs], -1
+            )
+            if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
+                padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[input_batch.num_reqs :]
+                expected_query_len = self.vllm_config.num_speculative_tokens + 1
+                if np.all(padded_query_lens == expected_query_len):
+                    num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         model_specific_metadata = MambaHybridAttnMetadata(
@@ -472,6 +481,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        # Varlen graphs capture evenly split dummy rows (possibly one token
+        # each), but must allow the descriptor's full K+1 replay query bound.
+        max_query_len = getattr(input_batch, "max_query_len", None)
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -481,7 +495,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
-            max_query_len=input_batch.num_scheduled_tokens.max().item(),
+            max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,

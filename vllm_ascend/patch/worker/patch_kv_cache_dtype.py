@@ -19,10 +19,10 @@ Worker process — the launcher's platform patch does not propagate to the
 workers' fresh interpreters. It is applied before model loading, which is
 when ``kv_cache_dtype_str_to_dtype`` is called.
 
-On vllm builds that *do* provide ``register_kv_cache_dtype`` (kvquant_27 /
-future main) this patch is a no-op: the eager handler import in
-``vllm_ascend/worker/worker.py`` already flipped the dtype, so we must not
-touch the dict again (idempotency, and to avoid masking the handler path).
+The registration API can exist without an Ascend handler having updated the
+mapping. In that case, replace only the upstream ``torch.uint8`` default.
+Leave any other handler-provided dtype unchanged. Remove this fallback when
+all supported vLLM builds reliably register the Ascend FP8 dtype in workers.
 
 Worker-side dtype Literal widening: the launcher's platform patches
 (``patch/platform/patch_kv_cache_dtype.py`` and
@@ -31,7 +31,10 @@ and ``--attention_config.indexer_kv_dtype int8`` through CLI/pydantic
 validation, but only in the main process. Worker processes run in fresh
 interpreters, so the ``CacheDType`` / ``IndexerKVDType`` Literals still reject
 ``"int8"`` there. This patch widens both in every worker, mirroring the
-platform patches. Without it, ``vllm/v1/attention/selector.py::get_attn_backend``
+platform patches. The same goes for the mutable ``KV_CACHE_DTYPES`` mirror
+list that current vLLM main gates ``CacheConfig.cache_dtype`` on: a spawned
+worker starts from the upstream list, so ``"int8"``/``"mxfp8"`` are appended
+here as well. Without it, ``vllm/v1/attention/selector.py::get_attn_backend``
 dies with ``AssertionError: Invalid kv_cache_dtype: int8`` when the attention
 backend is selected during model init, and the speculative draft path
 (``DraftModelProposer._create_draft_vllm_config`` -> ``replace``) re-validates
@@ -42,6 +45,10 @@ import typing
 
 import torch
 import vllm.utils.torch_utils as _torch_utils
+
+# Ascend-only ``--kv-cache-dtype`` values; keep in sync with
+# ``_ASCEND_CACHE_DTYPES`` in ``patch/platform/patch_kv_cache_dtype.py``.
+_ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
 
 
 def _apply_fp8_kv_cache_dtype_flip() -> None:
@@ -54,11 +61,10 @@ def _apply_fp8_kv_cache_dtype_flip() -> None:
         # int8 already maps to torch.int8 upstream; nothing to flip.
         return
 
-    # Pluggable mechanism present: the handler import in worker.py already
-    # injected fp8 -> float8_e4m3fn. Leave the dict untouched so the handler
-    # path stays the source of truth (and so is_quantized/quant_mode queries
-    # routed through the handler remain consistent).
-    return
+    # The registration API may exist without an Ascend handler updating the
+    # mapping. Only replace upstream raw-byte storage, preserving handler dtypes.
+    if _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.get("fp8") == torch.uint8:
+        _torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"] = torch.float8_e4m3fn
 
 
 def _widen_cache_dtype_literal_for_worker() -> None:
@@ -84,12 +90,28 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     from vllm.config import cache as _cache_mod
     from vllm.config.cache import CacheConfig
 
+    # Current vLLM main also validates ``CacheConfig.cache_dtype`` against
+    # the mutable ``KV_CACHE_DTYPES`` mirror list (``is_known_kv_cache_dtype``
+    # in ``_validate_cache_dtype``; the ``get_attn_backend`` assertion in
+    # ``vllm/v1/attention/selector.py`` reads the same list object). A
+    # spawned worker starts from the upstream list, so append the Ascend
+    # dtypes here too; idempotent when fork already inherited the append.
+    # The mirror list only exists on newer vLLM main; releases (e.g. v0.32.0)
+    # gate on the Literal alone, so the append is main-only.
+    mirror_list = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
+    if mirror_list is not None:
+        for dtype in _ASCEND_CACHE_DTYPES:
+            if dtype not in mirror_list:
+                mirror_list.append(dtype)
+
     existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
-    missing = tuple(d for d in ("int8", "mxfp8") if d not in existing_args)
+    missing = tuple(d for d in _ASCEND_CACHE_DTYPES if d not in existing_args)
     if missing:
         # Derive from the current upstream Literal and append the Ascend-only
-        # dtypes so no upstream member is dropped.
-        widened = typing.Literal[*existing_args + missing]  # type: ignore[valid-type]
+        # dtypes so no upstream member is dropped. Subscripting with the plain
+        # tuple is the same __getitem__ call as star-unpacking it and parses
+        # on Python 3.10 (PEP 646 starred subscripts are 3.11+).
+        widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
 
         _cache_mod.CacheDType = widened
         CacheConfig.__annotations__["cache_dtype"] = widened

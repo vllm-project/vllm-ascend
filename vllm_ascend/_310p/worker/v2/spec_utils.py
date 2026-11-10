@@ -371,7 +371,7 @@ def prepare_prefill_inputs_cpu(
         kept_end = query_start + query_len
         if query_len > 1:
             # 310P: NPU slice-assign can corrupt the destination tail element
-            # (see llm_base_proposer_310.set_inputs_first_pass). Save/restore
+            # on the persistent drafter input_ids buffer. Save/restore
             # draft_input_ids[kept_end-1] around the shift copy.
             tail_idx = kept_end - 1
             tail_save = draft_input_ids[tail_idx].clone()

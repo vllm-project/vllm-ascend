@@ -199,13 +199,11 @@ class RequestIoSnapshotManager:
         RequestGuardStore.reset_for_tests()
 
     def clear_wave_cache(self) -> None:
-        """Drop snapshot cache and same-wave append dedupe on Store.
+        """Drop the same-wave snapshot cache.
 
-        Called at the start of each ``sync_for_step`` / ``refresh_config`` wave
-        so content-identical chunks from a later step are not swallowed.
+        Called at the start of each ``sync_for_step`` / ``refresh_config`` wave.
         """
         self._cache.clear()
-        RequestGuardStore.get().clear_wave_append_frontier()
 
     def clear_req_cache(self, req_id: str) -> None:
         """Drop wave snapshot cache entries for ``req_id`` (Store on_clear hook)."""
@@ -226,9 +224,8 @@ class RequestIoSnapshotManager:
     def append_output(self, req_id: str, token_ids: Any) -> None:
         """Normalize accepted ids and append into :class:`RequestGuardStore`.
 
-        Drops ``-1`` placeholders. Within one engine wave, duplicate chunks
-        for the same req are skipped (Store ``last_append_chunk``). Across
-        waves, identical chunks are kept after :meth:`clear_wave_cache`.
+        Drops ``-1`` placeholders. MR v2 records each step once, in
+        ``after_sample_hot_path``. Fully-off never calls this.
         """
         if not req_id:
             return

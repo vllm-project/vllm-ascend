@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, assignment, misc"
 #
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
@@ -25,12 +26,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.forward_context import BatchDescriptor
+from vllm.forward_context import is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
@@ -167,7 +167,9 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 1024
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
+    speculator.draft_max_seq_len = 1024
     speculator.dcp_size = 1
     speculator.input_buffers = SimpleNamespace(
         query_start_loc=torch.zeros(5, dtype=torch.int32),
@@ -459,27 +461,27 @@ def test_init_cudagraph_manager_preserves_graph_mode(monkeypatch, enforce_eager,
     assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
 
 
-def test_selector_scores_in_request_scoped_context(monkeypatch):
-    config = SimpleNamespace()
-    selector = MagicMock()
+def test_selector_scores_without_forward_context():
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
-    speculator.vllm_config = config
-    speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
     speculator.num_query_per_req = 3
-    speculator.input_buffers = SimpleNamespace(input_ids=torch.arange(6))
+    speculator.input_buffers = SimpleNamespace(input_ids=torch.arange(9))
     candidates = torch.zeros(2, 2, 2, dtype=torch.int64)
     unary = torch.zeros(2, 2, 2)
     hidden = torch.zeros(2, 2, 4)
-    context = object()
-    create = MagicMock(return_value=context)
-    override = MagicMock(return_value=nullcontext())
-    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.create_forward_context", create)
-    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.override_forward_context", override)
+    scores = torch.zeros(2, 2, 2, 2)
 
-    speculator._score_candidates(candidates, unary, hidden)
+    def select(candidate_ids, unary_logits, hidden_states, anchor_token_ids):
+        assert not is_forward_context_available()
+        assert candidate_ids is candidates
+        assert unary_logits is unary
+        assert hidden_states is hidden
+        torch.testing.assert_close(anchor_token_ids, torch.tensor([0, 3]))
+        return scores
 
-    create.assert_called_once_with(None, config, batch_descriptor=BatchDescriptor(num_tokens=2))
-    override.assert_called_once_with(context)
+    selector = MagicMock(side_effect=select)
+    speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
+    with override_forward_context(None):
+        assert speculator._score_candidates(candidates, unary, hidden) is scores
     selector.assert_called_once()
 
 
@@ -605,7 +607,7 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
     kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
 
 
-@pytest.mark.skipif(vllm_version_is("0.32.0"), reason="main-only num_reqs_override")
+@pytest.mark.skipif(False, reason="main-only num_reqs_override")
 def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
     """vLLM main (#58984) forwards the DP-synced request count positionally."""
     kernel = MagicMock()

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="assignment"
 """Unit tests for fine-grained TP support in the Ascend V2 model runner.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the runner-side pad/trim
@@ -21,6 +22,7 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -40,6 +42,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    runner.dcp_size = 1
     # Dump contract from the production initializer; helpers no-op on None.
     runner.debugger = None
     runner._debugger_started = False
@@ -48,7 +51,13 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.is_last_pp_rank = True
     runner.execute_model_state = None
     runner.pcp_manager = None
-    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    # Upstream #63102 routes sampling through the model state; production
+    # states inherit these hooks, so mirror them on the bare CPU double.
+    runner.model_state = SimpleNamespace(
+        kvpp_is_dummy_run=False,
+        compute_sample_logits=lambda hidden: runner.model.compute_logits(hidden),
+        dummy_sampler_run=lambda *args, **kwargs: False,
+    )
     runner.kvpp = MagicMock()
     runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
     runner.model = MagicMock()
@@ -216,8 +225,9 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft:
-        # Exercise real grammar masking, not merely a fourth None argument.
+    if with_grammar and with_draft and vllm_version_is("0.33.0"):
+        # 0.33.0 exposes the permissive-row mask as the fourth sampler argument;
+        # main feeds it through the scheduler/draft-token handler instead.
         invalid_drafts = runner.rejection_sampler.call_args.args[3]
         assert invalid_drafts.tolist() == [False, False, True]
 
@@ -281,7 +291,7 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
     execute_model_state (as the real forward does) for the hook to read."""
 
     def super_execute(scheduler_output, **kwargs):
-        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states, dp_sync=None, dp_sync_state=None)
         return "upstream-output"
 
     with (

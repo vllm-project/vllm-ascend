@@ -1,0 +1,145 @@
+name: Collect published image information
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+      targets_json:
+        required: true
+        type: string
+      expected_types_json:
+        required: true
+        type: string
+      obs_bucket:
+        required: false
+        type: string
+      obs_endpoint:
+        required: false
+        type: string
+      obs_region:
+        required: false
+        type: string
+      obs_prefix:
+        required: false
+        type: string
+        default: ci/build-info
+    secrets:
+      BUILD_INFO_OBS_AK:
+        required: false
+      BUILD_INFO_OBS_SK:
+        required: false
+
+jobs:
+  collect:
+    runs-on: linux-amd64-cpu-2-hk
+    env:
+      BUILD_INFO_WORK: build-info-work
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    defaults:
+      run:
+        shell: bash
+    concurrency:
+      group: build-info-obs-publish
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download previous complete report bundle
+        if: ${{ github.run_attempt > 1 }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: build-info-run-*
+          path: ${{ env.BUILD_INFO_WORK }}/previous-build-info-bundles
+      - name: Download published image reports
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          # Failed-job reruns keep successful reports from older attempts.
+          pattern: build-info-image-*
+          path: ${{ env.BUILD_INFO_WORK }}/build-info-images
+      - name: Download source commits
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: build-info-source-*
+          path: ${{ env.BUILD_INFO_WORK }}/build-info-sources
+      - name: Restore reports from previous complete attempts
+        if: ${{ github.run_attempt > 1 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_INFO_WORK/build-info-images"
+          for bundle in "$BUILD_INFO_WORK"/previous-build-info-bundles/build-info-run-*/reports; do
+            [ -d "$bundle" ] || continue
+            cp -R "$bundle/." "$BUILD_INFO_WORK/build-info-images/"
+          done
+      - name: Restore source commits from previous complete attempts
+        if: ${{ github.run_attempt > 1 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_INFO_WORK/build-info-sources"
+          for bundle in "$BUILD_INFO_WORK"/previous-build-info-bundles/build-info-run-*/sources; do
+            [ -d "$bundle" ] || continue
+            cp -R "$bundle/." "$BUILD_INFO_WORK/build-info-sources/"
+          done
+      - name: Assemble run information
+        env:
+          TARGETS_JSON: ${{ inputs.targets_json }}
+          EXPECTED_TYPES_JSON: ${{ inputs.expected_types_json }}
+          SOURCE_BRANCH: ${{ inputs.branch }}
+          OBS_BUCKET: ${{ inputs.obs_bucket }}
+          OBS_ENDPOINT: ${{ inputs.obs_endpoint }}
+          OBS_REGION: ${{ inputs.obs_region }}
+          OBS_PREFIX: ${{ inputs.obs_prefix }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.BUILD_INFO_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILD_INFO_OBS_SK }}
+        run: |
+          set -euo pipefail
+          REPORT_DIR="$BUILD_INFO_WORK/build-info-images"
+          OUTPUT_FILE="$BUILD_INFO_WORK/build-info/build-info.json"
+          if [ -n "$OBS_BUCKET" ] && [ -n "$OBS_ENDPOINT" ] && [ -n "$OBS_REGION" ]; then
+            python3 -m pip install esdk-obs-python --quiet
+          fi
+          python3 .github/workflows/scripts/collect_build_info.py \
+            --artifact-dir "$REPORT_DIR" \
+            --targets-json "$TARGETS_JSON" \
+            --expected-types-json "$EXPECTED_TYPES_JSON" \
+            --branch "$SOURCE_BRANCH" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --output "$OUTPUT_FILE"
+      - name: Bundle run information
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_INFO_WORK/build-info-bundle/reports" "$BUILD_INFO_WORK/build-info-bundle/sources"
+          cp -R "$BUILD_INFO_WORK/build-info-images/." "$BUILD_INFO_WORK/build-info-bundle/reports/"
+          cp -R "$BUILD_INFO_WORK/build-info-sources/." "$BUILD_INFO_WORK/build-info-bundle/sources/"
+          cp "$BUILD_INFO_WORK/build-info/build-info.json" "$BUILD_INFO_WORK/build-info-bundle/build-info.json"
+      - name: Upload run information
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-info-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.BUILD_INFO_WORK }}/build-info-bundle/
+          if-no-files-found: error
+      - name: Remove superseded build information artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const current = `build-info-run-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner, repo, run_id: context.runId, per_page: 100,
+            });
+            for (const artifact of artifacts) {
+              if (artifact.name.startsWith('build-info-image-') ||
+                  artifact.name.startsWith('build-info-source-') ||
+                  (artifact.name.startsWith('build-info-run-') && artifact.name !== current)) {
+                await github.rest.actions.deleteArtifact({ owner, repo, artifact_id: artifact.id });
+              }
+            }

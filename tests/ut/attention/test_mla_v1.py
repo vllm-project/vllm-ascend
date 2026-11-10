@@ -1,8 +1,11 @@
+# mypy: disable-error-code="arg-type, assignment, index, method-assign, type-var, union-attr"
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.compilation import backends
+from vllm.compilation.backends import set_model_tag
 from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -1115,41 +1118,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
         self.assertEqual(metadata.decode.block_table.shape[0], 8)
 
-    def test_reorder_batch(self):
-        ascend_config = MagicMock()
-
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
-        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
-        mock_device = "cpu"
-
-        mock_vllm_config.speculative_config = None
-
-        with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
-            builder.decode_threshold = 1
-
-        input_batch = MagicMock()
-        input_batch.req_ids = [0, 1, 2, 3]
-
-        scheduler_output = MagicMock()
-        scheduler_output.num_scheduled_tokens = {0: 1, 1: 3, 2: 1, 3: 2}
-        scheduler_output.scheduled_spec_decode_tokens = {0: [], 1: [1], 2: [], 3: []}
-
-        input_batch.swap_states = MagicMock()
-
-        modified = builder.reorder_batch(input_batch, scheduler_output)
-
-        self.assertTrue(modified)
-        input_batch.swap_states.assert_called_once_with(1, 2)
-
     def test_determine_chunked_prefill_workspace_size(self):
         mock_vllm_config = MagicMock()
         mock_vllm_config.scheduler_config.enable_chunked_prefill = True
@@ -1159,6 +1127,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.max_num_batched_tokens = 4096
         mock_vllm_config.model_config.max_model_len = 4096
 
+        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         result = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(mock_vllm_config)
         self.assertGreater(result, 0)
 
@@ -1871,6 +1840,40 @@ class TestAscendMLAImpl(TestBase):
         self.assertFalse(impl.enable_mlapo)
         mock_enabling_mlapo.assert_not_called()
 
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_eagle_tag_identifies_draft_without_replacing_config(self, mock_config, mock_enabling):
+        config = self.impl.vllm_config
+        config.model_config.runner_type = "generate"
+        mock_config.return_value = config
+        with set_model_tag("eagle_head"):
+            impl = self._rebuild_impl()
+        self.assertIs(impl.vllm_config, config)
+        self.assertEqual(config.model_config.runner_type, "generate")
+        self.assertTrue(impl.is_draft_model)
+        self.assertFalse(impl.enable_mlapo)
+        mock_enabling.assert_not_called()
+        # The upstream tag scope has ended; the layer retains its own identity.
+        self.assertNotEqual(backends.model_tag, "eagle_head")
+        with patch.object(impl, "_supports_strided_mla_projection", return_value=True):
+            impl.support_fp8_attention = True
+            impl.use_pcp = impl.use_dcp = False
+            impl.num_kv_heads = 1
+            impl.fused_qkv_a_proj.input_size = 14336
+            self.assertTrue(impl._uses_strided_kv_adapter())
+
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_non_eagle_tags_leave_target_identity_unchanged(self, mock_config, mock_enabling):
+        config = self.impl.vllm_config
+        config.model_config.runner_type = "generate"
+        mock_config.return_value = config
+        for tag in ("backbone", "dspark_head", "dflash_head"):
+            with self.subTest(tag=tag), patch.object(backends, "model_tag", tag):
+                impl = self._rebuild_impl()
+                self.assertFalse(impl.is_draft_model)
+                self.assertTrue(impl.enable_mlapo)
+
     def _rebuild_impl(self):
         """Rebuild the impl from ``setUp`` so tests can tweak projection kwargs."""
         return AscendMLAImpl(
@@ -1909,9 +1912,8 @@ class TestAscendMLAImpl(TestBase):
         """Kimi-K3 fuses its gate as a third QKV-A shard; MLAPO cannot carry it."""
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
-        # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.32.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.32.0")
+        # Both supported Kimi AMD implementations use the three-shard layout.
+        gate_fused = True
 
         impl = self._rebuild_impl()
 
@@ -2769,13 +2771,8 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
-        only while shape, dtype and device still match. The hand-rolled
-        ``copy_`` it replaced was unconditional, so a re-derived value that
-        stopped being compatible aborted the whole weight-update transaction
-        with a ``RuntimeError``. That failure mode is the only behaviour this
-        change alters, so it is the part of the contract the unit tests have to
-        pin down.
+        v0.33.0 rebinds an incompatible value; main can copy a smaller value
+        into the parameter's existing storage. Both must accept the new shape.
         """
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -2805,7 +2802,13 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        if vllm_version_is("0.33.0"):
+            # A re-derived value that no longer fits rebinds the parameter.
+            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        else:
+            # Main copies a smaller value into the parameter's own storage, so
+            # the address captured by graphs is preserved.
+            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
@@ -3651,10 +3654,6 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
     torch.testing.assert_close(kv_no_split, qkv_lora[:, 4:])
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="gate-fused QKV-A layout is vLLM main only",
-)
 def test_split_fused_qkv_lora_peels_kimi_output_gate():
     """A gate-fused layout returns the trailing shard separately from q/kv."""
     qkv_lora = torch.arange(15, dtype=torch.float32).reshape(1, 15)

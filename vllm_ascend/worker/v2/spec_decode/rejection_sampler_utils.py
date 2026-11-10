@@ -17,6 +17,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import Any, cast
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
@@ -343,12 +345,35 @@ def rejection_sample(
     use_entropy_verify: bool | None = None,
     posterior_threshold: float = 0.95,
     posterior_alpha: float = 0.4,
+    draft_logits_num_shards: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Upstream passes logits after applying sampling parameters. Resolve the
     # worker configuration here to keep its sampler and chunking flow unchanged.
     # An explicit flag bypasses configuration lookup for standalone callers.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
+    if vllm_version_is("0.33.0"):
+        draft_logits_row_mapping = None
+        if draft_logits_num_shards != 1:
+            # vLLM main (#63554) can shard the draft logits cache across TP ranks;
+            # the NPU kernels index it by request state, so reject sharding.
+            raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
+    else:
+        # Main passes a `DraftLogitsCache` (values plus an optional per-row
+        # mapping) in the same positional slot.
+        draft_logits_cache = cast(Any, draft_logits)
+        if draft_logits_cache is None:
+            draft_logits = None
+            draft_logits_row_mapping = None
+        elif isinstance(draft_logits_cache, torch.Tensor):
+            # Public callers (and the frozen one-card E2E) still pass the raw
+            # per-step tensor, which never carries a per-row mapping.
+            draft_logits_row_mapping = None
+        else:
+            draft_logits = draft_logits_cache.values
+            draft_logits_row_mapping = draft_logits_cache.row_mapping
+        if draft_logits_row_mapping is not None:
+            raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
     if fly_window_size > 0:
         raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
     if (
@@ -378,14 +403,8 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
 
-    # vLLM main renamed the `num_speculative_steps` argument of the logits-stats
-    # kernels to `num_logits` and moved bonus-token detection into
-    # `_is_bonus_logit`, which masks its look-ahead load with the total logit
-    # count. Passing `num_speculative_steps` there makes the kernels treat every
-    # logit after the first one as a bonus token and return early, leaving the
-    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
-    # `num_speculative_steps`.
-    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
+    # Both upstream kernels detect bonus rows using the total logit count.
+    stats_num_logits = num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -408,33 +427,63 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
-        target_local_argmax,
-        target_local_argmax.stride(0),
-        target_local_max,
-        target_local_max.stride(0),
-        target_local_sumexp,
-        target_local_sumexp.stride(0),
-        draft_local_max,
-        draft_local_max.stride(0),
-        draft_local_sumexp,
-        draft_local_sumexp.stride(0),
-        target_logits,
-        target_logits.stride(0),
-        draft_logits,
-        draft_logits.stride(0),
-        draft_logits.stride(1),
-        expanded_idx_mapping,
-        expanded_local_pos,
-        temperature,
-        vocab_size,
-        stats_num_logits,
-        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=has_draft_logits,
-        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
-        # bug for max-with-index reductions is fixed.
-        has_auto_blockify_blacklist_op=True,
-    )
+    if vllm_version_is("0.33.0"):
+        _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
+            target_local_argmax,
+            target_local_argmax.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            target_logits,
+            target_logits.stride(0),
+            draft_logits,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            stats_num_logits,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+            # bug for max-with-index reductions is fixed.
+            has_auto_blockify_blacklist_op=True,
+        )
+    else:
+        _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
+            target_local_argmax,
+            target_local_argmax.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            target_logits,
+            target_logits.stride(0),
+            draft_logits,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            draft_logits_row_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            stats_num_logits,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+            # bug for max-with-index reductions is fixed.
+            has_auto_blockify_blacklist_op=True,
+        )
 
     entropy_partials = None
     # With alpha=0 the threshold is constant; no vocabulary scan is needed.
@@ -460,60 +509,117 @@ def rejection_sample(
 
     if use_block_verification:
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        _compute_cumulative_log_p_kernel[(num_reqs,)](
-            cumulative_log_p,
-            target_logits,
-            target_logits.stride(0),
-            target_local_max,
-            target_local_max.stride(0),
-            target_local_sumexp,
-            target_local_sumexp.stride(0),
-            draft_sampled,
-            draft_logits,
-            draft_logits.stride(0),
-            draft_logits.stride(1),
-            draft_local_max,
-            draft_local_max.stride(0),
-            draft_local_sumexp,
-            draft_local_sumexp.stride(0),
-            cu_num_logits,
-            idx_mapping,
-            temperature,
-            vocab_num_blocks,
-            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
-            HAS_DRAFT_LOGITS=has_draft_logits,
-            num_warps=1,
-        )
+        if vllm_version_is("0.33.0"):
+            _compute_cumulative_log_p_kernel[(num_reqs,)](
+                cumulative_log_p,
+                target_logits,
+                target_logits.stride(0),
+                target_local_max,
+                target_local_max.stride(0),
+                target_local_sumexp,
+                target_local_sumexp.stride(0),
+                draft_sampled,
+                draft_logits,
+                draft_logits.stride(0),
+                draft_logits.stride(1),
+                draft_local_max,
+                draft_local_max.stride(0),
+                draft_local_sumexp,
+                draft_local_sumexp.stride(0),
+                cu_num_logits,
+                idx_mapping,
+                temperature,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                HAS_DRAFT_LOGITS=has_draft_logits,
+                num_warps=1,
+            )
+        else:
+            _compute_cumulative_log_p_kernel[(num_reqs,)](
+                cumulative_log_p,
+                target_logits,
+                target_logits.stride(0),
+                target_local_max,
+                target_local_max.stride(0),
+                target_local_sumexp,
+                target_local_sumexp.stride(0),
+                draft_sampled,
+                draft_logits,
+                draft_logits.stride(0),
+                draft_logits.stride(1),
+                draft_logits_row_mapping,
+                draft_local_max,
+                draft_local_max.stride(0),
+                draft_local_sumexp,
+                draft_local_sumexp.stride(0),
+                cu_num_logits,
+                idx_mapping,
+                temperature,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                HAS_DRAFT_LOGITS=has_draft_logits,
+                num_warps=1,
+            )
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
             if num_logits > 1:
-                _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
-                    local_residual_mass,
-                    local_residual_mass.stride(0),
-                    cumulative_log_p,
-                    target_logits,
-                    target_logits.stride(0),
-                    target_local_max,
-                    target_local_max.stride(0),
-                    target_local_sumexp,
-                    target_local_sumexp.stride(0),
-                    draft_logits,
-                    draft_logits.stride(0),
-                    draft_logits.stride(1),
-                    draft_local_max,
-                    draft_local_max.stride(0),
-                    draft_local_sumexp,
-                    draft_local_sumexp.stride(0),
-                    draft_sampled,
-                    expanded_idx_mapping,
-                    expanded_local_pos,
-                    temperature,
-                    vocab_size,
-                    stats_num_logits,
-                    vocab_num_blocks,
-                    BLOCK_SIZE=VOCAB_BLOCK_SIZE,
-                    PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
-                )
+                if vllm_version_is("0.33.0"):
+                    _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                        local_residual_mass,
+                        local_residual_mass.stride(0),
+                        cumulative_log_p,
+                        target_logits,
+                        target_logits.stride(0),
+                        target_local_max,
+                        target_local_max.stride(0),
+                        target_local_sumexp,
+                        target_local_sumexp.stride(0),
+                        draft_logits,
+                        draft_logits.stride(0),
+                        draft_logits.stride(1),
+                        draft_local_max,
+                        draft_local_max.stride(0),
+                        draft_local_sumexp,
+                        draft_local_sumexp.stride(0),
+                        draft_sampled,
+                        expanded_idx_mapping,
+                        expanded_local_pos,
+                        temperature,
+                        vocab_size,
+                        stats_num_logits,
+                        vocab_num_blocks,
+                        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+                        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                    )
+                else:
+                    _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                        local_residual_mass,
+                        local_residual_mass.stride(0),
+                        cumulative_log_p,
+                        target_logits,
+                        target_logits.stride(0),
+                        target_local_max,
+                        target_local_max.stride(0),
+                        target_local_sumexp,
+                        target_local_sumexp.stride(0),
+                        draft_logits,
+                        draft_logits.stride(0),
+                        draft_logits.stride(1),
+                        draft_logits_row_mapping,
+                        draft_local_max,
+                        draft_local_max.stride(0),
+                        draft_local_sumexp,
+                        draft_local_sumexp.stride(0),
+                        draft_sampled,
+                        expanded_idx_mapping,
+                        expanded_local_pos,
+                        temperature,
+                        vocab_size,
+                        stats_num_logits,
+                        vocab_num_blocks,
+                        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+                        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                    )
         else:
             local_residual_mass = None
     else:

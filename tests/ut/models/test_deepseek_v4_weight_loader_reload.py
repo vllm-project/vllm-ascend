@@ -57,7 +57,7 @@ class _SinkOnlyModel(nn.Module):
         self.model = nn.Module()
         self.model.layers = nn.ModuleDict({str(layer_idx): layer})
         self.model.num_dspark_layers = 2
-        self.model.get_expert_mapping = lambda: []
+        self.model.get_expert_mapping = lambda *, num_redundant_experts=0: []
         self.config = SimpleNamespace(
             num_attention_heads=TOTAL_HEADS,
             num_hidden_layers=TARGET_LAYER_IDX,
