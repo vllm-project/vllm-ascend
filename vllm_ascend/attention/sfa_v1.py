@@ -329,6 +329,52 @@ class SparseMLAMetadataState:
 # npu_transpose_batchmatmul rejects operand dimensions >= 65536
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
+# The fused op's tiling follows the token count of the current launch, while its
+# torch.bmm fallback rounds differently, so picking the path from the *packed*
+# batch size makes a row's result depend on how many unrelated rows share the
+# step.  Keep every launch on the fused op and on the same operand bound the old
+# guard already enforced, so a token count that fits in one launch today keeps
+# exactly one launch with unchanged arguments, and larger packed batches are cut
+# on a fixed grid instead of switching kernels.  The split is sound because the
+# fused op is row independent: a row's output does not depend on the launch's M
+# or on the other rows in it (measured bitwise on 910_93 / torch_npu 2.10.0.post4
+# for M from 8192 to 66048).
+TRANSPOSE_BMM_CHUNK = TRANSPOSE_BMM_MAX_SUPPORTED_DIM - 1
+
+
+def _transpose_batchmatmul_on_grid(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    chunk: int = TRANSPOSE_BMM_CHUNK,
+) -> torch.Tensor:
+    """Fused ``npu_transpose_batchmatmul`` on a fixed token-dim grid.
+
+    Args:
+        x: ``(num_tokens, num_heads, qk_nope_head_dim)``.
+        w: ``(num_heads, qk_nope_head_dim, kv_lora_rank)``.
+        chunk: fixed number of tokens per launch, ``<= TRANSPOSE_BMM_MAX_SUPPORTED_DIM``.
+
+    Returns:
+        ``(num_tokens, num_heads, kv_lora_rank)``.
+
+    A launch carries at most ``chunk`` tokens, so the token dim never crosses the
+    operator limit and never depends on the batch composition: the same row gets
+    the same kernel and the same tiling whether it is served alone or packed with
+    other requests.
+    """
+    assert 0 < chunk <= TRANSPOSE_BMM_MAX_SUPPORTED_DIM, chunk
+    perm = {"perm_x1": (1, 0, 2), "perm_x2": (0, 1, 2), "perm_y": (1, 0, 2)}
+    num_tokens = x.shape[0]
+    if num_tokens <= chunk:
+        return torch_npu.npu_transpose_batchmatmul(x, w, **perm)
+    return torch.cat(
+        [
+            torch_npu.npu_transpose_batchmatmul(x[start : start + chunk], w, **perm)
+            for start in range(0, num_tokens, chunk)
+        ],
+        dim=0,
+    )
+
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
     for config in configs:
@@ -1346,23 +1392,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
-        if (
-            q_nope.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch_npu, "npu_transpose_batchmatmul")
-            and q_nope.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
-        ):
+        if q_nope.dtype in [torch.float16, torch.bfloat16] and hasattr(torch_npu, "npu_transpose_batchmatmul"):
             # Convert from (B, N, P) to (N, B, P) and multiply
-            # (N, B, P) x (N, P, L) -> (B, N, L)
-            ql_nope = torch_npu.npu_transpose_batchmatmul(
-                q_nope,
-                self.W_UK_T,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-            )
+            # (N, B, P) x (N, P, L) -> (B, N, L).
+            # Fixed token grid: a row must not change kernel or tiling just
+            # because the packed batch grew past a threshold.
+            ql_nope = _transpose_batchmatmul_on_grid(q_nope, self.W_UK_T)
         else:
-            # Fallback for torch_npu builds without the fused op, unsupported
-            # dtypes, or a token dim beyond the operand limit.
+            # Fallback for torch_npu builds without the fused op or dtypes it
+            # does not support.
             # Convert from (B, N, P) to (N, B, P)
             q_nope = q_nope.transpose(0, 1)
             # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
