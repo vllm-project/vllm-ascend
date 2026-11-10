@@ -1,4 +1,0 @@
-pr: 20740
-entries:
-  - category: bugfix
-    text: Fixed packed NPU IPC weight updates failing to release producer staging buffers after multi-chunk transfers.
