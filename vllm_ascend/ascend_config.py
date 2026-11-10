@@ -304,6 +304,21 @@ class EplbConfig:
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
+    @field_validator(
+        "expert_heat_collection_interval",
+        "algorithm_execution_interval",
+        "num_redundant_experts",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_for_int_fields(cls, value: Any) -> Any:
+        # bool is an int subclass and pydantic coerces True/False to 1/0 before
+        # the after-validator runs, so reject booleans up front for these
+        # configuration knobs (mirrors StairConfig._reject_bool).
+        if isinstance(value, bool):
+            raise ValueError("EPLB numeric fields must not be booleans")
+        return value
+
     @model_validator(mode="after")
     def _validate_config(self):
         if self.expert_map_path is not None:

@@ -352,6 +352,10 @@ class TestAscendConfig(TestBase):
                     EplbConfig(**{key: 0})
                 with self.assertRaisesRegex(ValueError, f"{key} must be greater than 0"):
                     EplbConfig(**{key: -1})
+                # bool is an int subclass; pydantic would coerce True->1 silently,
+                # so reject it up front (mirrors StairConfig).
+                with self.assertRaisesRegex(ValueError, "must not be booleans"):
+                    EplbConfig(**{key: True})
 
     def test_eplb_interval_accepts_positive(self):
         EplbConfig(expert_heat_collection_interval=1, algorithm_execution_interval=1)
@@ -362,9 +366,11 @@ class TestAscendConfig(TestBase):
         self.assertEqual(EplbConfig(num_redundant_experts=0).num_redundant_experts, 0)
         self.assertEqual(EplbConfig(num_redundant_experts=4).num_redundant_experts, 4)
 
-    def test_eplb_num_redundant_experts_rejects_negative(self):
+    def test_eplb_num_redundant_experts_rejects_negative_and_bool(self):
         with self.assertRaisesRegex(ValueError, "num_redundant_experts must be non-negative"):
             EplbConfig(num_redundant_experts=-1)
+        with self.assertRaisesRegex(ValueError, "must not be booleans"):
+            EplbConfig(num_redundant_experts=True)
 
     def test_eplb_config_rejects_algorithm_selection(self):
         for algorithm in ("default", "stair"):
