@@ -182,9 +182,12 @@ def make_impl(query, *, num_kv_heads=1, window=None, layout="PA_BBND", sinks=Non
 @pytest.fixture
 def select_flash_attn(monkeypatch):
     from vllm_ascend import platform
-    from vllm_ascend.device.hardware_profile import AttentionBackendFamily
+    from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability
 
-    profile = SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD)
+    profile = SimpleNamespace(
+        supports=lambda capability: capability is HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
+        attention_backend_family=AttentionBackendFamily.STANDARD,
+    )
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
 
@@ -231,9 +234,10 @@ def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_at
     config = dflash2_config
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
+    supports = profile.supports
     profile.supports = lambda _: False
     assert not select(config, selector)
-    profile.supports = lambda _: True
+    profile.supports = supports
     config.speculative_config = None
     config.model_config = None
     assert not select(config, selector)
@@ -258,6 +262,143 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     dflash2_config.speculative_config.draft_sample_method = sampling
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(dflash2_config, selector)
+
+
+@pytest.fixture
+def dflash2_fa3_runtime(monkeypatch, dflash2_config):
+    from vllm_ascend import platform
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    config = dflash2_config
+    config.use_v2_model_runner = True
+    config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    config.cache_config = SimpleNamespace(cache_dtype="auto")
+    config.quant_config = None
+    config.kv_transfer_config = None
+    config.speculative_config.enable_adaptive_verification = False
+    ops = SimpleNamespace(flash_attn_with_kvcache=Mock(), get_scheduler_metadata=Mock())
+    runtime = SimpleNamespace(config=config, hardware="A2", package_available=True, ops=ops)
+    monkeypatch.setattr(
+        platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType[runtime.hardware])
+    )
+    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", "dflash_head")
+    find_spec = platform.util.find_spec
+    monkeypatch.setattr(
+        platform.util,
+        "find_spec",
+        lambda name: (
+            (object() if runtime.package_available else None) if name == "flash_attn_npu_3" else find_spec(name)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", ops)
+    runtime.selector = AttentionSelectorConfig(
+        head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto"
+    )
+    runtime.select = lambda: platform.NPUPlatform._select_attn_backend_cls(runtime.selector)
+    return runtime
+
+
+@pytest.mark.parametrize("hardware", ["A2", "A3"])
+@pytest.mark.parametrize("eager", [False, True])
+@pytest.mark.parametrize("target_model_type", ["glm_moe_dsa", "qwen3"])
+@pytest.mark.parametrize("head_size", [128, 192])
+def test_a2_a3_dflash2_uses_device_length_fa3(dflash2_fa3_runtime, hardware, eager, target_model_type, head_size):
+    runtime = dflash2_fa3_runtime
+    runtime.hardware = hardware
+    runtime.config.speculative_config.enforce_eager = eager
+    runtime.config.speculative_config.target_model_config.hf_text_config.model_type = target_model_type
+    runtime.selector = runtime.selector._replace(head_size=head_size)
+    # A quantized target does not describe the draft's unquantized cache.
+    runtime.config.cache_config.cache_dtype = "fp8"
+    assert runtime.select() == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+
+
+@pytest.mark.parametrize(
+    "query_dtype,cache_dtype,selected",
+    [
+        (torch.float16, "float16", True),
+        (torch.bfloat16, "bfloat16", True),
+        (torch.float16, "bfloat16", False),
+        (torch.bfloat16, "float16", False),
+    ],
+)
+def test_a2_a3_fa3_requires_matching_q_and_kv_dtype(dflash2_fa3_runtime, query_dtype, cache_dtype, selected):
+    runtime = dflash2_fa3_runtime
+    runtime.selector = runtime.selector._replace(dtype=query_dtype, kv_cache_dtype=cache_dtype)
+    backend = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+    assert (runtime.select() == backend) is selected
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "target_tag",
+        "selector_tag",
+        "v1",
+        "method",
+        "draft_architecture",
+        "missing_draft",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "adaptive",
+        "package_missing",
+        "scheduler_api_missing",
+        "attention_api_missing",
+        "use_mla",
+        "use_pcp",
+        "use_dcp",
+        "use_mm_prefix",
+        "use_per_head_quant_scales",
+        "use_batch_invariant",
+        "use_adaptive_verification",
+        "use_rswa",
+        "has_sink",
+        "attn_type",
+        "dtype",
+        "kv_cache_dtype",
+        "head_size",
+    ],
+)
+def test_a2_a3_fa3_preserves_unsupported_paths(monkeypatch, dflash2_fa3_runtime, fault):
+    runtime = dflash2_fa3_runtime
+    spec = runtime.config.speculative_config
+    if fault.endswith("tag"):
+        monkeypatch.setattr(
+            "vllm.compilation.backends.model_tag", "backbone" if fault == "target_tag" else "dflash2_candidate_selector"
+        )
+    elif fault == "v1":
+        runtime.config.use_v2_model_runner = False
+    elif fault == "method":
+        spec.method = "dspark"
+    elif fault == "draft_architecture":
+        spec.draft_model_config.architectures = ["Qwen3DFlashForCausalLM"]
+    elif fault == "missing_draft":
+        spec.draft_model_config = None
+    elif fault.endswith("parallel_size"):
+        setattr(runtime.config.parallel_config, fault, 2)
+    elif fault == "adaptive":
+        spec.enable_adaptive_verification = True
+    elif fault == "package_missing":
+        runtime.package_available = False
+    elif fault == "scheduler_api_missing":
+        runtime.ops.get_scheduler_metadata = None
+    elif fault == "attention_api_missing":
+        runtime.ops.flash_attn_with_kvcache = None
+    else:
+        value = {
+            "attn_type": AttentionType.ENCODER,
+            "dtype": torch.float32,
+            "kv_cache_dtype": "fp8",
+            "head_size": 512,
+        }.get(fault, True)
+        runtime.selector = runtime.selector._replace(**{fault: value})
+    assert runtime.select() != "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
 
 
 @pytest.mark.parametrize(

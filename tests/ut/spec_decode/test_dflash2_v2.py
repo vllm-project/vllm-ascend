@@ -18,6 +18,7 @@
 #
 """Unit tests for the V2 DFlash2 speculator (worker/v2/spec_decode/dflash2)."""
 
+import sys
 from contextlib import nullcontext
 from dataclasses import make_dataclass
 from types import SimpleNamespace
@@ -60,7 +61,8 @@ REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not
 
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
-def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail):
+@pytest.mark.parametrize("hardware", ["A2", "A3", "A5"])
+def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail, hardware):
     from vllm.compilation import backends
     from vllm.config import AttentionConfig, CacheConfig, set_current_vllm_config
     from vllm.v1.attention import selector as selector_module
@@ -68,7 +70,8 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     from vllm.v1.worker.gpu.spec_decode.dflash import utils as loader
 
     from vllm_ascend import platform
-    from vllm_ascend.device.hardware_profile import AttentionBackendFamily
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
 
     target_config = SimpleNamespace(runner_type="generate", hf_text_config=SimpleNamespace(model_type="glm_moe_dsa"))
     draft_config = SimpleNamespace(
@@ -91,7 +94,11 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
         "attention_config": AttentionConfig(),
         "cache_config": CacheConfig(cache_dtype="fp8"),
         "load_config": object(),
-        "parallel_config": SimpleNamespace(pipeline_parallel_size=1),
+        "parallel_config": SimpleNamespace(
+            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        "quant_config": None,
+        "kv_transfer_config": None,
     }
     config_cls = make_dataclass("LoaderConfig", [(name, object) for name in fields])
     config = config_cls(**fields)
@@ -104,7 +111,13 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     monkeypatch.setattr(
         platform,
         "get_current_hardware_profile",
-        lambda: SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD),
+        lambda: get_hardware_profile(AscendDeviceType[hardware]),
+    )
+    optional_ops = SimpleNamespace(flash_attn_with_kvcache=MagicMock(), get_scheduler_metadata=MagicMock())
+    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", optional_ops)
+    find_spec = platform.util.find_spec
+    monkeypatch.setattr(
+        platform.util, "find_spec", lambda name: object() if name == "flash_attn_npu_3" else find_spec(name)
     )
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
     monkeypatch.setattr("vllm.platforms.current_platform", platform.NPUPlatform)
@@ -125,7 +138,8 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
             use_mla=False, use_sparse=False, kv_cache_dtype="auto", use_non_causal=not causal
         )
         with set_current_vllm_config(vllm_config):
-            assert select(None, selector) == "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+            module = "fa_v1" if hardware == "A5" else "flash_attention_v3"
+            assert select(None, selector) == f"vllm_ascend.attention.{module}.AscendFlashAttentionBackend"
         if fail:
             raise RuntimeError("draft load failed")
         return draft_model
@@ -151,9 +165,10 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
 
 
 @pytest.mark.parametrize("causal", [False, True])
-def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeypatch, causal):
-    import sys
-
+@pytest.mark.parametrize(
+    "backend,cg_mode", [("cann", CUDAGraphMode.NONE), ("fa3", CUDAGraphMode.NONE), ("fa3", CUDAGraphMode.FULL)]
+)
+def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeypatch, causal, backend, cg_mode):
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
@@ -161,11 +176,41 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
 
     num_query = 6
     layer_names = [f"draft.layers.{i}" for i in range(6)]
-    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
-    builder.model_config = SimpleNamespace(runner_type="generate")
-    builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: None)
-    group = SimpleNamespace(layer_names=layer_names, get_metadata_builder=lambda _: builder)
     kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    ops = SimpleNamespace(
+        flash_attn_metadata=MagicMock(side_effect=lambda *_args, **_kwargs: torch.empty(16)),
+        flash_attn=MagicMock(side_effect=lambda query, *_args, **_kwargs: (query, None)),
+        get_scheduler_metadata=MagicMock(side_effect=lambda **_kwargs: torch.empty(16, dtype=torch.int32)),
+        flash_attn_with_kvcache=MagicMock(side_effect=lambda query, *_args, **_kwargs: query),
+    )
+    if backend == "cann":
+        monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+        builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
+        builder.model_config = SimpleNamespace(runner_type="generate")
+        builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: None)
+        impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
+        impl.num_heads, impl.num_kv_heads, impl.sliding_window = 8, 1, None
+        impl.use_bnsd_kv_cache, impl.sinks, impl.scale = True, None, 128**-0.5
+        impl.key_cache = impl.value_cache = torch.empty(0)
+    else:
+        from vllm_ascend.attention import flash_attention_v3
+
+        monkeypatch.setitem(sys.modules, "flash_attn_npu_3", ops)
+        impl = flash_attention_v3.AscendFlashAttentionImpl(8, 128, 128**-0.5, num_kv_heads=1)
+        config = SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=cg_mode,
+                # DFlash rounds these target buckets to query-width multiples.
+                cudagraph_capture_sizes=[8, 16],
+                static_forward_context={name: SimpleNamespace(impl=impl) for name in layer_names},
+            ),
+            scheduler_config=SimpleNamespace(max_num_seqs=4),
+            speculative_config=SimpleNamespace(enforce_eager=cg_mode == CUDAGraphMode.NONE),
+        )
+        builder = flash_attention_v3.AscendFlashAttentionMetadataBuilder(
+            kv_spec, layer_names, config, torch.device("cpu")
+        )
+    group = SimpleNamespace(layer_names=layer_names, get_metadata_builder=lambda _: builder)
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
     if vllm_version_is("0.32.0"):
@@ -191,20 +236,19 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         input_block_tables=[torch.zeros(4, 8, dtype=torch.int32)],
         slot_mappings=torch.arange(4 * num_query, dtype=torch.int32).view(1, -1),
     )
-    ops = SimpleNamespace(
-        flash_attn_metadata=MagicMock(side_effect=lambda *_args, **_kwargs: torch.empty(16)),
-        flash_attn=MagicMock(side_effect=lambda query, *_args, **_kwargs: (query, None)),
-    )
-    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
-    impl.num_heads, impl.num_kv_heads, impl.sliding_window = 8, 1, None
-    impl.use_bnsd_kv_cache, impl.sinks, impl.scale = True, None, 128**-0.5
-    impl.key_cache = impl.value_cache = torch.empty(0)
     upper_bounds = torch.tensor([110, 210, 0, 0], dtype=torch.int32)
     previous = None
+    scheduler_addresses = {}
+    layer = SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0)
     # Reuse buffer addresses while requests are reordered, rejected and removed.
     for step, (lengths, order, rejected, padded) in enumerate(
-        [([100, 200], [0, 1], [0, 2], 3), ([210, 110], [1, 0], [3, 1], 2), ([220], [1], [4], 2)], start=1
+        [
+            ([100, 200], [0, 1], [0, 2], 3),
+            ([210, 110], [1, 0], [3, 1], 2),
+            ([220], [1], [4], 2),
+            ([230, 120], [1, 0], [2, 1], 2),
+        ],
+        start=1,
     ):
         num_reqs = len(lengths)
         upper_bounds.zero_()
@@ -217,7 +261,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         boundaries.fill_(num_reqs * num_query)
         boundaries[: num_reqs + 1].copy_(torch.arange(num_reqs + 1, dtype=torch.int32) * num_query)
         speculator.block_tables.input_block_tables[0][:num_reqs, 0] = torch.tensor(order, dtype=torch.int32)
-        desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.NONE, num_tokens=padded * num_query, num_reqs=padded)
+        desc = BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=padded * num_query, num_reqs=padded)
 
         def forbid_host_lengths(*_args, **_kwargs):
             raise AssertionError("exact draft lengths must remain on device")
@@ -239,19 +283,40 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
             output = torch.empty_like(query)
             for name in layer_names:
                 assert metadata_by_layer[name] is metadata
-                impl.forward_impl(query, None, None, None, metadata, output)
+                if backend == "cann":
+                    impl.forward_impl(query, None, None, None, metadata, output)
+                else:
+                    impl.forward(layer, query, None, None, (torch.empty(0), torch.empty(0)), metadata, output)
         assert metadata is not previous
         previous = metadata
-        assert metadata.num_actual_tokens == num_reqs * num_query
+        assert metadata.num_actual_tokens == (padded if cg_mode == CUDAGraphMode.FULL else num_reqs) * num_query
         assert metadata.causal is causal
-        assert metadata.seq_lens_gpu.data_ptr() == seq_lens.data_ptr()
-        assert ops.flash_attn_metadata.call_count == step
-        assert ops.flash_attn.call_count == step * len(layer_names)
-        attrs = ops.flash_attn_metadata.call_args.kwargs
-        expected_lengths = torch.ones(padded, dtype=torch.int32)
-        expected_lengths[:num_reqs] = exact_lengths
-        torch.testing.assert_close(attrs["seqused_kv"], expected_lengths)
-        torch.testing.assert_close(attrs["cu_seqlens_q"], boundaries[: padded + 1])
+        if backend == "cann":
+            assert metadata.seq_lens_gpu.data_ptr() == seq_lens.data_ptr()
+            assert ops.flash_attn_metadata.call_count == step
+            assert ops.flash_attn.call_count == step * len(layer_names)
+            attrs = ops.flash_attn_metadata.call_args.kwargs
+            expected_lengths = torch.ones(padded, dtype=torch.int32)
+            expected_lengths[:num_reqs] = exact_lengths
+            torch.testing.assert_close(attrs["seqused_kv"], expected_lengths)
+            torch.testing.assert_close(attrs["cu_seqlens_q"], boundaries[: padded + 1])
+        else:
+            assert metadata.seq_lens.data_ptr() == seq_lens.data_ptr()
+            assert ops.get_scheduler_metadata.call_count == step
+            assert ops.flash_attn_with_kvcache.call_count == step * len(layer_names)
+            attrs = ops.get_scheduler_metadata.call_args.kwargs
+            assert attrs["batch_size"] == num_reqs
+            torch.testing.assert_close(attrs["cache_seqlens"], exact_lengths)
+            torch.testing.assert_close(attrs["cu_seqlens_q"], boundaries[: num_reqs + 1])
+            assert attrs["max_seqlen_q"] == num_query
+            assert ops.flash_attn_with_kvcache.call_args.args[0] is query
+            forward_attrs = ops.flash_attn_with_kvcache.call_args.kwargs
+            assert forward_attrs["cache_seqlens"].data_ptr() == seq_lens.data_ptr()
+            torch.testing.assert_close(forward_attrs["cu_seqlens_q"], boundaries[: num_reqs + 1])
+            assert forward_attrs["max_seqlen_q"] == num_query
+            address = forward_attrs["scheduler_metadata"].data_ptr()
+            if cg_mode == CUDAGraphMode.FULL:
+                assert scheduler_addresses.setdefault(padded, address) == address
         torch.testing.assert_close(metadata.block_tables[:num_reqs, 0], torch.tensor(order, dtype=torch.int32))
 
 

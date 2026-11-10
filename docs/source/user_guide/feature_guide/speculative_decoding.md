@@ -387,6 +387,43 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+6. **A2/A3 device-side draft lengths**: on model runner V2, installing the
+   optional `flash_attn_npu` distribution exposing `flash_attn_npu_3` with the
+   `get_scheduler_metadata` and `flash_attn_with_kvcache` APIs (the 0.4.2.post2
+   scheduler ABI, also available in 0.5.0) enables the device-length FA3
+   backend for compatible DFlash2 draft layers. This is a
+   different package from the training-consistency `flash_attn_npu_v3` backend.
+   It consumes exact device lengths after rejection without the draft
+   attention builder's `seq_lens.tolist()` synchronization. Identical layers
+   share device tiling, refreshed before ACL graph replay at stable addresses.
+   Queries use packed TND layout with device query offsets. With
+   `flash_attn_npu` 0.5.0, non-local paged attention at KV capacities of 1024
+   tokens or more still reads lengths on the host inside forward and cannot
+   be graph-captured. For short draft queries, a sliding window smaller than
+   the page-table token capacity avoids that branch; a window covering the
+   entire capacity does not.
+
+   Selection requires FP16/BF16 queries, draft KV with the same dtype, head
+   sizes up to 256, and PP/PCP/DCP sizes of 1. Causal and non-causal sliding windows
+   are preserved. Missing APIs, attention sinks, adaptive verification,
+   multimodal prefixes, batch invariance, and unsupported configurations
+   retain the existing backend. The target backend is selected independently;
+   any CPU length synchronization required by the target still applies.
+   With a Qwen3.5-architecture target (including Qwen3.8) using the standard
+   FIA and fused GDN backends, the FA3 DFlash2 path also skips the runner's
+   post-sampling length D2H snapshot and its next-step Event wait. Exact
+   rejection-corrected lengths remain on device; CPU lengths remain upper
+   bounds. This requires PP/PCP/DCP and KV parallel sizes of 1, without KV
+   transfer, sparse KV offload, or adaptive verification. The target FIA
+   builder's own length `tolist()` and asynchronous output completion events
+   are unchanged.
+   A5 retains its existing CANN path. Check the backend's numerical and graph
+   replay behavior on A2/A3 with:
+
+    ```shell
+    pytest -sv tests/e2e/pull_request/one_card/test_dflash2_fa3_precision.py
+    ```
+
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate

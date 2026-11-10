@@ -43,6 +43,50 @@ def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monke
     manager.speculator.build_draft_attn_metadatas.assert_not_called()
 
 
+def test_fa3_graph_replay_refreshes_device_tiling_before_replay(monkeypatch):
+    from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as FA3Backend
+
+    events = []
+    metadata, result = object(), object()
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=18, num_reqs=3)
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+
+    def build_metadata(num_reqs, upper_bound):
+        assert num_reqs == desc.num_reqs
+        assert upper_bound is manager.speculator.input_batch.seq_lens_cpu_upper_bound
+        events.append("tiling")
+        return [metadata]
+
+    manager.speculator = SimpleNamespace(
+        attn_backends={"draft.0": FA3Backend},
+        input_batch=SimpleNamespace(seq_lens_cpu_upper_bound=torch.tensor([128, 256])),
+        build_draft_attn_metadatas=build_metadata,
+        dp_size=1,
+        model_state=SimpleNamespace(attn_metadata={}),
+        speculative_config=object(),
+    )
+    manager.update_stream = SimpleNamespace(wait_stream=lambda _: events.append("wait"))
+    manager.vllm_config = object()
+    monkeypatch.setattr(aclgraph_module, "_EXTRA_CTX", SimpleNamespace())
+    monkeypatch.setattr(aclgraph_module, "set_forward_context", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(aclgraph_module, "get_forward_context", lambda: object())
+    update = MagicMock()
+    monkeypatch.setattr(aclgraph_module, "update_full_graph_params", update)
+
+    def replay(self, batch_desc):
+        assert batch_desc is desc
+        assert events == ["tiling", "wait"]
+        events.append("replay")
+        return result
+
+    monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    assert manager.run_fullgraph(desc) is result
+    assert events == ["tiling", "wait", "replay"]
+    update.assert_called_once()
+    assert update.call_args.args[0] is FA3Backend
+    assert update.call_args.kwargs["draft_attn_metadatas"] == [metadata]
+
+
 def _speculator(**attributes):
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     speculator.attn_architecture = None

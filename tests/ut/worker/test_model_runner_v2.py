@@ -26,7 +26,9 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -1980,6 +1982,94 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups():
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
+def _qwen_dflash2_device_length_runner():
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    runner, output, batch = _device_length_runner()
+    runner.model_config.architecture = "Qwen3_5ForConditionalGeneration"
+    runner.model_config.hf_text_config.model_type = "qwen3_5_text"
+    runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.speculative_config.parallel_drafting = True
+    runner.speculative_config.enable_adaptive_verification = False
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendFA3Backend})
+    runner.attn_groups = [
+        [SimpleNamespace(backend=backend)]
+        for backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend, AscendFA3Backend)
+    ]
+    return runner, output, batch
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        None,
+        "no_draft_backends",
+        "mixed_draft_backends",
+        "no_target_groups",
+        "uninitialized_target",
+        "target_backend",
+        "no_gdn",
+        "model_state",
+        "parallel_drafting",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kvpp",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(unsupported):
+    runner, output, batch = _qwen_dflash2_device_length_runner()
+    if unsupported == "no_draft_backends":
+        del runner.speculator.attn_backends
+    elif unsupported == "mixed_draft_backends":
+        runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
+    elif unsupported == "no_target_groups":
+        runner.attn_groups = []
+    elif unsupported == "uninitialized_target":
+        del runner.attn_groups
+    elif unsupported == "target_backend":
+        runner.attn_groups[0][0].backend = AscendMLABackend
+    elif unsupported == "no_gdn":
+        runner.attn_groups[1][0].backend = AscendAttentionBackend
+    elif unsupported == "model_state":
+        runner.model_state = object()
+    elif unsupported == "parallel_drafting":
+        runner.speculative_config.parallel_drafting = False
+    elif unsupported and unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kvpp":
+        runner.ascend_config.kvpp_config.size = 2
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    eligible = unsupported is None
+    assert runner._can_skip_spec_cpu_length_sync() is eligible
+    runner.num_computed_tokens_stream = Mock()
+    with (
+        patch.object(GPUModelRunner, "postprocess_sampled") as update_device,
+        patch("torch.cuda.current_stream"),
+        patch("torch.npu.stream", return_value=nullcontext()),
+    ):
+        runner.postprocess_sampled(None, None, 2, 1)
+    update_device.assert_called_once()
+    runner._update_seq_lens_cpu(output, batch.req_ids)
+    assert runner.num_computed_tokens_stream.wait_stream.call_count == int(not eligible)
+    assert runner.num_computed_tokens_event.record.call_count == int(not eligible)
+    assert runner.num_computed_tokens_event.synchronize.call_count == int(not eligible)
+
+
 @pytest.mark.parametrize(
     "unsupported",
     ["no_spec_config", "no_speculator", "method", "no_draft_config", "draft_arch", "target_arch"],
@@ -2195,10 +2285,12 @@ def test_glm_mla_dspark_fallback_copies_and_waits():
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark"])
+@pytest.mark.parametrize("draft", ["dflash", "qwen_dflash2", "m3_dspark", "glm_dspark", "glm_mla_dspark"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
-    if draft == "glm_dspark":
+    if draft == "qwen_dflash2":
+        runner, output, _ = _qwen_dflash2_device_length_runner()
+    elif draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     elif draft == "glm_mla_dspark":
         runner, output, _ = _glm_mla_device_length_runner()

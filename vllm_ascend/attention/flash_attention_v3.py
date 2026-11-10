@@ -1,0 +1,288 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Device-length FA3 attention for A2/A3 DFlash2 drafts."""
+
+from dataclasses import dataclass, field
+
+import torch
+from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionImpl,
+    AttentionLayer,
+    AttentionMetadata,
+    AttentionMetadataBuilder,
+    AttentionType,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
+
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+
+
+def _get_window_size(sliding_window: int | None, causal: bool) -> tuple[int, int]:
+    if sliding_window is None:
+        return (-1, -1)
+    return (sliding_window - 1, 0 if causal else sliding_window - 1)
+
+
+class AscendFlashAttentionBackend(AttentionBackend):
+    accept_output_buffer = True
+    forward_includes_kv_cache_update = True
+    supported_dtypes = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes = ["auto", "float16", "bfloat16"]
+
+    @staticmethod
+    def get_name() -> str:
+        return "CUSTOM"
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        # The 910 FA3 ABI supports native widths through 256, including 192.
+        return 1 <= head_size <= 256
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str=""):
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        return [128]
+
+    @staticmethod
+    def get_impl_cls():
+        return AscendFlashAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        return AscendFlashAttentionMetadataBuilder
+
+
+@dataclass
+class AscendFlashAttentionMetadata(AttentionMetadata):
+    num_actual_tokens: int
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+    block_tables: torch.Tensor
+    slot_mapping: torch.Tensor
+    max_query_len: int
+    causal: bool
+    scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
+
+
+class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAttentionMetadata]):
+    reorder_batch_threshold = None
+
+    def __init__(
+        self, kv_cache_spec: AttentionSpec, layer_names: list[str], vllm_config: VllmConfig, device: torch.device
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.block_size = kv_cache_spec.block_size
+        self.use_graph_buffers = (
+            not vllm_config.speculative_config.enforce_eager
+            and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        )
+        self.scheduler_specs = set()
+        for name in layer_names:
+            impl = vllm_config.compilation_config.static_forward_context[name].impl
+            self.scheduler_specs.add(
+                (
+                    impl.num_heads,
+                    impl.num_kv_heads,
+                    impl.head_size,
+                    kv_cache_spec.dtype,
+                    impl.scale,
+                    impl.logits_soft_cap,
+                    impl.sliding_window,
+                )
+            )
+        self.scheduler_buffers: dict[tuple, dict[tuple, torch.Tensor]] = {}
+
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> AttentionCGSupport:
+        return AttentionCGSupport.ALWAYS
+
+    def build(self, common_prefix_len, common_attn_metadata: AscendCommonAttentionMetadata, fast_build=False):
+        # The optional extension is loaded only by workers selecting this backend.
+        from flash_attn_npu_3 import get_scheduler_metadata
+
+        common = common_attn_metadata
+        offsets_cpu = common.query_start_loc_cpu[: common.num_reqs + 1]
+        # FULL draft metadata reports padded tokens while CPU offsets end at the
+        # real query extent. Exclude repeated padding offsets from FA3 tiling.
+        active_reqs = max(1, int(torch.searchsorted(offsets_cpu, offsets_cpu[-1])))
+        query_start_loc = common.query_start_loc[: active_reqs + 1]
+        seq_lens = common.seq_lens[:active_reqs]
+        block_tables = common.block_table_tensor[:active_reqs]
+        num_input_tokens = common.num_input_tokens or common.num_actual_tokens
+        max_query_len = common.max_query_len
+        source_key = (query_start_loc.data_ptr(), seq_lens.data_ptr(), block_tables.data_ptr())
+        # DFlash rounds capture sizes to whole queries; target capture sizes do
+        # not identify its graph buckets. Retain storage for every actual shape.
+        graph_key = (source_key, num_input_tokens, max_query_len, common.causal)
+        scheduler_metadata = self.scheduler_buffers.setdefault(graph_key, {}) if self.use_graph_buffers else {}
+        for spec in self.scheduler_specs:
+            num_heads, num_kv_heads, head_size, dtype, scale, softcap, sliding_window = spec
+            # AICPU tiling stays outside the graph: its auxiliary stream events
+            # are not capture-safe on every CANN version. This tiling call uses
+            # device lengths and is shared by layers with identical parameters.
+            tiling = get_scheduler_metadata(
+                batch_size=active_reqs,
+                max_seqlen_q=max_query_len,
+                max_seqlen_k=block_tables.shape[1] * self.block_size,
+                num_heads_q=num_heads,
+                num_heads_kv=num_kv_heads,
+                headdim=head_size,
+                cache_seqlens=seq_lens,
+                qkv_dtype=dtype,
+                cu_seqlens_q=query_start_loc,
+                page_size=self.block_size,
+                causal=common.causal,
+                window_size=_get_window_size(sliding_window, common.causal),
+                has_softcap=softcap != 0.0,
+                num_splits=0,
+            )
+            if spec in scheduler_metadata:
+                buffer = scheduler_metadata[spec]
+                # The 910 ABI uses a fixed byte layout per mask/window mode.
+                # Reallocating here would leave a graph reading stale metadata.
+                if buffer.shape != tiling.shape or buffer.dtype != tiling.dtype:
+                    raise RuntimeError("FA3 scheduler metadata layout changed for a captured draft shape")
+                buffer.copy_(tiling)
+            else:
+                scheduler_metadata[spec] = tiling
+        return AscendFlashAttentionMetadata(
+            num_actual_tokens=common.num_actual_tokens,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_tables=block_tables,
+            slot_mapping=common.slot_mapping[: common.num_actual_tokens],
+            max_query_len=max_query_len,
+            causal=common.causal,
+            scheduler_metadata=scheduler_metadata,
+        )
+
+
+class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        sliding_window: int | None = None,
+        kv_cache_dtype: str = "auto",
+        logits_soft_cap: float | None = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
+        sinks: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        if attn_type != AttentionType.DECODER or alibi_slopes is not None or sinks is not None:
+            raise ValueError("DFlash2 FA3 requires decoder attention without ALiBi or sinks")
+        logger.info_once("Using device-length Ascend FA3 attention for DFlash2 drafts.", scope="process")
+        self.num_heads = num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.sliding_window = sliding_window
+        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.logits_soft_cap = 0.0 if logits_soft_cap is None else logits_soft_cap
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        # The builder has already refreshed the captured device tiling storage.
+        pass
+
+    def do_kv_cache_update(self, layer: AttentionLayer, key, value, kv_cache, slot_mapping) -> None:
+        if self.kv_sharing_target_layer_name is not None:
+            return
+        DeviceOperator.reshape_and_cache(
+            key=key,
+            value=value,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slot_mapping,
+        )
+        notify_kv_cache_written(layer.layer_name)
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query,
+        key,
+        value,
+        kv_cache,
+        attn_metadata: AscendFlashAttentionMetadata | None,
+        output=None,
+        output_scale=None,
+        output_block_scale=None,
+    ):
+        assert output is not None
+        assert output_scale is None and output_block_scale is None
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+        if attn_metadata is None:
+            return output.fill_(0)
+
+        from flash_attn_npu_3 import flash_attn_with_kvcache
+
+        if key is not None and value is not None:
+            num_tokens = attn_metadata.num_actual_tokens
+            self.do_kv_cache_update(
+                layer,
+                key[:num_tokens],
+                value[:num_tokens],
+                kv_cache,
+                attn_metadata.slot_mapping[:num_tokens],
+            )
+        scheduler_key = (
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            query.dtype,
+            self.scale,
+            self.logits_soft_cap,
+            self.sliding_window,
+        )
+        with attention_transfer_window():
+            # Keep packed TND queries and the runner's graph-stable offsets.
+            # Refreshed device tiling limits replay to the active requests.
+            result = flash_attn_with_kvcache(
+                query,
+                kv_cache[0],
+                kv_cache[1],
+                cache_seqlens=attn_metadata.seq_lens,
+                page_table=attn_metadata.block_tables,
+                cu_seqlens_q=attn_metadata.query_start_loc,
+                max_seqlen_q=attn_metadata.max_query_len,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+                window_size=_get_window_size(self.sliding_window, attn_metadata.causal),
+                softcap=self.logits_soft_cap,
+                scheduler_metadata=attn_metadata.scheduler_metadata[scheduler_key],
+                num_splits=0,
+            )
+            output.copy_(result)
+        return output
