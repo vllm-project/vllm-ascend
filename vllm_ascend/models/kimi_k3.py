@@ -91,7 +91,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
+from vllm_ascend.utils import get_rotation_path, is_950
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -929,14 +929,6 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.config.attn_res_block_size is None:
-            if vllm_version_is("0.32.0"):
-                return super().forward(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **kwargs,
-                )
             return super().forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -1131,15 +1123,11 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        if vllm_version_is("0.32.0"):
-            # v0.32.0 predates the AMD specialized-decode hooks we inherit.
-            pass
-        else:
-            from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
-                specialized_decode_config,
-            )
+        from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+            specialized_decode_config,
+        )
 
-            self.init_specialized_decode(specialized_decode_config(vllm_config))
+        self.init_specialized_decode(specialized_decode_config(vllm_config))
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.config = self.model_config.hf_config
@@ -1177,19 +1165,17 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled
 
-    if not vllm_version_is("0.32.0"):
+    def get_model_state_cls(self):
+        """Use the Ascend hybrid state instead of the inherited ROCm one.
 
-        def get_model_state_cls(self):
-            """Use the Ascend hybrid state instead of the inherited ROCm one.
+        vLLM main lets the AMD Kimi class provide its own model state; that
+        state builds upstream attention metadata, which is invalid on NPU.
+        """
+        from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
+            AscendMambaHybridModelState,
+        )
 
-            vLLM main lets the AMD Kimi class provide its own model state; that
-            state builds upstream attention metadata, which is invalid on NPU.
-            """
-            from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
-                AscendMambaHybridModelState,
-            )
-
-            return AscendMambaHybridModelState
+        return AscendMambaHybridModelState
 
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):

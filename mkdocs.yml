@@ -182,15 +182,17 @@ extra:
   release_fla_npu_version: "26.9.1"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
-  # Update this group when repository requirements or the verified main build image changes.
+  # The framework versions derive from requirements.txt via req_version() so
+  # the pins have a single source of truth; update this group only when the
+  # verified main build image changes.
   cann_image_tag: 9.2.1-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.2.1"
-  main_pytorch_version: "2.10.0"
-  main_torch_npu_version: "2.10.0.post7"
-  main_torchvision_version: "0.25.0"
-  main_torchaudio_version: "2.10.0"
-  main_triton_ascend_version: "3.6.0.post2"
+  main_pytorch_version: '{{ req_version("torch") }}'
+  main_torch_npu_version: '{{ req_version("torch-npu") }}'
+  main_torchvision_version: '{{ req_version("torchvision") }}'
+  main_torchaudio_version: '{{ req_version("torchaudio") }}'
+  main_triton_ascend_version: '{{ req_version("triton-ascend") }}'
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
@@ -246,6 +248,7 @@ nav:
         - tutorials/models/Kimi-K2.5.md
         - tutorials/models/Kimi-K2.6.md
         - tutorials/models/Kimi-K3.md
+        - tutorials/models/Kimi-K3.1-Pro.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/MiniMax-M3.md
@@ -267,7 +270,6 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
     - faqs.md
   - User Guide:
@@ -341,7 +343,6 @@ nav:
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
         - developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.md
-        - developer_guide/Design_Documents/model_runner_v1_eplb.md
         - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md

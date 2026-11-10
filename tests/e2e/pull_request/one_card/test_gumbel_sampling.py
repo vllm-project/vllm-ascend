@@ -604,7 +604,7 @@ class TestGumbelSampling:
         speculator.temperature = torch.tensor([0.5, 1.5], device=DEVICE)
         speculator.seeds = torch.tensor([3, 7], dtype=torch.int64, device=DEVICE)
         speculator._step_cols = torch.arange(2, dtype=torch.int32, device=DEVICE)
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             # The release tree keeps the raw per-step draft-logits tensor.
             speculator.draft_logits = torch.zeros(2, 2, 1031, device=DEVICE)
             draft_logits = speculator.draft_logits

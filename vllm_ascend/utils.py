@@ -553,9 +553,6 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
-    # FIXME(linfeng): Currently custom op compilation and execution are partially available
-    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
-    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
     if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
@@ -970,6 +967,17 @@ def register_ascend_fla_customop():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 1
+
+
+def requires_lmhead_dp_sync(vllm_config: VllmConfig) -> bool:
+    """V2 reduced LMHead padding requires real, synchronized DP token buckets."""
+    # TODO: Merge the requires_lmhead_dp_sync interface into
+    # should_skip_allreduce_across_dp_group in a future refactor.
+    return (
+        vllm_config.use_v2_model_runner
+        and vllm_config.parallel_config.decode_context_parallel_size == 1
+        and lmhead_tp_enable()
+    )
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:

@@ -17,11 +17,6 @@ def identity_module(monkeypatch):
     _stub(monkeypatch, "vllm.config", ModelConfig=object, VllmConfig=object)
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.types", RFORK_PROTOCOL_VERSION=1)
     _stub(monkeypatch, "vllm_ascend.ascend_config", get_ascend_config=lambda: SimpleNamespace(weight_nz_mode=None))
-    _stub(
-        monkeypatch,
-        "vllm_ascend.device.hardware_profile",
-        get_current_hardware_profile=lambda: SimpleNamespace(weight_layout_policy=None, _device_type="A2"),
-    )
     return _load_module(monkeypatch, "rfork_test_identity", "identity.py")
 
 
@@ -40,9 +35,7 @@ def seed_module(monkeypatch):
     class SeedTransferInfo:
         session_id: str
         weights: dict
-        shared_names: list[str] | None = None
         formats: dict | None = None
-        load_state: dict | None = None
 
     _stub(
         monkeypatch,
@@ -222,14 +215,12 @@ def _ascend_config(**overrides):
         "pd_tp_ratio": 1,
         "pd_head_ratio": 1,
         "num_head_replica": 1,
-        "draft_window_size": None,
         "finegrained_tp_config": SimpleNamespace(
             oproj_tensor_parallel_size=1,
             lmhead_tensor_parallel_size=1,
             embedding_tensor_parallel_size=1,
             mlp_tensor_parallel_size=1,
         ),
-        "dynamic_spec_config": SimpleNamespace(method=None, method_params={}),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -285,7 +276,6 @@ def test_ascend_layout_switches_do_not_partition_weight_seeds(identity_module, m
         ("pd_tp_ratio", 1, 2),
         ("pd_head_ratio", 1, 2),
         ("num_head_replica", 1, 2),
-        ("draft_window_size", None, 8),
     )
     for field, base_value, changed_value in changes:
         monkeypatch.setattr(
@@ -644,17 +634,6 @@ def test_draft_model_and_parallel_layout_do_not_partition_weight_seeds(identity_
     assert parallel_changed == base
 
 
-def test_dynamic_spec_layout_does_not_partition_weight_seeds(identity_module, monkeypatch):
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
-    base = _fingerprint(identity_module)
-    monkeypatch.setattr(
-        identity_module,
-        "get_ascend_config",
-        lambda: _ascend_config(dynamic_spec_config=SimpleNamespace(method="mtp", method_params={"window": 4})),
-    )
-    assert _fingerprint(identity_module) == base
-
-
 def test_compilation_capture_sizes_do_not_partition_weight_seeds(identity_module):
     changes = (
         ("cudagraph_mode", "FULL"),
@@ -864,6 +843,48 @@ def test_seed_port_base_rejects_non_integer_extra_config(config_module, value):
         config_module.RForkConfigurationError, match="rfork_seed_port_base must be a JSON integer in range"
     ):
         config_module.RForkConfig.from_extra_config({"rfork_seed_port_base": value})
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("rfork_heartbeat_interval_sec", 0, "rfork_heartbeat_interval_sec must be a finite positive JSON number"),
+        (
+            "rfork_heartbeat_interval_sec",
+            True,
+            "rfork_heartbeat_interval_sec must be a finite positive JSON number",
+        ),
+        (
+            "rfork_lease_release_retry_interval_sec",
+            -1,
+            "rfork_lease_release_retry_interval_sec must be a finite positive JSON number",
+        ),
+        (
+            "rfork_lease_release_max_attempts",
+            0,
+            "rfork_lease_release_max_attempts must be a positive JSON integer",
+        ),
+        (
+            "rfork_lease_release_max_attempts",
+            1.5,
+            "rfork_lease_release_max_attempts must be a positive JSON integer",
+        ),
+        ("rfork_seed_removal_supported", "yes", "rfork_seed_removal_supported must be a JSON boolean or null"),
+    ],
+)
+def test_config_rejects_invalid_runtime_values(config_module, key, value, message):
+    with pytest.raises(config_module.RForkConfigurationError, match=message):
+        config_module.RForkConfig.from_extra_config(
+            {"model_url": "model", "model_deploy_strategy_name": "strategy", key: value}
+        )
+
+
+def test_config_accepts_null_seed_removal_supported(config_module):
+    cfg = config_module.RForkConfig.from_extra_config(
+        {"model_url": "model", "model_deploy_strategy_name": "strategy", "rfork_seed_removal_supported": None}
+    )
+
+    assert cfg.seed_removal_supported is None
 
 
 def test_unknown_extra_config_keys_are_reported(config_module):
