@@ -127,7 +127,10 @@ def _make_a5_case(
             for request, count in enumerate(query_counts):
                 assert (output[0][request, count:].cpu() == -1).all()
             output = tuple(
-                torch.cat([tensor[request, :count] for request, count in enumerate(query_counts)]) for tensor in output
+                torch.cat([tensor[request, :count] for request, count in enumerate(query_counts)])
+                if tensor.numel()
+                else tensor
+                for tensor in output
             )
         indices = output[0].cpu()
         for request, count in enumerate(query_counts):
