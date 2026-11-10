@@ -254,7 +254,7 @@ def test_a5_split_k_glm_long_context_performance(quant_mode, record_property):
             graph.replay()
         graphs[name] = graph
     start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
-    raw = {name: [] for name in graphs}
+    raw: dict[str, list[float]] = {name: [] for name in graphs}
     for iteration in range(30):
         for name in list(graphs) if iteration % 2 == 0 else list(reversed(graphs)):
             start.record()
