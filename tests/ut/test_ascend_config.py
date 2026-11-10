@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import (
     FinegrainedTPConfig,
     KVPPConfig,
     ProfilingChunkConfig,
+    QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
@@ -111,6 +112,27 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestQuantizedAllReduceConfig(TestBase):
+    def test_defaults(self):
+        config = QuantizedAllReduceConfig()
+        self.assertFalse(config.enable)
+        self.assertEqual(config.min_numel, 16777216)
+
+    def test_explicit_values_and_lax_bool(self):
+        config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
+        self.assertTrue(config.enable)
+        self.assertEqual(config.min_numel, 2097152)
+
+    def test_rejects_unknown_key(self):
+        with self.assertRaises(ValueError):
+            QuantizedAllReduceConfig(enable=True, min_numels=1)  # type: ignore[call-arg]
+
+    def test_rejects_non_positive_min_numel(self):
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                QuantizedAllReduceConfig(min_numel=value)
 
 
 class TestAscendConfig(TestBase):
@@ -360,6 +382,61 @@ class TestAscendConfig(TestBase):
         for name in ("z_score", "use_covariance", "hysteresis_enabled"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 EplbConfig(stair_config={name: 0})
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "min_numel": 2097152}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.quantized_all_reduce_config.enable)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 2097152)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_bad_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_rejects_unsupported_tp_at_config_time(self, mock_fix_incompatible_config):
+        # The TP degree is validated here, not when a parallel group is built:
+        # an EP/MC2 group of DP x PCP x TP ranks must never gate the feature.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True}}
+        with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_unsupported_tp_ok_when_disabled(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": False}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_disabled_with_flashcomm1_sp(self, mock_fix_incompatible_config):
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the int8
+        # all-reduce wrapper would never be invoked. Warn and disable it.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.parallel_config.data_parallel_size = 2
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "enable_flashcomm1": True,
+            "quantized_all_reduce_config": {"enable": True},
+        }
+        with patch("vllm_ascend.ascend_config.logger.warning_once") as mock_warning:
+            ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
+        self.assertTrue(any("FlashComm1/SP" in str(call) for call in mock_warning.call_args_list))
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
