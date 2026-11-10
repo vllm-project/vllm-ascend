@@ -4,9 +4,65 @@ meta:
 hardware_overrides:
   npu:
     extra_args:
-      []
+      - '--data-parallel-size'
+      - '4'
+      - '--tensor-parallel-size'
+      - '4'
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--served-model-name'
+      - 'DeepSeek-V4.1-Flash'
+      - '--max-model-len'
+      - '286720'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--max-num-seqs'
+      - '32'
+      - '--enable-prefix-caching'
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load":true,"num_threads":128}'
+      - '--safetensors-load-strategy'
+      - 'lazy'
+      - '--speculative-config'
+      - '{"num_speculative_tokens":5,"method":"dspark"}'
+      - '--trust-remote-code'
+      - '--block-size'
+      - '128'
+      - '--tokenizer-mode'
+      - 'deepseek_v41'
+      - '--tool-call-parser'
+      - 'deepseek_v41'
+      - '--enable-auto-tool-choice'
+      - '--reasoning-parser'
+      - 'deepseek_v41'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--quantization'
+      - 'ascend'
+      - '--enforce-eager'
+      - '--engram-config'
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
+      - '--kv-transfer-config'
+      - '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":4},"decode":{"dp_size":8,"tp_size":2}}}'
+      - '>'
+      - 'run_model.log'
+      - '2>&1'
+      - '&'
     extra_env:
-      {}
+      HCCL_SOCKET_IFNAME: 'bond4'
+      HCCL_CONNECT_TIMEOUT: '1200'
+      GLOO_SOCKET_IFNAME: 'bond4'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_EXEC_TIMEOUT: '204'
+      HCCL_OP_EXPANSION_MODE: 'AIV'
+      ASCEND_CUSTOM_OPP_PATH: '/usr/local/python3.12.13/lib/python3.12/site-packages/fla_npu/opp/vendors/fla_npu_transformer:/usr/local/python3.12.13/lib/python3.12/site-packages/fla_npu/opp/vendors/fla_npu_transformer/op_api/lib'
+      TASK_QUEUE_ENABLE: '1'
+      TP_SOCKET_IFNAME: 'bond4'
+      OMP_NUM_THREADS: '1'
+      HCCL_IF_IP: '<node0_ip>'
 hardware_notes:
   ascend_910c:
     title: "vLLM Ascend image required"
@@ -20,6 +76,13 @@ strategy_hardware:
     npu: verified
   single_node_tp:
     npu: unsupported
+features:
+  reasoning:
+    hardware_overrides:
+      npu:
+        args:
+          - '--reasoning-parser'
+          - 'deepseek_v41'
 variants:
   default:
     hardware_overrides:
