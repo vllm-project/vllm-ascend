@@ -1505,6 +1505,19 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
         index_topk = int(_config_value(text_config, "index_topk"))
         operator_ratio = 0 if req.cache_kind == "swa" else req.compress_ratio
         metadata_tokens = req.num_input_tokens if self._device_metadata_in_graph else req.num_actual_tokens
+        if self._a5_smla_length_rows is not None and metadata_tokens > 0:
+            target_rows = self._a5_smla_length_rows[:metadata_tokens]
+            target_rows.zero_()
+            # PCP planes can carry actual tokens without materialized window
+            # lengths; zero rows keep the deferred task deterministic.
+            if req.num_actual_tokens > 0 and req.ori_topk_length is not None:
+                if req.ori_topk_length.shape[0] < req.num_actual_tokens:
+                    raise ValueError(
+                        f"req.ori_topk_length length {req.ori_topk_length.shape[0]} "
+                        f"is less than num_actual_tokens {req.num_actual_tokens}"
+                    )
+                src_rows = req.ori_topk_length[: req.num_actual_tokens].to(torch.int32).reshape(-1, 1)
+                target_rows[: req.num_actual_tokens].copy_(src_rows)
         if (
             self._uses_a5_packed_cache
             and req.cache_kind == "swa"
