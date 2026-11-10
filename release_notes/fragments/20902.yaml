@@ -1,0 +1,7 @@
+pr: 20902
+entries:
+  - category: performance
+    text: >-
+      Reduced QuantLightningIndexerV2 latency for small-query, long-context
+      workloads in candidate-consumer and candidate-disabled modes, including
+      batches with multiple requests.

@@ -79,6 +79,7 @@ protected:
     // =================================常量区=================================
 
 private:
+    __aicore__ inline void CopyMergedTopk(const LocalTensor<float> &dst, const LocalTensor<float> &src);
     __aicore__ inline void GetKeyScale(const QLIV2Common::RunInfo &runInfo, const LocalTensor<half> &resUb,
                                        int64_t batchId, int64_t startS2, int64_t getLen);
     // candidate (two-level topk)
@@ -1039,12 +1040,10 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
         }
         int32_t cuS2Len = cuBaseS2Idx + s2BaseSize_ >= cuRealAcSeq ? cuRealAcSeq - cuBaseS2Idx : s2BaseSize_;
         int32_t cuS1Idx = cuS1BeginIdxPerAiv + innerS1Idx;
-        // 当前vec1ResGm对应S1的位置
-        // P10: LD 布局 = 每核 s1Base 行预留区 (起点 = saveWorkSpaceIdx * s1Base * pairW),
-        // 行内用全局行号 cuS1Idx (0..s1Base-1) 作槽偏移 — 同一全局行在所有分段核的
-        // 槽偏移一致, 头核归并时按 (核i*4 + 全局行) 寻址
+        // 每个workspace槽只保存一个query组，使用组内行号计算偏移，
+        // 避免后续query组写入下一个核的槽位。
         uint64_t wsOffset = static_cast<uint64_t>(info.saveWorkSpaceIdx) * s1BaseSize_ * topkPairWidth_ +
-                            static_cast<uint64_t>(cuS1Idx) * topkPairWidth_;
+                            static_cast<uint64_t>(cuS1Idx - cuBaseS1Idx) * topkPairWidth_;
         if (cuRealAcSeq > 0 && cuS2Len > 0) {
             int32_t cuS2LenVecAlign = AlignS2(cuS2Len);
             LocalTensor<float> mmInUb = inQueue_.AllocTensor<float>();
@@ -1107,8 +1106,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             LocalTensor<float> tmpSortBuf = sortBuff[2 * cuS2LenVecAlign];
             QLIV2ServiceVec::SortAll(sortBuff, tmpSortBuf, cuS2LenVecAlign);
             PipeBarrier<PIPE_V>();
-            QLIV2ServiceVec::MergeSort(globalTopkUb_[innerS1Idx * topkPairWidth_], topkWidth_, sortBuff,
-                                       cuS2LenVecAlign, tmpSortBuf); // P3
+            if (ldInfo_.preferLaterShard) {
+                // split-K后续的向量归并会读取此累加结果。
+                QLIV2ServiceVec::MergeSortVecCopy(globalTopkUb_[innerS1Idx * topkPairWidth_], topkWidth_, sortBuff,
+                                                  cuS2LenVecAlign, tmpSortBuf);
+            } else {
+                QLIV2ServiceVec::MergeSort(globalTopkUb_[innerS1Idx * topkPairWidth_], topkWidth_, sortBuff,
+                                           cuS2LenVecAlign, tmpSortBuf);
+            }
             PipeBarrier<PIPE_V>();
             bool isS2End = cuBaseS2Idx + s2BaseSize_ >= cuRealAcSeq;
             bool needCopyOutGm = blockS2StartIdx_ == 0 && isS2End;
@@ -1216,6 +1221,21 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
 }
 
 template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::CopyMergedTopk(const LocalTensor<float> &dst,
+                                                           const LocalTensor<float> &src)
+{
+    // 拷贝在PIPE_V上执行，保证下一轮归并读取到最新的累加结果。
+    // 整数Adds保留分数和索引的位模式，包括无效索引-1。
+    LocalTensor<int32_t> dstInt = dst.template ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> srcInt = src.template ReinterpretCast<int32_t>();
+    constexpr uint32_t COPY_ELEMENTS = 64;
+    for (uint32_t offset = 0; offset < topkPairWidth_; offset += COPY_ELEMENTS) {
+        Adds(dstInt[offset], srcInt[offset], 0, COPY_ELEMENTS);
+    }
+    PipeBarrier<PIPE_V>();
+}
+
+template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
 {
     LocalTensor<float> curValueIdxUb = ldToBeMrgBuf_.Get<float>();
@@ -1232,11 +1252,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
 
     AscendC::DataCopyPadExtParams<float> indexValuePadParams{true, 0, 0, 0};
     AscendC::DataCopyExtParams indexValueParams;
-    // P3: 每列表搬运/间距按实际 topk 对宽 (vec1ResGm 内相邻列表间距 = 3 对宽)
+    // 逐核显式拷贝列表，相邻列表间隔为s1BaseSize_行。
     indexValueParams.blockLen = topkPairWidth_ * sizeof(int32_t); // bytes
-    // P10: 分段槽按核分布 (核 i 的区起点 = i*s1Base 槽), 跨 3 列表的间距 = s1Base 槽。
-    // DataCopyExtParams.srcStride 单位 = 32B 块: (s1Base*pairW*4B)/32
-    indexValueParams.srcStride = s1BaseSize_ * topkPairWidth_ * sizeof(int32_t) / 32U;
+    indexValueParams.srcStride = 0;
     indexValueParams.dstStride = 0;
 
     uint32_t ldProWorkspaceNum = ldInfo_.workspaceNum;
@@ -1286,10 +1304,16 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             srcList.src2 = curValueIdxUb[topkPairWidth_];
             srcList.src3 = curValueIdxUb[2 * topkPairWidth_];
             srcList.src4 = curValueIdxUb[3 * topkPairWidth_];
+            if (ldInfo_.preferLaterShard) {
+                // 串行MergeSort在同分时优先选择后处理的K块。
+                srcList.src1 = curValueIdxUb[3 * topkPairWidth_];
+                srcList.src2 = curValueIdxUb[2 * topkPairWidth_];
+                srcList.src3 = curValueIdxUb[topkPairWidth_];
+                srcList.src4 = curValueIdxUb[0];
+            }
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, topkPairWidth_);
-            PipeBarrier<PIPE_V>();
+            CopyMergedTopk(curValueIdxUb, tmpUb);
         }
 
         // 处理不等于4的部分
@@ -1299,10 +1323,13 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
                 static_cast<uint64_t>(ldInfo_.workspaceIdx) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldProcessNum * (ldProcessLen - 1) + 1) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldInfo_.mStart + j) * topkPairWidth_;
-            indexValueParams.blockCount = ldTailLen;
+            indexValueParams.blockCount = 1;
             SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
-            AscendC::DataCopyPad(curValueIdxUb[valueOffset], vec1ResGm[wsOffsetTail], indexValueParams,
-                                 indexValuePadParams);
+            for (uint32_t k = 0; k < ldTailLen; k++) {
+                uint64_t segSlot = wsOffsetTail + static_cast<uint64_t>(k) * s1BaseSize_ * topkPairWidth_;
+                AscendC::DataCopyPad(curValueIdxUb[valueOffset + k * topkPairWidth_],
+                                     vec1ResGm[segSlot], indexValueParams, indexValuePadParams);
+            }
             SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
             AscendC::MrgSort4Info params;
             params.elementLengths[0] = topkWidth_;
@@ -1322,11 +1349,15 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             srcList.src2 = curValueIdxUb[topkPairWidth_];
             srcList.src3 = curValueIdxUb[2 * topkPairWidth_];
             srcList.src4 = curValueIdxUb[3 * topkPairWidth_];
+            if (ldInfo_.preferLaterShard) {
+                srcList.src1 = curValueIdxUb[ldTailLen * topkPairWidth_];
+                srcList.src2 = ldTailLen == 1 ? curValueIdxUb[0] : curValueIdxUb[topkPairWidth_];
+                srcList.src3 = curValueIdxUb[0];
+            }
             PipeBarrier<PIPE_V>();
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, topkPairWidth_);
-            PipeBarrier<PIPE_V>();
+            CopyMergedTopk(curValueIdxUb, tmpUb);
         }
 
         // 搬出 (P3: Extract repeat = topkWidth_/32, 每 repeat 消费 32 对)

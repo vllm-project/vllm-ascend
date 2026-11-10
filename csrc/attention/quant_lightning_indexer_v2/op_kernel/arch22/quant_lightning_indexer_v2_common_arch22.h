@@ -137,6 +137,7 @@ struct ConstInfo {
 
 struct LdSplitCoreInfo {
     bool isLdCoreEnable = false;    // 当前核是否参与规约任务
+    bool preferLaterShard = false;  // 切分K时保持与串行Token Top-K相同的同分优先级
     uint32_t saveWorkSpaceIdx = 0U; // 存放LD参数的地址
     uint32_t bn2Idx = 0U;           // 归约任务
     uint32_t bIdx = 0U;
