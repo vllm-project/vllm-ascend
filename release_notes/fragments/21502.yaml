@@ -1,4 +1,4 @@
-pr: PRNUM
+pr: 21502
 entries:
   - category: performance
     text: Scaled rotary embeddings now run on the Ascend fused rotary kernel instead of the reference implementation. This covers checkpoints whose `rope_scaling.type` is `dynamic` (with either `factor` or `alpha`), `ntk`, or `llama3`.
