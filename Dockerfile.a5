@@ -80,12 +80,8 @@ COPY . /vllm-workspace/vllm-ascend/
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
     https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
-# GITCODE_PROXY: 集群内 gitcode git-cdn 地址（非空时 csrc cmake 的 CANN 第三方依赖
-# 经 git-cdn 下载；为空则默认直连 gitcode.com）
-ARG GITCODE_PROXY=""
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
-    if [ -n "$GITCODE_PROXY" ]; then export CANN_3RD_PARTY_BASE_URL="${GITCODE_PROXY%/}/cann-src-third-party"; fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \

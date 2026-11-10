@@ -50,13 +50,6 @@ get_filename_component(OPS_ADV_DIR                  "${CMAKE_CURRENT_SOURCE_DIR}
 get_filename_component(OPS_ADV_CMAKE_DIR            "${OPS_ADV_DIR}/cmake"                  REALPATH)
 get_filename_component(OPS_ADV_UTILS_KERNEL_INC     "${OPS_ADV_DIR}/common/include/kernel"   REALPATH)
 
-# CANN 第三方依赖下载源（默认 gitcode.com，集群内可经 CANN_3RD_PARTY_BASE_URL 环境变量指向 git-cdn）
-if (DEFINED ENV{CANN_3RD_PARTY_BASE_URL})
-    set(CANN_3RD_PARTY_BASE_URL "$ENV{CANN_3RD_PARTY_BASE_URL}" CACHE STRING "CANN third-party base URL (override for cluster git-cdn)")
-else()
-    set(CANN_3RD_PARTY_BASE_URL "https://gitcode.com/cann-src-third-party" CACHE STRING "CANN third-party base URL (override for cluster git-cdn)")
-endif()
-
 
 #   构建树相关路径
 set(ASCEND_IMPL_OUT_DIR           ${CMAKE_CURRENT_BINARY_DIR}/impl                     CACHE   STRING "ascend impl output directories")

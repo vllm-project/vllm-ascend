@@ -85,9 +85,6 @@ on:
         required: false
       SYNC_TOOLS_TOKEN:
         required: false
-      GITCODE_PROXY:
-        description: 'Cluster-internal git-cdn base URL for gitcode.com (empty = direct)'
-        required: false
 
 jobs:
   build-base:
@@ -106,7 +103,6 @@ jobs:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
-      GITCODE_PROXY: ${{ secrets.GITCODE_PROXY }}
 
   build-nightly:
     name: Build nightly-${{ inputs.target }} (${{ inputs.os }})
