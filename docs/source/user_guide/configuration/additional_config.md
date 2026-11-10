@@ -121,7 +121,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
 | `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
 | `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
-| `qkv_iproj_tensor_parallel_size`       | int  | `1` | QKV input projection TP, currently supported for GLM-5.3-Flash KDA on PD decode nodes. The recurrent core and state remain DP; `o_proj` is controlled independently by `oproj_tensor_parallel_size`. |
+| `qkv_iproj_tensor_parallel_size`  | int  | `1` | The custom tensor parallel size of QKV input projections (experimental). See [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
 
 **ascend_compilation_config**
 
