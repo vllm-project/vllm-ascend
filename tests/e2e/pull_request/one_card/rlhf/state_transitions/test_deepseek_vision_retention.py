@@ -7,10 +7,10 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.config import ModelConfig
 
-from tests.e2e.common.rlhf.weight_transfer.deepseek_vision import deepseek_vision_case
+from tests.e2e.common.rlhf.weight_transfer.case import DEEPSEEK_V4_VISION_CASE
 from tests.e2e.common.rlhf.weight_transfer.retention import run_vision_retention
 
-CASE = deepseek_vision_case()
+CASE = DEEPSEEK_V4_VISION_CASE
 DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 MEMORY_UTILIZATION = float(os.environ.get("VLLM_RL_DSV4_MEM_UTIL", "0.45"))
 
