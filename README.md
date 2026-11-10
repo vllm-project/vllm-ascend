@@ -26,7 +26,7 @@ vLLM Ascend Plugin
 ---
 *Latest News* 🔥
 
-- [2026/11] We are preparing the release candidate [v0.32.0rc1](https://github.com/vllm-project/vllm-ascend/issues/19867), aligned with upstream vLLM v0.32.0. See the [release feedback issue](https://github.com/vllm-project/vllm-ascend/issues/19888) for updates.
+- [2026/11] We released the new release candidate [v0.32.0rc1](https://github.com/vllm-project/vllm-ascend/issues/19867), aligned with upstream vLLM v0.32.0. See the [release feedback issue](https://github.com/vllm-project/vllm-ascend/issues/19888) for updates.
 - [2026/09] We released the new release candidate [v0.26.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.26.0rc1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/08] We released the new official version [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to start using vLLM Ascend Plugin on Ascend.
 - [2026/05] We released the new official version [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.18.0/) to start using vLLM Ascend Plugin on Ascend.
