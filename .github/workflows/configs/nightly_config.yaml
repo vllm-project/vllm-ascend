@@ -367,6 +367,10 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V4_Flash_A5.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
+      - name: DeepSeek_V41_Flash_FP8_A5_Mixed
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V41_Flash_FP8_A5_Mixed.yaml
+        config_base_path: tests/SIT/cases/models/configs/DeepSeek
       - name: Gemma4_26B_A4B_W4A4_A5
         os: linux-aarch64-a5-8
         config_file_path: Gemma4_26B_A4B_W4A4_A5.yaml
