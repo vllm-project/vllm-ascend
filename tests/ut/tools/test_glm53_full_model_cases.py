@@ -4,6 +4,7 @@
 
 import base64
 import json
+import math
 import os
 import subprocess
 import sys
@@ -73,20 +74,21 @@ class FullModelConfigTests(unittest.TestCase):
                     args = template["server_cmd_template"]
                     additional = json.loads(args[args.index("--additional-config") + 1])
                     max_len = int(args[args.index("--max-model-len") + 1])
-                    self.assertEqual(max_len, 135000 if a5 else 200000)
+                    self.assertEqual(max_len, 135000 if a5 else 131072)
                     self.assertNotIn("--enable-batch-sharded-sampling", args)
                     if template["node_index"] < 2:
-                        self.assertEqual(additional["enable_fused_mc2"], 2)
+                        self.assertEqual(additional["enable_fused_mc2"], 1)
                         self.assertTrue(additional["enable_flashcomm1"])
                         self.assertIn("--enforce-eager", args)
                     else:
                         self.assertIn("--no-enable-prefix-caching", args)
-                        self.assertTrue(additional["recompute_scheduler_enable"])
+                        self.assertTrue(additional["scheduler_config"]["recompute_scheduler_enable"])
                         self.assertNotIn("enable_fused_mc2", additional)
                         self.assertTrue(additional["multistream_overlap_shared_expert"])
                         compilation = additional["ascend_compilation_config"]
                         self.assertTrue(compilation["enable_npugraph_ex"])
-                        self.assertFalse(compilation["enable_static_kernel"])
+                        self.assertEqual(compilation["enable_static_kernel"], not a5)
+                        self.assertEqual(compilation["enable_super_kernel"], not a5)
                 benchmarks = {
                     name: bench for name, bench in config["benchmarks"].items() if bench["case_type"] == "performance"
                 }
@@ -203,6 +205,40 @@ class FullModelConfigTests(unittest.TestCase):
                         self.assertEqual(accuracy, [])
                     accuracy_cases.extend(accuracy)
                 self.assertEqual(len(accuracy_cases), 1)
+
+    def test_scheduler_and_graph_budgets_cover_peak_client_load(self):
+        for path in sorted(CONFIG_DIR.glob("*.yaml")):
+            config = yaml.safe_load(path.read_text(encoding="utf-8"))
+            peak_clients = max(
+                case["batch_size"]
+                for case in config["benchmarks"].values()
+                if case["case_type"] in ("performance", "accuracy")
+            )
+            global_dp = config["config"][2]["dp_size"]
+            self.assertEqual(sum(node["dp_size_local"] for node in config["config"][2:]), global_dp)
+            balanced_peak = math.ceil(peak_clients / global_dp)
+            for template in config["templates"]:
+                args = template["server_cmd_template"]
+                seqs = int(args[args.index("--max-num-seqs") + 1])
+                tokens = int(args[args.index("--max-num-batched-tokens") + 1])
+                if template["node_index"] < 2:
+                    # The P pipeline has DP1; PP and PCP do not divide its request load.
+                    self.assertGreaterEqual(seqs, peak_clients)
+                    self.assertGreaterEqual(tokens, seqs)
+                    continue
+                self.assertGreater(seqs, balanced_peak)
+                self.assertLessEqual(seqs, 2 * balanced_peak)
+                spec = json.loads(args[args.index("--speculative-config") + 1])
+                query_length = spec["num_speculative_tokens"] + 1
+                compilation = json.loads(args[args.index("--compilation-config") + 1])
+                self.assertGreaterEqual(tokens, seqs * query_length)
+                # Every possible uniform decode batch has an exact capture, no
+                # oversized padding gap between common per-instance loads.
+                self.assertEqual(
+                    compilation["cudagraph_capture_sizes"],
+                    [batch * query_length for batch in range(1, seqs + 1)],
+                )
+                self.assertEqual(compilation["max_cudagraph_capture_size"], seqs * query_length)
 
     def test_weekly_a5_workflow_and_dispatch_are_connected(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/schedule_weekly_test_a5.yaml").read_text())

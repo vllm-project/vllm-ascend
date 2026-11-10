@@ -1,6 +1,7 @@
 # Full checkpoint: no layer overrides or dummy weights.
 # See README.md for resource assumptions and calibration requirements.
 # Throughput is collected without a regression gate until hardware calibration.
+# Scheduler/capture budgets follow the peak client load; see README.md.
 test_name: "GLM-5.3-W8A8C8-A3-ALL-E2E"
 model: "Eco-Tech/GLM-5.3-w8a8c8"
 num_nodes: 4
@@ -74,7 +75,7 @@ env_common: &env_common
   VLLM_USE_V2_MODEL_RUNNER: "1"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
   ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
-  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
   HCCL_EXEC_TIMEOUT: "1800"
   HCCL_CONNECT_TIMEOUT: "1800"
   ASCEND_TRANSFER_TIMEOUT: "10000"
@@ -123,12 +124,12 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "131072"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "80"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--quantization"
@@ -146,7 +147,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "int8"
       - "--additional-config"
-      - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": false}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--kv-transfer-config"
@@ -184,12 +185,12 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "131072"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "80"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--quantization"
@@ -207,7 +208,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "int8"
       - "--additional-config"
-      - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": false}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--kv-transfer-config"
@@ -237,12 +238,12 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "131072"
       - "--max-num-batched-tokens"
-      - "256"
+      - "48"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "8"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--async-scheduling"
@@ -260,11 +261,11 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "int8"
       - "--additional-config"
-      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "multistream_overlap_shared_expert": true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true}, "multistream_overlap_shared_expert": true, "scheduler_config": {"recompute_scheduler_enable": true}}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 18, 24, 30, 36, 42, 48], "max_cudagraph_capture_size": 48}'
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -292,12 +293,12 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "131072"
       - "--max-num-batched-tokens"
-      - "256"
+      - "48"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "8"
       - "--gpu-memory-utilization"
       - "0.92"
       - "--async-scheduling"
@@ -315,11 +316,11 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "int8"
       - "--additional-config"
-      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "multistream_overlap_shared_expert": true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true}, "multistream_overlap_shared_expert": true, "scheduler_config": {"recompute_scheduler_enable": true}}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 18, 24, 30, 36, 42, 48], "max_cudagraph_capture_size": 48}'
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 

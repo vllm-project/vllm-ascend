@@ -16,15 +16,17 @@ than copying MiniMax performance baselines or claiming identical prefix ratios.
 
 | Platform | Allocation | P: nodes 0-1 | D: nodes 2-3 | KV format | Max context |
 | --- | --- | --- | --- | --- | --- |
-| A3 W8A8C8 | 4 x 16 logical devices | PP2, PCP16, TP1 | DP16, TP2 | INT8 | 200000 |
+| A3 W8A8C8 | 4 x 16 logical devices | PP2, PCP16, TP1 | DP16, TP2 | INT8 | 131072 |
 | A5 W8A8C8 / W4A4C8 | 4 x 8 devices | PP2, PCP8, TP1 | DP16, TP1 | FP8 | 135000 |
 
-Each family uses its previous E2E serving configuration throughout all phases,
+Each family uses one workload-sized serving configuration throughout all phases,
 with P prefix caching enabled and D prefix caching disabled. Both roles use
 Model Runner V2 and MooncakeConnectorV2, with DSA CP disabled. P retains eager
-MTP1, PP partition `42,36`, FlashComm1 and requested fused MC2 mode 2. D retains
+MTP1, PP partition `42,36`, FlashComm1 and fused MC2 mode 1. Shared-expert DP
+is explicitly disabled on P because TP1 disables it in the config validator.
+D retains
 MTP5, FULL_DECODE_ONLY, recompute scheduling and shared-expert overlap. A3 retains
-npugraph_ex with static kernels disabled (super kernels inherit this setting);
+npugraph_ex with static and super kernels explicitly enabled;
 A5 retains its previous static/super-disabled, MLAPO
 and LM-head TP8 settings. Flags are not switched between benchmarks.
 
@@ -33,6 +35,64 @@ The recipes originate from the
 and the P PCP adaptation in [PR20228](https://github.com/vllm-project/vllm-ascend/pull/20228).
 Capability checks can disable requested optimizations, including shared-expert DP
 at TP1. Check effective runtime flags instead of assuming the YAML proves execution.
+
+## Scheduler, capture and context budgets
+
+`max-num-seqs` is a scheduling ceiling **per DP rank**, not a measurement of
+live concurrency. The two D hosts together contain DP16 (8 instances per host),
+so divide client concurrency by 16, not by the local DP8 count. PP/PCP/TP do not
+multiply request-serving replicas. P is one DP1 pipeline across both P hosts.
+
+| Family / phase | Client concurrency ceiling | Average D load at full client concurrency |
+| --- | --- | --- |
+| A3 Prefill | 7 | 0.4375 |
+| A3 PD | 40 | 2.5 |
+| A3 Decode replay | 80 | 5 |
+| A3 GPQA | 32 | 2 |
+| A5 short 20 ms / long 50 ms | 16 | 1 |
+| A5 short 50 ms / GPQA | 32 | 2 |
+| A5 long 30 ms | 8 | 0.5 |
+
+These are sizing averages, not observed running-request counts. Request lengths,
+arrival rate (A3 PD remains 1.8 requests/s), prompt completion and token-aware
+proxy routing can make live per-rank loads uneven or lower. Collect each D
+engine's running/waiting metrics during measurement before reporting actual
+concurrency. When clients are fewer than DP ranks, some ranks may be idle.
+
+| Parameter | A3 P / D | A5 P / D | Reason |
+| --- | --- | --- | --- |
+| `max-num-seqs` | 80 / 8 | 32 / 4 | P covers peak clients; D leaves skew margin above averages 5 / 2. |
+| `max-num-batched-tokens` | 16384 / 48 | 16384 / 24 | P retains chunked-prefill budget; D covers `seqs * (MTP5 + 1)`. |
+| D capture token sizes | 6,12,18,24,30,36,42,48 | 6,12,18,24 | Exact uniform MTP5 batches for every supported request count. |
+| D max capture token size | 48 | 24 | Avoid capturing batches far above tested client loads. |
+| `max-model-len` | 131072 | 135000 | Total input plus output; A3 includes GPQA output65536; A5 retains128K input plus1024 output/headroom. |
+| GPU/NPU memory utilization | 0.92 / 0.92 | 0.90 / 0.95 | Keep tutorial memory reservations; cache capacity still needs measurement. |
+| Worker execution timeout | 3000 seconds | 3000 seconds | A per-step timeout, reduced from30000; not a request or service-start budget. |
+
+A3 restores static **and** super kernels; A5 keeps both disabled. Each D keeps
+MRV2, MTP5, FULL_DECODE_ONLY and npugraph_ex. Smaller captures reduce startup work
+but do not prove startup fits the local3600-second readiness budget. The common
+runner's global5400-second readiness/master-stop budget is unchanged. A YAML
+server environment cannot extend those parent test-runner deadlines.
+
+Use nested `scheduler_config.recompute_scheduler_enable` instead of the deprecated
+top-level key. This keeps D steps decode-shaped after remote KV transfer. Fused
+MC2 is explicitly1, matching current Ascend's automatic rollback of requested2.
+P's eager mode, PP42/36 partition, FlashComm1, INT8/FP8 KV and indexer KV, and A5's
+MLAPO/LM-head TP8/CPU binding remain recipe-specific choices, not knobs inferred
+from client concurrency. MTP draft eager settings and optimization flags do not
+change between phases. HCCL buffers (P2560MiB/D1024MiB), AIV/resource settings,
+connect/execute timeouts1800s, transfer timeout, allocator settings, seed,
+quantization, parsers, prefetch and Mooncake ports/topology are retained. Reducing
+scheduler load alone does not establish a safe smaller collective buffer.
+
+Definitions and implementation references:
+
+- [vLLM0.33 serve arguments](https://docs.vllm.ai/en/v0.33.0/cli/serve/)
+- [DP rank sizing and load balancing](https://docs.vllm.ai/en/v0.33.0/serving/data_parallel_deployment/)
+- [Chunked-prefill token budgets](https://docs.vllm.ai/en/v0.33.0/configuration/optimization/)
+- [Ascend speculative decoding capture sizes](../../../../../../../docs/source/user_guide/feature_guide/speculative_decoding.md)
+- [Ascend config schema and effective optimization constraints](../../../../../../../vllm_ascend/ascend_config.py)
 
 ## Benchmark and cache sequence
 
