@@ -1233,52 +1233,50 @@ class SparseKVOffloadManager:
             request.fill_(-1)
 
     def write_selective_tail(self, layer_name, slots, tail_rows, k, v, capturing):
-        from vllm_ascend.ops.triton.selective_kv_writeback import build_tail_flush_descriptors, write_tail
-
         layer_id = self._get_offload_layer_id(layer_name)
         k_cache, v_cache = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
-        slots = slots.reshape(-1).contiguous()
         rows = slots.numel()
-        write_tail[(rows,)](
-            slots,
-            tail_rows,
-            k.contiguous(),
-            v.contiguous(),
-            k_cache,
-            v_cache,
-            self.selective_row_stride,
-            self.topk_buffer_size,
-            self.block_size,
-            k_cache.shape[-1],
-            v_cache.shape[-1],
-            1 << (k_cache.shape[-1] - 1).bit_length(),
-            1 << (v_cache.shape[-1] - 1).bit_length(),
+
+        def tail_positions():
+            host_slots = slots.reshape(-1).to(torch.int64)
+            tail_slot, first = tail_rows[:rows].unbind(-1)
+            valid = (tail_slot >= 0) & (host_slots >= 0)
+            safe_slots = host_slots.clamp_min(0)
+            offset = safe_slots % self.block_size
+            tail_base = tail_slot.clamp_min(0) * self.selective_row_stride + self.topk_buffer_size
+            return valid, safe_slots, offset, tail_base, first
+
+        valid, _, offset, tail_base, _ = tail_positions()
+        device_slots = torch.where(valid, tail_base + offset, -1)
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=k.reshape(rows, 1, k_cache.shape[-1]).contiguous(),
+            value=v.reshape(rows, 1, v_cache.shape[-1]).contiguous(),
+            key_cache=k_cache.view(-1, self.block_size, 1, k_cache.shape[-1]),
+            value_cache=v_cache.view(-1, self.block_size, 1, v_cache.shape[-1]),
+            slot_mapping=device_slots,
+            cache_mode="Norm",
         )
         if self.tp_rank != 0:
             return
 
-        tile = min(128, max(16, 1 << (rows - 1).bit_length()))
-
         def submit():
-            build_tail_flush_descriptors[(cdiv(rows, tile),)](
-                slots,
-                tail_rows,
-                self.d2h_src_ptrs_npu,
-                self.d2h_dst_ptrs_npu,
-                self.d2h_lengths_npu,
-                self.d2h_size_npu,
-                k_cache.data_ptr(),
-                v_cache.data_ptr(),
-                self.gvas_k_bases[layer_id],
-                self.gvas_v_bases[layer_id],
-                rows,
-                self.selective_row_stride,
-                self.topk_buffer_size,
-                self.block_size,
-                self.token_size_bytes_k,
-                self.token_size_bytes_v,
-                tile,
-            )
+            # Build stream-local temporaries from the persistent step metadata.
+            valid, safe_slots, offset, tail_base, first = tail_positions()
+            start = first.clamp_min(0)
+            host_base = safe_slots - offset + start
+            source = tail_base + start
+            tokens = torch.where(valid & (offset == self.block_size - 1), self.block_size - start, 0)
+            for i, (cache, gva, row_bytes) in enumerate(
+                (
+                    (k_cache, self.gvas_k_bases[layer_id], self.token_size_bytes_k),
+                    (v_cache, self.gvas_v_bases[layer_id], self.token_size_bytes_v),
+                )
+            ):
+                segment = slice(i * rows, (i + 1) * rows)
+                self.d2h_src_ptrs_npu[segment].copy_(cache.data_ptr() + source * row_bytes)
+                self.d2h_dst_ptrs_npu[segment].copy_(gva + host_base * row_bytes)
+                self.d2h_lengths_npu[segment].copy_((tokens * row_bytes).to(torch.int32))
+            self.d2h_size_npu.fill_(2 * rows)
             self._submit_current_kv_writeback(k_cache.device)
 
         if capturing:
@@ -1384,43 +1382,6 @@ class SparseKVOffloadManager:
             raise ValueError(
                 f"Sparse KV offload CPU K/V pools have incompatible token capacities: k={num_k_slots}, v={num_v_slots}"
             )
-        if (
-            getattr(self.sparse_kv_offload_config, "selective_offload", False)
-            and not has_prefill
-            and k is not None
-            and v is not None
-            and k.is_contiguous()
-            and v.is_contiguous()
-            and slot_mapping.is_contiguous()
-            and slot_mapping.device == device
-            and token_count
-        ):
-            if k.numel() * k.element_size() != token_count * self.token_size_bytes_k or (
-                v.numel() * v.element_size() != token_count * self.token_size_bytes_v
-            ):
-                raise ValueError("decode K/V row counts must match slot_mapping")
-            from vllm_ascend.ops.triton.selective_kv_writeback import build_d2h_descriptors
-
-            block = min(128, max(16, 1 << (token_count - 1).bit_length()))
-            build_d2h_descriptors[(cdiv(token_count, block),)](
-                slot_mapping,
-                self.d2h_src_ptrs_npu,
-                self.d2h_dst_ptrs_npu,
-                self.d2h_lengths_npu,
-                self.d2h_size_npu,
-                k.data_ptr(),
-                v.data_ptr(),
-                k_cache_cpu.data_ptr(),
-                v_cache_cpu.data_ptr(),
-                token_count,
-                num_k_slots,
-                self.token_size_bytes_k,
-                self.token_size_bytes_v,
-                block,
-            )
-            self._submit_current_kv_writeback(device)
-            return
-
         slots = slot_mapping.reshape(-1).to(device=device, dtype=torch.int64)
         valid = (slots >= 0) & (slots < num_k_slots)
         safe_slots = slots.clamp(min=0, max=num_k_slots - 1)

@@ -1586,9 +1586,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         topk_indices: torch.Tensor,
         metadata: AscendSFAOffloadMetadata,
         seq_lengths: torch.Tensor,
-        plan: tuple[torch.Tensor, ...] | None = None,
+        plan: tuple[torch.Tensor | None, ...] | None = None,
         lookup: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor | None, ...]:
         block_size = manager.block_size
         topk = manager.topk
         rows = topk_indices.numel() // topk
@@ -1604,49 +1604,24 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             host_blocks = manager.kv_cache_config.num_blocks
             tail_rows = getattr(metadata, "selective_tail_rows", None)
             tail_indices = None
-            if tail_rows is not None and logical.device.type == "npu":
-                from vllm_ascend.ops.triton.selective_kv_writeback import map_tail_sources
-
-                source_slots = torch.empty_like(logical, dtype=torch.int64, memory_format=torch.contiguous_format)
-                valid = torch.empty_like(source_slots, dtype=torch.bool)
-                tail_indices = torch.empty_like(source_slots)
-                tile = 256
-                map_tail_sources[(rows, cdiv(topk, tile))](
-                    logical.contiguous(),
-                    table,
-                    seq_lengths.contiguous(),
-                    request.contiguous(),
-                    tail_rows,
-                    source_slots,
-                    valid,
-                    tail_indices,
-                    topk,
-                    block_size,
-                    table.shape[1],
-                    table.stride(0),
-                    table.stride(1),
-                    host_blocks,
-                    manager.topk_buffer_size,
-                    tile,
+            logical = logical.to(torch.int64)
+            valid = (request != 0) & (logical >= 0) & (logical < seq_lengths)
+            valid &= logical < table.shape[1] * block_size
+            safe_logical = logical.clamp_min(0)
+            logical_block = safe_logical // block_size
+            physical = table.gather(-1, logical_block.clamp_max(table.shape[1] - 1)).to(torch.int64)
+            valid &= (physical >= 0) & (physical < host_blocks)
+            offset = safe_logical % block_size
+            source_slots = physical.clamp(0, host_blocks - 1) * block_size + offset
+            if tail_rows is not None:
+                in_tail = (
+                    valid
+                    & (tail_rows[:rows, :1] >= 0)
+                    & (logical_block == (seq_lengths - 1) // block_size)
+                    & (offset >= tail_rows[:rows, 1:2])
                 )
-            else:
-                logical = logical.to(torch.int64)
-                valid = (request != 0) & (logical >= 0) & (logical < seq_lengths)
-                valid &= logical < table.shape[1] * block_size
-                block_indices = (logical.clamp_min(0) // block_size).clamp_max(table.shape[1] - 1)
-                physical = table.gather(-1, block_indices).to(torch.int64)
-                valid &= (physical >= 0) & (physical < host_blocks)
-                offset = logical.clamp_min(0) % block_size
-                source_slots = physical.clamp(0, host_blocks - 1) * block_size + offset
-                if tail_rows is not None:
-                    in_tail = (
-                        valid
-                        & (tail_rows[:rows, :1] >= 0)
-                        & (logical // block_size == (seq_lengths - 1) // block_size)
-                        & (offset >= tail_rows[:rows, 1:2])
-                    )
-                    tail_indices = torch.where(in_tail, manager.topk_buffer_size + offset, -1)
-                    valid = valid & ~in_tail
+                tail_indices = torch.where(in_tail, manager.topk_buffer_size + offset, -1)
+                valid = valid & ~in_tail
             destinations, misses, updated_keys = plan_selective_hot_slots(
                 keys,
                 previous_request,
@@ -1658,7 +1633,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             )
             # Current KV is produced locally by this layer on each TP rank.
             current = valid & (logical == seq_lengths - 1)
-            current_slots = torch.where(current, destinations, -1).amax(-1, keepdim=True)
+            current_slots = None
+            if tail_indices is None:
+                current_slots = torch.where(current, destinations, -1).amax(-1, keepdim=True)
             plan = source_slots, destinations, valid, current, current_slots, request, tail_indices
         else:
             source_slots, destinations, valid, current, current_slots, request, tail_indices = plan
@@ -1671,7 +1648,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 torch.where(valid, destinations, sentinel),
                 torch.where(valid, source_slots, -1),
             )
-        manager.selective_current_slots[layer_id, :rows].copy_(current_slots)
+        if current_slots is not None:
+            manager.selective_current_slots[layer_id, :rows].copy_(current_slots)
         misses &= ~current
         entries = rows * topk
         src = manager.selective_copy_src[layer_id, : 2 * entries]

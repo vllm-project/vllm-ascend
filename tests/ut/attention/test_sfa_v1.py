@@ -97,7 +97,9 @@ def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
     metadata.req_ids_tensor = torch.tensor([3, 4])
     metadata.selective_tail_rows = torch.tensor([[0, 0], [1, 1]])
     manager.topk_buffer_size = 3
+    manager.selective_current_slots.fill_(-2)
     AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, seq_lens)
+    assert manager.selective_current_slots.tolist() == [[[-2], [-2]]] * 2
     assert manager.selective_physical[0, :, 0, 1].tolist() == [3, 4]
     assert manager.selective_copy_lengths[0].tolist() == [4, 0, 0, 4, 0, 0] * 2
 
