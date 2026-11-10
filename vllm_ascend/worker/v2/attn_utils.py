@@ -699,7 +699,11 @@ def build_attn_metadata(
                 if not for_cudagraph_capture and model_specific_attn_metadata is not None
                 else {}
             )
-            if isinstance(attn_metadata_builder, (AscendSFAMetadataBuilder, AscendSFAIndexerMetadataBuilder)):
+            # Core's capture entry point does not accept the shared RoPE context.
+            # Keep sharing on the runtime build interface that declares it.
+            if not for_cudagraph_capture and isinstance(
+                attn_metadata_builder, (AscendSFAMetadataBuilder, AscendSFAIndexerMetadataBuilder)
+            ):
                 if shared_mla_rope is None:
                     shared_mla_rope = MLARopeMetadataCache()
                 attn_metadata_extra_kwargs["shared_mla_rope"] = shared_mla_rope

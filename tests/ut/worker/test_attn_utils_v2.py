@@ -9,6 +9,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -112,18 +113,18 @@ def test_plain_sfa_and_indexer_share_rope_only_within_one_compatible_build(
                 # The unrelated consumer owns its copies, like a separate builder.
                 return SimpleNamespace(cos=cos.clone() if self.offset else cos, sin=sin.clone() if self.offset else sin)
 
-            def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-                return self.build(0, common_attn_metadata, **kwargs)
-
         class PlainSFA(Recorder, AscendSFAMetadataBuilder):
             pass
 
         class PlainIndexer(Recorder, AscendSFAIndexerMetadataBuilder):
             pass
 
+        class UnrelatedBuilder(Recorder, AttentionMetadataBuilder):
+            pass
+
         builders = [("sfa", PlainSFA())]
         if boundary == "builder":
-            builders.append(("other", Recorder(5)))
+            builders.append(("other", UnrelatedBuilder(5)))
         builders.append(("indexer", PlainIndexer()))
         groups = [
             [SimpleNamespace(layer_names=[name], get_metadata_builder=lambda _, builder=builder: builder)]
@@ -168,7 +169,7 @@ def test_plain_sfa_and_indexer_share_rope_only_within_one_compatible_build(
             for name in ("sfa", "indexer"):
                 torch.testing.assert_close(metadata[name].cos, expected)
                 torch.testing.assert_close(metadata[name].sin, -expected)
-            expected_lookups = 1 if boundary == "none" else len(builders)
+            expected_lookups = 1 if boundary == "none" and not for_capture else len(builders)
             assert len(lookups) == expected_lookups
             # The same position tensor is updated between calls; no prior-build hit.
             positions.add_(1)
