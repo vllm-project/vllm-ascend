@@ -7,21 +7,18 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from safetensors.torch import load_file
 
+from tests.e2e.common.rlhf.weight_transfer.case import DEEPSEEK_V4_VISION_CASE
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_vision_params
-from tests.e2e.common.rlhf.weight_transfer.deepseek_vision import deepseek_vision_case
 from tests.e2e.common.rlhf.weight_transfer.reference_check import generation_signature, reference_serve_args
 from tests.e2e.common.rlhf.weight_transfer.weight_source import FixedRandomWeightSource
 
 
-def test_graph_modes_are_case_local(monkeypatch):
-    monkeypatch.setenv("VLLM_RL_DSV4_CUDAGRAPH_MODE", "NONE")
-    eager = deepseek_vision_case()
-    monkeypatch.setenv("VLLM_RL_DSV4_CUDAGRAPH_MODE", "FULL_DECODE_ONLY")
-    graph = deepseek_vision_case()
+def test_graph_modes_are_case_local():
+    graph = DEEPSEEK_V4_VISION_CASE
+    eager = replace(graph, id=f"{graph.id}-eager", compilation_config=json.dumps({"cudagraph_mode": "NONE"}))
     for case, expected in ((eager, "NONE"), (graph, "FULL_DECODE_ONLY")):
         args = reference_serve_args(case, port=8000, gpu_memory_utilization=0.45)
         assert json.loads(args[args.index("--compilation-config") + 1])["cudagraph_mode"] == expected
@@ -52,7 +49,7 @@ def test_vision_checkpoint_metadata_includes_tower_sentinels_and_router_state():
 def test_local_startup_checkpoint_uses_same_payload_as_transfer(tmp_path):
     config_bytes = b'{"model_type": "deepseek_v4", "num_hidden_layers": 1}\n'
     (tmp_path / "config.json").write_bytes(config_bytes)
-    case = replace(deepseek_vision_case(), model=str(tmp_path), extra_param_builder=None)
+    case = replace(DEEPSEEK_V4_VISION_CASE, model=str(tmp_path), extra_param_builder=None)
     source = object.__new__(FixedRandomWeightSource)
     source._case = case
     source._device = torch.device("cpu")
@@ -84,12 +81,3 @@ def test_image_signature_exercises_chat_and_records_logprobs():
     assert signature == [("text", (-0.5,)), ("text", (-0.5,)), ("image", (-0.75,))]
     content = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
-
-
-@pytest.mark.parametrize("layers,vision,experts", [(0, 2, 8), (4, 0, 8), (4, 2, 5)])
-def test_invalid_vision_reduction_fails_before_starting_server(monkeypatch, layers, vision, experts):
-    monkeypatch.setenv("VLLM_RL_DSV4_TEXT_LAYERS", str(layers))
-    monkeypatch.setenv("VLLM_RL_DSV4_VISION_LAYERS", str(vision))
-    monkeypatch.setenv("VLLM_RL_DSV4_EXPERTS", str(experts))
-    with pytest.raises(ValueError, match="Vision reload"):
-        deepseek_vision_case()
