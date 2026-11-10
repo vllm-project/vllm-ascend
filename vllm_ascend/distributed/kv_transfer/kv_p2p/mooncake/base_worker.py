@@ -270,6 +270,23 @@ class MooncakeBaseConnectorWorker:
             return shape
 
         heads = spec.num_kv_heads
+        if len(shape) > 3:
+            # Packed/blocked HND caches (for example C8-MXFP PA_NZ K/V and
+            # E8M0 scale caches) keep the KV-head axis first while splitting
+            # the token or head-dimension axes into additional fragments.
+            # Mooncake transfers raw bytes, so preserve that physical shape;
+            # the pull worker can still shard it by the leading head axis.
+            if shape[0] != heads:
+                raise ValueError(
+                    f"MooncakeConnector packed GQA block shape {shape} does not "
+                    f"match the spec's {heads} KV heads."
+                )
+            if not cache[0].is_contiguous():
+                raise ValueError(
+                    "MooncakeConnector packed HND requires contiguous bytes "
+                    "within each KV block."
+                )
+            return shape
         if len(shape) != 3:
             raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")
         if shape[0] == shape[1] == heads and heads > 1:

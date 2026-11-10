@@ -154,6 +154,39 @@ def test_transfer_block_shape_rejects_unsupported_cache(heads, shape, step, erro
         MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=heads), cache)
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (4, 2, 8, 512, 32),  # C8-MXFP K/V PA_NZ cache
+        (4, 2, 32, 8, 16, 1),  # C8-MXFP K-scale cache
+        (4, 2, 8, 16, 32, 1),  # C8-MXFP V-scale cache
+    ],
+)
+def test_transfer_block_shape_preserves_packed_head_major_gqa(shape) -> None:
+    cache = torch.empty(shape, dtype=torch.uint8)
+
+    assert MooncakeBaseConnectorWorker._get_transfer_block_shape(
+        make_full_spec(num_kv_heads=2), cache
+    ) == tuple(shape[1:])
+
+
+@pytest.mark.parametrize(
+    ("shape", "step", "error"),
+    [
+        ((4, 1, 8, 512, 32), 1, "does not match"),
+        ((4, 2, 8, 512, 32), 2, "contiguous bytes"),
+    ],
+)
+def test_transfer_block_shape_rejects_invalid_packed_head_major_gqa(
+    shape, step, error
+) -> None:
+    cache = torch.empty(shape, dtype=torch.uint8)[..., ::step]
+    with pytest.raises(ValueError, match=error):
+        MooncakeBaseConnectorWorker._get_transfer_block_shape(
+            make_full_spec(num_kv_heads=2), cache
+        )
+
+
 @pytest.mark.parametrize("spare", [0, 64, 256])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
