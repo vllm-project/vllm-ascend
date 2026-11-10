@@ -70,7 +70,7 @@ def test_tiering_matches_upstream_population_api(monkeypatch, replicated, worker
     kwargs = region_factory.call_args.kwargs
     assert "barrier" not in kwargs
     assert events == ["region", "barrier", "worker"]
-    assert kwargs["rank"] == (0 if replicated else 1)
+    assert kwargs["rank"] == (0 if replicated else worker_index)
     if segment_constant is None:
         # The release version accepts the barrier, but not the new keywords.
         assert "num_segments" not in kwargs
