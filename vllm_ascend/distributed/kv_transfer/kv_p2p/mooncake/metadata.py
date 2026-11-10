@@ -137,6 +137,7 @@ class ReqMeta:
     remote_request_id: str
     remote_num_prompt_tokens: int
     local_full_block_ids: BlockIds
+    remote_lease_nonce: str | None = None
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -166,6 +167,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_request_id=kv_transfer_params["remote_request_id"],
+            remote_lease_nonce=kv_transfer_params.get("remote_lease_nonce"),
             remote_num_prompt_tokens=kv_transfer_params["remote_num_prompt_tokens"],
             local_full_block_ids=local_full_block_ids or tuple(),
         )

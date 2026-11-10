@@ -1,0 +1,4 @@
+pr: 19282
+entries:
+  - category: bugfix
+    text: Mooncake V2 verifies producer holds after KV reads and rejects stale completion messages. Prefill and decode nodes must upgrade together because transfer descriptors and completion messages now identify each hold.
