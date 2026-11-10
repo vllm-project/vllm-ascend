@@ -7,15 +7,21 @@ Ported from the official reference implementation
 checkpoint so no renaming is needed at load time.
 """
 
+from collections import OrderedDict
 from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+
+_ROPE_CACHE_LOG_INTERVAL = 100
+_ROPE_CACHE_MAX_ENTRIES = 8
+_ROPE_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 
 @lru_cache(8)
@@ -95,15 +101,78 @@ class DeepseekV41ViT(nn.Module):
         super().__init__()
         self.rope_dim = config.vision_dim // config.vision_n_heads // 2
         self.rope_theta = config.vision_rope_theta
+        self._rope_cache_logger = init_logger(__name__)
+        self._rope_cache_hits = 0
+        self._rope_cache_misses = 0
+        self._rope_cache_evictions = 0
+        self._rope_cache_oversized = 0
+        self._rope_cache = OrderedDict()
+        self._rope_cache_bytes = 0
         self.patch_embed = DeepseekV41PatchEmbed(config)
         self.blocks = nn.ModuleList([DeepseekV41VisionBlock(config) for _ in range(config.vision_n_layers)])
         self.norm = RMSNorm(config.vision_dim, eps=1e-6, dtype=torch.float32)
 
+    def _apply(self, fn, recurse=True):
+        # Cached FP32 tables are derived state, not weights or checkpoint buffers.
+        self._rope_cache.clear()
+        self._rope_cache_bytes = 0
+        return super()._apply(fn, recurse=recurse)
+
+    def _log_rope_cache_stats(self, key):
+        # Lifetime counters: include warmup and survive model device/dtype changes.
+        calls = self._rope_cache_hits + self._rope_cache_misses
+        if calls != 1 and calls % _ROPE_CACHE_LOG_INTERVAL:
+            return
+        self._rope_cache_logger.info(
+            "ViT RoPE cache instance=%s device=%s calls=%d hits=%d misses=%d "
+            "hit_rate=%.2f%% evictions=%d oversized=%d entries=%d bytes=%d "
+            "last_grid=%dx%d",
+            hex(id(self)),
+            key[-1],
+            calls,
+            self._rope_cache_hits,
+            self._rope_cache_misses,
+            100.0 * self._rope_cache_hits / calls,
+            self._rope_cache_evictions,
+            self._rope_cache_oversized,
+            len(self._rope_cache),
+            self._rope_cache_bytes,
+            key[0],
+            key[1],
+        )
+
+    def _get_rope(self, n_h: int, n_w: int, device: torch.device):
+        key = (n_h, n_w, self.rope_dim, self.rope_theta, device)
+        if key in self._rope_cache:
+            self._rope_cache_hits += 1
+            self._rope_cache.move_to_end(key)
+            self._log_rope_cache_stats(key)
+            return self._rope_cache[key]
+
+        cos, sin = get_vision_cos_sin(n_h, n_w, self.rope_dim, self.rope_theta)
+        self._rope_cache_misses += 1
+        size = sum(t.numel() * t.element_size() for t in (cos, sin))
+        # Oversized tables remain usable without displacing the working set.
+        if size <= _ROPE_CACHE_MAX_BYTES:
+            while self._rope_cache and (
+                len(self._rope_cache) >= _ROPE_CACHE_MAX_ENTRIES
+                or self._rope_cache_bytes + size > _ROPE_CACHE_MAX_BYTES
+            ):
+                _, old = self._rope_cache.popitem(last=False)
+                self._rope_cache_evictions += 1
+                self._rope_cache_bytes -= sum(t.numel() * t.element_size() for t in old)
+        result = (cos.to(device=device), sin.to(device=device))
+        if size <= _ROPE_CACHE_MAX_BYTES:
+            self._rope_cache[key] = result
+            self._rope_cache_bytes += size
+        else:
+            self._rope_cache_oversized += 1
+        self._log_rope_cache_stats(key)
+        return result
+
     def forward(self, patches: torch.Tensor, n_vit_h: int, n_vit_w: int) -> torch.Tensor:
         x = self.patch_embed(patches)
-        cos, sin = get_vision_cos_sin(n_vit_h, n_vit_w, self.rope_dim, self.rope_theta)
-        cos = cos.to(device=x.device)
-        sin = sin.to(device=x.device)
+        cos, sin = self._get_rope(n_vit_h, n_vit_w, x.device)
         for block in self.blocks:
             x = block(x, cos, sin)
         return self.norm(x)
