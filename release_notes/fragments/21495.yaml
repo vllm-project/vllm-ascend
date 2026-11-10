@@ -1,0 +1,8 @@
+pr: 21495
+entries:
+  - category: feature
+    text: >-
+      Added optional MiniMax M3 Union sparse-attention prefill on Ascend950,
+      including frozen layer/head routing and opt-in MoE graph output buffers.
+      This experimental path requires separately installed custom NN and
+      transformer Union operators and is disabled by default.
