@@ -22,7 +22,7 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 |----------|-------------------------------|------------------------|
 | MoE serving with embedding / LM head TP — a standalone instance (optionally stacked with standard TP) or a PD decode node | embedding / LM head | MoE model, sizes evenly divide `data_parallel_size` |
 | P/D-disaggregated decode (D) node | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
-| GLM-5.3-Flash P/D-disaggregated decode node | QKV IProj (experimental) | See [preconditions for QKV IProj TP](#preconditions-for-qkv-iproj-tp) |
+| GLM-5.3-Flash P/D-disaggregated decode node | QKV IProj | See [preconditions for QKV IProj TP](#preconditions-for-qkv-iproj-tp) |
 
 #### Component & Execution Mode Support
 
@@ -74,7 +74,7 @@ If the largest cudagraph capture size does not cover the largest decode-shaped s
 
 #### Preconditions for QKV IProj TP
 
-QKV IProj TP is **experimental** while full-model accuracy validation continues. Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these conditions.
+Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these conditions.
 
 - GLM-5.3-Flash on a P/D-disaggregated decode node (`kv_role = kv_consumer`).
 - `tensor_parallel_size == 1`, `prefill_context_parallel_size == 1` and `pipeline_parallel_size == 1`.
@@ -252,7 +252,7 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
-| `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection (experimental). Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
+| `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection. Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
 
 ## Experimental Results
 
