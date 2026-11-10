@@ -143,3 +143,14 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
+
+  run-selected-tests-upstream:
+    needs: [select-tests, prepare-csrc-cache]
+    uses: ./.github/workflows/_selected_tests_upstream.yaml
+    with:
+      runner: linux-aarch64-a2-fed-1
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
