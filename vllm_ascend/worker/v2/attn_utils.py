@@ -72,8 +72,6 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    get_sfa_qsfa_packed_head_dim,
-    get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
 )
@@ -115,7 +113,6 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
-    enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
@@ -222,31 +219,11 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
-    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-
-    use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
-    sfa_dcp_replicated_indexer_size = (
-        vllm_config.parallel_config.decode_context_parallel_size
-        if enable_sfa_dcp_replicated_indexer(vllm_config)
-        else 1
-    )
-    enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
-    if enable_sparse_li_c8:
-        c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-            vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
-        )
-        if c8_k_cache_dtype == torch.float8_e4m3fn:
-            c8_k_scale_cache_dtype = torch.float32
-        elif c8_k_cache_dtype == torch.int8:
-            c8_k_scale_cache_dtype = torch.float16
-
-    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
@@ -271,99 +248,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # Keep Mamba groups after attention groups. Ascend graph parameter
             # updates rely on this stable backend ordering.
             mamba_specs[layer_name] = spec
-            continue
-
-        if isinstance(attn_module, MLAAttention):
-            cache_sparse_sfa_c8 = False
-            cache_sparse_sfa_turboquant = False
-            if getattr(attn_module.impl, "fa_quant_layer", False):
-                head_size = attn_module.head_size + attn_module.qk_rope_head_dim
-                dtype, cache_dtype_str = attn_module.impl.dtype, None
-            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_turboquant", False)):
-                cache_sparse_sfa_turboquant = True
-                head_size = get_tq_fused_slot_bytes(
-                    attn_module.kv_lora_rank,
-                    attn_module.qk_rope_head_dim,
-                )
-                dtype, cache_dtype_str = torch.int8, vllm_config.cache_config.cache_dtype
-            elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
-                cache_sparse_sfa_c8 = True
-                head_size = get_sfa_qsfa_packed_head_dim(
-                    vllm_config.model_config.hf_text_config.kv_lora_rank,
-                    vllm_config.model_config.hf_text_config.qk_rope_head_dim,
-                )
-                dtype = c8_cache_dtype
-                cache_dtype_str = vllm_config.cache_config.cache_dtype
-            else:
-                head_size = spec.head_size
-                dtype = spec.dtype
-                cache_dtype_str = spec.cache_dtype_str
-            model_version = spec.model_version or getattr(attn_module, "model_version", None)
-            indexes_kv_by_block_stride = bool(
-                getattr(spec, "indexes_kv_by_block_stride", False)
-                or getattr(attn_module, "indexes_kv_by_block_stride", False)
-            )
-            compression_ratio = get_kv_cache_compression_ratio(spec)
-            ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
-            spec = AscendMLAAttentionSpec(
-                block_size=spec.block_size,
-                # ``num_heads`` describes physical cache head slots, not query
-                # heads. Kimi K3 publishes one latent KV slot per token; using
-                # the query-head count here makes vLLM's generic planner inflate
-                # each page by the local query-head count.
-                num_heads=(
-                    spec.num_heads
-                    if getattr(vllm_config.model_config.hf_text_config, "model_type", None) == "kimi_linear"
-                    else attn_module.num_heads
-                ),
-                num_kv_heads=spec.num_kv_heads,
-                head_size=head_size,
-                dtype=dtype,
-                cache_dtype_str=cache_dtype_str,
-                cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
-                cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
-                non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
-                model_version=model_version,
-                indexes_kv_by_block_stride=indexes_kv_by_block_stride,
-                **ratio_kwargs,
-            )
-        if isinstance(attn_module, DeepseekV32IndexerCache):
-            if not getattr(
-                getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
-                "runtime_has_indexer",
-                True,
-            ):
-                continue
-            cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
-            cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
-            head_dim = vllm_config.model_config.hf_text_config.index_head_dim
-            kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
-                block_size=vllm_config.cache_config.block_size,
-                num_kv_heads=1,
-                head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
-                dtype=torch.uint8
-                if cache_sparse_li_c4
-                else c8_k_cache_dtype
-                if cache_sparse_li_c8
-                else vllm_config.model_config.dtype,
-                cache_dtype_str=(
-                    vllm_config.cache_config.cache_dtype
-                    if (cache_sparse_li_c8 or cache_sparse_li_c4)
-                    else None
-                    if use_turboquant
-                    else "auto"
-                ),
-                scale_dim=head_dim // 32 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
-                scale_dtype=torch.float8_e8m0fnu
-                if cache_sparse_li_c4
-                else c8_k_scale_cache_dtype
-                if cache_sparse_li_c8
-                else torch.int8,
-                cache_sparse_li_c4=cache_sparse_li_c4,
-                cache_sparse_li_c8=cache_sparse_li_c8,
-                sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
-            )
             continue
 
         if getattr(attn_module, "attn_backend", None) is AscendFlashAttentionBackend:

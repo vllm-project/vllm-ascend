@@ -202,6 +202,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
+    # Logical MLA component dimensions supplied by the owner. Backend packing
+    # must not infer a layer's RoPE width from the global model configuration.
+    kv_lora_rank: int | None = None
+    qk_rope_head_dim: int | None = None
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -251,6 +255,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
         ascend_layouts = {
             (
+                spec.kv_lora_rank,
+                spec.qk_rope_head_dim,
                 spec.scale_dim,
                 spec.num_heads,
                 spec.scale_dtype,
@@ -274,6 +280,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         merged = super().merge(specs)
         return replace(
             merged,
+            kv_lora_rank=first_spec.kv_lora_rank,
+            qk_rope_head_dim=first_spec.qk_rope_head_dim,
             scale_dim=first_spec.scale_dim,
             num_heads=first_spec.num_heads,
             scale_dtype=first_spec.scale_dtype,

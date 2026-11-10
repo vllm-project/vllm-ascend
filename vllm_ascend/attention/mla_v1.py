@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -82,6 +82,7 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
+    _is_glm_model,
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
     enable_sfa,
@@ -157,6 +158,46 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
+        """Publish the complete cache demand using the selected execution format."""
+        spec = super().get_kv_cache_spec(vllm_config)
+        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
+        storage_heads = self.num_heads
+        if _is_glm_model(vllm_config.model_config) or model_type == "kimi_linear":
+            # The planner counts physical latent slots. Query heads remain on
+            # the attention layer and its execution backend.
+            storage_heads = spec.num_heads
+        values.update(
+            num_heads=storage_heads,
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
+        )
+        # These are per-layer execution decisions, not backend-wide defaults.
+        # The standard backend hook owns the physical packing calculation.
+        values.update(
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            cache_sparse_sfa_turboquant=getattr(self.impl, "enable_sparse_sfa_turboquant", False),
+            cache_sparse_sfa_c8=getattr(self.impl, "enable_sparse_sfa_c8", False),
+            store_on_host=getattr(self.impl, "store_kv_cache_on_host", False),
+        )
+        if values["cache_sparse_sfa_turboquant"]:
+            values.update(dtype=torch.int8, cache_dtype_str=self.impl.kv_cache_dtype, cache_sparse_sfa_c8=False)
+        elif values["cache_sparse_sfa_c8"]:
+            values.update(dtype=self.impl.c8_cache_dtype, cache_dtype_str=self.impl.kv_cache_dtype)
+        elif getattr(self.impl, "fa_quant_layer", False):
+            # FA quantization can differ by layer; a class hook has no layer
+            # identity and must not reselect this mode from global config.
+            values.update(
+                head_size=self.impl.head_size + self.qk_rope_head_dim,
+                dtype=self.impl.dtype,
+                cache_dtype_str=None,
+            )
+        return self.get_attn_backend().customize_spec(AscendMLAAttentionSpec(**values))
 
 
 @dataclass
