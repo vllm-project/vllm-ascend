@@ -166,13 +166,12 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     def finish_weight_update(self) -> None:
         try:
             # Only fill omitted parameters after all trainer weights arrive.
-            # Replaying them at start could complete a layer early and suppress
-            # a later trainer-supplied value for a preserved parameter.
+            from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+            
             for module, name, value in getattr(self, "_retained_parameters", []):
                 parameter = getattr(module, name)
                 if parameter is value:
                     continue
-                from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 
                 info = get_layerwise_info(module)
                 if not any(loaded_name == name for loaded_name, _ in info.loaded_weights):
