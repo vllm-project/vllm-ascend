@@ -66,6 +66,7 @@ config:
 env_common:
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+  TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
   HCCL_BUFFSIZE: '256'
@@ -79,6 +80,7 @@ env_common:
 env_prefill:
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+  TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
   HCCL_BUFFSIZE: '256'
@@ -94,6 +96,7 @@ env_prefill:
 env_decode:
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+  TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
   HCCL_BUFFSIZE: '64'
@@ -111,6 +114,7 @@ templates:
   envs:
     SERVER_PORT: ${PORT}
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '256'
@@ -186,6 +190,7 @@ templates:
   envs:
     SERVER_PORT: ${PORT}
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '256'
@@ -262,6 +267,7 @@ templates:
   envs:
     SERVER_PORT: ${PORT}
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '64'
@@ -332,6 +338,7 @@ templates:
   envs:
     SERVER_PORT: ${PORT}
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '64'
