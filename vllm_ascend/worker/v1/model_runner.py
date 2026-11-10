@@ -162,7 +162,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
     CopySfaRequestStates,
 )
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_tail import SelectiveTailSlots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     allocate_kv_offload_topk_profile_buffers,
@@ -718,13 +717,6 @@ class NPUModelRunner(GPUModelRunner):
             else None
         )
         self._copy_sfa_need_eager_tail_restore = False
-        self._selective_tails = None
-        self._selective_tail_rows = None
-        if self.sparse_kv_offload_config.selective_offload and self.cache_config.block_size == 128:
-            self._selective_tails = SelectiveTailSlots(
-                min(self.max_num_reqs, self.max_num_tokens), self.cache_config.block_size
-            )
-            self._selective_tail_rows = self._make_buffer(self.max_num_reqs, 2, dtype=torch.int64)
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
@@ -1007,11 +999,6 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
-        if self._selective_tails is not None:
-            self._selective_tails.release(scheduler_output.finished_req_ids)
-            self._selective_tails.release(scheduler_output.preempted_req_ids or ())
-            self._selective_tails.release(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
-            self._selective_tails.release(req.req_id for req in scheduler_output.scheduled_new_reqs)
         self._update_replay_requests(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -3805,17 +3792,6 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_req_ids_tensor,
                 self._offload_token_to_req,
             )
-        tail_rows = None
-        if self._selective_tail_rows is not None and num_tokens == num_reqs and max_query_len == 1:
-            assert self._selective_tails is not None
-            self._selective_tail_rows.np[:num_reqs_padded].fill(-1)
-            if not (offload_dummy or for_cudagraph_capture):
-                for row, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-                    self._selective_tail_rows.np[row] = self._selective_tails.row(
-                        req_id, int(self.input_batch.num_computed_tokens_cpu[row])
-                    )
-            self._selective_tail_rows.copy_to_gpu(num_reqs_padded)
-            tail_rows = self._selective_tail_rows.gpu[:num_reqs_padded]
         if self.sparse_kv_offload_config.use_fused_copy_sfa and self.sparse_kv_offload_enabled:
             assert self._offload_pool_slots is not None
             assert self._offload_pool_active is not None
@@ -4032,7 +4008,6 @@ class NPUModelRunner(GPUModelRunner):
             req_topk_buffer_active=(self._offload_pool_active.cpu[:num_reqs_padded]
                                          if self._offload_pool_active is not None else None),
             offload_dummy=offload_dummy,
-            selective_tail_rows=tail_rows,
             copy_sfa_restore_tails=self._copy_sfa_need_eager_tail_restore,
             mm_req_doc_ranges=req_doc_ranges,
         )
