@@ -1,0 +1,5 @@
+pr: 21413
+entries:
+  - category: bugfix
+    text: Fixed W4A8 fused MoE token accounting that could truncate valid expert outputs and cause invalid or empty responses.
+    hardware: [A3]
