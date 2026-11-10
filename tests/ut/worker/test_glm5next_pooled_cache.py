@@ -277,9 +277,9 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     spec = replace(_make_specs()[STATE], head_size=2)
     plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
     raw = raw_caches[STATE]
-    expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)[0]
+    expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)
     group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend)
-    actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE][0]
+    actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE]
     assert actual.shape == expected.shape == (plan.num_blocks, 2, 4)
     assert actual.data_ptr() == expected.data_ptr() == raw.data_ptr()
     page_bytes = raw.numel() // plan.num_blocks

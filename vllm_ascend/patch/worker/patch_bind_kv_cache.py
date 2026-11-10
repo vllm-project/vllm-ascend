@@ -7,6 +7,7 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.models.glm5next.kv_cache import Glm5NextTailCache
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
@@ -52,7 +53,11 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        layer = forward_context[layer_name]
+        if isinstance(layer, Glm5NextTailCache):
+            layer.bind_kv_cache(kv_cache)
+        else:
+            layer.kv_cache = kv_cache
     # vLLM #52506 adds ReplaySSM ring trackers on main.
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
@@ -73,7 +78,7 @@ def bind_kv_cache_to_layers(
     """
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, DeepseekV41CacheLayer):
+        if isinstance(layer, (DeepseekV41CacheLayer, Glm5NextTailCache)):
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache
