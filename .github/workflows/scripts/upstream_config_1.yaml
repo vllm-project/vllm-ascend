@@ -428,8 +428,8 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/determinism/test_xpu_batch_invariant_ut.py
     estimated_time: 20
-#  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
-#    estimated_time: 20
+  - name: tests/v1/e2e/general/test_async_scheduling_accuracy.py
+    estimated_time: 20
   - name: tests/v1/e2e/general/test_attention_backend_per_kind.py
     estimated_time: 20
   - name: tests/v1/e2e/general/test_hisparse.py
