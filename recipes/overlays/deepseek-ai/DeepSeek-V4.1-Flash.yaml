@@ -47,10 +47,6 @@ hardware_overrides:
       - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
       - '--kv-transfer-config'
       - '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":4},"decode":{"dp_size":8,"tp_size":2}}}'
-      - '>'
-      - 'run_model.log'
-      - '2>&1'
-      - '&'
     extra_env:
       HCCL_SOCKET_IFNAME: 'bond4'
       HCCL_CONNECT_TIMEOUT: '1200'
