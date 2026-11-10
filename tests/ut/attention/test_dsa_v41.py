@@ -190,6 +190,48 @@ def test_a5_qli_preserves_graph_mode_after_defer_scope(monkeypatch, in_graph, nu
     assert builder._qli_metadata is buffer
 
 
+@pytest.mark.parametrize("tensor_parallel_size", [1, 8])
+def test_a5_smla_metadata_uses_tp_sharded_head_count(monkeypatch, tensor_parallel_size):
+    builder_cls = dsa_v41.AscendDSAV41AttentionMetadataBuilder
+    builder = builder_cls.__new__(builder_cls)
+    builder._device_metadata_enabled = False
+    builder._device_metadata_in_graph = False
+    builder._device_metadata_tasks = ()
+    builder._uses_a5_packed_cache = True
+    builder._supports_device_ops = False
+    builder.common_v41_smla_metadata = {}
+    buffer = torch.zeros(2, 512)
+    builder._a5_smla_metadata = buffer
+    builder._a5_smla_length_rows = torch.ones(2, dtype=torch.int32)
+    metadata_op = Mock(return_value=torch.ones_like(buffer))
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=metadata_op)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_attention_heads=64, head_dim=512, index_topk=512)),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tensor_parallel_size),
+    )
+    req = dsa_v41.AscendDSAV41Metadata(
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+        compress_ratio=2,
+        storage_block_size=16,
+        is_compressor_state=False,
+        cache_kind="swa",
+        num_actual_tokens=2,
+        num_input_tokens=2,
+        num_reqs=1,
+        cache_seq_lens=torch.tensor([1], dtype=torch.int32),
+    )
+    builder._build_smla_metadata(SimpleNamespace(query_start_loc=req.query_start_loc), req, max_ori_seq_len=0)
+
+    # The A5 packed-cache kernel must see the TP-sharded local head count, not the
+    # model's full head count: a TP>1 rank only ever holds num_attention_heads //
+    # tensor_parallel_size of them.
+    metadata_op.assert_called_once()
+    assert metadata_op.call_args.kwargs["num_heads_q"] == 64 // tensor_parallel_size
+
+
 def _impl(role):
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = role

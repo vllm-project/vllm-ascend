@@ -1522,7 +1522,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     length_rows,
                     length_rows,
                     cu_seqlens_q=common.query_start_loc[: req.num_reqs + 1].int().contiguous(),
-                    num_heads_q=64,
+                    num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=512,
                     quant_mode=1,
