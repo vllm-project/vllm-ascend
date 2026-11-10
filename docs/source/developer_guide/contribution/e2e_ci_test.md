@@ -106,9 +106,9 @@ Run tests across multiple hardware categories in one comment:
 /e2e tests/e2e/pull_request/one_card/test_offline_inference.py tests/e2e/pull_request/two_card/test_data_parallel.py
 ```
 
-Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
-re-runs the workflow and picks up the existing `/e2e` comment automatically — no need
-to post a new comment.
+Re-trigger after fixing an issue: pushing a new commit does not start CI by itself.
+Post `/e2e` again to re-run these paths, or `/run` to run the full PR gate on the
+latest commit.
 
 ## Troubleshooting
 
@@ -116,8 +116,8 @@ to post a new comment.
 
 - Check that the comment starts exactly with `/e2e` followed by at least one path,
   with no leading spaces or extra characters before the slash.
-- To re-trigger after fixing an issue, simply push a new commit — the workflow will
-  reuse the existing `/e2e` comment automatically.
+- To re-trigger after fixing an issue, push the fix and post `/e2e` again (or `/run`
+  for the full PR gate on the latest commit).
 
 **Tests ran on the wrong hardware.**
 

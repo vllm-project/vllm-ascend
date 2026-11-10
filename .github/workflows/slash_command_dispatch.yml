@@ -34,6 +34,7 @@ jobs:
           commands: |
             e2e
             rerun
+            run
             cancel
             nightly
             cherry-pick
@@ -52,6 +53,11 @@ jobs:
               },
               {
                 "command": "rerun",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "run",
                 "permission": "none",
                 "issue_type": "pull-request"
               },

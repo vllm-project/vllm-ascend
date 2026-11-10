@@ -1,0 +1,168 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /run Command
+
+# /run re-runs the PR gate (pr_test.yaml) on the *latest* commit of a PR.
+# pr_test.yaml deliberately no longer triggers on `synchronize`, so a commit is
+# only tested when someone asks for it. Rather than duplicating the whole job
+# graph here, this handler re-emits a `pull_request: labeled` event for the PR,
+# which lets pr_test run with its normal event payload: ci-gate therefore lands
+# on the PR head SHA exactly as it did for an automatically triggered run.
+on:
+  repository_dispatch:
+    types: [run-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  run:
+    name: Trigger E2E on the latest commit
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Check user authorization
+        id: auth
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          if [ "$ACTOR" = "$PR_AUTHOR" ]; then
+            echo "User $ACTOR is the PR author, authorized."
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            ROLE_NAME=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/collaborators/$ACTOR/permission" | jq -r '.role_name // empty')
+            case "$ROLE_NAME" in
+              triage|write|maintain|admin)
+                echo "User $ACTOR has $ROLE_NAME role, authorized."
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /run.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Check for a run already in flight on this commit
+        id: inflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          # Query by head_sha on purpose: only a run for *this* commit makes the
+          # command redundant. A run for an older commit is left alone, because
+          # triggering pr_test again cancels it via cancel-in-progress anyway.
+          ACTIVE=0
+          for STATUS in queued in_progress waiting requested pending; do
+            N=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/runs?head_sha=$PR_SHA&status=$STATUS&per_page=100" \
+              | jq '[.workflow_runs[] | select(.name == "E2E")] | length')
+            ACTIVE=$((ACTIVE + ${N:-0}))
+          done
+          echo "active_runs=$ACTIVE" >> "$GITHUB_OUTPUT"
+          if [ "$ACTIVE" -gt 0 ]; then
+            echo "::notice::E2E is already queued or running for $PR_SHA; /run is a no-op."
+          fi
+
+      - name: Post already-running comment
+        if: steps.inflight.outputs.active_runs != '0'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command skipped. E2E is already queued or running for commit `${{ github.event.client_payload.pull_request.head.sha }}`. Comment `/rerun` instead if you only want to retry failed jobs.
+          reactions: confused
+
+      - name: Re-arm ci-run label to emit a labeled event
+        id: trigger
+        if: steps.inflight.outputs.active_runs == '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          # Returns 422 when the label already exists; either way is fine.
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/labels" \
+            -d '{"name":"ci-run","color":"1d76db","description":"E2E requested manually on the latest commit"}'
+
+          # Remove first: adding a label that is already present emits no event,
+          # so a plain add would silently do nothing on the second /run.
+          curl -s -o /dev/null -X DELETE \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/labels/ci-run" || true
+          sleep 2
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/labels" \
+            -d '{"labels":["ci-run"]}')
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Failed to add the ci-run label (HTTP $CODE); E2E was not triggered."
+            exit 1
+          fi
+          echo "triggered=true" >> "$GITHUB_OUTPUT"
+
+      - name: Comment result on PR
+        if: steps.trigger.outputs.triggered == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command accepted. E2E has been queued on the latest commit `${{ github.event.client_payload.pull_request.head.sha }}` of this PR, with whatever test-scope labels the PR currently carries. Track progress in [PR checks](https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/pull/${{ github.event.client_payload.pull_request.number }}/checks).
+          reactions: rocket
+
+      - name: Fail if the trigger did not happen
+        if: steps.inflight.outputs.active_runs == '0' && steps.trigger.outputs.triggered != 'true'
+        run: |
+          echo "::error::The ci-run label was re-armed but no trigger output was produced."
+          exit 1

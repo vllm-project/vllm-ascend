@@ -19,9 +19,13 @@ name: E2E
 
 on:
   pull_request:
+    # `synchronize` is intentionally absent: pushing new commits no longer starts
+    # E2E. A commit is tested when the PR is opened/reopened, when a maintainer
+    # adds a label, or when a `/run` comment re-emits the `labeled` event
+    # (see pr_run_command.yml). This keeps frequent pushers from occupying the
+    # NPU runner pool with every intermediate commit.
     types:
       - opened
-      - synchronize
       - reopened
       - labeled
     branches:
