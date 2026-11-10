@@ -95,9 +95,9 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 
 ### Known Issues
 
-- Qwen2-Audio-7B-Instruct may fail to initialize on the reported v0.32.0rc stack because CANN/OPP does not provide a supported `Conv2D` kernel for its audio processing path. This limitation is carried in the release candidate. [#21487](https://github.com/vllm-project/vllm-ascend/issues/21487)
+- In v0.32.0rc1, Qwen2-Audio-7B-Instruct fails to initialize because CANN/OPP has no supported `Conv2D` kernel for its audio processing path. [#21487](https://github.com/vllm-project/vllm-ascend/issues/21487)
 - In A3 pooling P/D deployments with GLM-5.3-Flash W8A8, prolonged stress tests may hit a RecoverSSM speculative metadata staging error that terminates the D-node EngineCore and stalls the service; the root cause is unconfirmed. [#21486](https://github.com/vllm-project/vllm-ascend/issues/21486)
-- In some A5 GLM-5.3-Flash pooling P/D workloads with multiple prefixes, D-node throughput was observed to be up to approximately 50% lower than v0.30.0; the root cause is under investigation. [#21485](https://github.com/vllm-project/vllm-ascend/issues/21485)
+- On A5, D-node throughput for GLM-5.3-Flash pooling P/D workloads with multiple prefixes can be up to approximately 50% lower than in v0.30.0; the root cause is under investigation. [#21485](https://github.com/vllm-project/vllm-ascend/issues/21485)
 
 ## v0.30.0rc1 - 2026.10.11
 
