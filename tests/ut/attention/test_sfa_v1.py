@@ -94,6 +94,26 @@ def test_selective_prefetch_defers_current_token_and_keeps_layer_descriptors():
     assert manager.selective_copy_lengths[0].tolist() == [4, 0, 0, 0, 0, 0] * 2
     assert manager.selective_physical[0, 1].tolist() == [[-1, -1, -1]]
 
+    metadata.req_ids_tensor = torch.tensor([3, 4])
+    metadata.selective_tail_rows = torch.tensor([[0, 0], [1, 1]])
+    manager.topk_buffer_size = 3
+    AscendSFAKVOffloadImpl._prepare_selective_kv(manager, 0, indices, metadata, seq_lens)
+    assert manager.selective_physical[0, :, 0, 1].tolist() == [3, 4]
+    assert manager.selective_copy_lengths[0].tolist() == [4, 0, 0, 4, 0, 0] * 2
+
+
+def test_selective_tail_slots_follow_request_across_batch_reordering():
+    from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_tail import SelectiveTailSlots
+
+    state = SelectiveTailSlots(capacity=2, block_size=128)
+    assert state.row("a", 2305) == (0, 1)
+    assert state.row("b", 140) == (1, 12)
+    assert state.row("b", 141) == (1, 12)
+    assert state.row("a", 2431) == (0, 1)
+    assert state.row("a", 2432) == (0, 0)
+    state.release(["b"])
+    assert state.row("c", 131) == (1, 3)
+
 
 def test_selective_current_kv_updates_only_selected_row_slots():
     keys = torch.arange(24).view(3, 4, 1, 2)

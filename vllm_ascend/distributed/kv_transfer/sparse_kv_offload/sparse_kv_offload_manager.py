@@ -149,6 +149,8 @@ def allocate_kv_offload_topk_buffer_pair(
         request_rows = 2 * copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs)
         max_num_topk_rows = request_rows
         topk_buffer_size += COPY_SFA_TAIL_BLOCKS * vllm_config.cache_config.block_size
+    if sparse_kv_offload_config.selective_offload and vllm_config.cache_config.block_size == 128:
+        topk_buffer_size += vllm_config.cache_config.block_size
     topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
     topk_buffer_v_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * v_dim * torch.bfloat16.itemsize
     # NOTE make sure to allocate k+v together and split them after allocate.
@@ -855,14 +857,19 @@ class SparseKVOffloadManager:
                     leader = index
                 else:
                     self.selective_followers.setdefault(leader, []).append(host_layers[index])
-            hot_blocks = cdiv(self.topk_buffer_size, self.block_size)
-            self.selective_hot_block_table = torch.arange(rows * hot_blocks, dtype=torch.int32, device=device).view(
-                rows, -1
+            self.selective_row_stride = self.topk_buffers_k[0].shape[1]
+            row_blocks = self.selective_row_stride // self.block_size
+            hot_blocks = self.topk_buffer_size // self.block_size
+            self.selective_hot_block_table = (
+                torch.arange(rows * row_blocks, dtype=torch.int32, device=device)
+                .view(rows, row_blocks)[:, :hot_blocks]
+                .contiguous()
             )
             self.selective_hot_offsets = (
-                torch.arange(rows, dtype=torch.int64, device=device).view(-1, 1) * self.topk_buffer_size
+                torch.arange(rows, dtype=torch.int64, device=device).view(-1, 1) * self.selective_row_stride
             )
             self.selective_hot_len = torch.full((rows,), self.topk_buffer_size, dtype=torch.int32, device=device)
+            self.selective_tail_len = torch.full_like(self.selective_hot_len, self.selective_row_stride)
             self.selective_hot_keys = [
                 torch.full((rows, self.topk_buffer_size + 1), -1, dtype=torch.int64, device=device)
                 for _ in self.offload_layer_names
@@ -1224,6 +1231,62 @@ class SparseKVOffloadManager:
         for keys, request in zip(self.selective_hot_keys, self.selective_hot_requests):
             keys.fill_(-1)
             request.fill_(-1)
+
+    def write_selective_tail(self, layer_name, slots, tail_rows, k, v, capturing):
+        from vllm_ascend.ops.triton.selective_kv_writeback import build_tail_flush_descriptors, write_tail
+
+        layer_id = self._get_offload_layer_id(layer_name)
+        k_cache, v_cache = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
+        slots = slots.reshape(-1).contiguous()
+        rows = slots.numel()
+        write_tail[(rows,)](
+            slots,
+            tail_rows,
+            k.contiguous(),
+            v.contiguous(),
+            k_cache,
+            v_cache,
+            self.selective_row_stride,
+            self.topk_buffer_size,
+            self.block_size,
+            k_cache.shape[-1],
+            v_cache.shape[-1],
+            1 << (k_cache.shape[-1] - 1).bit_length(),
+            1 << (v_cache.shape[-1] - 1).bit_length(),
+        )
+        if self.tp_rank != 0:
+            return
+
+        tile = min(128, max(16, 1 << (rows - 1).bit_length()))
+
+        def submit():
+            build_tail_flush_descriptors[(cdiv(rows, tile),)](
+                slots,
+                tail_rows,
+                self.d2h_src_ptrs_npu,
+                self.d2h_dst_ptrs_npu,
+                self.d2h_lengths_npu,
+                self.d2h_size_npu,
+                k_cache.data_ptr(),
+                v_cache.data_ptr(),
+                self.gvas_k_bases[layer_id],
+                self.gvas_v_bases[layer_id],
+                rows,
+                self.selective_row_stride,
+                self.topk_buffer_size,
+                self.block_size,
+                self.token_size_bytes_k,
+                self.token_size_bytes_v,
+                tile,
+            )
+            self._submit_current_kv_writeback(k_cache.device)
+
+        if capturing:
+            self.current_kv_save_stream.wait_stream(torch_npu.npu.current_stream())
+            with torch_npu.npu.stream(self.current_kv_save_stream):
+                submit()
+        else:
+            submit()
 
     def offload_new_kv(
         self,

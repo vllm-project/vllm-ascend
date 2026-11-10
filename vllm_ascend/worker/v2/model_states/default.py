@@ -39,6 +39,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_tail import SelectiveTailSlots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
@@ -93,6 +94,16 @@ class AscendModelState(DefaultModelState):
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
         self._offload_draft_layer_names: set[str] = set()
         sparse_cfg = get_ascend_config().sparse_kv_offload_config
+        self._selective_tails = None
+        self._selective_tail_rows = None
+        if sparse_cfg.selective_offload and vllm_config.cache_config.block_size == 128:
+            capacity = vllm_config.scheduler_config.max_num_seqs
+            self._selective_tails = SelectiveTailSlots(
+                min(capacity, vllm_config.scheduler_config.max_num_batched_tokens), vllm_config.cache_config.block_size
+            )
+            self._selective_tail_rows = CpuGpuBuffer(
+                capacity, 2, dtype=torch.int64, device=device, pin_memory=is_pin_memory_available()
+            )
         if sparse_cfg.enabled:
             pin_memory = is_pin_memory_available()
             self._offload_req_ids = CpuGpuBuffer(
@@ -337,6 +348,8 @@ class AscendModelState(DefaultModelState):
         super().remove_request(req_id)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
+        if self._selective_tails is not None:
+            self._selective_tails.release((req_id,))
 
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
@@ -476,6 +489,18 @@ class AscendModelState(DefaultModelState):
                 offload_req_ids,
                 offload_token_to_req,
             )
+        tail_rows = None
+        tail_buffer = getattr(self, "_selective_tail_rows", None)
+        if tail_buffer is not None and num_actual_tokens == num_actual_reqs:
+            assert self._selective_tails is not None
+            tail_buffer.np[:num_reqs].fill(-1)
+            if not (input_batch.is_dummy or for_capture):
+                for row, req_id in enumerate(input_batch.req_ids[:num_actual_reqs]):
+                    tail_buffer.np[row] = self._selective_tails.row(
+                        req_id, int(input_batch.num_computed_tokens_np[row])
+                    )
+            tail_buffer.copy_to_gpu(num_reqs)
+            tail_rows = tail_buffer.gpu[:num_reqs]
         pool_slots = getattr(self, "_offload_pool_slots", None)
         pool_active = getattr(self, "_offload_pool_active", None)
         request_states = getattr(self, "_offload_request_states", None)
@@ -554,6 +579,7 @@ class AscendModelState(DefaultModelState):
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
+            selective_tail_rows=tail_rows,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
             offload_dummy=getattr(input_batch, "is_dummy", False),
             req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,
