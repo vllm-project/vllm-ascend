@@ -219,6 +219,9 @@ def _run_spec_decode_acceptance_ext(
 
 def test_external_dp() -> None:
     config = ExternalDPConfigLoader.from_yaml()
+    for command in config.startup_commands:
+        logger.info("Running startup command: %s", command)
+        subprocess.run(command, check=True)
     _install_special_dependencies(config)
     ranks = RankResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)

@@ -490,6 +490,7 @@ The framework derives proxy metadata from `routing.type`, and `routing.groups` a
 | `routing.groups` | Yes | Config indices assigned to each serving role |
 | `config` | Yes | Per-node DP and parallel layout |
 | `templates` | Yes | Per-config environment and command template |
+| `startup_commands` | No | Argument lists executed without a shell once on each node before service startup; a failed command aborts startup |
 | `kv_pool` | No | Managed Mooncake or Memcache service |
 | `benchmarks` | Yes | AISBench jobs run on node 0; may be `{}` |
 
