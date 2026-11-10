@@ -37,6 +37,9 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.ops.mla_prolog import MX_GROUP_SIZE
+from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -875,6 +878,54 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError("GLM KPool cache requires a key tensor and, for FP8, one scale tensor.")
         return tuple(cache)
 
+    @staticmethod
+    def supports_bf16_query_input(projection) -> bool:
+        # A missing inner quant_method also describes unknown wrappers; it is
+        # not evidence of an unquantized projection.
+        weight = getattr(projection, "weight", None)
+        return (
+            type(getattr(projection, "quant_method", None)) is AscendUnquantizedLinearMethod
+            and isinstance(weight, torch.Tensor)
+            and weight.dtype == torch.bfloat16
+        )
+
+    def _get_query_input(
+        self, q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor], num_tokens: int
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        bf16_projection = self.supports_bf16_query_input(self.wq_b)
+        if not isinstance(q_c, tuple):
+            if bf16_projection and q_c.dtype != torch.bfloat16:
+                raise TypeError("BF16 KPool query projection requires the native BF16 query tensor.")
+            return q_c[:num_tokens]
+        method = getattr(getattr(self.wq_b, "quant_method", None), "quant_method", None)
+        if type(method) is not AscendW8A8MXFP8DynamicLinearMethod:
+            raise TypeError("GLM KPool quantized q_c requires an MXFP8 query projection.")
+        if any(getattr(self.wq_b, "mxfp8_tp_padding", (0, 0))):
+            raise ValueError("GLM KPool quantized q_c does not support TP input padding.")
+        if len(q_c) != 2:
+            raise ValueError("GLM KPool quantized q_c requires (values, scales).")
+        values, scales = q_c
+        if not isinstance(values, torch.Tensor) or not isinstance(scales, torch.Tensor):
+            raise TypeError("GLM KPool quantized q_c values and scales must be tensors.")
+        if method.group_size != MX_GROUP_SIZE:
+            raise ValueError("GLM KPool quantized q_c requires group size 32.")
+        if values.dtype != torch.float8_e4m3fn or scales.dtype != torch.float8_e8m0fnu:
+            raise TypeError("GLM KPool quantized q_c requires E4M3 values and E8M0 scales.")
+        if (
+            num_tokens < 0
+            or values.ndim != 2
+            or values.shape[0] < num_tokens
+            or values.shape[1] != self.q_lora_rank
+            or values.shape[1] % MX_GROUP_SIZE
+            or not values.is_contiguous()
+            or not scales.is_contiguous()
+            or scales.shape != (values.shape[0], values.shape[1] // MX_GROUP_SIZE)
+            or values.device != scales.device
+        ):
+            raise ValueError("GLM KPool quantized q_c requires per-token, per-32 scales.")
+        # The existing MXFP8 linear consumes this tuple without re-quantizing.
+        return values[:num_tokens], scales[:num_tokens]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -902,16 +953,17 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         q_values = None
         weights = None
         if compute_topk:
-            if isinstance(q_c, tuple):
-                raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
-            # Under TP row sharding only the rank's slice of the query
-            # projections is scored; the cache writes below still consume the
-            # full batch hidden states.
+            # Shard query projections only; key/cache writes retain the full batch.
             row_shard = indexer_metadata.indexer_row_shard
             row_start, row_stop = 0, num_tokens
+            query_input = self._get_query_input(q_c, num_tokens)
             if row_shard is not None:
                 row_start, row_stop = row_shard.start, row_shard.stop
-            q_values = self.wq_b(q_c[row_start:row_stop])[0].view(row_stop - row_start, self.n_head, self.head_dim)
+                if isinstance(query_input, tuple):
+                    query_input = tuple(tensor[row_start:row_stop] for tensor in query_input)
+                else:
+                    query_input = query_input[row_start:row_stop]
+            q_values = self.wq_b(query_input)[0].view(row_stop - row_start, self.n_head, self.head_dim)
             weights = F.linear(hidden[row_start:row_stop].float(), self._head_weight_f32).to(q_values.dtype)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 

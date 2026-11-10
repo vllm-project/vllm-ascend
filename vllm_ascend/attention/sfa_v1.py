@@ -30,6 +30,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -58,6 +59,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
+from vllm_ascend.ops.mla_prolog import MX_GROUP_SIZE, PreparedMlaProlog, mla_prolog, prepare_mla_prolog
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 from vllm_ascend.quantization.methods import (
@@ -884,6 +886,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+        self._mla_prolog_backend = self._select_mla_prolog_backend()
+        self._mla_prolog_prepared: PreparedMlaProlog | None = None
+        if self._mla_prolog_backend == "cannbot":
+            reasons = self._cannbot_config_unsupported_reasons()
+            if reasons:
+                raise ValueError("Cannbot MLA Prolog: " + "; ".join(reasons))
         self._initialize_pcp_o_proj()
 
     def _initialize_pcp_o_proj(self) -> None:
@@ -1001,6 +1009,93 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
 
+    def _select_mla_prolog_backend(self) -> str:
+        # The packaged ABI supports NoPE MXFP8, not every A5 SFA model.
+        # Preserve native NoPE preprocessing for BF16/INT8 and the existing
+        # torch_npu fused path for RoPE, regardless of the device provider.
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        if self.qk_rope_head_dim != 0 or type(quant_method) is not AscendW8A8MXFP8DynamicLinearMethod:
+            return "torch_npu"
+        return DeviceOperator.get_mla_prolog_backend()
+
+    def _uses_cannbot_prolog(self) -> bool:
+        return getattr(self, "_mla_prolog_backend", "torch_npu") == "cannbot" and self.qk_rope_head_dim == 0
+
+    def _uses_native_indexer_query(self) -> bool:
+        # The Indexer projection is not a Prolog weight. Keep its original
+        # BF16 input path instead of dequantizing Prolog's MXFP8 query norm.
+        return (
+            self._uses_cannbot_prolog()
+            and self.has_indexer
+            and type(getattr(self.indexer, "impl", None)) is Glm5NextKPoolIndexerBackend
+            and Glm5NextKPoolIndexerBackend.supports_bf16_query_input(getattr(self.indexer, "wq_b", None))
+        )
+
+    def _runtime_preprocess_type(self, attn_metadata: M, num_input_tokens: int) -> PreprocessType:
+        """Diagnostic policy: packaged Prolog only for metadata-classified decode."""
+        fused_type = self.preprocess_type
+        if fused_type == PreprocessType.PROLOG_V3 and self._uses_cannbot_prolog():
+            # Decide before any cache-writing kernel. Mixed batches stay native
+            # as a whole; never retry native after a partially executed Prolog.
+            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly or attn_metadata.num_prefills > 0:
+                return PreprocessType.NATIVE
+        if fused_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
+            return PreprocessType.NATIVE
+        return fused_type
+
+    def _cannbot_config_unsupported_reasons(self) -> list[str]:
+        """Validate the selected packaged ABI without device reads or mutations."""
+        reasons = []
+        if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+            reasons.append("requires A5 FP8 hardware")
+        config = self.vllm_config
+        if self.rl_weight_update_enabled:
+            reasons.append("does not support RL weight reloads")
+        if config.kv_transfer_config is not None:
+            reasons.append("does not support PD/KV transfer")
+        if config.speculative_config is not None:
+            reasons.append("does not support speculative decoding yet")
+        parallel = config.parallel_config
+        if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1 or self.enable_sp:
+            reasons.append("does not support context/sequence parallelism")
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            reasons.append("does not support sparse KV offload")
+        if self.enable_sparse_sfa_turboquant:
+            reasons.append("does not support TurboQuant cache")
+        return reasons
+
+    def _prepare_cannbot_prolog_weights(self) -> None:
+        """Keep source parameters intact; prepare independent ND snapshots once."""
+        assert self.fused_qkv_a_proj is not None and self.q_proj is not None
+        assert self.q_a_layernorm is not None and self.kv_a_layernorm is not None
+        fused = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
+        self.weight_dq = fused[:, : self.q_lora_rank]
+        self.weight_dkv_kr = fused[:, self.q_lora_rank :]
+        self.weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
+        scales = self.fused_qkv_a_proj.weight_scale.data
+        self.weight_dq_scale = scales[:, : self.q_lora_rank, :]
+        self.weight_dkv_kr_scale = scales[:, self.q_lora_rank :, :]
+        self.weight_uq_qr_scale = self.q_proj.weight_scale.data
+        self._mla_prolog_prepared = prepare_mla_prolog(
+            weight_dq=self.weight_dq,
+            weight_dkv_kr=self.weight_dkv_kr,
+            weight_uq_qr=self.weight_uq_qr,
+            weight_uk=self.W_UK_T,
+            dequant_scale_w_dq=self.weight_dq_scale,
+            dequant_scale_w_dkv_kr=self.weight_dkv_kr_scale,
+            dequant_scale_w_uq_qr=self.weight_uq_qr_scale,
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,
+            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
+            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
+        )
+        logger.warning_once(
+            "Cannbot MLA Prolog diagnostic policy: metadata-classified decode only; "
+            "non-decode/prefill batches use native preprocessing. "
+            "Direct functionalization of Prolog is unsupported because KV cache updates must remain in place. "
+            "NPU correctness and performance require validation for this wheel/model combination."
+        )
+
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):
         return getattr(getattr(layer, "quant_method", None), "quant_method", None)
@@ -1009,6 +1104,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
 
+        if self._uses_cannbot_prolog() and act_dtype != torch.bfloat16:
+            raise ValueError("Cannbot MLA Prolog requires BF16 model activations")
         pp_type = self._fused_preprocess_type()
         if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
             return pp_type
@@ -1018,6 +1115,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         """Return the enabled fused preprocess type, or None if it cannot run."""
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
+
+        if self._uses_cannbot_prolog():
+            reasons = self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+            if reasons:
+                raise ValueError("Cannbot MLA Prolog: " + "; ".join(reasons))
+            return PreprocessType.PROLOG_V3
 
         # PROLOG_V3 takes precedence over MLAPO and is the default fused
         # preprocessing for quantized SFA layers in every deployment (plain
@@ -1053,8 +1156,30 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_fused_type_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
         reasons = []
-        if self.qk_rope_head_dim == 0:
+        cannbot = self._uses_cannbot_prolog() and pp_type is PreprocessType.PROLOG_V3
+        bf16_indexer = cannbot and self._uses_native_indexer_query()
+        if self.qk_rope_head_dim == 0 and not cannbot:
             reasons.append("NoPE SFA currently uses native preprocessing; fused NoPE contracts are not enabled.")
+        if cannbot:
+            reasons.extend(self._cannbot_config_unsupported_reasons())
+            projections = [("fused_qkv_a_proj", self.fused_qkv_a_proj), ("q_proj", self.q_proj)]
+            if self.has_indexer:
+                projections.append(("indexer.wq_b", getattr(self.indexer, "wq_b", None)))
+            for name, projection in projections:
+                method = self._get_layer_quant_method(projection)
+                if type(method) is AscendW8A8MXFP8DynamicLinearMethod:
+                    if method.group_size != MX_GROUP_SIZE or method.dynamic_mx_quant_scale_alg != 0:
+                        reasons.append(f"Cannbot requires per-32 MXFP8 scale_alg=0 for {name}")
+                elif not (name == "indexer.wq_b" and bf16_indexer):
+                    reasons.append(
+                        f"Cannbot requires an MXFP8 {name} (or BF16 wq_b with native KPool query recomputation)"
+                    )
+                if getattr(projection, "bias", None) is not None:
+                    reasons.append(f"Cannbot does not support {name} bias")
+                if any(getattr(projection, "mxfp8_tp_padding", (0, 0))):
+                    reasons.append(f"Cannbot does not support {name} TP padding")
+            if self.enable_sparse_sfa_c8 and self.c8_cache_dtype != torch.float8_e4m3fn:
+                reasons.append("Cannbot C8 requires FP8 E4M3 cache, not INT8")
         if self.kv_a_layernorm is None or self.q_a_layernorm is None:
             reasons.append("Fused preprocessing requires q_a_layernorm and kv_a_layernorm.")
         if self.fused_qkv_a_proj is None:
@@ -1063,10 +1188,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
-            # Prolog's indexer query can carry quantization scales independently
-            # of the MLA weight type. Preserve the native query for an
-            # unquantized indexer, including layers that later toggle skip_topk.
-            if self.has_indexer:
+            # CANNBot/KPool recomputes the native query for BF16 projections.
+            # Keep other PROLOG_V3 indexer contracts unchanged,
+            # including layers that later toggle skip_topk.
+            if self.has_indexer and not bf16_indexer:
                 wq_b = getattr(self.indexer, "wq_b", None)
                 if not hasattr(wq_b, "weight_scale"):
                     reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
@@ -1087,6 +1212,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _process_weights_for_fused_prolog_v3(self) -> None:
         assert self.fused_qkv_a_proj is not None
         assert self.q_proj is not None
+
+        if self._uses_cannbot_prolog():
+            self._prepare_cannbot_prolog_weights()
+            return
 
         qt = self._quant_type
 
@@ -1411,6 +1540,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         qt = self._quant_type
         use_c8 = self.enable_sparse_sfa_c8
+        native_indexer_query = self._uses_native_indexer_query()
 
         common: dict[str, Any] = dict(
             weight_dq=self.weight_dq,
@@ -1421,7 +1551,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,
             rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
             rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
-            query_norm_flag=self.has_indexer,
+            query_norm_flag=self.has_indexer and not native_indexer_query,
             qc_qr_scale=1.0,
             kc_scale=1.0,
             cache_mode="PA_BSND",
@@ -1438,18 +1568,28 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             kr_cache = self.sfa_qsfa_kr_cache_dummy
         else:
-            kr_cache = kv_cache[1]
-        rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
-        rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
+            kr_cache = kv_cache[1] if self.qk_rope_head_dim else None
+        rope_cos_ = cos.view(cos.shape[0], cos.shape[-1]) if self.qk_rope_head_dim else None
+        rope_sin_ = sin.view(sin.shape[0], sin.shape[-1]) if self.qk_rope_head_dim else None
         # The caller forwards the per-step cached int64 slots, so the .to()
         # below is a no-op in production; kept for direct-call safety.
         cache_index = slot_mapping.view(-1).to(torch.int64)
 
         if qt is not None:
             if qt is AscendW8A8MXFP8DynamicLinearMethod:
-                token_x, ds = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+                if self._uses_cannbot_prolog() and hidden_states.shape[0] == 0:
+                    token_x = torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn)
+                    ds = torch.empty(
+                        (0, hidden_states.shape[-1] // MX_GROUP_SIZE),
+                        dtype=torch.float8_e8m0fnu,
+                        device=hidden_states.device,
+                    )
+                else:
+                    token_x, ds = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
                 branch = dict(
-                    dequant_scale_x=ds.reshape(token_x.shape[0], -1).view(torch.float8_e8m0fnu),
+                    dequant_scale_x=ds.reshape(token_x.shape[0], hidden_states.shape[-1] // MX_GROUP_SIZE).view(
+                        torch.float8_e8m0fnu
+                    ),
                     dequant_scale_w_dq=self.weight_dq_scale.view(torch.float8_e8m0fnu),
                     dequant_scale_w_uq_qr=self.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
                     dequant_scale_w_dkv_kr=self.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
@@ -1478,7 +1618,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 weight_quant_mode=0,
             )
 
-        ql_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
+        ql_nope, q_pe, _, q_c, q_c_scale = mla_prolog(
+            backend=getattr(self, "_mla_prolog_backend", "torch_npu"),
+            prepared=getattr(self, "_mla_prolog_prepared", None),
             token_x=token_x,
             rope_sin=rope_sin_,
             rope_cos=rope_cos_,
@@ -1491,14 +1633,31 @@ class AscendSFAImpl(MLAAttentionImpl):
             **extra_kwargs,
         )
         num_h = self.local_num_heads
-        ql_nope = ql_nope.view(-1, num_h, self.kv_lora_rank)
-        q_pe = q_pe.view(-1, num_h, self.qk_rope_head_dim)
+        num_tokens = hidden_states.shape[0]
+        ql_nope = ql_nope.view(num_tokens, num_h, self.kv_lora_rank)
+        q_pe = q_pe.view(num_tokens, num_h, self.qk_rope_head_dim)
 
-        if self.has_indexer:
+        if native_indexer_query:
+            # Match the native BF16 Indexer input, not the already-quantized
+            # query norm. This does not rerun any cache-writing operation.
+            # MTP skip_topk can still need the Indexer key/cache path, but no Q.
+            has_local_query = attn_metadata is None or attn_metadata.num_actual_tokens > 0
+            if num_tokens and self.runtime_has_indexer and not self.skip_topk and has_local_query:
+                assert self.fused_qkv_a_proj is not None, "BF16 Indexer query recomputation requires fused_qkv_a_proj"
+                qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+                q_c = self.q_a_layernorm(qkv_lora[..., : self.q_lora_rank])
+            else:
+                q_c = None
+        elif self.has_indexer:
             if q_c is None:
                 raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA indexer.")
-            q_c = q_c.view(-1, self.q_lora_rank)
-            if q_c_scale is not None:
+            q_c = q_c.view(num_tokens, self.q_lora_rank)
+            has_mx_scale = (
+                qt is AscendW8A8MXFP8DynamicLinearMethod
+                and q_c_scale is not None
+                and q_c_scale.shape == (num_tokens, self.q_lora_rank // MX_GROUP_SIZE)
+            )
+            if q_c_scale is not None and (q_c_scale.numel() != 0 or has_mx_scale):
                 if qt is AscendW8A8MXFP8DynamicLinearMethod:
                     q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
                     q_c = (q_c, q_c_scale)
@@ -1969,11 +2128,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.all_gather_weights()
 
-        fused_type: PreprocessType = self.preprocess_type
-        # PROLOG_V3 serves every attention state (decode, spec decoding and
-        # prefill); only MLAPO carries a per-call token-count limit.
-        if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
-            fused_type = PreprocessType.NATIVE
+        fused_type = self._runtime_preprocess_type(attn_metadata, num_input_tokens)
 
         # IMPORTANT!
         # NOTE: With PIECEWISE ACL graphs, this method is executed in
