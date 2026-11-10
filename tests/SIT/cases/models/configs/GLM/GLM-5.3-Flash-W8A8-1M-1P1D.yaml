@@ -42,6 +42,7 @@ env_common: &env_common
   HCCL_BUFFSIZE: "1024"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resourceesc":["hccs:device"]}'
   ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+  TORCH_EXTENSIONS_DIR: "/tmp/minimax_m3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
 
 env_prefill: &env_prefill
   <<: *env_common
