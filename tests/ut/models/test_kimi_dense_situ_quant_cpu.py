@@ -67,6 +67,10 @@ def runtime(monkeypatch):
         AscendLinearScheme=object,
         WeightSwitchGatherSpec=lambda *a, **kw: None,
         register_scheme=lambda *a: lambda cls: cls,
+        # Class-body annotation on AscendW8A8MXFP8DynamicLinearMethod
+        # (quant_type: QuantType = QuantType.W8A8MXFP); the sandbox only
+        # needs the attribute to resolve, not the real enum.
+        QuantType=SimpleNamespace(W8A8MXFP="W8A8MXFP"),
     )
 
     def quantize(x, *, dst_type, **kwargs):
