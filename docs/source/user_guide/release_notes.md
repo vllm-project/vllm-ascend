@@ -34,7 +34,7 @@ This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstrea
 - Extended AscendStore KV Cache Pool with Qwen3.8 hybrid-cache pooling, GLM RecoverSSM prefix reuse, and optional Mooncake SSD-to-DRAM prefetching. [#20261](https://github.com/vllm-project/vllm-ascend/pull/20261) [#21059](https://github.com/vllm-project/vllm-ascend/pull/21059) [#19472](https://github.com/vllm-project/vllm-ascend/pull/19472)
 - Added optional Prefill session affinity to improve prefix-cache reuse across multi-turn requests in distributed deployments. [#19708](https://github.com/vllm-project/vllm-ascend/pull/19708)
 - Expanded quantization and expert load balancing support with ModelSlim W4A8 Dynamic Linear and EPLB compatibility for W4A8-MXFP and W8A8-MXFP8 MoE models. [#20507](https://github.com/vllm-project/vllm-ascend/pull/20507) [#20713](https://github.com/vllm-project/vllm-ascend/pull/20713) [#20847](https://github.com/vllm-project/vllm-ascend/pull/20847)
-- Expanded MiniMax speculative decoding with native DSpark draft support for MiniMax-M3.1-Flash and FlashAttention execution for compatible MiniMax-M3 draft configurations on Ascend A5. [#20691](https://github.com/vllm-project/vllm-ascend/pull/20691) [#19537](https://github.com/vllm-project/vllm-ascend/pull/19537)
+- Expanded MiniMax speculative decoding with native DSpark draft support for MiniMax-M3.1-Flash and FlashAttention execution for compatible MiniMax-M3 draft configurations on Ascend 950DT. [#20691](https://github.com/vllm-project/vllm-ascend/pull/20691) [#19537](https://github.com/vllm-project/vllm-ascend/pull/19537)
 
 ### Performance
 
@@ -97,7 +97,7 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 
 - In v0.32.0rc1, Qwen2-Audio-7B-Instruct fails to initialize because CANN/OPP has no supported `Conv2D` kernel for its audio processing path. [#21487](https://github.com/vllm-project/vllm-ascend/issues/21487)
 - In A3 pooling P/D deployments with GLM-5.3-Flash W8A8, prolonged stress tests may hit a RecoverSSM speculative metadata staging error that terminates the D-node EngineCore and stalls the service; the root cause is unconfirmed. [#21486](https://github.com/vllm-project/vllm-ascend/issues/21486)
-- On A5, D-node throughput for GLM-5.3-Flash pooling P/D workloads with multiple prefixes can be up to approximately 50% lower than in v0.30.0; the root cause is under investigation. [#21485](https://github.com/vllm-project/vllm-ascend/issues/21485)
+- On 950DT, D-node throughput for GLM-5.3-Flash pooling P/D workloads with multiple prefixes can be up to approximately 50% lower than in v0.30.0; the root cause is under investigation. [#21485](https://github.com/vllm-project/vllm-ascend/issues/21485)
 
 ## v0.30.0rc1 - 2026.10.11
 
