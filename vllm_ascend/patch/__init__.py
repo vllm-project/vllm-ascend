@@ -135,22 +135,20 @@
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.engram.EngramConfig.verify_model_config`
+#   1. `vllm.config.engram.EngramConfig.verify_parallel_config`
 #    Why:
-#       Upstream Engram model validation requires CUDA before the platform hook.
+#       Upstream requires dp_shared_memory to run with DP > 1; Ascend Engram
+#       also supports host table sharing across PCP replicas (DP x PCP groups),
+#       which upstream validation rejects.
 #    How:
-#       Keep upstream model/layer checks and lift only the CUDA requirement.
-#       Use the native EngramConfig and resolver. Ascend's normal platform hook
-#       supplies missing defaults and checks its model, topology and loader limits.
-#       Skip this patch when vLLM does not provide EngramConfig.
+#       Override verify_parallel_config to accept DP > 1 or PCP > 1 and keep
+#       the elastic-EP restrictions. Skip this patch when vLLM does not provide
+#       EngramConfig.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/59171
-#       Tracks https://github.com/vllm-project/vllm/issues/59169.
-#       Removes CUDA-alike restrictions from model validation and defaults.
+#       No, Ascend-specific PCP topology support.
 #    Future Plan:
-#       Once the pinned vLLM includes that change, remove this patch and
-#       platform-side default creation. Keep Ascend's
-#       model, topology and loader restrictions in the normal platform hook.
+#       Remove this patch once upstream natively supports Engram PCP, including
+#       DP x PCP groups and parallel validation.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -210,28 +208,6 @@
 #       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
-#
-# ** File: platform/patch_glm53_reasoning.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
-#    Why:
-#       GLM-5.3 always generates reasoning. This compatibility fallback
-#       normalizes thinking=False and enable_thinking=False to prevent
-#       reasoning from leaking into content; v0.33.0 also handles this
-#       upstream through PR #56994.
-#    How:
-#       Detect the GLM-5.3 template using the upstream signature and normalize
-#       both switches on a copy of the parser kwargs before initialization.
-#       The shared GLM parser then enables reasoning for the glm45/glm47
-#       reasoning adapters and the glm47 tool adapter. Older GLM templates
-#       retain their thinking switch. Skip patching versions with the upstream
-#       helper, and do not wrap the constructor more than once.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/56994
-#       Original fix by Shijin Zhang (Dovis01), commit d95d1dcfb975.
-#    Future Plan:
-#       Remove this patch and its platform import once all supported vLLM
-#       release tags and verified main pins include the upstream fix.
 #
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -462,25 +438,10 @@
 #
 # ** 15. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
-#    Why:
-#       PR vllm-project/vllm#32623 introduced a new MLAPrefillBackend abstraction.
-#       When MLAAttention.__init__ calls get_mla_prefill_backend(), the upstream
-#       selector sees that Ascend NPU returns None for get_device_capability() and
-#       falls back to FlashAttnPrefillBackend, which asserts flash_attn_varlen_func
-#       is available — crashing on Ascend.
-#    How：
-#       Register a no-op AscendMLAPrefillBackend and patch get_mla_prefill_backend
-#       so that MLAAttention.__init__ completes without error. Ascend's
-#       AscendSFAImpl/AscendMLAImpl handles the full forward pass (including
-#       prefill) via impl.forward(), so prefill_backend.run_prefill_* is never
-#       called.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/32623
-#    Future Plan:
-#       Remove this patch once upstream `get_mla_prefill_backend` provides a
-#       platform/device hook so Ascend can be selected (or skipped) without
-#       monkey-patching.
+#   REMOVED: upstream vLLM v0.32.0 exposes the official
+#   `Platform.get_mla_prefill_backend_cls` hook, implemented on `NPUPlatform`
+#   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
+#   from `vllm_ascend/attention/mla_prefill.py`.
 #
 # ** 16. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -620,24 +581,18 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Several MTP draft models (DeepSeek-V3/V4, Pangu, MiMo, GLM4-MoE, ERNIE,
-#       Nemotron-H, Qwen3-Next, Qwen3.5, Exaone, LongCat-Flash, Step3.5/3.7) are
-#       loaded as the target model's MTP layer rather than a standalone model.
-#       Upstream `SpeculativeConfig.hf_config_override` does not remap these
-#       target model_types/architectures to their MTP variants, so spec decoding
-#       cannot locate the drafter.
+#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
+#       natively. The remaining Ascend deltas are legacy checkpoint
+#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
+#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
 #    How：
-#       Replace `SpeculativeConfig.hf_config_override` to detect the supported
-#       target model_type/architecture, derive `n_predict` from
-#       `num_nextn_predict_layers` (or `mtp_num_hidden_layers`), and rewrite
-#       `model_type`/`architectures` to the corresponding MTP model. Also remaps
-#       MistralLarge3 to its Eagle variant.
+#       Call upstream `hf_config_override` first, then apply the legacy
+#       normalizations on top.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific MTP model type remapping.
+#       No, Ascend-specific legacy checkpoint compatibility.
 #    Future Plan:
-#       Remove this patch once upstream vLLM supports loading these MTP draft
-#       models without a custom `hf_config_override`, or exposes a plugin hook
-#       for MTP model_type/architecture remapping.
+#       Remove these normalizations once the checkpoints ship converted
+#       configs and upstream handles glm5_next_text MTP remapping.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
@@ -699,29 +654,7 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
-#   2. `vllm.v1.structured_output.backend_outlines.OutlinesGrammar.accept_tokens`
-#    Why:
-#       After the outlines FSM finishes (e.g. the JSON is complete), the
-#       scheduler emits one more mask that allows EOS/stop tokens so the
-#       request can terminate normally. Those tokens are not part of the FSM
-#       alphabet built from the JSON regex, so `guide.accepts_tokens()` rejects
-#       them and the scheduler terminates the request with FINISHED_ERROR,
-#       logging "Unexpected: grammar rejected tokens". The xgrammar backend
-#       already short-circuits in this case (`if self._is_terminated:
-#       return True`); outlines is missing the same guard.
-#    How:
-#       Wrap `OutlinesGrammar.accept_tokens` with a terminal short-circuit
-#       that returns True once `guide.is_finished()` is set, mirroring the
-#       xgrammar behavior. Applies to both model runner v1 and v2 since the
-#       fix targets the scheduler-side grammar class.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/49227 (fixed the analogous
-#       stop-token handling for xgrammar only; outlines was left out)
-#    Future Plan:
-#       Remove this patch once upstream vLLM adds the terminal short-circuit
-#       to the outlines backend.
-#
-#   3. `xgrammar.GrammarCompiler.compile_json_schema`
+#   2. `xgrammar.GrammarCompiler.compile_json_schema`
 #    Why:
 #       vLLM #58067 (included in v0.33.0 and verified main) passes
 #       `separators=(",", ":")` when `disable_any_whitespace` is set. The
@@ -931,30 +864,26 @@
 #       Remove this patch once upstream exposes process-group reuse and teardown
 #       hooks.
 #
-# ** 4. File: worker/patch_eagle3_init.py**
+# ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM`,
-#      `vllm.model_executor.models.deepseek_v2.Eagle3DeepseekV2ForCausalLM` /
-#      `Eagle3DeepseekV3ForCausalLM`
+#   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
+#      `forward`, `make_empty_intermediate_tensors`
 #    Why:
-#       Upstream Eagle3 draft models compute `target_layer_num` via
-#       `model_config.get_num_layers(parallel_config)` which, under PP, returns the
-#       per-PP-stage count. This value feeds into the draft model's
-#       `start_layer_id` (used to build parameter name prefixes like
-#       `model.layers.<start_layer_id + i>`). With PP>1 the prefixes collide with
-#       the checkpoint (e.g. a 61-layer target + 2-way PP builds prefixes 31..34
-#       while the checkpoint expects 61..64), breaking weight loading. Additionally,
-#       `config.target_layer_count` (used to index `layer_types` for draft
-#       attention) ends up wrong.
+#       In Eagle3 speculative decoding with Pipeline Parallelism (PP), auxiliary
+#       hidden states are collected from specific target model layers (e.g.,
+#       layers 2, N/2, N-3). When these layers span multiple PP stages, the last
+#       PP rank (where the drafter runs) only sees a subset of aux states, causing
+#       `combine_hidden_states` to fail with a k-axis shape mismatch.
 #    How：
-#       Patch the affected Eagle3 draft models to use
-#       `get_total_num_hidden_layers()` instead, which matches the checkpoint's
-#       global layer indices and keeps `target_layer_count` correct.
+#       Wrap the inner model's `forward` and `make_empty_intermediate_tensors` to
+#       transparently pass aux hidden states through IntermediateTensors across PP
+#       stages. Each PP stage carries forward all aux states from previous stages,
+#       and the last PP rank merges them into a single list for the drafter.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP weight-loading fix.
+#       No, vllm-ascend-specific Eagle3 + PP aux-state propagation.
 #    Future Plan:
-#       Remove this patch once upstream Eagle3 draft models compute
-#       `target_layer_num` from the total (not per-stage) hidden layer count.
+#       Remove this patch once upstream Eagle3 supports collecting aux hidden
+#       states that span PP stages without cross-stage propagation.
 #
 # ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
