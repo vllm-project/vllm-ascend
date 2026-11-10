@@ -1545,20 +1545,11 @@ def create_runtime_component_views(
     page_bytes: int,
     block_stride: int,
     *,
-    kernel_blocks_per_manager: int = 1,
     as_tuple: bool = False,
 ) -> list[torch.Tensor] | tuple[torch.Tensor, ...]:
     """Interpret backend byte shapes [B,H,N,C] using the existing NHD ABI."""
     if not shapes or len(shapes) != len(dtypes):
         raise ValueError("Each runtime cache component requires a shape and dtype.")
-    if kernel_blocks_per_manager < 1:
-        raise ValueError("Runtime cache views require a positive kernel-block ratio.")
-    if kernel_blocks_per_manager > 1 and block_stride != page_bytes:
-        raise ValueError("Manager-block splitting requires contiguous per-layer pages.")
-    if page_bytes % kernel_blocks_per_manager:
-        raise ValueError("Physical pages must split into whole kernel slots.")
-    page_bytes //= kernel_blocks_per_manager
-    block_stride //= kernel_blocks_per_manager
     num_blocks = shapes[0][0]
     if block_stride == page_bytes:
         if raw.nbytes % page_bytes:
@@ -1637,14 +1628,14 @@ def create_kv_cache_runtime_views(
                 kv_cache_config.num_blocks_of(descriptor),
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+                block_stride=descriptor.block_stride,
             )
             caches[name] = create_runtime_component_views(
                 raw_tensors[name],
                 runtime.shapes,
                 runtime.dtypes,
-                spec.page_size_bytes,
-                descriptor.block_stride,
-                kernel_blocks_per_manager=runtime.kernel_blocks_per_manager,
+                runtime.page_bytes,
+                runtime.block_stride,
                 as_tuple=runtime.as_tuple,
             )
     for name, target in shared_layers.items():

@@ -320,6 +320,8 @@ class AscendDSABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
+        *,
+        block_stride: int | None = None,
     ) -> KVCacheRuntimeShapes:
         """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
 
@@ -335,7 +337,12 @@ class AscendDSABackend(AttentionBackend):
         if getattr(spec, "scale_dim", 0):
             shapes.append((*prefix, spec.scale_dim * spec.scale_dtype.itemsize))
             dtypes.append(spec.scale_dtype)
-        return KVCacheRuntimeShapes(shapes=tuple(shapes), dtypes=tuple(dtypes))
+        return KVCacheRuntimeShapes(
+            shapes=tuple(shapes),
+            dtypes=tuple(dtypes),
+            page_bytes=spec.page_size_bytes,
+            block_stride=spec.page_size_bytes if block_stride is None else block_stride,
+        )
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:

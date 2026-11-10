@@ -60,7 +60,8 @@ class KVCacheRuntimeShapes:
 
     shapes: tuple[RuntimeComponentShape, ...]
     dtypes: tuple[torch.dtype, ...]
-    kernel_blocks_per_manager: int = 1
+    page_bytes: int
+    block_stride: int
     as_tuple: bool = False
 
 

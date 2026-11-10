@@ -141,6 +141,8 @@ class AscendMLABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
+        *,
+        block_stride: int | None = None,
     ) -> KVCacheRuntimeShapes:
         """Describe ordinary NoPE/RoPE components as byte shapes [B,H,N,C]."""
         if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
@@ -149,6 +151,12 @@ class AscendMLABackend(AttentionBackend):
         if block_size <= 0 or spec.block_size % block_size:
             raise ValueError("MLA kernel block size must divide the manager block size.")
         kernel_blocks_per_manager = spec.block_size // block_size
+        page_bytes = spec.page_size_bytes
+        block_stride = page_bytes if block_stride is None else block_stride
+        if kernel_blocks_per_manager > 1 and block_stride != page_bytes:
+            raise ValueError("MLA manager-block splitting requires contiguous per-layer pages.")
+        if page_bytes % kernel_blocks_per_manager:
+            raise ValueError("MLA physical pages must split into whole kernel slots.")
         prefix = (num_blocks * kernel_blocks_per_manager, spec.num_kv_heads, block_size)
         return KVCacheRuntimeShapes(
             shapes=(
@@ -156,7 +164,8 @@ class AscendMLABackend(AttentionBackend):
                 (*prefix, spec.qk_rope_head_dim * spec.dtype.itemsize),
             ),
             dtypes=(spec.dtype, spec.dtype),
-            kernel_blocks_per_manager=kernel_blocks_per_manager,
+            page_bytes=page_bytes // kernel_blocks_per_manager,
+            block_stride=block_stride // kernel_blocks_per_manager,
             as_tuple=True,
         )
 

@@ -1768,9 +1768,13 @@ class DeepseekV41CacheBackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
+        *,
+        block_stride: int | None = None,
     ) -> KVCacheRuntimeShapes:
         """Expose NHD data/scale pages, including packed A5 byte widths."""
-        return AscendDSABackend.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+        return AscendDSABackend.get_runtime_shapes(
+            spec, num_blocks, layout, kernel_block_size, block_stride=block_stride
+        )
 
 
 class _DeepseekV41RoleBackend(DeepseekV41CacheBackend):
