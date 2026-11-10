@@ -87,5 +87,4 @@ class NPUCommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.quantized_ar is not None and self.world_size > 1:
             return self.quantized_ar.all_reduce(input_)
-        dist.all_reduce(input_, group=self.device_group)
-        return input_
+        return super().all_reduce(input_)
