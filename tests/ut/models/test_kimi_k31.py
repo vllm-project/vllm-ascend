@@ -59,6 +59,8 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
     # Exercise the real multimodal -> text handoff. Only the allocated model
     # class and unrelated device/distributed services are replaced.
     register_model()
+    # Keep inspection in the CPU test process, where device dependencies are mocked.
+    monkeypatch.setattr("vllm.model_executor.models.registry._run_in_subprocess", lambda fn: fn())
     config = KimiK31Config(
         architectures=["KimiK31ForConditionalGeneration"],
         text_config=text_config(mla_use_nope=inner_kind != "k31_rope"),

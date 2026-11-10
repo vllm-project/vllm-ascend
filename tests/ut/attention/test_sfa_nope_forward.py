@@ -476,6 +476,9 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     """Run the real forward entry; PCP peers need the same padded row count."""
     impl_cls = AscendSFADCPImpl if dcp_enabled else AscendSFAImpl
     impl = impl_cls.__new__(impl_cls)
+    impl._sharded_indexer = False
+    impl._local_topk = False
+    impl.use_rope = False
     impl.pcp_enabled = True
     impl._parallel_o_proj = SimpleNamespace(
         batch=lambda **kwargs: nullcontext(), uses_full_weight=False, all_gather_weights=MagicMock()

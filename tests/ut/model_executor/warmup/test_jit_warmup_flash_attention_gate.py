@@ -3,6 +3,7 @@
 
 import ast
 import importlib
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -60,7 +61,7 @@ def test_registration_is_scoped_deduplicated_and_metadata_only(prefix):
 def test_shared_launcher_preserves_runtime_grid_and_compile_options(tokens, block, strided):
     owner = gate_ops.FlashAttentionGateKernel()
     kernel = Mock()
-    kernel.arg_names = owner.kernel.arg_names
+    kernel.arg_names = list(inspect.signature(getattr(owner.kernel, "fn", owner.kernel)).parameters)
     launch = Mock()
     kernel.__getitem__ = Mock(return_value=launch)
     owner.kernel = kernel

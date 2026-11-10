@@ -73,7 +73,10 @@ def test_fullgraph_compile_never_queries_npu_capture(selector, monkeypatch, inpu
         raise AssertionError("The NPU capture query must not enter the compiled graph")
 
     monkeypatch.setattr(
-        torch, "npu", SimpleNamespace(is_current_stream_capturing=forbidden_capture_query), raising=False
+        torch,
+        "npu",
+        SimpleNamespace(is_current_stream_capturing=forbidden_capture_query, is_available=lambda: False),
+        raising=False,
     )
     layer = SimpleNamespace(quant_method=MXFP8Method(), _mxfp8_gmm_nz_layout=nz_layout)
 

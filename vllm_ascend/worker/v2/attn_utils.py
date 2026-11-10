@@ -1321,10 +1321,10 @@ def _allocate_kv_cache(
     # PP ranks with only recurrent or draft layers retain the global paired
     # group spec and still use the same backing layout.
     is_paired_sfa = any(
-        isinstance(spec, AscendSFAIndexerCacheSpec)
+        any(isinstance(spec, AscendMLAAttentionSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
+        and any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
         for group in kv_cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for spec in group.kv_cache_spec.kv_cache_specs.values()
     )
     if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)

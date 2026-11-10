@@ -77,6 +77,7 @@ def test_k31_prolog_v3_route_preserves_other_backends(impl_cls, is_kimi_k31, pcp
     impl.q_a_layernorm = object()
     impl.kv_a_layernorm = object()
     impl.qk_rope_head_dim = 64
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.is_kv_consumer = True
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
@@ -126,6 +127,7 @@ def _make_pcp_sfa_impl(dcp_enabled=False):
 def _make_nope_pcp_impl(width, packed_cache=False):
     impl = _make_pcp_sfa_impl()
     impl.qk_rope_head_dim = 0
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.kv_lora_rank = width
     impl.num_kv_heads = 1
     impl.is_pcp_decode_sharded = False
@@ -673,6 +675,9 @@ def test_sfa_pcp_dcp_builder_allows_decode_graph_metadata_without_pcp_context() 
 def test_sfa_pcp_dcp_empty_local_prefill_uses_global_kv_view(global_has_prefill: bool) -> None:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v32"))
+    )
     builder.decode_threshold = 1
     builder.use_dcp = False
     builder.dcp_local_seq_lens_buf = torch.empty(1, dtype=torch.int32)
@@ -736,6 +741,7 @@ def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     impl._local_topk = False
     impl.pcp_enabled = True
     impl.qk_rope_head_dim = 64
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.dcp_group = object()
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
@@ -804,6 +810,7 @@ def test_sfa_gathers_main_kv_only_when_pcp_enabled(
     impl.pcp_enabled = pcp_enabled
     impl.is_pcp_decode_sharded = sharded_decode
     impl.qk_rope_head_dim = 1
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.kv_lora_rank = 2
     impl.num_kv_heads = 1
     impl.enable_sparse_sfa_c8 = False
@@ -1091,6 +1098,7 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     impl = _make_pcp_sfa_impl(dcp_enabled=dcp_enabled)
     impl.is_pcp_decode_sharded = False
     impl.qk_rope_head_dim = rope_dim
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.kv_lora_rank = 3
     impl.num_kv_heads = 1
     impl.enable_sparse_sfa_c8 = cache_mode == "c8"
@@ -1616,6 +1624,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     builder.decode_threshold = 3
     builder.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v32")),
     )
     builder.dcp_local_seq_lens_buf = torch.empty(2, dtype=torch.int32)
     slots = torch.arange(sum(query_lens), dtype=torch.int64)
@@ -1666,6 +1675,7 @@ def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     impl._local_topk = False
     impl.pcp_enabled = False
     impl.qk_rope_head_dim = 64
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.enable_sparse_sfa_turboquant = False
     impl.dcp_group = Mock()
     packed = torch.randn(2, 128, 1, 576)
@@ -1734,6 +1744,7 @@ def test_sfa_pcp_keeps_prolog_v3_enabled(is_kv_consumer, sfa_c8, quantized_index
     impl.q_a_layernorm = object()
     impl.kv_a_layernorm = object()
     impl.qk_rope_head_dim = 64
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.is_kv_consumer = is_kv_consumer
     impl.enable_sparse_sfa_c8 = sfa_c8
     impl.enable_sparse_sfa_turboquant = False
@@ -1981,6 +1992,7 @@ def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
     impl.pcp_enabled = True
     impl.is_pcp_decode_sharded = False
     impl.qk_rope_head_dim = 64
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.enable_sparse_sfa_c8 = False
     impl.enable_sparse_sfa_turboquant = False
     metadata = SimpleNamespace(
@@ -2107,6 +2119,7 @@ def test_sfa_pcp_nope_gathers_latent_kv_without_rope(dcp_enabled, mode):
     impl.pcp_enabled = True
     impl.is_pcp_decode_sharded = mode == "sharded_decode"
     impl.qk_rope_head_dim = 0
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.kv_lora_rank = 2
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
     impl.kv_a_layernorm = lambda value: value * 2
@@ -2160,6 +2173,7 @@ def _run_fused_forward(impl, hidden, cache, slots, metadata, preprocess_type=Pre
     impl._parallel_o_proj = None
     impl.g_proj = None
     impl.qk_rope_head_dim = 1
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.has_indexer = False
     impl.skip_topk = True
     impl.topk_indices_buffer = torch.zeros(hidden.shape[0], 1, dtype=torch.int64)
@@ -2197,7 +2211,9 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
             cp_kv_cache_interleave_size=128,
         ),
         model_config=SimpleNamespace(
-            dtype=torch.float32, hf_config=SimpleNamespace(index_topk=4), hf_text_config=SimpleNamespace(index_topk=4)
+            dtype=torch.float32,
+            hf_config=SimpleNamespace(model_type="deepseek_v32", index_topk=4),
+            hf_text_config=SimpleNamespace(index_topk=4),
         ),
         kv_transfer_config=None,
         num_speculative_tokens=0,
@@ -2365,6 +2381,7 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
     impl.is_pcp_decode_sharded = False
     impl._parallel_o_proj = None
     impl.qk_rope_head_dim = impl.q_lora_rank = impl.kv_lora_rank = 1
+    impl.use_rope = impl.qk_rope_head_dim > 0
     impl.local_num_heads = impl.v_head_dim = 1
     impl.enable_sparse_sfa_c8 = packed_cache
     impl.enable_sparse_sfa_turboquant = False

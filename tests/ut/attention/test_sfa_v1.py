@@ -522,6 +522,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention_vllm(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.is_kimi_k31 = False
         impl.enable_sparse_sfa_c8 = True
         impl.enable_sparse_sfa_turboquant = False
         impl.scale = 0.125
@@ -728,6 +729,8 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer.use_pcp = False
         indexer._use_fused_cache_store = False
+        indexer._sharded_dcp = False
+        indexer._local_topk = False
         indexer.write_cache = MagicMock()
 
         hidden_states = torch.randn(num_tokens, head_dim + weights_dim)
@@ -737,6 +740,9 @@ class TestAscendSFAKPathFusion(TestBase):
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
+            cache_scatter_indices=torch.stack(
+                (torch.zeros(num_tokens, dtype=torch.int64), torch.arange(num_tokens)), dim=-1
+            ),
             actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
             actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
         )

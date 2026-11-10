@@ -812,7 +812,12 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     groups = _groups()
     expected = get_qwen4_exp_pool_bytes_per_block(groups)
     assert expected is not None
-    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(SimpleNamespace(), groups) == expected
+    assert (
+        AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
+            SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp"))), groups
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])

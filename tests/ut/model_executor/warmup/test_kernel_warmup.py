@@ -2,6 +2,7 @@
 """Unit tests for ``kernel_warmup`` orchestration."""
 
 import importlib
+import inspect
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -179,6 +180,16 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     with patch.object(V2BaseRunner, "initialize_kv_cache") as super_init:
         bare._initialize_kv_cache_upstream(MagicMock(), None)
     super_init.assert_called_once()
+
+
+@pytest.fixture(autouse=True)
+def dcp_kernel_signatures(monkeypatch):
+    # The no-Triton shim returns plain functions; emulate only JIT signature metadata.
+    for owner in dcp_warmup._DCP_KERNELS:
+        if not hasattr(owner.kernel, "arg_names"):
+            monkeypatch.setattr(
+                owner.kernel, "arg_names", list(inspect.signature(owner.kernel).parameters), raising=False
+            )
 
 
 def _register_dcp_warmup(**kwargs):

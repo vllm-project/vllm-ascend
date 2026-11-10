@@ -1068,6 +1068,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
 
     class FakeAttention:
         kv_sharing_target_layer_name = None
+        is_draft_layer = False
 
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
@@ -1120,6 +1121,7 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
 
     class FakeAttention:
         kv_sharing_target_layer_name = None
+        is_draft_layer = False
 
         def __init__(self, spec):
             self.spec = spec
@@ -1187,6 +1189,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     )
     layers = {
         name: SimpleNamespace(
+            is_draft_layer=name.startswith("draft."),
             get_kv_cache_spec=lambda _config, spec=spec: spec,
             get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
         )

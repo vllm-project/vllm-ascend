@@ -39,7 +39,7 @@ def _config(max_len, interleave):
 def _create_builder(spec, config, indexer):
     # Exercise the real upstream factory, including its kernel-size spec copy.
     cls = AscendSFAIndexerMetadataBuilder if indexer else AscendSFADCPMetadataBuilder
-    backend = SimpleNamespace(get_builder_cls=lambda: cls)
+    backend = SimpleNamespace(get_builder_cls=lambda: cls, get_supported_kernel_block_sizes=lambda _spec: [128])
     group = AttentionGroup(backend=backend, layer_names=["layer"], kv_cache_spec=spec, kv_cache_group_id=0)
 
     def init_base(self, *args, **kwargs):

@@ -2196,7 +2196,7 @@ def test_replicated_mamba_selects_one_complete_producer_replica(local_tp: int, r
     groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), remote_pcp, remote_tp, 1)
     assert groups == [list(range(remote_pcp * remote_tp))]
     transfers = thread._compute_group_block_ids(
-        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1
+        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1, remote_interleave_size=1
     )
     assert transfers == [(1, [2], [3])]
 

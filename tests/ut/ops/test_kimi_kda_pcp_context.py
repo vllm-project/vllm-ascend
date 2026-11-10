@@ -18,8 +18,7 @@ from vllm_ascend.ops import gdn_attn_builder, kda_pcp
 
 @pytest.mark.parametrize("rank", range(8))
 @pytest.mark.parametrize("for_capture", [False, True])
-@pytest.mark.parametrize("legacy_context", [False, True])
-def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, legacy_context, monkeypatch):
+def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, monkeypatch):
     _patch_missing_runtime_cdiv(monkeypatch)
     group = SimpleNamespace(rank_in_group=rank, world_size=8)
 
@@ -41,12 +40,11 @@ def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, lega
         restore = torch.tensor([2 * (i % 8) + i // 8 for i in range(15)])
         local_indices = torch.arange(rank, 15, 8)
         context = SimpleNamespace(local_num_tokens=2, hidden_restore_idx=restore, local_token_indices=local_indices)
-        common.pcp_context = None if legacy_context else context
-        kwargs = {"pcp_context": context} if legacy_context else {}
+        common.pcp_context = context
         if for_capture:
-            metadata = builder.build_for_cudagraph_capture(common, **kwargs)
+            metadata = builder.build_for_cudagraph_capture(common)
         else:
-            metadata = builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
+            metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
 
     gathered = torch.tensor([[r, r + 8 if r < 7 else -1] for r in range(8)]).float().reshape(-1, 1)
     group.all_gather = lambda x, dim: gathered

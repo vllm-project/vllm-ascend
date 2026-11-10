@@ -13,7 +13,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 
 @pytest.mark.parametrize("is_draft", [False, True])
 @pytest.mark.parametrize("pcp,dcp", [(1, 1), (2, 1), (1, 2), (2, 2)])
-def test_replicated_mla_draft_accepts_target_interleave_without_enabling_real_cp(monkeypatch, is_draft, pcp, dcp):
+def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
     draft = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
@@ -55,11 +55,9 @@ def test_replicated_mla_draft_accepts_target_interleave_without_enabling_real_cp
         speculative_config=object(),
     )
     monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: {"draft": SimpleNamespace(impl=impl)})
-    if pcp == dcp == 1:
-        cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
-    else:
-        with pytest.raises(AssertionError, match="MTP with cp_kv_cache_interleave_size"):
-            cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
+    cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
+    assert impl.use_pcp == (pcp > 1)
+    assert impl.use_dcp == (dcp > 1)
 
 
 @pytest.mark.parametrize("tp_size,pcp_size", [(1, 2), (4, 2), (2, 4)])
