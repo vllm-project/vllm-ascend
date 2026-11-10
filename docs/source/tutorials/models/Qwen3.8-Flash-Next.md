@@ -874,7 +874,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     | API port | 8088 | 8092 |
     | DP RPC port | 13388 | 13389 |
     | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
-    | Maximum context / sequences / batched tokens | 141312 / 128 / 4096 | 141312 / 128 / 4096 |
+    | Maximum context / sequences / batched tokens | 143360 / 64 / 4096 | 143360 / 64 / 4096 |
 
     Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Set `local_ip` to the serving host address and `nic_name` to its network interface in each command block. Provide sufficient host memory for Engram CPU offload and shared memory.
 
@@ -932,8 +932,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
-        --max-model-len 141312 \
-        --max-num-seqs 128 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -996,8 +996,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
-        --max-model-len 141312 \
-        --max-num-seqs 128 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -2194,10 +2194,10 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | 950DT products | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
 | A2 series | Prefill | 0–7 on prefill host | 4 × 2 × 1 | 141312 | 32 | 8192 |
 | A3 series | Prefill | 0–7 | 4 × 2 × 1 | 141312 | 32 | 8192 |
-| 950DT products | Prefill | 0–3 | 2 × 1 × 2 | 141312 | 128 | 4096 |
+| 950DT products | Prefill | 0–3 | 2 × 1 × 2 | 143360 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
 | A3 series | Decode | 8–15 | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| 950DT products | Decode | 4–7 | 2 × 1 × 2 | 141312 | 128 | 4096 |
+| 950DT products | Decode | 4–7 | 2 × 1 × 2 | 143360 | 64 | 4096 |
 | 950DT products | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
 | 950DT products | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
 | 950DT products | Prefill (long-context) | 0–3 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
