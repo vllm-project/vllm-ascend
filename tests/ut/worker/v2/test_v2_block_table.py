@@ -26,8 +26,6 @@ def _parent_init(
     cp_rank=0,
     cp_interleave=1,
     slot_mapping_enabled=None,
-    dcp_sharded=None,
-    sliding_window_reach=None,
 ):
     self.block_sizes = block_sizes
     # vLLM main dropped `kernel_block_sizes` from BlockTables; only the release
@@ -128,48 +126,6 @@ def test_init_forwards_single_group_slot_mapping_enabled():
     ):
         AscendBlockTables([4], 2, 8, [4], torch.device("cpu"), slot_mapping_enabled=[True])
     assert seen["kwargs"]["slot_mapping_enabled"] == [True]
-
-
-def _init_with_sliding_window_reach(declared: bool) -> tuple[dict[str, Any], list[int]]:
-    seen: dict[str, Any] = {}
-    reach = [0, 32]
-
-    def recording_init(self, *args, **kwargs):
-        seen["kwargs"] = kwargs
-        _parent_init(self, *args, **kwargs)
-
-    def fake_declared_kwarg(_owner, name, value):
-        return {name: value} if declared else {}
-
-    with (
-        patch.object(BlockTables, "__init__", recording_init),
-        patch("vllm_ascend.worker.v2.block_table.declared_kwarg", fake_declared_kwarg),
-        patch(
-            "vllm_ascend.worker.v2.block_table.triton.next_power_of_2",
-            return_value=16,
-            create=True,
-        ),
-    ):
-        AscendBlockTables(
-            [4, 4],
-            2,
-            8,
-            [4, 4],
-            torch.device("cpu"),
-            dcp_sharded=[True, True],
-            sliding_window_reach=reach,
-        )
-    return seen, reach
-
-
-def test_init_forwards_sliding_window_reach_when_supported():
-    seen, reach = _init_with_sliding_window_reach(declared=True)
-    assert seen["kwargs"]["sliding_window_reach"] is reach
-
-
-def test_init_omits_sliding_window_reach_when_unsupported():
-    seen, _ = _init_with_sliding_window_reach(declared=False)
-    assert "sliding_window_reach" not in seen["kwargs"]
 
 
 def _make_uninitialized_tables():

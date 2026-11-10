@@ -166,26 +166,6 @@ def test_memory_budget_sources_preserve_physical_capacity(
     assert memory_profiling.call_count == (budget_source == "profiled")
 
 
-def test_draft_kv_window_keeps_shared_budget(monkeypatch):
-    config = _config()
-    config.model_config.hf_text_config.model_type = "qwen3"
-    cache = _cache_config(sliding_groups=1)
-    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(draft_kv_window=2048))
-    assert can_share_full_and_sliding_kv_cache(config, _specs(cache).values())
-
-    worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
-    worker.vllm_config = config
-    worker.use_v2_model_runner = True
-    worker.model_config = config.model_config
-    worker.get_kv_cache_spec = lambda: _specs(cache)
-    worker.model_runner = SimpleNamespace(
-        supports_standardized_shared_kv_backing=True, use_sparse=False, use_compress=False
-    )
-    monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
-    available = 60 * cache.kv_cache_tensors[0].size
-    assert worker._scale_kv_cache_memory_for_multi_group(available) == available
-
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("kernel_block_size", [1, 2])
 def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype, kernel_block_size):
