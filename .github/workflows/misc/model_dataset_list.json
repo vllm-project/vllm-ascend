@@ -143,6 +143,7 @@
             "RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
             "Shanghai_AI_Laboratory/internlm-7b",
             "Shanghai_AI_Laboratory/internlm-chat-7b",
+            "Shanghai_AI_Laboratory/internlm2-chat-20b",
             "Shanghai_AI_Laboratory/internlm3-8b-instruct",
             "Tencent-Hunyuan/Hunyuan-A13B-Instruct",
             "Tencent-Hunyuan/HunyuanOCR",

@@ -1,0 +1,8 @@
+pr: PRNUM
+entries:
+  - category: performance
+    text: Scaled rotary embeddings now run on the Ascend fused rotary kernel instead of the reference implementation. This covers checkpoints whose `rope_scaling.type` is `dynamic` (with either `factor` or `alpha`), `ntk`, or `llama3`.
+  - category: feature
+    text: Added InternLM2-20B-Chat support, with an end-to-end accuracy configuration, two-card serving tests, and a deployment tutorial.
+    model: internlm2-chat-20b
+    hardware: [A2, A3]

@@ -88,6 +88,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_xlite.py: 215
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 820
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
+  # Two loads of a 20B BF16 checkpoint at TP2, one offline and one served.
+  tests/e2e/pull_request/two_card/test_internlm2_20b_chat.py: 900
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 180
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 470
