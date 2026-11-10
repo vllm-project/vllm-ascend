@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import _is_deepseek_v4_groups
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
@@ -208,22 +209,6 @@ def _ascend_annotate_eagle_groups(
 
     if not any(group.is_eagle_group for group in kv_cache_groups):
         raise ValueError(f"Qwen4Exp MTP is enabled, but no KV cache group contains its draft layer(s) {draft_markers}.")
-
-
-def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
-    if (
-        is_deepseek_v41_cache(kv_cache_groups)
-        or not kv_cache_groups
-        or not all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
-    ):
-        return False
-    for group in kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
-        specs = group_spec.kv_cache_specs.values()
-        if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
-            return True
-    return False
 
 
 def _ascend_max_memory_usage_bytes_from_groups(
