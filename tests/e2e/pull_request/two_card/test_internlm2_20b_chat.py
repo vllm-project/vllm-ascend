@@ -35,6 +35,10 @@ from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, wait_until_npu_me
 
 MODEL = "Shanghai_AI_Laboratory/internlm2-chat-20b"
 TENSOR_PARALLEL_SIZE = 2
+# The server is already serving when these run, so a request that has not
+# answered within this budget is hung rather than slow. Bounding it keeps a
+# stuck engine from holding the two cards for the whole job timeout.
+REQUEST_TIMEOUT_S = 60
 
 SHORT_PROMPTS = [
     "The capital of France is",
@@ -141,6 +145,7 @@ def test_online_multi_turn_chat_and_completions():
         completion = requests.post(
             server.url_for("v1", "completions"),
             json={"model": MODEL, "prompt": "Shanghai is", "max_tokens": 32, "temperature": 0.0},
+            timeout=REQUEST_TIMEOUT_S,
         )
         assert completion.status_code == 200
         assert completion.json()["choices"][0]["text"].strip(), "empty online completion"
@@ -151,6 +156,7 @@ def test_online_multi_turn_chat_and_completions():
             chat = requests.post(
                 server.url_for("v1", "chat", "completions"),
                 json={"model": MODEL, "messages": messages, "max_tokens": 96, "temperature": 0.0},
+                timeout=REQUEST_TIMEOUT_S,
             )
             assert chat.status_code == 200
             choice = chat.json()["choices"][0]
