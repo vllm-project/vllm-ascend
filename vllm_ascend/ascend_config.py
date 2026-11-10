@@ -490,7 +490,7 @@ class AscendConfig:
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 65536,
+            "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -642,13 +642,16 @@ class AscendConfig:
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
-    # This is a reference value: if the actual per-rank received token
-    # count exceeds it, tokens may be truncated, causing precision
-    # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
-    mega_moe_max_tokens: int = 65536
+    # MegaMoe (enable_fused_mc2=2/3): passed as the symm buffer's
+    # max_recv_token_num. 0 (default) lets the operator auto-compute it as
+    # num_max_tokens_per_rank * ep_world_size * min(num_topk, expert_per_rank).
+    # A positive value is used as a reference capacity instead: if the actual
+    # per-rank received token count exceeds it, tokens may be truncated,
+    # causing precision degradation. Do not set it too large because
+    # workspace memory scales linearly with this value.
+    # Plain MC2 (enable_fused_mc2=1): the same value is passed as
+    # dispatch_ffn_combine's max_output_size; 0 falls back to 65536 there.
+    mega_moe_max_tokens: int = 0
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -661,6 +664,10 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Derived from enable_fused_mc2=3: MegaMoE runs the shared expert inside
+    # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
+    # keeps the shared expert separate. Internal flag, not user-settable.
+    megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -723,9 +730,22 @@ class AscendConfig:
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
+        elif self.enable_fused_mc2 in (2, 3):
+            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
+            # with the shared expert fused into the operator.
+            self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
             _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires the cann_ops_transformer package; "
+                    "MegaMoe (and its shared-expert fusion) will be disabled."
+                )
             self.enable_fused_mc2 = 1
+        else:
+            raise ValueError(
+                "enable_fused_mc2 must be one of 0, 1, 2 (MegaMoE) or 3 "
+                f"(MegaMoE + shared-expert fusion); got {self.enable_fused_mc2}"
+            )
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -974,10 +994,11 @@ class AscendConfig:
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
 
         self._validate_mc2_comm_alg(vc)
+        self._validate_megamoe_shared_expert_fusion(vc)
 
-        # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        # mega_moe_max_tokens range (0 = let the MegaMoe operator auto-compute)
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
@@ -1043,6 +1064,36 @@ class AscendConfig:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication. "
                 "Please set additional_config.enable_fused_mc2 to 0."
+            )
+
+    def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
+        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+
+        The shared expert is fused into the routed A5 MegaMoe operator, so this
+        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        the shared expert and routed experts share the residual width. Latent-MoE
+        models (e.g. Kimi K3) project the residual stream before the routed FFN and
+        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
+        that layout. Fail fast instead of silently downgrading, because a silent
+        downgrade would change results without failing the launch.
+        """
+        if not self.megamoe_shared_expert_fusion:
+            return
+
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "the current hardware profile does not support it. "
+                "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
+            )
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        if getattr(hf_text_config, "routed_expert_hidden_size", None) is not None:
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) does not support latent-MoE models "
+                "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
