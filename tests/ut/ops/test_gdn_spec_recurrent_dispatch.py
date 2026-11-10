@@ -16,8 +16,18 @@ from vllm_ascend.ops.gdn_attn_builder import (
 from .test_gdn_mixed_batch import _make_layer, _make_mixed_metadata
 
 
-@pytest.mark.parametrize(("window", "expect_upstream"), [(8, False), (9, True), (16, True)])
-def test_spec_recurrent_dispatches_by_window_width(window: int, expect_upstream: bool) -> None:
+@pytest.mark.parametrize(
+    ("window", "use_upstream_recurrent"),
+    [(8, False), (9, True), (16, True), (64, False)],
+)
+def test_spec_recurrent_follows_builder_decision(window: int, use_upstream_recurrent: bool) -> None:
+    """The metadata flag, not a local width, selects the recurrent kernel.
+
+    ``window=64`` with the flag off is deliberate: re-adding an eight-token
+    check in ``_forward_core`` would route it to Triton and fail here, even
+    though the installed OPP published no limit.
+    """
+
     layer = _make_layer()
     metadata = _make_mixed_metadata()
     num_seqs = 2
@@ -41,14 +51,15 @@ def test_spec_recurrent_dispatches_by_window_width(window: int, expect_upstream:
             num_accepted_tokens=num_accepted_tokens,
         ),
         actual_seq_lengths=torch.tensor([0] * (num_seqs + 1), dtype=torch.int32),
+        use_upstream_recurrent=use_upstream_recurrent,
     )
 
     def ascendc(q, k, v, state, **kwargs):
-        assert not expect_upstream
+        assert not use_upstream_recurrent
         return v.clone()
 
     def triton(q, k, v, g, beta, **kwargs):
-        assert expect_upstream
+        assert use_upstream_recurrent
         assert kwargs["cu_seqlens"] is query_start_loc
         assert kwargs["ssm_state_indices"] is state_indices
         assert kwargs["num_accepted_tokens"] is num_accepted_tokens
@@ -78,5 +89,5 @@ def test_spec_recurrent_dispatches_by_window_width(window: int, expect_upstream:
             layer, packed, torch.zeros(num_tokens, 1), torch.zeros(num_tokens, 1), output
         )
 
-    assert ascendc_mock.called is not expect_upstream
-    assert triton_mock.called is expect_upstream
+    assert ascendc_mock.called is not use_upstream_recurrent
+    assert triton_mock.called is use_upstream_recurrent

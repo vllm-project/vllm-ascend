@@ -22,7 +22,6 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops import gdn as ascend_gdn
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -33,6 +32,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
+from vllm_ascend.ops.gdn_capabilities import RecurrentGdnLimits
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -1825,10 +1825,17 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("num_speculative_tokens", [7, 8, 9])
 def test_long_fixed_drafts_use_strided_recurrent_route(monkeypatch, builder_cls, device_type, num_speculative_tokens):
+    # arch22 (A2/A3) with the pre-V2 OPP has an eight-token hard window; the
+    # A5/arch35 OPP publishes no cap. The builder must follow the installed
+    # OPP, not just the A2 numerical workaround.
+    legacy_arch22 = RecurrentGdnLimits(8, 9, True, "legacy-kernel-header")
+    unbounded_arch35 = RecurrentGdnLimits(None, None, True, "opp-capabilities")
     monkeypatch.setattr(
-        ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+        ascend_gdn_attn_builder,
+        "get_recurrent_gdn_limits",
+        lambda: unbounded_arch35 if device_type == AscendDeviceType.A5 else legacy_arch22,
     )
-    expected_fused = device_type == AscendDeviceType.A2 and num_speculative_tokens >= 8
+    expected_fused = device_type != AscendDeviceType.A5 and num_speculative_tokens >= 8
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -1855,9 +1862,10 @@ def test_long_fixed_drafts_use_strided_recurrent_route(monkeypatch, builder_cls,
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("query_len", [1, 9])
 def test_adaptive_recurrent_route_is_hardware_independent(monkeypatch, builder_cls, device_type, query_len):
-    monkeypatch.setattr(
-        ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
-    )
+    # Adaptive verification ignores both the OPP window and the profile
+    # workaround; install a conservative legacy limit to prove that.
+    legacy = RecurrentGdnLimits(8, 9, True, "legacy-kernel-header")
+    monkeypatch.setattr(ascend_gdn_attn_builder, "get_recurrent_gdn_limits", lambda: legacy)
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -1885,7 +1893,7 @@ def test_adaptive_recurrent_route_is_hardware_independent(monkeypatch, builder_c
 def test_310p_never_selects_common_strided_recurrent_workaround(monkeypatch, adaptive):
     monkeypatch.setattr(
         ascend_gdn_attn_builder,
-        "get_current_hardware_profile",
+        "get_recurrent_gdn_limits",
         Mock(side_effect=AssertionError("310P must not query the common recurrent workaround")),
     )
     builder = _make_builder(
