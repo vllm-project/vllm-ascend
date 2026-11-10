@@ -377,7 +377,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         return SimpleNamespace(
             parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size, tensor_parallel_size=2, rank=0),
             model_config=SimpleNamespace(
-                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // 2],
+                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // p.tensor_parallel_size],
                 get_total_num_hidden_layers=lambda: 7,
                 get_total_num_kv_heads=lambda: 1,
                 compute_hash=lambda: "model-config",
