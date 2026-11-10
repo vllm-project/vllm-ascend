@@ -33,6 +33,7 @@ the final full mamba-align state page unmaterialized across the chunk boundary
 hits one full page (or entirely) short.
 """
 
+import copy
 import functools
 import inspect
 
@@ -65,40 +66,7 @@ def _mamba_block_aligned_split(
     num_new_local_computed_tokens: int = 0,
     num_external_computed_tokens: int = 0,
 ) -> int:
-    """Preserve PD windows and align sparse index-kpool cache groups.
-
-    On a pure PD prefill producer or a standalone instance the EAGLE
-    one-block backoff of the last cacheable position is suppressed.
-    ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
-    mamba-align page off by one block (and, on newer vLLM revisions, shifts
-    the partial-tail checkpoint boundary) whenever the EAGLE block drop is
-    active. Consequently a producer prefill can never end a chunk at its
-    final full-page boundary. In mamba "align" mode the recurrent state of a
-    page is only materialized across a chunk boundary (copy-on-write in
-    ``MambaManager.allocate_new_blocks``), so the suppressed split leaves the
-    final full state page unhashed. Hybrid coordinator hits reconcile to the
-    per-group minimum: even with the full-attention group fixed by the
-    coordinator exemption, the mamba groups report one full page less
-    (1600-token prompts -> 0 hit, 3200-token prompts -> 1536 with 1536-token
-    align pages) - the observed MTP prefix-cache kill band.
-
-    Rather than copy the scheduler method (its body moves between vLLM
-    revisions), invoke the original with the drop bit temporarily cleared:
-    every read of the bit inside the method exists solely to compensate for
-    the block drop, and on the producer matched blocks are always verified
-    prompt blocks and the coordinator never drops. Scheduling is
-    single-threaded per scheduler instance, so the temporary toggle is safe.
-    vLLM 0.28.x names the bit ``use_eagle``; newer revisions expose the
-    dedicated ``use_eagle_block_drop`` knob.
-
-    The suppression self-gates at call time on
-    ``self.vllm_config.kv_transfer_config`` via ``_skips_eagle_block_drop``
-    (the same PD role source used by the coordinator and the neighboring
-    mamba split logic), so consumers and ``kv_both`` instances pass straight
-    through with upstream behavior. Standalone instances (no connector)
-    suppress the backoff too: the coordinator never drops there, so backing
-    the split off would only erase cacheable hit length.
-    """
+    """Use upstream prefill boundaries while preserving the final PD window."""
     kv_transfer_config = self.vllm_config.kv_transfer_config
     # A consumer only needs the unsplit verifier window after some prefix has
     # already been computed locally or loaded from the connector.  ``kv_both``
@@ -109,46 +77,27 @@ def _mamba_block_aligned_split(
     if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
         return num_new_tokens
 
-    # Pure PD prefill producer or standalone instance: suppress the EAGLE
-    # one-block backoff (see the docstring). The sparse index-kpool
-    # early-return path below must observe it too (it previously ran under
-    # a temporary bit clear from the outer producer wrapper).
-    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
-        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
-        if num_computed_tokens < max(
-            request.num_prompt_tokens,
-            request.num_tokens - 1,
-        ):
-            block_size = self.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
-                last_cache_position = max(last_cache_position - block_size, 0)
-            scheduled_end = num_computed_tokens + num_new_tokens
-            if scheduled_end < last_cache_position:
-                chunked_tokens = num_new_tokens // block_size * block_size
-                if chunked_tokens > 0:
-                    num_new_tokens = chunked_tokens
-            elif num_computed_tokens < last_cache_position < scheduled_end:
-                num_new_tokens = last_cache_position - num_computed_tokens
-        return num_new_tokens
-
-    if not _skips_eagle_block_drop(kv_transfer_config):
-        return _original_mamba_block_aligned_split(
-            self,
-            request,
-            num_new_tokens,
-            num_new_local_computed_tokens,
-            num_external_computed_tokens,
-        )
+    # Sparse indexer groups have a smaller physical block than their common
+    # state boundary. Give upstream a scheduler-local config view without
+    # changing the configuration shared with other components.
+    cache_config = self.cache_config
+    sparse_index_kpool = _get_sparse_index_kpool(self.vllm_config.model_config) is not None
     # vLLM 0.28.x and newer revisions use different names.  Some
     # transitional scheduler implementations expose both and different
     # wrapper layers consult different attributes, so clear every
     # attribute that exists and restore all of them after the call.
-    drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
+    drop_attrs = (
+        tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
+        if _skips_eagle_block_drop(kv_transfer_config)
+        else ()
+    )
     original_drop_values = {name: getattr(self, name) for name in drop_attrs}
     for name in drop_attrs:
         setattr(self, name, False)
     try:
+        if sparse_index_kpool:
+            self.cache_config = copy.copy(cache_config)
+            self.cache_config.block_size = self.block_size
         return _original_mamba_block_aligned_split(
             self,
             request,
@@ -157,6 +106,8 @@ def _mamba_block_aligned_split(
             num_external_computed_tokens,
         )
     finally:
+        if sparse_index_kpool:
+            self.cache_config = cache_config
         for name, value in original_drop_values.items():
             setattr(self, name, value)
 
