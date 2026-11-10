@@ -322,7 +322,14 @@ class NPUWorker(WorkerBase):
         self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
-        global_te.unregister_buffer()
+        # The transfer-engine registrations cover the KV cache buffers. A level-1
+        # sleep only offloads the weights, so the KV cache stays resident and its
+        # registrations remain valid. Unregistering them here would leave the
+        # buffers unregistered for the rest of the process lifetime whenever the
+        # following wake only restores weights (wake_up re-registers on a
+        # kv_cache wake, not on a weights-only wake).
+        if level >= 2:
+            global_te.unregister_buffer()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep

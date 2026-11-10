@@ -163,6 +163,43 @@ def test_non_weight_wake_preserves_backups_without_touching_parameters(worker, t
     assert set(worker._sleep_saved_buffers) == {"scale"}
 
 
+@pytest.fixture
+def transfer_engine(monkeypatch):
+    from vllm_ascend.worker import worker as worker_module
+
+    global_te = MagicMock()
+    monkeypatch.setattr(worker_module, "global_te", global_te)
+    return global_te
+
+
+def test_level_one_sleep_keeps_mooncake_registration(worker, transfer_engine):
+    # A level-1 sleep keeps the KV cache resident, so its transfer-engine
+    # registrations must survive both the sleep and a weights-only wake.
+    worker.sleep(level=1)
+    worker.wake_up(tags=["weights"])
+
+    transfer_engine.unregister_buffer.assert_not_called()
+    transfer_engine.reregister_buffer.assert_not_called()
+
+
+@pytest.mark.parametrize("tags", [None, ["weights", "kv_cache"], ["kv_cache"]])
+def test_level_two_sleep_reregisters_only_when_kv_cache_wakes(worker, transfer_engine, tags):
+    worker.sleep(level=2)
+    transfer_engine.unregister_buffer.assert_called_once_with()
+
+    worker.wake_up(tags=tags)
+
+    transfer_engine.reregister_buffer.assert_called_once_with()
+
+
+def test_weights_only_wake_after_level_two_sleep_does_not_reregister(worker, transfer_engine):
+    worker.sleep(level=2)
+    worker.wake_up(tags=["weights"])
+
+    transfer_engine.unregister_buffer.assert_called_once_with()
+    transfer_engine.reregister_buffer.assert_not_called()
+
+
 def test_repeated_sleep_uses_latest_parameter_values(worker, monkeypatch):
     model = worker.model_runner.model
     device_parameters(model, monkeypatch)
