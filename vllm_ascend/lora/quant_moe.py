@@ -178,7 +178,8 @@ def _apply_dynamic_int8_moe_lora(
     if hidden_states.shape[0] == 0:
         # An EP rank may receive no routed tokens. Keep participating in the
         # surrounding AlltoAll collectives, but avoid empty-tensor NPU kernels.
-        return hidden_states, None
+        # Shared activation still needs a milestone for this empty GMM2 stage.
+        return hidden_states, torch.npu.current_stream().record_event()
 
     # Weights are carried by the routed-expert layer since the MoE MLP refactor;
     # fall back to the payload for direct callers/tests that still build it.

@@ -297,13 +297,13 @@ def test_native_sfa_dcp_forward_needs_no_projection_component(monkeypatch, fail)
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switch_enabled, monkeypatch):
     from vllm_ascend.attention import sfa_v1
-    from vllm_ascend.attention.context_parallel import common_cp
+    from vllm_ascend.attention.context_parallel import common_cp, sfa_cp
 
     group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
     owner = torch.nn.Module()
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
     impl.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1, decode_context_parallel_size=2),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=4), dtype=torch.float32),
         compilation_config=SimpleNamespace(static_forward_context={"layer": owner}),
     )
@@ -324,7 +324,7 @@ def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switc
     impl.qk_nope_head_dim, impl.v_head_dim = 1, 2
     impl.kv_b_proj = SimpleNamespace(weight=torch.ones(6, 2))
     impl.rl_weight_update_enabled = True
-    impl.has_indexer = impl.enable_sparse_sfa_c8 = False
+    impl.has_indexer = impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
     monkeypatch.setattr(sfa_v1, "enable_pcp_o_proj_weight_sharding", lambda: switch_enabled)
     for name in ("get_tp_group", "get_pcp_group"):
         monkeypatch.setattr(sfa_v1, name, lambda: group)
@@ -336,6 +336,7 @@ def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switc
     monkeypatch.setattr(AscendSFAImpl, "__init__", lambda self: None)
     for name in ("get_tp_group", "get_pcp_group", "get_dcp_group"):
         monkeypatch.setattr(common_cp, name, lambda: group)
+    monkeypatch.setattr(sfa_cp, "get_pcp_group", lambda: group)
     AscendSFADCPImpl.__init__(impl)
     assert not impl.enable_mlapo
     assert (impl._parallel_o_proj is not None) == pcp_enabled
@@ -345,8 +346,8 @@ def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switc
     impl.process_weights_after_loading(torch.float32)
     states = impl._parallel_o_proj._weight_switch_states if pcp_enabled else None
     assert (states is not None) == (pcp_enabled and switch_enabled)
-    assert owner._dcp_sfa_remap_order is impl._remap_order
-    assert owner._dcp_sfa_remap_invalid_index is impl._remap_invalid_index
+    assert not hasattr(owner, "_dcp_sfa_remap_order")
+    assert not hasattr(owner, "_dcp_sfa_remap_invalid_index")
     impl.process_weights_after_loading(torch.float32)
     if pcp_enabled:
         assert impl._parallel_o_proj._weight_switch_states is states

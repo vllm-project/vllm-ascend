@@ -10,13 +10,14 @@ from vllm_ascend.ascend_config import is_draft_config_context
 from vllm_ascend.patch.worker import patch_dspark
 
 
+@pytest.mark.parametrize("architecture", ["GlmMoeDsaForCausalLM", "KimiK31ForConditionalGeneration"])
 @pytest.mark.parametrize("inherits_quant", [True, False])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
-def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, fail):
+def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, fail, architecture):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
-        model_config=SimpleNamespace(model="target", architecture="GlmMoeDsaForCausalLM"),
+        model_config=SimpleNamespace(model="target", architecture=architecture),
         speculative_config=SimpleNamespace(
             method="dspark", draft_model_config=SimpleNamespace(model="target" if inherits_quant else "draft")
         ),
