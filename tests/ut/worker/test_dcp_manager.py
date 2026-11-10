@@ -10,6 +10,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +19,10 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.attention.context_parallel import dcp_metadata, sfa_cp
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.utils import AscendDCPMetadata
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.dcp_utils import DCPManager
 
 
@@ -274,11 +279,9 @@ def test_update_spec_decode_drafting_metadata_requires_gqa_decode() -> None:
     manager = object.__new__(DCPManager)
     attn_metadata = SimpleNamespace(decode=None)
 
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
-        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
-        pytest.raises(AssertionError, match="must be classified as decode"),
-    ):
+    # No matching provider and a non-MLA cache spec fall back to the shared
+    # GQA drafting assertions.
+    with pytest.raises(AssertionError, match="must be classified as decode"):
         manager.update_spec_decode_drafting_cp_metadata(
             attn_metadata=attn_metadata,
             kv_cache_spec=object(),
@@ -305,11 +308,10 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
         dcp_local_seq_lens_cpu=torch.tensor([99, 99], dtype=torch.int32),
     )
 
-    with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True):
-        manager.prepare_spec_decode_drafting_cp_metadata(
-            common_attn_metadata=common_attn_metadata,
-            kv_cache_spec=object(),
-        )
+    manager.prepare_spec_decode_drafting_cp_metadata(
+        common_attn_metadata=common_attn_metadata,
+        kv_cache_spec=object(),
+    )
 
     # The common global lengths have already advanced; do not add another step.
     assert common_attn_metadata.dcp_local_seq_lens_cpu.tolist() == [4, 6]
@@ -323,14 +325,13 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
     manager = object.__new__(DCPManager)
     attn_metadata = SimpleNamespace(decode=None)
+    # A bare instance is enough to take the MLA branch (isinstance check only).
+    kv_cache_spec = object.__new__(AscendMLAAttentionSpec)
 
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True),
-        pytest.raises(AssertionError, match="must be classified as decode"),
-    ):
+    with pytest.raises(AssertionError, match="must be classified as decode"):
         manager.update_spec_decode_drafting_cp_metadata(
             attn_metadata=attn_metadata,
-            kv_cache_spec=object(),
+            kv_cache_spec=kv_cache_spec,
             seq_lens=torch.tensor([3]),
             draft_index=1,
         )
@@ -338,28 +339,163 @@ def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
 
 def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
     manager = object.__new__(DCPManager)
+    manager.dcp_world_size = 2
     manager.dcp_world_rank = 1
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+    )
     local_seq_lens = torch.tensor([[4, 3], [6, 5]], dtype=torch.int32)
-    manager._get_dcp_local_seq_lens = MagicMock(return_value=local_seq_lens)
     dcp_seq_lens = torch.zeros(3, dtype=torch.int32)
     attn_metadata = SimpleNamespace(
         dcp_context=SimpleNamespace(seq_lens=dcp_seq_lens),
     )
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True),
-        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=True),
-    ):
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+    with patch.object(sfa_cp.dcp_metadata, "dcp_local_seq_lens", return_value=local_seq_lens) as mock_local_seq_lens:
         manager.update_spec_decode_drafting_cp_metadata(
             attn_metadata=attn_metadata,
             kv_cache_spec=object(),
             seq_lens=torch.tensor([7, 11], dtype=torch.int32),
             draft_index=1,
-            attn_metadata_builder=object(),
+            attn_metadata_builder=builder,
         )
 
     assert torch.equal(dcp_seq_lens, torch.tensor([3, 5, 0], dtype=torch.int32))
-    manager._get_dcp_local_seq_lens.assert_called_once()
+    mock_local_seq_lens.assert_called_once()
     assert torch.equal(
-        manager._get_dcp_local_seq_lens.call_args.args[0],
+        mock_local_seq_lens.call_args.args[0],
         torch.tensor([9, 13], dtype=torch.int32),
     )
+    assert mock_local_seq_lens.call_args.kwargs["dcp_size"] == 2
+    assert mock_local_seq_lens.call_args.kwargs["cp_kv_cache_interleave_size"] == 1
+
+
+def test_dcp_manager_metadata_methods_delegate_to_attention_helpers() -> None:
+    manager = _make_dcp_manager(dcp_world_size=2, dcp_rank=1, interleave_size=1)
+    seq_lens = torch.tensor([1, 2, 128, 129], dtype=torch.int32)
+
+    torch.testing.assert_close(
+        manager._get_dcp_local_seq_lens(seq_lens),
+        dcp_metadata.dcp_local_seq_lens(seq_lens, dcp_size=2, cp_kv_cache_interleave_size=1),
+    )
+    torch.testing.assert_close(
+        manager.prepare_dcp_local_seq_lens_cpu(seq_lens),
+        dcp_metadata.dcp_local_seq_lens(seq_lens, dcp_size=2, cp_kv_cache_interleave_size=1, dcp_rank=1),
+    )
+
+    manager.num_reqs = 2
+    manager.num_decode_reqs = 2
+    manager.query_lens_full = SimpleNamespace(cpu=torch.tensor([4, 2], dtype=torch.int32))
+    input_batch = SimpleNamespace(num_computed_tokens_cpu=np.array([5, 10], dtype=np.int32))
+    block_table = torch.zeros((2, 1), dtype=torch.int32)
+    num_scheduled_tokens = np.array([4, 2], dtype=np.int32)
+    metadata, actual_block_table = manager.generate_dcp_metadata(
+        6,
+        torch.tensor([4, 2]),
+        input_batch,
+        num_scheduled_tokens,
+        block_table,
+        2,
+        2,
+    )
+
+    context_lens = np.concatenate(
+        [
+            input_batch.num_computed_tokens_cpu[:2] + num_scheduled_tokens[:2],
+            input_batch.num_computed_tokens_cpu[2:],
+        ]
+    )
+    expected_local_seq_lens = dcp_metadata.dcp_local_seq_lens(
+        torch.tensor(context_lens),
+        dcp_size=2,
+        cp_kv_cache_interleave_size=1,
+    )
+    expected_metadata = dcp_metadata.build_dcp_metadata(
+        expected_local_seq_lens,
+        manager.query_lens_full.cpu[:2],
+        4,
+    )
+    np.testing.assert_array_equal(
+        metadata.num_computed_tokens_of_dcp,
+        expected_metadata.num_computed_tokens_of_dcp,
+    )
+    torch.testing.assert_close(metadata.query_lens_cpu, expected_metadata.query_lens_cpu)
+    assert metadata.max_query_len == expected_metadata.max_query_len == 4
+    assert metadata.dcp_mtp_attn_mask is None
+    assert actual_block_table is block_table
+    assert manager.long_seq_metadata is metadata
+
+
+def test_unknown_backend_keeps_spec_based_assertions() -> None:
+    manager = object.__new__(DCPManager)
+    mla_spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.float16)
+
+    # An unknown builder falls back to the shared spec checks: MLA requires the
+    # backend-specific decode metadata, GQA requires the history/current split.
+    mla_metadata = SimpleNamespace(decode=SimpleNamespace(cp_seq_len=None))
+    with pytest.raises(AssertionError):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=mla_metadata,
+            kv_cache_spec=mla_spec,
+            seq_lens=torch.tensor([3]),
+            draft_index=1,
+            attn_metadata_builder=object(),
+        )
+
+    gqa_metadata = SimpleNamespace(decode=SimpleNamespace(cp_history_seq_len=None))
+    with pytest.raises(AssertionError):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=gqa_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([3]),
+            draft_index=1,
+            attn_metadata_builder=SimpleNamespace(),
+        )
+
+
+def test_sfa_provider_hook_updates_graph_stable_buffer() -> None:
+    manager = object.__new__(DCPManager)
+    manager.dcp_world_size = 2
+    manager.dcp_world_rank = 1
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+    )
+    dcp_seq_lens = torch.zeros(3, dtype=torch.int32)
+    attn_metadata = SimpleNamespace(dcp_context=SimpleNamespace(seq_lens=dcp_seq_lens))
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+
+    with patch("vllm_ascend.worker.dcp_utils.dcp_metadata.validate_spec_decode_drafting_metadata") as validate:
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+            draft_index=1,
+            attn_metadata_builder=builder,
+        )
+
+    validate.assert_not_called()
+    # Rank-1 interleave-aware lengths for advanced seq_lens [9, 13].
+    assert torch.equal(dcp_seq_lens, torch.tensor([4, 6, 0], dtype=torch.int32))
+
+
+def test_dcp_manager_has_no_backend_module_imports() -> None:
+    module_path = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/dcp_utils.py"
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+
+    imported_modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported_modules.append(node.module or "")
+
+    forbidden_fragments = ("sfa_cp", "attention_cp", "mla_cp", "_v1")
+    assert not any(fragment in module for module in imported_modules for fragment in forbidden_fragments), (
+        imported_modules
+    )
+    # The backend type checks now live behind the provider hook; no dangling
+    # attribute carrying one of the removed check names may remain.
+    removed_check_fragments = ("mla_kv_cache_spec", "sfa_dcp_metadata_builder")
+    dangling_checks = [
+        name for name in dir(DCPManager) if any(fragment in name for fragment in removed_check_fragments)
+    ]
+    assert dangling_checks == [], dangling_checks

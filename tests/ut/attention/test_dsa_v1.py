@@ -1675,9 +1675,22 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
     unpack_cache.assert_not_called()
 
 
+def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
+    """Minimal current-config stub for the registry-based CP selection seam."""
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        )
+    )
+
+
 def test_dsa_backend_selects_pcp():
     with (
-        patch("vllm_ascend.attention.dsa_v1.is_pcp_enabled", return_value=True),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_current_vllm_config",
+            return_value=_cp_config(pcp_size=2),
+        ),
     ):
         assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
         assert AscendDSABackend.get_impl_cls() is AscendDSAPCPImpl

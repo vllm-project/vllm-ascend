@@ -243,9 +243,22 @@ def test_generic_dense_backend_keeps_128_for_m3(hardware):
         assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
 
 
+def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
+    """Minimal current-config stub for the registry-based CP selection seam."""
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        )
+    )
+
+
 @pytest.mark.parametrize("is_dcp_enabled", [False, True])
 def test_model_dense_backend_reuses_generic_implementation(is_dcp_enabled):
-    with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=is_dcp_enabled):
+    with patch(
+        "vllm_ascend.attention.attention_v1.get_current_vllm_config",
+        return_value=_cp_config(dcp_size=2 if is_dcp_enabled else 1),
+    ):
         assert AscendMiniMaxM3DenseBackend.get_impl_cls() is AscendAttentionBackend.get_impl_cls()
         assert AscendMiniMaxM3DenseBackend.get_builder_cls() is AscendAttentionBackend.get_builder_cls()
         assert AscendMiniMaxM3DenseBackend.supports_pcp() == AscendAttentionBackend.supports_pcp()

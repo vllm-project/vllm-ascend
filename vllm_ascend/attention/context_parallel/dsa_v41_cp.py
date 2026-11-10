@@ -12,10 +12,12 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention import dsa_v41 as v41
+from vllm_ascend.attention.context_parallel.attn_hooks import DSA_V41_METADATA_HOOKS
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41AttentionMetadataBuilder,
     AscendDSAV41FoldedIndexMetadataBuilder,
@@ -546,3 +548,17 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # V4.1 already projects padded output even on empty query ranks.
         with projector._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
             return super().forward(attn, positions, hidden_states, output)
+
+
+DSA_V41_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="dsa_v41",
+        base_builder_cls=AscendDSAV41MetadataBuilder,
+        base_impl_cls=AscendDSAV41Impl,
+        cp_builder_cls=AscendDSAV41PCPMetadataBuilder,
+        cp_impl_cls=AscendDSAV41PCPImpl,
+        supports_pcp=True,
+        supports_dcp=False,
+        attn_metadata_hooks=DSA_V41_METADATA_HOOKS,
+    )
+)

@@ -39,6 +39,7 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
     is_draft_config_context,
 )
+from vllm_ascend.attention.context_parallel.topology import CPTopology, resolve_cp_topology, validate_common_topology
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
@@ -351,13 +352,7 @@ class NPUPlatform(Platform):
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
         if attn_selector_config.use_pcp:
-            pcp_backend_map = {
-                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
-            }
-            pcp_backend = pcp_backend_map.get(backend_key)
+            pcp_backend = backend_map.get(backend_key)
             if pcp_backend is None:
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
@@ -1900,12 +1895,11 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
-    if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
-        raise ValueError(
-            "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
-            "Please set --prefill-context-parallel-size to 1. "
-            f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
-        )
+    validate_common_topology(
+        resolve_cp_topology(vllm_config),
+        cache_config=getattr(vllm_config, "cache_config", None),
+        vllm_config=vllm_config,
+    )
 
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:
@@ -1942,14 +1936,7 @@ def _validate_model_pcp_dcp_config(
     dcp_size: int,
 ) -> None:
     """Require equal PCP/DCP sizes for GQA/MQA stacking."""
-    if model_config.use_mla or pcp_size <= 1 or dcp_size <= 1:
-        return
-    if pcp_size != dcp_size:
-        raise ValueError(
-            "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
-            "to equal decode_context_parallel_size; "
-            f"got PCP={pcp_size}, DCP={dcp_size}."
-        )
+    validate_common_topology(CPTopology(tp_size=1, pcp_size=pcp_size, dcp_size=dcp_size), model_config)
 
 
 def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:

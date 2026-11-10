@@ -31,6 +31,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     use_history_current_split_decode,
 )
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -1199,3 +1200,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert reorganized_k_pe.shape[0] == sum_seq_len
         assert max_seq_len_check == max_seq_len
         return reorganized_kv_c_normed, reorganized_k_pe
+
+
+MLA_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="mla",
+        base_builder_cls=AscendMLAMetadataBuilder,
+        base_impl_cls=AscendMLAImpl,
+        cp_builder_cls=AscendMlaDCPMetadataBuilder,
+        cp_impl_cls=AscendMlaDCPImpl,
+        supports_pcp=False,
+        supports_dcp=True,
+    )
+)

@@ -35,6 +35,16 @@ from vllm_ascend.utils import AscendDeviceType
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 
 
+def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
+    """Minimal current-config stub for the registry-based CP selection seam."""
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        )
+    )
+
+
 class TestAttentionGraphHelpers(TestBase):
     @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
@@ -140,18 +150,18 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=_cp_config()):
             self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=_cp_config()):
             self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        # supports_pcp() does not read the CP switches: the main backend keeps
+        # supporting PCP for both previously patched switch states.
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
             @staticmethod
@@ -161,14 +171,20 @@ class TestAscendAttentionBackend(TestBase):
         self.assertFalse(OtherAttentionBackend.supports_pcp())
 
     def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
+        with patch(
+            "vllm_ascend.attention.attention_v1.get_current_vllm_config",
+            return_value=_cp_config(dcp_size=2),
+        ):
             self.assertIs(
                 AscendAttentionBackend.get_impl_cls(),
                 AscendAttentionDCPImpl,
             )
 
     def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
+        with patch(
+            "vllm_ascend.attention.attention_v1.get_current_vllm_config",
+            return_value=_cp_config(dcp_size=2),
+        ):
             self.assertIs(
                 AscendAttentionBackend.get_builder_cls(),
                 AscendAttentionDCPMetadataBuilder,

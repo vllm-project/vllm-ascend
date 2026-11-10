@@ -37,6 +37,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.context_parallel.registry import resolve_cp_classes
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.attention.flashmla import (
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
@@ -114,12 +116,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        use_dcp = is_dcp_enabled()
-        if use_dcp:
-            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
-
-            return AscendMlaDCPMetadataBuilder
-        return AscendMLAMetadataBuilder
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("mla", vllm_config, resolve_cp_topology(vllm_config))[0]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -133,12 +131,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        use_dcp = is_dcp_enabled()
-        if use_dcp:
-            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
-
-            return AscendMlaDCPImpl
-        return AscendMLAImpl
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("mla", vllm_config, resolve_cp_topology(vllm_config))[1]
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:

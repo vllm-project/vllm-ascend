@@ -2727,3 +2727,29 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+def test_validate_pcp_dcp_config_messages_unchanged_after_topology_refactor():
+    gqa_config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=False),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=4,
+        ),
+    )
+    with pytest.raises(ValueError, match=r"GQA/MQA PCP\+DCP requires") as exc_info:
+        _validate_pcp_dcp_config(gqa_config)
+    assert str(exc_info.value) == (
+        "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
+        "to equal decode_context_parallel_size; "
+        "got PCP=2, DCP=4."
+    )
+
+    mla_config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=True),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=16,
+        ),
+    )
+    _validate_pcp_dcp_config(mla_config)

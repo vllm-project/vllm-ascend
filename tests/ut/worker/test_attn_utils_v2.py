@@ -1,3 +1,5 @@
+import inspect
+from copy import copy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -23,12 +25,13 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
+from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1, dsa_v41
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec, mxfp_paged_cache_views
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
+    AscendAttentionMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
 )
@@ -2185,11 +2188,29 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
         return common_attn_metadata.is_prefilling
 
 
+class _V41CaptureStateBuilder(dsa_v41.AscendDSAV41MetadataBuilder):
+    """V4.1 builder that records the build kwargs without building metadata."""
+
+    def __init__(self):
+        self.extra_kwargs = None
+        self.common_attn_metadata = None
+
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        assert common_prefix_len == 0
+        self.extra_kwargs = kwargs
+        self.common_attn_metadata = common_attn_metadata
+        return common_attn_metadata.is_prefilling
+
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        self.extra_kwargs = kwargs
+        self.common_attn_metadata = common_attn_metadata
+        return common_attn_metadata.is_prefilling
+
+
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("full_graph", [False, True])
-def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, full_graph):
-    monkeypatch.setattr(attn_utils, "AscendDSAV41MetadataBuilder", _CaptureStateBuilder)
-    builder = _CaptureStateBuilder()
+def test_v41_capture_keeps_compressed_indexer_branches(capture, full_graph):
+    builder = _V41CaptureStateBuilder()
     group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
     attn_utils.build_attn_metadata(
         attn_groups=[[group]],
@@ -3141,3 +3162,146 @@ def test_combined_mla_cache_nonzero_offset_preserves_guards_and_slot_padding(dty
     assert k_cache.storage_offset() * k_cache.element_size() == raw_offset_bytes
     assert v_cache.storage_offset() * v_cache.element_size() == raw_offset_bytes + k_block_bytes
     assert k_cache.untyped_storage().data_ptr() == v_cache.untyped_storage().data_ptr() == backing.data_ptr()
+
+
+_DISPATCH_CASES = [
+    ("dsa", "dsa", True),
+    ("dsa_v41", "dsa_v41", True),
+    ("sfa", "sfa", True),
+    ("plain", "gqa", False),
+    ("qsa", None, False),
+    ("gdn", None, False),
+]
+
+
+def _make_dispatch_builder(kind: str):
+    """Create a builder instance for one row of the dispatch shadow table."""
+    if kind == "dsa":
+        return AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    if kind == "dsa_v41":
+        return dsa_v41.AscendDSAV41MetadataBuilder.__new__(dsa_v41.AscendDSAV41MetadataBuilder)
+    if kind == "sfa":
+        return AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+    if kind == "plain":
+        return AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
+    if kind == "gdn":
+        return MagicMock(spec=attn_utils.GDNAttentionMetadataBuilder)
+    return MagicMock(spec=attn_utils.QSAMetadataBuilder)
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize(("kind", "expected_provider", "expect_hook"), _DISPATCH_CASES)
+def test_attn_metadata_hooks_shadow_legacy_dispatch(kind, expected_provider, expect_hook, for_capture, full_graph):
+    builder = _make_dispatch_builder(kind)
+    attn_group = SimpleNamespace(layer_names=["target.layer", "draft.layer"] if kind == "sfa" else ["layer.0"])
+    common_attn_metadata = SimpleNamespace(copy_sfa_draft_index=None, copy_sfa_restore_tails=True)
+    draft_layer_names = {"draft.layer"} if kind == "sfa" else None
+
+    provider = attn_utils.find_cp_backend_for_builder(builder)
+    assert (provider.name if provider is not None else None) == expected_provider
+    hooks = provider.attn_metadata_hooks if provider is not None else None
+    assert (hooks is not None) is expect_hook
+
+    # Legacy inline dispatch, copied verbatim from the pre-hook implementation.
+    is_dsa = isinstance(builder, AscendDSAMetadataBuilder)
+    is_v41 = isinstance(builder, dsa_v41.AscendDSAV41MetadataBuilder)
+    is_sfa = isinstance(builder, AscendSFAMetadataBuilder)
+    assert (is_dsa or is_v41 or is_sfa) is expect_hook
+    legacy_variants = [(attn_group.layer_names, common_attn_metadata)]
+    if is_sfa and draft_layer_names:
+        target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
+        draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]
+        if draft_names:
+            draft_common = copy(common_attn_metadata)
+            draft_common.copy_sfa_draft_index = 0
+            draft_common.copy_sfa_restore_tails = False
+            legacy_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
+                (draft_names, draft_common)
+            ]
+    variants = (
+        hooks.split_variants(attn_group, common_attn_metadata, draft_layer_names=draft_layer_names)
+        if hooks is not None
+        else [(attn_group.layer_names, common_attn_metadata)]
+    )
+    assert [list(names) for names, _ in variants] == [list(names) for names, _ in legacy_variants]
+    for (_, variant_common), (_, legacy_common) in zip(variants, legacy_variants, strict=True):
+        if variant_common is common_attn_metadata:
+            assert legacy_common is common_attn_metadata
+        else:
+            assert legacy_common is not common_attn_metadata
+            assert variant_common.copy_sfa_draft_index == legacy_common.copy_sfa_draft_index == 0
+            assert variant_common.copy_sfa_restore_tails is legacy_common.copy_sfa_restore_tails is False
+
+    common_ratio = {"first_group": True}
+    formatted_slot_mapping = torch.zeros(4, dtype=torch.int64)
+    # Cover both V4.1 override values across the capture/full-graph matrix.
+    v41_prefill_override = kind == "dsa_v41" and for_capture
+    model_specific_extra_kwargs = {"replay_start": 0} if kind == "dsa_v41" and full_graph else {}
+    ctx = {
+        "num_actual_reqs": 2,
+        "common_ratio_to_sas_metadata": common_ratio,
+        "full_graph_mode": for_capture or full_graph,
+        "skip_ring_state_update": False,
+        "common_v41_metadata": {"v41": 1},
+        "common_v41_batch_metadata": {"batch": 2},
+        "v41_prefill_override": v41_prefill_override,
+        "model_specific_extra_kwargs": model_specific_extra_kwargs,
+        "formatted_slot_mapping": formatted_slot_mapping,
+    }
+    legacy_extra_kwargs: dict[str, Any] = {}
+    if is_dsa:
+        legacy_extra_kwargs.update(
+            num_actual_reqs=2,
+            common_ratio_to_sas_metadata=common_ratio,
+            full_graph_mode=for_capture or full_graph,
+        )
+        if formatted_slot_mapping is not None:
+            legacy_extra_kwargs["formatted_slot_mapping"] = formatted_slot_mapping
+    elif is_v41:
+        # Only query overrides affect SMLA; unrelated model-specific fields
+        # must not disable sharing of batch coordinates or RoPE.
+        smla_override = bool(
+            {"replay_start", "replay_max_seq_len", "replay_seq_lens", "ori_sparse_indices", "num_query_heads"}
+            & model_specific_extra_kwargs.keys()
+        )
+        legacy_extra_kwargs.update(
+            num_actual_reqs=2,
+            skip_ring_state_update=False,
+            common_v41_metadata={"v41": 1},
+            common_v41_batch_metadata={"batch": 2},
+            v41_prefill_override=v41_prefill_override,
+            v41_smla_override=smla_override,
+            full_graph_mode=for_capture or full_graph,
+        )
+    extra_kwargs = hooks.build_extra_kwargs(**ctx) if hooks is not None else {}
+    assert extra_kwargs == legacy_extra_kwargs
+
+    if hooks is not None:
+        assert hooks.prepare_common_metadata(common_attn_metadata, num_reqs=2, num_actual_reqs=2) is (
+            common_attn_metadata
+        )
+
+    if is_dsa:
+        builder.common_ratio_to_sas_metadata = {"from_builder": True}
+    shared = {"common_ratio_to_sas_metadata": common_ratio}
+    if hooks is not None:
+        hooks.after_build(builder, object(), shared=shared)
+    if is_dsa:
+        assert shared["common_ratio_to_sas_metadata"] is builder.common_ratio_to_sas_metadata
+    else:
+        assert shared["common_ratio_to_sas_metadata"] is common_ratio
+
+
+def test_attn_utils_dispatch_no_longer_imports_backend_builder_classes():
+    source = inspect.getsource(attn_utils)
+    for builder_cls_name in (
+        "AscendDSAMetadataBuilder",
+        "AscendDSAV41MetadataBuilder",
+        "AscendSFAMetadataBuilder",
+    ):
+        assert builder_cls_name not in source
+    assert "find_cp_backend_for_builder" in source
+    # QSA and GDN are not CP providers, so their inline dispatch stays.
+    assert "QSAMetadataBuilder" in source
+    assert "GDNAttentionMetadataBuilder" in source

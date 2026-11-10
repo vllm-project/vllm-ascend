@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.attention.context_parallel import dcp_metadata, registry
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.spec_decode_utils import correct_optimistic_seq_lens_cpu
 
@@ -154,7 +154,7 @@ class DCPManager:
 
     def prepare_dcp_local_seq_lens_cpu(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
         """Partition the supplied global CPU lengths for this DCP rank."""
-        return get_dcp_local_seq_lens(
+        return dcp_metadata.dcp_local_seq_lens(
             seq_lens_cpu,
             dcp_size=self.dcp_world_size,
             dcp_rank=self.dcp_world_rank,
@@ -163,18 +163,19 @@ class DCPManager:
 
     def prepare_common_attn_metadata(self, common_attn_metadata: Any) -> None:
         """Refresh device and CPU local lengths from their global mirrors."""
-        common_attn_metadata.dcp_local_seq_lens = get_dcp_local_seq_lens(
-            common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs],
-            dcp_size=self.dcp_world_size,
-            dcp_rank=self.dcp_world_rank,
-            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
-        )
         seq_lens_cpu = common_attn_metadata._seq_lens_cpu
         if seq_lens_cpu is None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         assert seq_lens_cpu is not None
-        common_attn_metadata.dcp_local_seq_lens_cpu = self.prepare_dcp_local_seq_lens_cpu(
-            seq_lens_cpu[: common_attn_metadata.num_reqs]
+        (
+            common_attn_metadata.dcp_local_seq_lens,
+            common_attn_metadata.dcp_local_seq_lens_cpu,
+        ) = dcp_metadata.local_context_lens(
+            common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs],
+            seq_lens_cpu[: common_attn_metadata.num_reqs],
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_world_rank,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
 
     def classify_decode_request_mask(
@@ -548,7 +549,7 @@ class DCPManager:
         seq_lens: torch.Tensor,
     ) -> torch.Tensor:
         """Return each request's interleave-aware KV length on every DCP rank."""
-        return get_dcp_local_seq_lens(
+        return dcp_metadata.dcp_local_seq_lens(
             seq_lens,
             dcp_size=self.dcp_world_size,
             cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
@@ -576,38 +577,17 @@ class DCPManager:
         The producer has already advanced the global lengths and query offsets.
         MLA/SFA consume the common local-length fields instead.
         """
-        from vllm_ascend.attention.utils import AscendDCPMetadata
-
         seq_lens_cpu = common_attn_metadata._seq_lens_cpu
         if seq_lens_cpu is None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         assert seq_lens_cpu is not None
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu[: common_attn_metadata.num_reqs])
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
-            num_computed_tokens_of_dcp=local_seq_lens.numpy(),
-            query_lens_cpu=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
-            max_query_len=common_attn_metadata.max_query_len,
-            dcp_mtp_attn_mask=None,
+        common_attn_metadata.context_parallel_metadata = dcp_metadata.build_legacy_gqa_dcp_metadata(
+            seq_lens_cpu[: common_attn_metadata.num_reqs],
+            common_attn_metadata.query_start_loc_cpu,
+            common_attn_metadata.max_query_len,
+            dcp_size=self.dcp_world_size,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
-
-    @staticmethod
-    def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
-        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
-        return isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-
-    @staticmethod
-    def _is_sfa_dcp_metadata_builder(
-        attn_metadata_builder: Any | None,
-    ) -> bool:
-        if attn_metadata_builder is None:
-            return False
-        from vllm_ascend.attention.context_parallel.sfa_cp import (
-            AscendSFADCPMetadataBuilder,
-        )
-
-        return isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder)
 
     def prepare_spec_decode_drafting_cp_metadata(
         self,
@@ -631,35 +611,18 @@ class DCPManager:
         draft_index: int,
         attn_metadata_builder: Any | None = None,
     ) -> None:
-        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
-        if not is_sfa_dcp:
-            if self._is_mla_kv_cache_spec(kv_cache_spec):
-                assert attn_metadata.decode is not None, (
-                    "MLA DCP speculative draft metadata must be classified as decode "
-                    "before backend-specific metadata is finalized."
-                )
-                assert attn_metadata.decode.cp_seq_len is not None
-            else:
-                assert attn_metadata.decode is not None, (
-                    "GQA DCP speculative draft metadata must be classified as decode "
-                    "before backend-specific metadata is finalized."
-                )
-                assert attn_metadata.decode.cp_history_seq_len is not None
-            return
-
-        # SFA updates its graph-stable device buffer without a CPU->NPU copy.
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens + draft_index + 1)
-        rank_seq_lens = local_seq_lens[:, self.dcp_world_rank]
-        dcp_context = attn_metadata.dcp_context
-        assert dcp_context is not None
-        target = dcp_context.seq_lens
-        rank_seq_lens = rank_seq_lens.to(
-            device=target.device,
-            dtype=target.dtype,
-            non_blocking=True,
-        )
-        target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
-        target[rank_seq_lens.shape[0] :].fill_(0)
+        provider = registry.find_cp_backend_for_builder(attn_metadata_builder)
+        if provider is not None and provider.spec_decode_drafting_updater is not None:
+            if provider.spec_decode_drafting_updater(
+                self,
+                attn_metadata_builder,
+                attn_metadata,
+                kv_cache_spec,
+                seq_lens,
+                draft_index,
+            ):
+                return
+        dcp_metadata.validate_spec_decode_drafting_metadata(attn_metadata, kv_cache_spec)
 
     def generate_dcp_metadata(
         self,
@@ -673,7 +636,6 @@ class DCPManager:
         fixed_decode_seq_lens_cpu: np.ndarray | None = None,
     ) -> tuple[Any, torch.Tensor]:
         del total_num_scheduled_tokens, query_lens
-        from vllm_ascend.attention.utils import AscendDCPMetadata
 
         assert num_scheduled_tokens is not None
         if fixed_decode_seq_lens_cpu is not None:
@@ -685,12 +647,16 @@ class DCPManager:
             )
         prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_reqs]
         context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
-        local_seq_lens = self._get_dcp_local_seq_lens(torch.tensor(context_lens))
+        local_seq_lens = dcp_metadata.dcp_local_seq_lens(
+            torch.tensor(context_lens),
+            dcp_size=self.dcp_world_size,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
         query_lens_cpu = self.query_lens_full.cpu[:num_reqs_padded]
-        metadata = AscendDCPMetadata(
-            num_computed_tokens_of_dcp=local_seq_lens.numpy(),
-            query_lens_cpu=query_lens_cpu,
-            max_query_len=(int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
+        metadata = dcp_metadata.build_dcp_metadata(
+            local_seq_lens,
+            query_lens_cpu,
+            (int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
         )
 
         self.long_seq_metadata = metadata

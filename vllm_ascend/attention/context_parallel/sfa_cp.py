@@ -11,11 +11,14 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel import dcp_metadata
+from vllm_ascend.attention.context_parallel.attn_hooks import SFA_METADATA_HOOKS
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     build_pcp_ordered_slot_mapping,
 )
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     _index_select_kv_blocks,
     as_byte_view,
@@ -25,6 +28,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
+from vllm_ascend.attention.context_parallel.topology import CPTopology, resolve_cp_topology
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -42,6 +46,7 @@ from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query
 from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
+    enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
@@ -1065,3 +1070,121 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             softmax_lse,
         )
         return output.to(output_dtype)
+
+
+# Upstream vLLM main folded the PCP-only O-projection switching into
+# AscendSFAImpl and the PCP+DCP gathered cache writes into AscendSFADCPImpl,
+# so the composite implementation now shares the DCP specialization. Keep the
+# historical name as an alias for backward-compatible imports; provider
+# selection returns the upstream classes.
+AscendSFAPCPDCPImpl = AscendSFADCPImpl
+
+
+def resolve_sfa_metadata_builder(
+    vllm_config: VllmConfig | None = None,
+) -> type[AscendSFAMetadataBuilder]:
+    """Resolve one SFA metadata builder from the independent CP switches."""
+    return _resolve_sfa_cp_classes(vllm_config, _resolve_sfa_topology(vllm_config))[0]
+
+
+def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
+    """Resolve one SFA implementation from the independent CP switches."""
+    return _resolve_sfa_cp_classes(vllm_config, _resolve_sfa_topology(vllm_config))[1]
+
+
+def _resolve_sfa_topology(vllm_config: VllmConfig | None, dcp_enabled: bool | None = None):
+    """Build the CP topology for the SFA wrappers, tolerating legacy configs.
+
+    Legacy callers only declare the PCP size on their config (tests and draft
+    helpers). Mirror the replicated-indexer switch in the derived DCP size so
+    provider selection sees the same layout as the full config would, and keep
+    the PCP-only predicate for callers that do not pass it.
+    """
+    if vllm_config is None:
+        return None
+    parallel_config = vllm_config.parallel_config
+    if not hasattr(parallel_config, "decode_context_parallel_size"):
+        return CPTopology(
+            tp_size=getattr(parallel_config, "tensor_parallel_size", 1),
+            pcp_size=parallel_config.prefill_context_parallel_size,
+            dcp_size=2 if dcp_enabled else 1,
+            interleave_size=getattr(parallel_config, "cp_kv_cache_interleave_size", 1),
+            pipeline_parallel_size=getattr(parallel_config, "pipeline_parallel_size", 1),
+        )
+    return resolve_cp_topology(vllm_config)
+
+
+def _resolve_sfa_cp_classes(
+    vllm_config,
+    topology,
+    dcp_enabled: bool | None = None,
+) -> tuple[type, type]:
+    """Resolve the SFA CP class pair from the independent CP switches.
+
+    Shared by the registry provider and the resolve_sfa_* wrappers. Upstream
+    main folded the PCP-only implementation into AscendSFAImpl, so the builder
+    keeps three layouts (PCP+DCP / DCP / base) while the implementation has two
+    (DCP / base). The optional dcp_enabled flag lets the v1 backend pass the
+    result of the upstream replicated-indexer switch it already evaluated for
+    its current config; without it the global switch is consulted as before.
+    """
+    if dcp_enabled is None:
+        dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    use_pcp = (
+        topology.is_pcp_enabled
+        if topology is not None
+        else bool(vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1)
+    )
+    if use_pcp and dcp_enabled:
+        builder_cls = AscendSFAPCPDCPMetadataBuilder
+    elif dcp_enabled:
+        builder_cls = AscendSFADCPMetadataBuilder
+    else:
+        builder_cls = AscendSFAMetadataBuilder
+    impl_cls = AscendSFADCPImpl if dcp_enabled else AscendSFAImpl
+    return builder_cls, impl_cls
+
+
+def _update_sfa_spec_decode_drafting_metadata(
+    manager,
+    attn_metadata_builder,
+    attn_metadata,
+    kv_cache_spec,
+    seq_lens,
+    draft_index,
+) -> bool:
+    """Refresh SFA's graph-stable device buffer for a speculative drafting step."""
+    if not isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder):
+        return False
+    # SFA updates its graph-stable device buffer without a CPU->NPU copy.
+    local_seq_lens = dcp_metadata.dcp_local_seq_lens(
+        seq_lens + draft_index + 1,
+        dcp_size=manager.dcp_world_size,
+        cp_kv_cache_interleave_size=manager.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+    )
+    rank_seq_lens = local_seq_lens[:, manager.dcp_world_rank]
+    dcp_context = attn_metadata.dcp_context
+    assert dcp_context is not None
+    target = dcp_context.seq_lens
+    rank_seq_lens = rank_seq_lens.to(
+        device=target.device,
+        dtype=target.dtype,
+        non_blocking=True,
+    )
+    target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
+    target[rank_seq_lens.shape[0] :].fill_(0)
+    return True
+
+
+SFA_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="sfa",
+        base_builder_cls=AscendSFAMetadataBuilder,
+        base_impl_cls=AscendSFAImpl,
+        supports_pcp=True,
+        supports_dcp=True,
+        cp_resolver=_resolve_sfa_cp_classes,
+        spec_decode_drafting_updater=_update_sfa_spec_decode_drafting_metadata,
+        attn_metadata_hooks=SFA_METADATA_HOOKS,
+    )
+)

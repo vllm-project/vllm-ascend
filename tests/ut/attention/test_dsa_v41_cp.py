@@ -40,6 +40,18 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, pcp):
     config = {"pcp": pcp}
     monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
+    # The v1 backend selection now reads the current config through the
+    # registry seam; keep it in sync with the same live `pcp` switch.
+    monkeypatch.setattr(
+        dsa_v41,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=2 if config["pcp"] else 1,
+                decode_context_parallel_size=1,
+            )
+        ),
+    )
     expected = (
         (dsa_v41_cp.AscendDSAV41PCPMetadataBuilder, dsa_v41_cp.AscendDSAV41PCPImpl)
         if pcp

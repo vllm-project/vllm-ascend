@@ -30,6 +30,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.context_parallel.registry import resolve_cp_classes
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -374,16 +375,15 @@ class AscendSFABackend(AttentionBackend):
 
             return AscendSFAKVOffloadMetadataBuilder
         vllm_config = get_current_vllm_config()
-        if enable_sfa_dcp_replicated_indexer(vllm_config):
-            from vllm_ascend.attention.context_parallel.sfa_cp import (
-                AscendSFADCPMetadataBuilder,
-                AscendSFAPCPDCPMetadataBuilder,
-            )
+        dcp_enabled = enable_sfa_dcp_replicated_indexer(vllm_config)
+        from vllm_ascend.attention.context_parallel.sfa_cp import _resolve_sfa_topology
 
-            if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-                return AscendSFAPCPDCPMetadataBuilder
-            return AscendSFADCPMetadataBuilder
-        return AscendSFAMetadataBuilder
+        return resolve_cp_classes(
+            "sfa",
+            vllm_config,
+            _resolve_sfa_topology(vllm_config, dcp_enabled),
+            dcp_enabled=dcp_enabled,
+        )[0]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -401,11 +401,16 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
             return AscendSFAKVOffloadImpl
-        if enable_sfa_dcp_replicated_indexer(get_current_vllm_config()):
-            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+        vllm_config = get_current_vllm_config()
+        dcp_enabled = enable_sfa_dcp_replicated_indexer(vllm_config)
+        from vllm_ascend.attention.context_parallel.sfa_cp import _resolve_sfa_topology
 
-            return AscendSFADCPImpl
-        return AscendSFAImpl
+        return resolve_cp_classes(
+            "sfa",
+            vllm_config,
+            _resolve_sfa_topology(vllm_config, dcp_enabled),
+            dcp_enabled=dcp_enabled,
+        )[1]
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -22,6 +22,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.registry import resolve_cp_classes
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
     get_dsa_attn_kv_plan,
@@ -31,7 +33,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_or_register_attention_buffer,
-    is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -292,12 +293,8 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        use_pcp = is_pcp_enabled()
-        if use_pcp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
-
-            return AscendDSAPCPMetadataBuilder
-        return AscendDSAMetadataBuilder
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("dsa", vllm_config, resolve_cp_topology(vllm_config))[0]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -315,12 +312,8 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
-        use_pcp = is_pcp_enabled()
-        if use_pcp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
-
-            return AscendDSAPCPImpl
-        return AscendDSAImpl
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("dsa", vllm_config, resolve_cp_topology(vllm_config))[1]
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:

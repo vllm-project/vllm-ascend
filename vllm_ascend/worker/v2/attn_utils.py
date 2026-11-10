@@ -65,11 +65,9 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_views_for_spec,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.registry import find_cp_backend_for_builder
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
@@ -534,7 +532,9 @@ def build_attn_metadata(
                 builder
                 for cache_group in attn_groups
                 for attn_group in cache_group
-                if isinstance(builder := attn_group.get_metadata_builder(0), AscendDSAMetadataBuilder)
+                if (builder := attn_group.get_metadata_builder(0)) is not None
+                and (cp_provider := find_cp_backend_for_builder(builder)) is not None
+                and cp_provider.name == "dsa"
             ),
             None,
         )
@@ -610,9 +610,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
-            is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
-            is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            cp_provider = find_cp_backend_for_builder(attn_metadata_builder)
+            attn_metadata_hooks = cp_provider.attn_metadata_hooks if cp_provider is not None else None
             if isinstance(attn_metadata_builder, QSAMetadataBuilder) and num_reqs > num_actual_reqs:
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc, while QSA reads the CPU tail as its
@@ -621,17 +620,21 @@ def build_attn_metadata(
                     common_attn_metadata,
                     query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
-            if is_sfa_builder and draft_layer_names:
-                target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
-                draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]
-                if draft_names:
-                    draft_common = copy(common_attn_metadata)
-                    draft_common.copy_sfa_draft_index = 0
-                    draft_common.copy_sfa_restore_tails = False
-                    metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
-                        (draft_names, draft_common)
-                    ]
+            if attn_metadata_hooks is not None:
+                common_attn_metadata = attn_metadata_hooks.prepare_common_metadata(
+                    common_attn_metadata,
+                    num_reqs=num_reqs,
+                    num_actual_reqs=num_actual_reqs,
+                )
+            metadata_variants = (
+                attn_metadata_hooks.split_variants(
+                    attn_group,
+                    common_attn_metadata,
+                    draft_layer_names=draft_layer_names,
+                )
+                if attn_metadata_hooks is not None
+                else [(attn_group.layer_names, common_attn_metadata)]
+            )
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -640,38 +643,28 @@ def build_attn_metadata(
                 if not for_cudagraph_capture and model_specific_attn_metadata is not None
                 else {}
             )
-            if is_dsa_builder:
-                # DSA cache groups share request-level metadata during replay.
+            if attn_metadata_hooks is not None:
+                # DSA / DSA V4.1 add their builder-specific extras here; SFA
+                # and plain backends inherit the empty default.
                 attn_metadata_extra_kwargs.update(
-                    num_actual_reqs=num_actual_reqs,
-                    common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                    # FULL graphs replay the padded batch; DSA PCP restore
-                    # indices must span the padded extent. Mirror the V4.1
-                    # branch so the flag also reaches builders during capture.
-                    full_graph_mode=full_graph_mode or for_cudagraph_capture,
-                )
-                if formatted_slot_mappings is not None:
-                    attn_metadata_extra_kwargs["formatted_slot_mapping"] = formatted_slot_mappings[i]
-            elif is_v41_builder:
-                # Only query overrides affect SMLA; unrelated model-specific
-                # fields must not disable sharing of batch coordinates or RoPE.
-                smla_override = bool(
-                    {"replay_start", "replay_max_seq_len", "replay_seq_lens", "ori_sparse_indices", "num_query_heads"}
-                    & attn_metadata_extra_kwargs.keys()
-                )
-                attn_metadata_extra_kwargs.update(
-                    num_actual_reqs=num_actual_reqs,
-                    skip_ring_state_update=skip_ring_state_update,
-                    common_v41_metadata=common_v41_metadata,
-                    common_v41_batch_metadata=common_v41_batch_metadata,
-                    v41_prefill_override=v41_prefill_override,
-                    v41_smla_override=smla_override,
-                    # Upstream capture prepares metadata with runtime mode
-                    # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
-                    # branches in the graph even for a short dummy sequence.
-                    full_graph_mode=full_graph_mode or for_cudagraph_capture,
+                    attn_metadata_hooks.build_extra_kwargs(
+                        num_actual_reqs=num_actual_reqs,
+                        common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                        full_graph_mode=full_graph_mode or for_cudagraph_capture,
+                        skip_ring_state_update=skip_ring_state_update,
+                        common_v41_metadata=common_v41_metadata,
+                        common_v41_batch_metadata=common_v41_batch_metadata,
+                        v41_prefill_override=v41_prefill_override,
+                        # The V4.1 hook derives its SMLA override from the
+                        # model-specific kwargs before they are merged below.
+                        model_specific_extra_kwargs=attn_metadata_extra_kwargs,
+                        formatted_slot_mapping=(
+                            formatted_slot_mappings[i] if formatted_slot_mappings is not None else None
+                        ),
+                    )
                 )
 
+            shared_metadata = {"common_ratio_to_sas_metadata": common_ratio_to_sas_metadata}
             for variant_names, variant_common in metadata_variants:
                 if for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
@@ -686,10 +679,13 @@ def build_attn_metadata(
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
                     )
-                if is_dsa_builder:
-                    # Preserve sharing even if a builder replaces one of the
-                    # dictionaries while constructing its metadata.
-                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+                if attn_metadata_hooks is not None:
+                    attn_metadata_hooks.after_build(
+                        attn_metadata_builder,
+                        metadata,
+                        shared=shared_metadata,
+                    )
+                    common_ratio_to_sas_metadata = shared_metadata["common_ratio_to_sas_metadata"]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
     return attn_metadata

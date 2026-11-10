@@ -16,7 +16,6 @@
 #
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
 import torch
@@ -47,10 +46,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.context_parallel.registry import resolve_cp_classes
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
+from vllm_ascend.attention.state import AscendAttentionState  # noqa: F401  # backward compatibility re-export
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
-    is_dcp_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -88,19 +89,13 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if is_dcp_enabled():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-
-            return AscendAttentionDCPImpl
-        return AscendAttentionBackendImpl
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("gqa", vllm_config, resolve_cp_topology(vllm_config))[1]
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if is_dcp_enabled():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-
-            return AscendAttentionDCPMetadataBuilder
-        return AscendAttentionMetadataBuilder
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("gqa", vllm_config, resolve_cp_topology(vllm_config))[0]
 
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -151,14 +146,6 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [128]
-
-
-class AscendAttentionState(Enum):
-    PrefillNoCache = 0
-    PrefillCacheHit = 1
-    DecodeOnly = 2
-    ChunkedPrefill = 3
-    SpecDecoding = 4
 
 
 @dataclass
