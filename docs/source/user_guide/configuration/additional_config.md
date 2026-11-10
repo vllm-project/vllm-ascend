@@ -77,6 +77,69 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
+### Experimental DeepEP communication
+
+`enable_deepep` (bool, default `false`) selects optional DeepEP dispatch/combine
+instead of the default MoE communication backend. `deepep_machine_type` (string,
+default `"auto"`) accepts `auto`, `mesh_clos`, `global_clos`, or `mesh_pcie`.
+Validation currently covers Ascend950 with `mesh_clos`, TP1/DP8/EP8, and
+`--enforce-eager`. Expert computation continues to use the existing quantization
+scheme, including the model's SwiGLU clamp; this does not enable MegaMoE.
+
+Install the optional `ascend_deepep==0.1.0.dev5` wheel built from
+[lueelu/DeepEP commit 89e1939](https://github.com/lueelu/DeepEP/tree/89e19399260c16c483b3614f57d2e3c90eb9fc2e)
+for the matching Python, CANN, and NPU environment. The adapter requires its
+bundled SHMEM manifest and libraries. It validates their hashes and loads them
+with Linux `RTLD_DEEPBIND` to isolate HYBM symbols from `memfabric_hybrid`.
+DeepEP is loaded only when this option is enabled; it is not a default dependency.
+
+For a mixed prefill/decode deployment, add the following options to the model's
+otherwise working TP1/DP8/EP8 launch command on every rank:
+
+```bash
+--tensor-parallel-size 1 --data-parallel-size 8 --enable-expert-parallel \
+--enforce-eager --additional-config '{
+  "enable_deepep": true,
+  "deepep_machine_type": "mesh_clos",
+  "enable_fused_mc2": 0,
+  "multistream_overlap_shared_expert": false,
+  "multistream_engram_overlap": false,
+  "multistream_dsv4_dsa_overlap": false
+}'
+```
+
+Both prefill and decode use the high-throughput transport. The adapter keeps
+the buffer token capacity above 256; small decode batches therefore do not
+select low-latency transport. The pinned mesh_clos low-latency selector does
+not support EP8. Low-latency transport and graph capture are not validated.
+EPLB, mixed expert placement, fused MC2, speculation, and LoRA are rejected.
+DP ranks pad to the global token count and invalidate padding routes; empty
+expert ranks still participate in combine. Same-shape layers share one buffer.
+
+This is functional integration, with no throughput or latency improvement claim.
+Hardware validation used DeepSeek-V4.1-Flash with hidden size 5120, 384 experts,
+top-k 6, a 4096-token batch budget, and native W4A8 MXFP expert computation.
+
+For that exact BF16 EP8 configuration, the pinned wheel's size hint reserves
+4,617,928,704 bytes (4.30078125 GiB) per rank; its default 1 GiB physical pages
+round the workspace allocation to 5 GiB per rank. Same-shape layers reuse this
+allocation. Payload outputs and expert activations are allocated separately.
+
+This budget was checked against the pinned EP8 rank-return layout. All 8 ranks
+can route all 6 expert slots for all 4096 tokens to one destination rank,
+requiring 196,608 expanded rows (1,920 MiB of BF16 hidden data). Rank dedup
+eliminates cross-rank gather rows. The largest combine half then needs about
+2,200.48 MiB including return/output storage and controls; the fixed equal
+halves require 4.30078125 GiB after alignment. Thus the current allocation fits
+that worst-case layout, although the generic four-times-average size hint is
+not a universal worst-case guarantee for other shapes or EP sizes.
+
+Balanced-route CPU layout calculations fit about 1.02 GiB before physical-page
+rounding (2 GiB with the current page policy). That is workload-dependent and
+must not replace the current budget without a load bound and hardware tests.
+The capacity audit used CPU route references and layout checks; it did not run
+a new full-batch hotspot NPU test or establish a smaller safe runtime budget.
+
 <span id="runtime_guard"></span>**runtime_guard**
 
 Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.

@@ -613,6 +613,10 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Experimental DeepEP dispatch/combine with the existing expert MLP.
+    # Validation currently covers single-node TP1/DP8/EP8 in eager mode.
+    enable_deepep: bool = False
+    deepep_machine_type: Literal["auto", "mesh_clos", "global_clos", "mesh_pcie"] = "auto"
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -686,6 +690,16 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.enable_deepep:
+            pc = vc.parallel_config
+            if not pc.enable_expert_parallel or pc.tensor_parallel_size != 1 or pc.data_parallel_size != 8:
+                raise ValueError("Experimental DeepEP requires TP1/DP8/EP8")
+            if not vc.model_config.enforce_eager:
+                raise ValueError("Experimental DeepEP requires --enforce-eager")
+            if pc.enable_eplb or self.eplb_config.dynamic_eplb or self.mix_placement or self.enable_fused_mc2:
+                raise ValueError("DeepEP validation does not support EPLB, mixed expert placement or fused MC2")
+            if vc.speculative_config is not None or vc.lora_config is not None:
+                raise ValueError("DeepEP validation does not support speculation or LoRA")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
