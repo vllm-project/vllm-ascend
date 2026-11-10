@@ -144,21 +144,21 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     def start_weight_update(self) -> None:
         patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
         retained = []
+        
         if patterns:
-            selected = {
-                id(parameter)
-                for name, parameter in self.model.named_parameters()
-                if any(fnmatchcase(name, pattern) for pattern in patterns)
-            }
-            # Replay each owning module once. A shared module can have several
-            # model paths; loading all paths would count its weights repeatedly
-            # and trigger processing before its received weights arrive.
-            retained = [
-                (module, name, parameter)
-                for module in self.model.modules()
-                for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
-                if id(parameter) in selected
-            ]
+            selected = set()
+            for name, parameter in self.model.named_parameters():
+                if any(fnmatchcase(name, pattern) for pattern in patterns):
+                    selected.add(id(parameter))
+    
+            for module in self.model.modules():
+                named_parameters = module.named_parameters(
+                    recurse=False,
+                    remove_duplicate=False,
+                )
+                for name, parameter in named_parameters:
+                    if id(parameter) in selected:
+                        retained.append((module, name, parameter))
 
         self._retained_parameters = retained
         super().start_weight_update()
