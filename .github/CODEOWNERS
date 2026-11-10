@@ -58,13 +58,22 @@
 /vllm_ascend/_cann_ops_custom @ZT-AIA
 
 # attention
-# TODO(owner): /vllm_ascend/attention/
-# /vllm_ascend/attention/
+# /vllm_ascend/attention/kvcomp_attn
 /vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
-/vllm_ascend/attention/sfa_v1.py @lijiahang226
+/vllm_ascend/attention/attention_c8_mxfp.py @kunpengW-code
+# /vllm_ascend/attention/attention_mask.py
+# /vllm_ascend/attention/attention_v1.py
 /vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
+# /vllm_ascend/attention/fa_v1.py
+/vllm_ascend/attention/fa3_v1.py @Ronald1995
+# /vllm_ascend/attention/flashmla.py
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
+/vllm_ascend/attention/mixed_quant_sparse_flash_mla.py @kunpengW-code
+# /vllm_ascend/attention/mla_v1.py
+# /vllm_ascend/attention/sfa_kv_offload.py
+/vllm_ascend/attention/sfa_v1.py @lijiahang226
+/vllm_ascend/attention/sparse_flash_mla.py @kunpengW-code 
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
@@ -91,9 +100,12 @@
 /vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
+/vllm_ascend/ops/triton/kda/recoverssm.py @drslark
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
+/vllm_ascend/ops/kimi_kda.py @Dawn952
+/vllm_ascend/ops/kimi_mla.py @Dawn952
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan
@@ -101,7 +113,7 @@
 /vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137 @zhenwenqi2024
 
 # spec decode
-/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman @zhenwenqi2024 @yiz-liu
+/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman @zhenwenqi2024 @yiz-liu @jiajinzhu2
 /vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
 
 # scheduler
@@ -134,6 +146,7 @@
 # Patch
 /vllm_ascend/patch @wxsIcey
 /vllm_ascend/patch/platform/patch_eplb.py @freyfwt
+/vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952
 
 # Worker base
 /vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk
@@ -151,14 +164,14 @@
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
-/vllm_ascend/worker/v2/aclgraph_utils.py @yiz-liu
-/vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj @zhenwenqi2024
+/vllm_ascend/worker/v2/aclgraph_utils.py @yiz-liu @drslark
+/vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj @zhenwenqi2024 @drslark
 /vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
 /vllm_ascend/worker/v2/eplb.py @freyfwt
 /vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
 /vllm_ascend/worker/v2/kvpp.py @recky-c
-/vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024
+/vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024 @drslark
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2 @pisceskkk
 # TODO(owner): /vllm_ascend/worker/v2/pp_transport.py
 # /vllm_ascend/worker/v2/pp_transport.py
@@ -174,6 +187,9 @@
 /vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/glm5next @lijiahang226
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
+/vllm_ascend/models/kimi_k3.py @Dawn952
+/vllm_ascend/models/kimi_k3_mtp.py @Dawn952
+/vllm_ascend/models/kimi_k3_dspark.py @Dawn952
 
 # 310P
 /vllm_ascend/_310p @Tflowers-0129 @YangShuai52
