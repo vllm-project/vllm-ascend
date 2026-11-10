@@ -158,12 +158,31 @@ transfers. It does not claim to roll back SWA/compressor state or automatically
 reschedule a partially executed hybrid request. Distributed failure handling
 and worker restart behavior need hardware validation before production use.
 
-The initial runtime gate supports eager Memcache transfers with full blocks.
-PP, PCP, DCP, KVPP, SP, microbatching, speculation/MTP, graph modes, partial
-objects, and unknown layouts retain group-object bulk behavior within the
-cross-layer strategy. Use `--enforce-eager` to enable its initial pipeline;
-ordinary layerwise keeps the existing graph-mode negotiation.
-KV-event publication also keeps saves on the bulk path.
+The runtime gate supports eager Memcache transfers with full blocks. With the
+V2 model runner, DeepSeek V4.1 DSpark also supports pipelined target loads.
+The target topology remains configuration-derived; this speculative extension
+requires the registered `DeepseekV41DSparkModel` drafter. Other speculative
+methods and drafters retain bulk transfers.
+
+Load eligibility is per cache group: compatible target groups use consumer
+gates, while draft groups and other cacheable unmapped groups are restored
+synchronously before target forward. Noncacheable private state is excluded.
+Request metadata and load specs are copied for each path. Synchronous bulk
+exceptions and failed status results drain pending target copies and abort
+before forward; step-local errors survive consumed failure notifications. The existing
+`finish_forward` fence drains target writes before DSpark prepares context or
+proposes tokens. The next metadata bind cannot replace live gates.
+
+Speculative saves always retain bulk publication, even with an exclusive
+backend. The V2 runner finalizes those saves after draft context preparation;
+no incremental producer callback publishes provisional draft/verify state.
+The pool coordinator's existing masks and trailing-block recomputation policy
+still determine which complete committed blocks can be reused.
+
+PP, PCP, DCP, KVPP, SP, microbatching, graph modes and partial objects retain
+bulk behavior. Unknown layouts retain bulk at the group boundary. Use
+`--enforce-eager` to enable the pipeline; ordinary layerwise keeps the existing
+graph-mode negotiation. KV-event publication also keeps saves on the bulk path.
 
 ## Verification
 
@@ -180,8 +199,12 @@ CPU regression tests cover:
 - Read-lease acquisition, GVA refresh, partial-lease cleanup, and persistent errors.
 - First-consumer ordering and a real background-thread test where an early
   consumer proceeds while a later source is still copying.
+- DSpark target/draft group partitioning, restored draft bytes while a later
+  target source is copying, metadata isolation, repeated load calls and draining
+  in-flight target writes when synchronous draft restoration raises or returns
+  missing, failed or malformed status results.
 
-NPU E2E, actual SDK execution, cross-rank failures, Graph/MTP extensions, and
+NPU E2E (including DSpark), actual SDK execution, cross-rank failures, Graph/MTP extensions, and
 performance traces remain required before promoting this draft. Measure copy
 start/end, producer events, consumer arrival, gate wait, TTFT, throughput,
 and HBM/NIC contention; no fixed speedup is claimed.

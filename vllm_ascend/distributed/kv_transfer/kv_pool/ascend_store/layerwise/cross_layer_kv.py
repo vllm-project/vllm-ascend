@@ -709,9 +709,10 @@ class CrossLayerKVRecvingThread(KVCacheStoreRecvingThread):
 class CrossLayerKVPoolWorker(KVPoolWorker):
     """Bulk-compatible CrossLayerKV worker with step-local producer/consumer plans.
 
-    Only eager, non-speculative TP deployments are enabled initially. Other
-    parallel layouts retain group-object bulk behavior. Scheduler admission
-    stays synchronous. SDK 1.3 supports pipelined reads, but not exclusive saves.
+    Eager target loads also support the V2 DeepSeek V4.1 DSpark drafter.
+    Unmapped groups, including draft KV, load synchronously before forward;
+    target copies drain before drafting. Other speculative/parallel layouts
+    retain bulk behavior. SDK 1.3 does not support exclusive saves.
     """
 
     def __init__(self, vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None):
@@ -731,6 +732,13 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
         mode = getattr(compilation.cudagraph_mode, "name", str(compilation.cudagraph_mode))
         eager = bool(vllm_config.model_config.enforce_eager) or mode == "NONE"
         parallel = vllm_config.parallel_config
+        speculative = vllm_config.speculative_config
+        dspark_supported = (
+            speculative is not None
+            and speculative.method == "dspark"
+            and getattr(vllm_config, "use_v2_model_runner", False)
+            and getattr(speculative.draft_model_config, "architectures", []) == ["DeepseekV41DSparkModel"]
+        )
         self._cross_layer_kv_runtime_supported = (
             str(self._extra_config.get("backend", "mooncake")).lower() == "memcache"
             and eager
@@ -739,7 +747,7 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
             and not self.use_kvpp
             and not getattr(parallel, "use_ubatching", False)
             and not getattr(parallel, "use_sequence_parallel_moe", False)
-            and vllm_config.speculative_config is None
+            and (speculative is None or dspark_supported)
             and self._extra_config.get("discard_partial_chunks", True) is True
         )
         self._cross_layer_kv_save_capable = False
@@ -747,7 +755,8 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
         if not self._cross_layer_kv_runtime_supported:
             logger.warning(
                 "cross_layer_kv requires eager memcache, load_async=false, full blocks and no "
-                "PP/PCP/DCP/KVPP/microbatching/speculation; retaining bulk transfers."
+                "PP/PCP/DCP/KVPP/microbatching; speculative loads support only V2 DeepSeek V4.1 DSpark. "
+                "Retaining bulk transfers."
             )
 
     def _cacheable_group_layer_names(self) -> dict[int, list[str]]:
@@ -785,11 +794,14 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
             )
         self._cross_layer_kv_save_capable = (
             mapped
+            and self.vllm_config.speculative_config is None
             and not self.enable_kv_events
             and getattr(self.m_store, "supports_exclusive_allocation", False) is True
         )
         self._cross_layer_kv_load_capable = mapped
-        if mapped and self.can_put and not self._cross_layer_kv_save_capable:
+        if mapped and self.can_put and self.vllm_config.speculative_config is not None:
+            logger.info("CrossLayerKV speculative saves retain bulk publication after draft context preparation.")
+        elif mapped and self.can_put and not self._cross_layer_kv_save_capable:
             logger.warning(
                 "CrossLayerKV incremental saves require exclusive allocation. Memcache release/1.3 "
                 "batch_alloc returns shared GVAs; preserving atomic bulk saves."
@@ -865,9 +877,40 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
         if not all(callable(getattr(native, name, None)) for name in required):
             return super().start_load_kv(metadata)
         handled = self._prepare_cross_layer_kv_loads(metadata)
+        pipelined_groups = {
+            task.req_meta.req_id: set(task.req_meta.kv_cache_group_ids) for task in self._cross_layer_kv_load_tasks
+        }
         bulk_metadata = copy(metadata)
-        bulk_metadata.requests = [request for request in metadata.requests if request.req_id not in handled]
-        super().start_load_kv(bulk_metadata)
+        bulk_metadata.requests = []
+        for request in metadata.requests:
+            if request.req_id not in handled:
+                bulk_metadata.requests.append(request)
+                continue
+            groups = [
+                group
+                for group in (request.kv_cache_group_ids or [0])
+                if group in self.cacheable_group_ids and group not in pipelined_groups[request.req_id]
+            ]
+            if groups:
+                bulk_metadata.requests.append(self._copy_req_meta_for_groups(request, groups))
+        try:
+            # Draft/unknown groups have no target-layer gates. Restore them
+            # fully before any model can consume or overwrite those pages.
+            super().start_load_kv(bulk_metadata)
+            with self._invalid_block_ids_lock:
+                failed = self._failed_requests.intersection(request.req_id for request in bulk_metadata.requests)
+            if failed:
+                error = RuntimeError(f"CrossLayerKV synchronous fallback load failed for requests: {sorted(failed)}")
+                # Memcache reports SDK exceptions/missing keys as status values.
+                # Preserve a step-local error even if notifications are consumed.
+                for task in self._cross_layer_kv_load_tasks:
+                    if task.error is None:
+                        task.error = error
+                raise error
+        except Exception:
+            # Drain target writes before an error path releases their blocks.
+            self.finish_cross_layer_kv_loads()
+            raise
 
     def _prepare_cross_layer_kv_loads(self, metadata: Any) -> set[str]:
         receiver = self.kv_recv_thread
@@ -879,8 +922,12 @@ class CrossLayerKVPoolWorker(KVPoolWorker):
             spec = request.load_spec
             if spec is None or not spec.can_load:
                 continue
-            groups = set(request.kv_cache_group_ids or [0]) & set(self.cacheable_group_ids)
-            if not groups or any(group not in self.cross_layer_kv_trigger_map.slices_by_group for group in groups):
+            groups = (
+                set(request.kv_cache_group_ids or [0])
+                & set(self.cacheable_group_ids)
+                & self.cross_layer_kv_trigger_map.slices_by_group.keys()
+            )
+            if not groups:
                 continue
             if spec.kvpool_cached_tokens % self.cache_transfer_granularity:
                 continue

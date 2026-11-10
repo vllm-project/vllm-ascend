@@ -980,8 +980,14 @@ Expected output: MetaService starts successfully with no errors.
     backend, producer slices can overlap later computation, and publication
     waits for all slices. The replay cut uses the final step write event.
 
+    With the V2 model runner, DeepSeek V4.1 DSpark can use pipelined target
+    loads. Draft KV and other unmapped cacheable groups load synchronously
+    before forward, and all target loads drain before drafting. Speculative
+    saves retain bulk publication after draft context preparation. Other
+    speculative methods or draft architectures retain bulk transfers.
+
     Unsupported backends, PP/PCP/DCP/KVPP, sequence parallelism, microbatching,
-    speculative decoding/MTP, graph execution, partial objects, or missing
+    graph execution, partial objects, or missing
     consumer hooks retain group-object bulk transfers within this strategy.
     A load failure after computation begins fails the step; automatic state
     rollback/retry is not supported. NPU correctness and performance evidence
