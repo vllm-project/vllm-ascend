@@ -416,14 +416,37 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     assert gather_padding.call_count == int(sequence_parallel)
 
 
-@pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])
-def test_request_reuse_refreshes_prompt_logprob_retention(state, monkeypatch, prompt_logprobs):
+@pytest.mark.parametrize(
+    ("sampling_params", "keeps_rows"),
+    [
+        pytest.param(None, False, id="no-sampling-params"),
+        pytest.param(
+            SimpleNamespace(prompt_logprobs=None, prompt_logprob_token_ids=None),
+            False,
+            id="generation",
+        ),
+        pytest.param(
+            SimpleNamespace(prompt_logprobs=0, prompt_logprob_token_ids=None),
+            True,
+            id="prompt-logprobs",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                prompt_logprobs=None,
+                prompt_logprob_token_ids=np.array([[1]], dtype=np.int32),
+            ),
+            True,
+            id="target-token-scoring",
+        ),
+    ],
+)
+def test_request_reuse_refreshes_prompt_scoring_retention(state, monkeypatch, sampling_params, keeps_rows):
     monkeypatch.setattr(AscendModelState, "add_request", lambda *args: None)
     model_state = EngramModelState.__new__(EngramModelState)
     model_state.decoder_replay_state = state
     model_state._replay_start_np = np.zeros(4, dtype=np.int32)
     state.keeps_rows[1] = True
-    request = SimpleNamespace(replay_start=7, sampling_params=SimpleNamespace(prompt_logprobs=prompt_logprobs))
+    request = SimpleNamespace(replay_start=7, sampling_params=sampling_params)
     model_state.add_request(1, request)
-    assert state.keeps_rows[1] == (prompt_logprobs is not None)
+    assert state.keeps_rows[1] == keeps_rows
     assert model_state._replay_start_np[1] == 7

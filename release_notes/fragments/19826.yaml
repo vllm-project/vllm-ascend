@@ -1,0 +1,8 @@
+pr: 19826
+entries:
+  - category: bugfix
+    text: >-
+      Fixed SFA Remote D2H sender threads to use the NPU already selected by
+      their worker when using --device-ids. Fixed overlapping CPU cache
+      partitions in non-replicated native tiering offload with non-contiguous
+      or reordered device IDs.
