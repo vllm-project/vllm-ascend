@@ -1,0 +1,9 @@
+pr: 21442
+entries:
+  - category: performance
+    text: >-
+      Accelerated Engram gating for rotated DeepSeek V4.1 checkpoints on Ascend
+      A3 with a dedicated Triton kernel while retaining the separate FP32
+      inverse-rotation MatMul. The existing A5 unrotated gate is unchanged.
+    model: deepseek-v4.1
+    hardware: [A3]
