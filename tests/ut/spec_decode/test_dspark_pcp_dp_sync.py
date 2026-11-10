@@ -37,7 +37,7 @@ def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, 
         idx_mapping=torch.arange(draft_reqs),
         is_prefilling_np=np.zeros(draft_reqs, dtype=np.bool_),
     )
-    sync_kwargs = {} if vllm_version_is("0.32.0") else {"max_query_len": None}
+    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([20, 20]), uniform_token_count=5, eager=False, num_reqs=4, **sync_kwargs
     )
@@ -87,7 +87,7 @@ def test_dspark_syncs_finished_proposals_only_without_upstream_hook(
     spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
     spec.draft_logits = torch.arange(24, dtype=torch.float32).reshape(6, 2, 2) if probabilistic else None
     original_logits = spec.draft_logits.clone() if probabilistic else None
-    batch = SimpleNamespace(idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
+    batch = SimpleNamespace(num_reqs=2, idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
     local_tokens = torch.tensor([[9, 8], [7, 6]])
     shared_tokens = torch.tensor([[1, 2], [3, 4]])
     shared_logits = torch.full((2, 2, 2), 0.5)

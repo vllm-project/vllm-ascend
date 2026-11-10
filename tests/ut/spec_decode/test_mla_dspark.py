@@ -17,8 +17,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
-from vllm_ascend.models import kimi_k3_dspark
-from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -63,7 +63,7 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
     # Without PCP, both models use the same request layout.
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         target_sync = DPSyncState(  # type: ignore[call-arg]
             num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
         )

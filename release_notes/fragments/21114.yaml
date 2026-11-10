@@ -1,0 +1,7 @@
+pr: 21114
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DFlash2 initialization with pipeline-parallel GLM-5.3 and other
+      targets using the generic DeepseekV2Model by loading the target input
+      embedding on the last pipeline stage before draft embedding sharing.

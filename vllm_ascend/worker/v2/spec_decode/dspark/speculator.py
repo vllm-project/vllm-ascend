@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
@@ -64,7 +65,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -75,6 +76,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
+        self._draft_metadata_num_reqs: int | None = None
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
         self._init_dcp()
@@ -296,12 +298,28 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
+    # TODO: Remove this helper and build_draft_attn_metadatas once tiling
+    # eliminates replay-time metadata rebuilding. The rebuild currently needs
+    # this count because it cannot access the effective num_reqs from upstream propose().
+    @contextmanager
+    def _draft_metadata_request_count(self, num_reqs: int):
+        previous = getattr(self, "_draft_metadata_num_reqs", None)
+        self._draft_metadata_num_reqs = num_reqs
+        try:
+            yield
+        finally:
+            self._draft_metadata_num_reqs = previous
+
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
+        num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
+        if num_reqs is None:
+            num_reqs = self.input_batch.num_reqs
+        assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-            self.input_batch.num_reqs, num_reqs_padded, self.num_query_per_req
+            num_reqs, num_reqs_padded, self.num_query_per_req
         )
         with (
             build_attn_metadata_wrapper(),
@@ -322,7 +340,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_reqs=num_reqs_padded,
             )
             attn_metadata = self._build_uniform_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
+                num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
@@ -432,15 +450,22 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        # Upstream trims DP dummy draft requests before selecting its graph,
+        # while input_batch still describes the padded target batch. Replay
+        # metadata must use the same count without mutating the target batch.
+        num_draft_reqs = input_batch.num_reqs
+        if dummy_run and sync_state is not None:
+            num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
             # DSpark drafts one block with a fixed step; zero unused request slots
             # before upstream selects the padded batch size and slices this view.
             seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-                input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
+                num_draft_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
+            self._draft_metadata_request_count(num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,

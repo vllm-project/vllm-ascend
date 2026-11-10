@@ -353,10 +353,11 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.dp_size = 2
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
     attn_metadata = {"mtp": _mla_pcp_decode_metadata(4, [4, 8])}
-    sync_kwargs = {} if vllm_version_is("0.32.0") else {"max_query_len": None}
+    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     dp_sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16, **sync_kwargs
     )

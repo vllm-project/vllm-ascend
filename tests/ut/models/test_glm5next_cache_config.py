@@ -70,7 +70,7 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 
 def make_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=2048),
+        model_config=SimpleNamespace(max_model_len=2048, hf_config=SimpleNamespace(model_type="glm_moe_dsa")),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
@@ -104,6 +104,7 @@ def make_specs(pool: int = 16):
         ),
         "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
             block_size=pool,
+            ring_capacity=pool,
             sliding_window=pool,
             compress_ratio=pool,
             num_kv_heads=1,
@@ -249,7 +250,7 @@ def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, looka
             tokens_per_state=4,
         )
         specs["model.layers.3.indexer.tail_cache"] = replace(
-            specs["model.layers.3.indexer.tail_cache"], block_size=4 + lookahead
+            specs["model.layers.3.indexer.tail_cache"], ring_capacity=4 + lookahead
         )
         groups = get_glm5_next_kv_cache_groups(config, specs)
         layout = _get_glm5_next_cache_layout(groups)

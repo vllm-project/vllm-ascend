@@ -71,7 +71,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
-| `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
@@ -140,40 +139,30 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. The rejection sampler and penalty kernels are v1-only and skipped by the v2 model runner. |
+| `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. |
 | `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
 
 **eplb_config**
 
-The accepted fields depend on the model runner:
+Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
+default and moves expert weights asynchronously over HIXL when it is available
+on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
+`default` or `stair` only through the upstream `--eplb-config.policy` option.
+See the
+[EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
+for the advanced STAIR fields and their defaults.
 
-- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
-  Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
-  uses the STAIR policy by default and moves expert weights asynchronously
-  over HIXL when it is available on every EPLB rank, falling back to Gloo
-  CPU staging otherwise. Select `default` or `stair` only through the
-  upstream `--eplb-config.policy` option. See the
-  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
-  for the advanced STAIR fields and their defaults.
-- **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase` and `stair_config`.
-  MRv1 does not accept upstream `--enable-eplb` on Ascend.
-
-Mixing the two schemas fails during startup instead of silently ignoring
-configuration.
+The legacy `dynamic_eplb`, `expert_map_path`, `expert_heat_collection_interval`,
+`algorithm_execution_interval`, `expert_map_record_path`,
+`num_redundant_experts`, `eplb_policy_type`, and `eplb_heat_collection_stage`
+fields configured the Model Runner V1 EPLB implementation, which has been
+removed. They no longer take effect.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `dynamic_eplb`                   | bool| `False`| MRv1 only. Whether to enable legacy dynamic EPLB. |
-| `expert_map_path`                | str | `None` | MRv1 only. Load a recorded static expert map. |
-| `expert_heat_collection_interval`| int | `600`  | MRv1 only. Number of forward iterations used to collect expert heat. |
-| `algorithm_execution_interval`   | int | `50`   | MRv1 only. Interval allowed for the EPLB worker to finish its CPU task. |
-| `expert_map_record_path`         | str | `None` | MRv1 only. Save the calculated expert map to the specified JSON path. |
-| `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
-| `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
-| `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
-| `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+| `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 **scheduler_config**
 
@@ -218,36 +207,17 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **rejection_sampler_config**
 
-For Model Runner V2, enable Entropy Verify with `enable_entropy_verify=true` and `speculative_config.rejection_sample_method="standard"`. Entropy Verify and upstream `"block"` verification are mutually exclusive. See [Block Verify and Entropy Verify](../feature_guide/speculative_decoding.md#block-verify-and-entropy-verify) for usage and sampling semantics.
+Enable Entropy Verify with `enable_entropy_verify=true` and `speculative_config.rejection_sample_method="standard"`. Entropy Verify and upstream `"block"` verification are mutually exclusive. See [Block Verify and Entropy Verify](../feature_guide/speculative_decoding.md#entropy-verify) for usage and sampling semantics.
 
-> **Note**: Both block verify and entropy verify improve speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
+> **Note**: Entropy verify improves speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
+
+`enable_block_verify` is no longer accepted: passing `true` fails at startup. Use `enable_entropy_verify` instead.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_block_verify`   | bool  | `False` | Whether to enable block verify mode. Block verify evaluates all draft tokens as a block using cumulative probability products, which can improve acceptance rate. |
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
-
-**dynamic_spec_config**
-
-> **Note**: This is an exploratory feature for model runner v1. Supported methods are `"dspark"` (DSpark confidence head) and `"dflash"` (head-free; uses max-softmax over draft logits as a confidence proxy). You still need a matching `speculative_config` (`method: "dspark"` or `"dflash"`); `dynamic_spec_config` only controls how many drafted tokens are verified per request. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding) for usage and limitations.
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `method` | str | `None` | Dynamic method name. Supported values: `"dspark"`, `"dflash"`. Omit or set to `None` to disable. |
-| `method_params` | dict | `{}` | Method-specific hyperparameters. When empty, each method falls back to its built-in defaults. |
-
-**dynamic_spec_config.method_params** (when `method` is `"dspark"` or `"dflash"`)
-
-`dspark` and `dflash` share the same scheduling hyperparameters. The difference is only how per-token acceptance confidence is estimated: DSpark uses its confidence head (`sigmoid`), while DFlash (head-free) uses `max(softmax(logits))` of the drafted token.
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `initial_verify_budget_per_req` | int | `5` | Initial per-request verify budget before the first recompute. |
-| `budget_update_interval` | int | `16` | Recompute the shared verify budget every N decode steps. |
-| `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
-| `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
 
 **scheduler_config.short_request_first_config**
 
@@ -350,18 +320,9 @@ An example of additional configuration is as follows:
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
     "rejection_sampler_config": {
-        "enable_block_verify": True,
         "enable_entropy_verify": True,
         "posterior_threshold": 0.95,
         "posterior_alpha": 0.4,
-    },
-    "dynamic_spec_config": {
-        "method": "dspark",
-        "method_params": {
-            "initial_verify_budget_per_req": 5,
-            "budget_update_interval": 50,
-            "budget_threshold": 0.7,
-        },
     },
     "refresh": False
 }
