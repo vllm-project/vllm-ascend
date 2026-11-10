@@ -30,7 +30,8 @@ from typing import Any
 
 env_variables: dict[str, Callable[[], Any]] = {
     # Opt-in fused C2 ring metadata on non-A5 NPUs. Existing A5 dispatch
-    # remains unchanged. Set before worker/builder initialization.
+    # remains unchanged. Default: 0 (disabled); use 1 to enable.
+    # Non-sensitive. Set before worker/builder initialization.
     "VLLM_ASCEND_ENABLE_C2_METADATA_FUSION": lambda: bool(
         int(os.getenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", "0"))
     ),

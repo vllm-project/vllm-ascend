@@ -939,6 +939,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     cos.ndim != 4
                     or cos.shape[1:3] != (1, 1)
                     or cos.shape != sin.shape
+                    or cos.dtype != self._c2_source_cos.dtype
+                    or sin.dtype != self._c2_source_sin.dtype
                     or cos.stride() != sin.stride()
                     or cos.shape[-1] != self._c2_source_cos.shape[-1]
                     or cos.device != self._c2_source_cos.device
@@ -946,7 +948,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ):
                     raise ValueError(
                         "C2 metadata fusion requires matching [L, 1, 1, D] "
-                        "source RoPE layouts on the builder device"
+                        "source RoPE layouts and output dtypes on the builder device"
                     )
             self._c2_full_source_rope = source_rope
 

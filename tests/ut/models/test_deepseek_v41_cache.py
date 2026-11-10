@@ -1614,3 +1614,171 @@ def test_the_swa_cache_carries_the_replay_flag_into_its_spec(monkeypatch):
     assert spec.bounded_replay
     assert not spec.prefix_cacheable
     assert spec.prefix_replay_tokens == REPLAY_WINDOW
+
+
+def _make_c2_fusion_test_builder(runtime, monkeypatch, *, device_type="npu", packed=False):
+    """Exercise the real builder on CPU, mocking only device setup/allocation."""
+    name = "model.layers.2.self_attn.compressor.state_cache"
+    spec = collect_specs(runtime)[name]
+    runtime.scheduler_config.max_num_batched_tokens = 8
+    runtime.scheduler_config.max_num_seqs = 4
+
+    original_base_init = dsa_v41.AttentionMetadataBuilder.__init__
+
+    def base_init(self, kv_cache_spec, layer_names, vllm_config, device):
+        original_base_init(self, kv_cache_spec, layer_names, vllm_config, torch.device("cpu"))
+
+    # A fake NPU device must not reach upstream device initialization.
+    monkeypatch.setattr(dsa_v41.AttentionMetadataBuilder, "__init__", base_init)
+    monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: object() if packed else None)
+    cpu_torch = SimpleNamespace(**vars(torch))
+    for factory_name in ("full", "zeros", "ones"):
+        factory = getattr(torch, factory_name)
+
+        def allocate_on_cpu(*args, _factory=factory, **kwargs):
+            kwargs["device"] = "cpu"
+            return _factory(*args, **kwargs)
+
+        setattr(cpu_torch, factory_name, allocate_on_cpu)
+    monkeypatch.setattr(dsa_v41, "torch", cpu_torch)
+    return AscendDSAV41MetadataBuilder(spec, [name], runtime, SimpleNamespace(type=device_type))
+
+
+def _c2_fusion_test_rope(builder):
+    width = builder._c2_source_cos.shape[-1]
+    cos = torch.arange(16 * width, dtype=torch.float32).reshape(16, 1, 1, width)
+    return cos, cos + 0.5
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "npu"])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_c2_metadata_fusion_dispatch(runtime, monkeypatch, device_type, packed, enabled, deferred):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", str(int(enabled)))
+    builder = _make_c2_fusion_test_builder(runtime, monkeypatch, device_type=device_type, packed=packed)
+    assert builder._enable_c2_metadata_fusion is (device_type == "npu" and enabled)
+    rope = _c2_fusion_test_rope(builder)
+    monkeypatch.setattr(dsa_v41, "get_full_cos_and_sin_dsa_for_layer", lambda name: rope)
+    builder.prepare_source_rope()
+    assert not builder._device_metadata_enabled
+    assert not builder.take_device_metadata_tasks()
+    if deferred:
+        builder.enable_device_metadata()
+    fused = Mock()
+    monkeypatch.setattr(dsa_v41, "build_c2_ring_metadata", fused)
+    # Changing the environment after construction must not change dispatch.
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", str(int(not enabled)))
+    common = SimpleNamespace(
+        slot_mapping=torch.tensor([10, 11, -1]),
+        block_table_tensor=torch.tensor([[1], [2], [0]], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([3, 4, 9], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([3, 4, 9], dtype=torch.int32),
+        positions=torch.tensor([2, 3, 0]),
+        num_reqs=3,
+        num_actual_tokens=2,
+        num_input_tokens=3,
+        max_query_len=1,
+        max_seq_len=9,
+        is_prefilling=torch.tensor([False, False, False]),
+    )
+    metadata = builder.build(0, common, num_actual_reqs=2)
+    tasks = builder.take_device_metadata_tasks()
+    if deferred:
+        fused.assert_not_called()
+        assert len(tasks) == 1
+        assert tasks[0].stage == DeviceMetadataStage.COMPRESSOR
+        assert tasks[0].group_id == id(builder._c2_complete_mask)
+        tasks[0].run()
+    else:
+        assert not tasks
+    if device_type == "npu" and (packed or enabled):
+        fused.assert_called_once()
+        assert fused.call_args.args[6:10] == (3, 3, 2, 2)
+        assert fused.call_args.kwargs["skip_update"] is False
+        assert fused.call_args.kwargs["ring_metadata_output"].data_ptr() == metadata.c2_ring_metadata.data_ptr()
+        assert fused.call_args.kwargs["cos_output"].data_ptr() == metadata.c2_source_cos.data_ptr()
+    else:
+        fused.assert_not_called()
+        assert metadata.c2_complete_mask.tolist() == [False, True, False]
+        assert metadata.c2_source_positions.tolist() == [0, 2, 0]
+        assert metadata.c2_ring_metadata.tolist() == [[2, 3, 0], [1, 1, 0], [0, 1, 2], [0, 1, 2], [1, 2, 0]]
+        if device_type == "npu":
+            for actual, source in zip((metadata.c2_source_cos, metadata.c2_source_sin), rope):
+                torch.testing.assert_close(actual, source[[0, 2, 0]], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "rank",
+        "inner_shape",
+        "shape",
+        "stride",
+        "width",
+        "cos_device",
+        "sin_device",
+        "cos_dtype",
+        "sin_dtype",
+        "both_dtypes",
+    ],
+)
+def test_c2_metadata_fusion_rejects_invalid_rope_before_submission(runtime, monkeypatch, invalid):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", "1")
+    builder = _make_c2_fusion_test_builder(runtime, monkeypatch)
+    cos, sin = _c2_fusion_test_rope(builder)
+    if invalid == "rank":
+        cos, sin = cos.squeeze(1), sin.squeeze(1)
+    elif invalid == "inner_shape":
+        cos, sin = cos.expand(-1, 2, -1, -1), sin.expand(-1, 2, -1, -1)
+    elif invalid == "shape":
+        sin = sin[:-1]
+    elif invalid == "stride":
+        sin = torch.empty((32, 1, 1, sin.shape[-1]))[::2]
+    elif invalid == "width":
+        cos, sin = cos[..., :-1], sin[..., :-1]
+    elif invalid == "cos_device":
+        cos = cos.to("meta")
+    elif invalid == "sin_device":
+        sin = sin.to("meta")
+    elif invalid == "cos_dtype":
+        cos = cos.to(torch.bfloat16)
+    elif invalid == "sin_dtype":
+        sin = sin.to(torch.bfloat16)
+    else:
+        cos, sin = cos.to(torch.bfloat16), sin.to(torch.bfloat16)
+    monkeypatch.setattr(dsa_v41, "get_full_cos_and_sin_dsa_for_layer", lambda name: (cos, sin))
+    with pytest.raises(ValueError, match="C2 metadata fusion requires"):
+        builder.prepare_source_rope()
+    assert builder._c2_full_source_rope is None
+    assert not builder._device_metadata_enabled
+    assert not builder.take_device_metadata_tasks()
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_c2_metadata_fusion_accepts_matching_rope_layout(runtime, monkeypatch, strided):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", "1")
+    builder = _make_c2_fusion_test_builder(runtime, monkeypatch)
+    width = builder._c2_source_cos.shape[-1]
+    cos, sin = (torch.empty((32, 1, 1, width * 2)) for _ in range(2))
+    rope = (cos[1::2, :, :, 1::2], sin[1::2, :, :, 1::2]) if strided else _c2_fusion_test_rope(builder)
+    monkeypatch.setattr(dsa_v41, "get_full_cos_and_sin_dsa_for_layer", lambda name: rope)
+    builder.prepare_source_rope()
+    assert builder._c2_full_source_rope is rope
+    assert not builder._device_metadata_enabled
+    assert not builder.take_device_metadata_tasks()
+
+
+@pytest.mark.parametrize(
+    "device_type,packed,enabled", [("cpu", False, True), ("npu", False, False), ("npu", True, True)]
+)
+def test_c2_metadata_fusion_layout_guard_keeps_existing_paths(runtime, monkeypatch, device_type, packed, enabled):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", str(int(enabled)))
+    builder = _make_c2_fusion_test_builder(runtime, monkeypatch, device_type=device_type, packed=packed)
+    # Only the non-A5 opt-in path gains the new validation.
+    rope = (torch.empty((4, 8), dtype=torch.bfloat16), torch.empty((4, 8), dtype=torch.bfloat16))
+    monkeypatch.setattr(dsa_v41, "get_full_cos_and_sin_dsa_for_layer", lambda name: rope)
+    builder.prepare_source_rope()
+    assert builder._c2_full_source_rope is rope

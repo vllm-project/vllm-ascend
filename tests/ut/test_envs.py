@@ -14,6 +14,7 @@
 
 import inspect
 import os
+from unittest.mock import patch
 
 import vllm_ascend.envs as envs_ascend
 from tests.ut.base import TestBase
@@ -22,6 +23,18 @@ from tests.ut.base import TestBase
 class TestEnvVariables(TestBase):
     def setUp(self):
         self.env_vars = list(envs_ascend.env_variables.keys())
+
+    def test_c2_metadata_fusion_defaults_to_disabled(self):
+        name = "VLLM_ASCEND_ENABLE_C2_METADATA_FUSION"
+        with patch.dict(os.environ):
+            os.environ.pop(name, None)
+            self.assertIs(getattr(envs_ascend, name), False)
+
+    def test_c2_metadata_fusion_boolean_values(self):
+        name = "VLLM_ASCEND_ENABLE_C2_METADATA_FUSION"
+        for value, expected in (("0", False), ("1", True)):
+            with self.subTest(value=value), patch.dict(os.environ, {name: value}):
+                self.assertIs(getattr(envs_ascend, name), expected)
 
     def test_env_vars_behavior(self):
         for var_name in self.env_vars:
