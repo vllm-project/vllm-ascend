@@ -306,9 +306,11 @@ guide_sections:
 
     1. **Scripts** downloads `launch_online_dp.py` for the optional Start_Server
        launcher. Skip this download when using the direct commands below.
-    2. **Prefill** shows the selected node's `export` environment variables and
-       `vllm serve` command with TP8/PP4. Set the node IP and communication
-       interface in **Env**, then select and start each prefill node.
+    2. **Prefill** shows the selected node's complete `docker run ... vllm serve`
+       command with TP8/PP4 in Docker mode, including device mappings, mounts,
+       `-e` environment variables, and the A5 image. Pip mode shows `export`
+       variables and `vllm serve`. Set the node IP and communication interface
+       in **Env**, then select and start each prefill node.
     3. **Decode** shows the same direct command format for DP4/TP8. Select and
        start each decode node with its own IP and communication interface.
     4. **Start_Server** is an optional alternative to the direct commands;
@@ -319,8 +321,9 @@ guide_sections:
        positional arguments. Repeat on all four nodes in every group.
     5. **Start_Proxy** starts the client-facing proxy after both pools are ready.
 
-    Run these commands in the installed vLLM Ascend environment. Container setup
-    belongs to the installation step.
+    Run Docker-mode Prefill and Decode commands on the host; each command starts
+    its own container. Run pip-mode commands and the optional Start_Server
+    launcher inside the installed vLLM Ascend environment.
     Start each prefill group's rank 0 before ranks 1-3. Prefill rank 0 serves HTTP;
     its follower ranks use `--headless`.
     Every decode node keeps its HTTP endpoint. The transfer connector remains MooncakeConnectorV2.
