@@ -415,11 +415,11 @@ A few important things to consider when using DFlash2 draft models:
    `seq_lens.tolist()` and FA3's internal global-attention length reads.
    The extra column allocates only page-table entries, not extra KV pages.
    The builder refreshes the table and tiling at stable addresses before replay.
-   Outside FULL graph capture/replay, equal-width queries are grouped into BSND
-   calls using the scheduler's CPU query offsets. This also avoids FA3 0.5.0's
-   eager TND boundary check, which otherwise reads a device scalar per layer.
-   The groups share device tiling across identical layers; variable-width FULL
-   graph replay continues to use packed TND and refreshed device offsets.
+   Eager prefill and decode use the same packed TND layout as FULL graph
+   capture/replay, including variable-width queries. FA3 0.5.0's eager TND
+   boundary check still reads the last device query offset once per attention
+   call, introducing a scalar D2H synchronization even with device tiling.
+   Graph capture skips this check, and replay does not rerun the host check.
 
    Selection requires FP16/BF16 queries, draft KV with the same dtype, head
    sizes up to 256, and PP/PCP/DCP sizes of 1. Causal and non-causal sliding windows

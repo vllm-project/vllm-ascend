@@ -145,7 +145,7 @@ def test_qwen_target_updates_padded_tables_and_lengths_at_captured_addresses(run
     assert len(builder.block_table_buffers) == 1
 
 
-def test_qwen_eager_groups_ragged_queries_without_reading_device_offsets(runtime, monkeypatch):
+def test_qwen_eager_preserves_ragged_tnd_queries_and_device_schedule(runtime, monkeypatch):
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
     impl = runtime.AscendFlashAttentionImpl(8, 128, 128**-0.5, num_kv_heads=2)
     query = torch.randn(16, 8, 128, dtype=torch.bfloat16)
@@ -160,7 +160,7 @@ def test_qwen_eager_groups_ragged_queries_without_reading_device_offsets(runtime
         max_query_len=5,
         causal=True,
         full_attention_window=1024,
-        query_offsets_cpu=(0, 3, 8, 11, 16),
+        scheduler_metadata={(8, 2, 128, query.dtype, impl.scale, 0.0, None): torch.zeros(8, dtype=torch.uint8)},
     )
     cache = (torch.empty(36, 128, 2, 128), torch.empty(36, 128, 2, 128))
     layer = SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0)
@@ -168,16 +168,16 @@ def test_qwen_eager_groups_ragged_queries_without_reading_device_offsets(runtime
     for _ in range(2):
         impl.forward(layer, query, None, None, cache, metadata, output)
         torch.testing.assert_close(output, query + 1)
-    assert runtime.ops.get_scheduler_metadata.call_count == 2  # Shared by subsequent layers.
-    assert [call.args[0].shape for call in runtime.ops.flash_attn_with_kvcache.call_args_list[:2]] == [
-        (2, 3, 8, 128),
-        (2, 5, 8, 128),
-    ]
+    runtime.ops.get_scheduler_metadata.assert_not_called()  # Reuse the builder's device tiling.
+    assert runtime.ops.flash_attn_with_kvcache.call_count == 2
     for call in runtime.ops.flash_attn_with_kvcache.call_args_list:
-        assert "cu_seqlens_q" not in call.kwargs
+        assert call.args[0] is query
+        assert call.kwargs["cu_seqlens_q"] is metadata.query_start_loc
+        assert call.kwargs["max_seqlen_q"] == 5
+        assert call.kwargs["cache_seqlens"] is lengths
+        assert call.kwargs["page_table"] is tables
+        assert call.kwargs["scheduler_metadata"] is next(iter(metadata.scheduler_metadata.values()))
         assert call.kwargs["window_size"] == (1023, 0)
-    torch.testing.assert_close(metadata.eager_query_groups[0].seq_lens, lengths[[0, 2]])
-    torch.testing.assert_close(metadata.eager_query_groups[1].block_tables, tables[[1, 3]])
 
 
 def test_replay_shrink_and_grow_refreshes_captured_tiling_without_reallocating(runtime):
