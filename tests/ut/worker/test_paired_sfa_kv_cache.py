@@ -35,8 +35,9 @@ def vllm_config(monkeypatch):
         additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(
+            use_mla=True,
             hf_config=SimpleNamespace(model_type="kimi_k31"),
-            hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+            hf_text_config=SimpleNamespace(model_type="kimi_linear", index_topk=2048),
             max_model_len=4096,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
