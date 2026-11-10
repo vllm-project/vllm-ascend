@@ -1,0 +1,29 @@
+meta:
+  hardware:
+    ascend_910c: verified
+hardware_overrides:
+  npu:
+    extra_args:
+      []
+    extra_env:
+      {}
+hardware_notes:
+  ascend_910c:
+    title: "vLLM Ascend image required"
+    body: |-
+      Pin quay.io/ascend/vllm-ascend:nightly-main-a3-openeuler - the NVIDIA pip wheel cannot run on Ascend NPU.
+      PD declaration (D01/PD01): roles = prefill + decode; total NPUs = 40; nodes per role: TODO; devices per node: TODO; TP/DP/EP per role: TODO.
+      PD readiness (PD10): every backend process healthy; requests via the router/proxy succeed; KV transfer completes before declaring PD ready.
+      stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
+strategy_hardware:
+  multi_node_dep:
+    npu: verified
+  single_node_tp:
+    npu: unsupported
+variants:
+  default:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: 'quay.io/ascend/vllm-ascend:nightly-main-a3-openeuler'
+        install:
+          pip: false
