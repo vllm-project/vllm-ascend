@@ -1,0 +1,13 @@
+pr: 20192
+entries:
+  - category: feature
+    text: >-
+      MooncakeConnectorV2 now renews producer KV-cache leases while decode-side
+      requests wait for scheduling or complete KV transfers after scheduler
+      admission, preventing premature release during long waits.
+  - category: config
+    text: >-
+      MooncakeConnectorV2 now uses kv_connector_extra_config.kv_lease_duration
+      (default 30 seconds) instead of VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT.
+      Configure the same duration on P and D, and upgrade P before enabling
+      decode heartbeats; MooncakeConnectorV1 keeps its existing timeout behavior.
