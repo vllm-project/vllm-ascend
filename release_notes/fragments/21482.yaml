@@ -1,0 +1,4 @@
+pr: 21482
+entries:
+  - category: bugfix
+    text: EPLB config validation now rejects `expert_heat_collection_interval` and `algorithm_execution_interval` of 0, which previously started EPLB in a silently inert state (heat collection and the algorithm never triggered). `num_redundant_experts` keeps allowing 0 (the default "no redundant experts" scheme) and only rejects negatives.
