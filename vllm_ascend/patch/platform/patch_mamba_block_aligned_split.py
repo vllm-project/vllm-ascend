@@ -100,13 +100,17 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    # A consumer only needs the unsplit verifier window after some prefix has
-    # already been computed locally or loaded from the connector.  ``kv_both``
-    # also handles cold prefills; bypassing alignment for those requests means
-    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
-    # pool can cache the prefix.
-    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
+    # Only verifier rows beyond the committed tokens need an unsplit window.
+    # A computed prefix can also come from an earlier local prefill chunk,
+    # which must still stop at reusable Mamba state checkpoints.
+    num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    remaining_tokens = max(request.num_tokens - num_computed_tokens, 0)
+    if (
+        kv_transfer_config is not None
+        and kv_transfer_config.is_kv_consumer
+        and num_computed_tokens > 0
+        and num_new_tokens > remaining_tokens
+    ):
         return num_new_tokens
 
     # Pure PD prefill producer or standalone instance: suppress the EAGLE
@@ -114,7 +118,6 @@ def _mamba_block_aligned_split(
     # early-return path below must observe it too (it previously ran under
     # a temporary bit clear from the outer producer wrapper).
     if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
-        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         if num_computed_tokens < max(
             request.num_prompt_tokens,
             request.num_tokens - 1,
