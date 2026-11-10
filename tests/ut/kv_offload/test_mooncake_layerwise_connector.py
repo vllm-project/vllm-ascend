@@ -855,9 +855,13 @@ class MockRequest:
         self.num_computed_tokens = 0
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self.max_tokens = 16
+        self.block_hashes: list = []
 
         self.all_token_ids = list(self.prompt_token_ids)
         self._all_token_ids = list(self.prompt_token_ids)
+
+    def update_block_hashes(self) -> None:
+        self.block_hashes.append(tuple(self._all_token_ids))
 
 
 class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
@@ -916,7 +920,11 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
     def test_get_num_new_matched_tokens_hybrid_truncates_prefill_request(self):
         self.scheduler.need_truncate = True
         request = MockRequest("req1", prompt_token_ids=list(range(4)), kv_transfer_params={"do_remote_decode": True})
+        # Request hashed the full prompt at construction.
+        request.block_hashes = [tuple(request._all_token_ids)]
 
+        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
+        # Preemption/reschedule must not drop a second token.
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
 
         self.assertEqual(tokens, 0)
@@ -926,6 +934,8 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(request.num_prompt_tokens, 3)
         self.assertEqual(request.max_tokens, 1)
         self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+        # Stale full-prompt hashes must be rebuilt for the shortened prompt.
+        self.assertEqual(request.block_hashes, [(0, 1, 2)])
 
     def test_build_connector_meta(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
