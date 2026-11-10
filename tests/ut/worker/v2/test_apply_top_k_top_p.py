@@ -17,7 +17,6 @@ def _config(enabled: bool, disable_gate: bool = True):
     return SimpleNamespace(
         enable_triton_apply_topk_topp=enabled,
         triton_topk_topp_disable_gate=disable_gate,
-        triton_topk_topp_disable_no_sort=False,
     )
 
 
@@ -62,7 +61,7 @@ def test_uses_triton_when_cann_unavailable():
         out = topk_op.apply_top_k_top_p(logits, k, p)
 
     # The fallback must match the native op / upstream reference semantics.
-    triton_op.assert_called_once_with(logits, k, p, top_p_mode="topk_renorm", no_sort=True)
+    triton_op.assert_called_once_with(logits, k, p)
     pytorch_op.assert_not_called()
     assert torch.equal(out, triton_out)
 
@@ -165,7 +164,7 @@ def test_accepts_has_topp_only_rows():
 
     # The flag is accepted on both lanes but not forwarded: the Triton op
     # handles per-row k/p without a split pipeline.
-    triton_op.assert_called_once_with(logits, k, p, top_p_mode="topk_renorm", no_sort=True)
+    triton_op.assert_called_once_with(logits, k, p)
     pytorch_op.assert_not_called()
     assert torch.equal(out, triton_out)
 

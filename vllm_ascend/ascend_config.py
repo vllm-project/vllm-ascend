@@ -434,7 +434,6 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "enable_triton_apply_topk_topp": false,
             "triton_topk_topp_disable_gate": false,
-            "triton_topk_topp_disable_no_sort": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
@@ -587,12 +586,10 @@ class AscendConfig:
     # Enable the Triton apply_top_k_top_p fallback used when the native CANN
     # npu_top_k_top_p op is unavailable. Default False.
     enable_triton_apply_topk_topp: bool = False
-    # Benchmark-only escape hatches for enable_triton_apply_topk_topp:
-    # disable_gate forces the Triton path below the measured B/V crossover,
-    # disable_no_sort rolls back to the exact sort path. Both stay False in
-    # production.
+    # Benchmark-only escape hatch for enable_triton_apply_topk_topp:
+    # disable_gate forces the Triton path below the measured B/V crossover.
+    # Keep it False in production.
     triton_topk_topp_disable_gate: bool = False
-    triton_topk_topp_disable_no_sort: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True

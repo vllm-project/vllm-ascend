@@ -76,13 +76,7 @@ def _apply_top_k_top_p_triton(
         "for top-k/top-p masking: logits shape %s.",
         tuple(logits.shape),
     )
-    return triton_apply_top_k_top_p(
-        logits,
-        k,
-        p,
-        top_p_mode="topk_renorm",
-        no_sort=not cfg.triton_topk_topp_disable_no_sort,
-    )
+    return triton_apply_top_k_top_p(logits, k, p)
 
 
 # NOTE: During the warmup stage, if both k and p are None, the NPU op is skipped.

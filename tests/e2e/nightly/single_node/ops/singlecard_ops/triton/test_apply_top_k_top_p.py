@@ -18,10 +18,7 @@
 # NPU tests for the Triton apply_top_k_top_p op
 # (vllm_ascend.ops.triton.sample.apply_top_k_top_p).
 #
-# Two semantic modes are covered:
-#   - top_p_mode="topk_renorm": bit-exact vs CANN npu_top_k_top_p
-#   - top_p_mode="full_vocab": bit-exact vs the legacy 0.29/0.32 reference
-#     (full-vocabulary top-p cutoff), ties kept
+# Semantics: topk_renorm (CANN/upstream), bit-exact vs CANN npu_top_k_top_p.
 
 import pytest
 import torch
@@ -42,33 +39,6 @@ def cann_masked(logits, k_t, p_t):
     if p_t is not None:
         p_t = p_t.to(logits.dtype)
     return torch_npu.npu_top_k_top_p(logits, p_t, k_t)
-
-
-@pytest.fixture
-def pytorch_baseline():
-    """Legacy 0.29/0.32 full-vocab reference (pre-top-k softmax)."""
-
-    def _ref(logits, k, p):
-        if p is None and k is None:
-            return logits
-        probs = logits.softmax(dim=-1)
-        probs_sort, _ = probs.sort(dim=-1, descending=False)
-        if k is not None:
-            top_k_count = probs_sort.size(1) - k.to(torch.long)
-            top_k_cutoff = probs_sort.gather(-1, top_k_count.unsqueeze(dim=1))
-            no_top_k_mask = (k == logits.shape[1]).unsqueeze(dim=1)
-            top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
-            logits.masked_fill_(probs < top_k_cutoff, -float("inf"))
-        if p is not None:
-            cumprob = torch.cumsum(probs_sort, dim=-1)
-            top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
-            top_p_mask[:, -1] = False
-            top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
-            top_p_cutoff = probs_sort.gather(-1, top_p_count)
-            logits.masked_fill_(probs < top_p_cutoff, -float("inf"))
-        return logits
-
-    return _ref
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +67,7 @@ def test_masked_logits_bit_exact_cann(B, V, dtype):
     # CANN requires p to match the logits dtype (p is rounded at low
     # precision); the op computes in fp32 internally, so pass the aligned
     # effective p value to keep both inputs identical.
-    out = apply_top_k_top_p(logits, k, p.to(dtype).float(), top_p_mode="topk_renorm")
+    out = apply_top_k_top_p(logits, k, p.to(dtype).float())
     ref = cann_masked(logits, k, p)
     assert torch.equal(out, ref)
 
@@ -108,79 +78,11 @@ def test_scalar_and_none_variants():
     B, V = 4, 8192
     logits = torch.randn(B, V, device="npu") * 4.0
     for k, p in [(None, None), (1, None), (50, 0.9), (V, 0.5), (200, 1.0)]:
-        out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="topk_renorm")
+        out = apply_top_k_top_p(logits.clone(), k, p)
         k_t = None if k is None or k >= V else torch.full((B,), k, dtype=torch.int32, device="npu")
         p_t = None if p is None or p >= 1.0 else torch.full((B,), p, dtype=torch.float32, device="npu")
         ref = cann_masked(logits, k_t, p_t)
         assert torch.equal(out, ref)
-
-
-# -----------------------------------------------------------------------------
-# full_vocab mode (legacy compatibility, explicit opt-in)
-# -----------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("B,V", [(1, 32000), (8, 32000), (8, 151936), (32, 4097)])
-def test_full_vocab_bit_exact_pytorch_fp32(B, V, pytorch_baseline):
-    """Legacy full_vocab must be a drop-in of _apply_top_k_top_p_pytorch:
-    fp32 bit-exact with k and p both enabled (AE-3 regression)."""
-    init_device_properties_triton()
-    logits = torch.randn(B, V, dtype=torch.float32, device="npu") * 4.0
-    k = torch.randint(1, 200, (B,), dtype=torch.int32, device="npu")
-    p = torch.rand(B, device="npu") * 0.09 + 0.90
-
-    out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="full_vocab")
-    ref = pytorch_baseline(logits.clone(), k, p)
-    assert torch.equal(out, ref)
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("bucket", [0.5, 1.0, 2.0])
-def test_full_vocab_ties_kept(dtype, bucket, pytorch_baseline):
-    """Repeated logit values at the cutoff must all survive (value
-    comparison, not a positional suffix): bf16 quantization creates ties."""
-    init_device_properties_triton()
-    B, V = 4, 32000
-    logits = ((torch.randn(B, V) * 4.0 / bucket).round() * bucket).to(dtype).npu()
-    k = torch.full((B,), 20, dtype=torch.int32, device="npu")
-    p = torch.full((B,), 0.95, dtype=torch.float32, device="npu")
-
-    out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="full_vocab")
-    ref = pytorch_baseline(logits.clone(), k, p)
-    if dtype == torch.float32:
-        assert torch.equal(out, ref)
-    else:
-        diff = (out != float("-inf")).sum(-1) - (ref != float("-inf")).sum(-1)
-        assert diff.abs().max() <= 3
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_full_vocab_low_precision_kept_tolerance(dtype, pytorch_baseline):
-    """bf16/fp16: kept count may differ by <=3 tokens (low-precision
-    softmax/cumsum rounding in the PyTorch baseline)."""
-    init_device_properties_triton()
-    B, V = 8, 32000
-    logits = (torch.randn(B, V) * 4.0).to(dtype).npu()
-    k = torch.randint(1, 200, (B,), dtype=torch.int32, device="npu")
-    p = torch.rand(B, device="npu") * 0.09 + 0.90
-
-    out = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="full_vocab")
-    ref = pytorch_baseline(logits.clone(), k, p)
-    diff = (out != float("-inf")).sum(-1) - (ref != float("-inf")).sum(-1)
-    assert diff.abs().max() <= 3
-
-
-def test_default_mode_is_topk_renorm():
-    """The default must match CANN/upstream semantics, not legacy full_vocab."""
-    init_device_properties_triton()
-    B, V = 8, 32000
-    logits = torch.randn(B, V, dtype=torch.float32, device="npu") * 4.0
-    k = torch.randint(1, 200, (B,), dtype=torch.int32, device="npu")
-    p = torch.rand(B, device="npu") * 0.09 + 0.90
-
-    out_default = apply_top_k_top_p(logits.clone(), k, p)
-    out_renorm = apply_top_k_top_p(logits.clone(), k, p, top_p_mode="topk_renorm")
-    assert torch.equal(out_default, out_renorm)
 
 
 # -----------------------------------------------------------------------------
@@ -205,10 +107,3 @@ def test_degenerate_rows():
     # many -inf / normal rows: finite behavior
     assert not torch.isnan(out[1]).any()
     assert torch.isnan(out[2]).any()  # NaN input stays visible (fail loud)
-
-
-def test_invalid_top_p_mode_raises():
-    init_device_properties_triton()
-    logits = torch.randn(2, 4096, device="npu")
-    with pytest.raises(ValueError, match="top_p_mode"):
-        apply_top_k_top_p(logits, None, None, top_p_mode="bogus")
