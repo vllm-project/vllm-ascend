@@ -131,16 +131,14 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-try:
+if vllm_version_is("0.32.0"):
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
-except ModuleNotFoundError as exc:
-    if exc.name != "vllm.models.qwen4_exp.common.qsa_cache":
-        raise
+
+    QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
+else:
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
 
     QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
-else:
-    QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
 
 
 # MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
