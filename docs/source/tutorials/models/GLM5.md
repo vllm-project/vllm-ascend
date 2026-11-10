@@ -1069,7 +1069,8 @@ if __name__ == "__main__":
         node_rank=0
 
         export VLLM_PP_LAYER_PARTITION="41,37"
-        export HCCL_BUFFSIZE=400
+        export HCCL_BUFFSIZE=2400
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
@@ -1131,7 +1132,8 @@ if __name__ == "__main__":
         node_rank=1
 
         export VLLM_PP_LAYER_PARTITION="41,37"
-        export HCCL_BUFFSIZE=400
+        export HCCL_BUFFSIZE=2400
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
