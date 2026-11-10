@@ -212,6 +212,32 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_process_weights_pads_odd_tp_scale_groups(self, mock_npu, mock_use_cann_megamoe, mock_vllm):
+        # A TP shard can leave intermediate_size_per_partition // group_size odd
+        # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 144), dtype=torch.uint8), requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(1, 255, (8, 128, 9), dtype=torch.uint8), requires_grad=False
+        )
+        original_scale = layer.w2_weight_scale.data.clone()
+
+        self.scheme.process_weights_after_loading(layer)
+
+        # (g, n, k // 2, 2) after padding k=9 -> 10, then transposed to (g, k // 2, n, 2).
+        self.assertEqual(layer.w2_weight_scale.shape, (8, 5, 128, 2))
+        restored = layer.w2_weight_scale.data.transpose(-3, -2).reshape(8, 128, 10)
+        torch.testing.assert_close(restored[..., :9], original_scale)
+        torch.testing.assert_close(restored[..., 9], torch.zeros(8, 128, dtype=torch.uint8))
+
     @staticmethod
     def _make_moe_layer():
         layer = nn.Module()

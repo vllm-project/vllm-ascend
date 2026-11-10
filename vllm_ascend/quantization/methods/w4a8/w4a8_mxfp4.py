@@ -301,6 +301,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         g, n, k = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2)
         g, n, k = layer.w2_weight_scale.shape
+        if k % 2 != 0:
+            # A TP shard can leave intermediate_size_per_partition // group_size odd
+            # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
+            # The runtime consumes scale groups in pairs, so append one zero group;
+            # the weight columns it would correspond to are already out of range.
+            layer.w2_weight_scale.data = torch.nn.functional.pad(
+                layer.w2_weight_scale.data, (0, 1), mode="constant", value=0
+            )
+            k += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
