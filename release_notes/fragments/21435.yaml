@@ -1,0 +1,5 @@
+pr: 21435
+entries:
+  - category: performance
+    text: Reduced GLM-5.3-Flash MTP draft loading time by skipping Safetensors shards that contain only target-model weights.
+    model: glm-5.3-flash
