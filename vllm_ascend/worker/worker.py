@@ -142,18 +142,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 torch.npu.config.allow_internal_format = True
 
 
-class _V1ModelRunnerFactory:
-    """Import the V1 model runner only when one is actually constructed."""
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-        return NPUModelRunner(*args, **kwargs)
-
-
-NPUModelRunner = _V1ModelRunnerFactory()
-
-
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -589,20 +577,16 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
-            logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+            from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-                with torch_cuda_wrapper():
-                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-            else:
-                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
-
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+            with torch_cuda_wrapper():
+                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
         else:
+            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
@@ -1332,20 +1316,8 @@ class NPUWorker(WorkerBase):
         )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
-        # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
-        # introduced only to prevent a recycled Mamba block from exposing stale
-        # values when reused by full attention during multi-step speculation.
-        speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_mamba_eagle_zeroing = (
-            kv_cache_config.has_mamba_layers
-            and speculative_config is not None
-            and speculative_config.method == "eagle3"
-            and speculative_config.num_speculative_tokens > 1
-        )
-        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
-        )
+        # set, so its worker-side consumer must use the same condition.
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):

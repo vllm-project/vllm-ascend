@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The vllm-ascend contributors
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
-from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 MANAGER_BLOCK_SIZE = 384
 KERNEL_BLOCK_SIZE = 128
@@ -65,43 +63,6 @@ def _make_k3_component_cache(*, num_blocks: int = 2):
         storage_offset=KERNEL_BLOCK_SIZE * NUM_KV_HEADS * 512,
     )
     return spec, (nope, rope)
-
-
-def test_zeroer_uses_single_fused_mla_physical_page():
-    spec, fused = _make_k3_fused_cache()
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    zeroer.init_meta(
-        [SimpleNamespace(kv_cache_spec=spec, kv_cache_group_id=0, layer_names=["layer"])],
-        [KERNEL_BLOCK_SIZE],
-        "auto",
-        set(),
-        {"layer": SimpleNamespace(kv_cache=fused)},
-    )
-
-    assert zeroer._meta is not None
-    seg_addrs, seg_page_sizes, _, _, n_segs = zeroer._meta
-    assert len(seg_addrs) == 1
-    assert seg_page_sizes[0].item() == PAGE_BYTES // 4
-    assert n_segs == 1
-
-
-def test_zeroer_dedupes_component_mla_views_sharing_physical_page():
-    spec, (nope, rope) = _make_k3_component_cache()
-    zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
-    zeroer.init_meta(
-        [SimpleNamespace(kv_cache_spec=spec, kv_cache_group_id=0, layer_names=["layer"])],
-        [KERNEL_BLOCK_SIZE],
-        "auto",
-        set(),
-        {"layer": SimpleNamespace(kv_cache=(nope, rope))},
-    )
-
-    assert zeroer._meta is not None
-    seg_addrs, seg_page_sizes, _, _, n_segs = zeroer._meta
-    assert len(seg_addrs) == 1
-    assert seg_addrs[0] == nope.data_ptr()
-    assert seg_page_sizes[0].item() == PAGE_BYTES // 4
-    assert n_segs == 1
 
 
 def test_component_mla_cow_copies_both_logical_components():
