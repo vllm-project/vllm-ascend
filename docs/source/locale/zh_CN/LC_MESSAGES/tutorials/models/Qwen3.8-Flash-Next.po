@@ -1194,11 +1194,6 @@ msgstr "`8248` 端口上的 Decode API 就绪后，在另一个终端中从 vLLM
 msgid "**Service verification:**"
 msgstr "**服务验证：**"
 
-msgid ""
-"`load_async=false` keeps external cache loading synchronous. Decode-side "
-"pool loading and saving remain disabled."
-msgstr "`load_async=false` 使外部缓存加载保持同步。Decode 侧的资源池加载和保存仍保持禁用。"
-
 msgid "**Verify three-tier cache reuse:**"
 msgstr "**验证三级缓存复用：**"
 
@@ -1456,3 +1451,10 @@ msgid ""
 msgstr ""
 "当目标模型和 MTP 的注意力实现支持时，Model Runner V2 会在 decode 期间自动减少 CPU 同步；无需额外的配置开关。精确的 "
 "token 计数和状态保留在设备上。不支持的配置会保留精确的 CPU 同步；运行时兼容性检查会选择相应的行为。"
+
+msgid ""
+"The tested configuration sets `lookup_rpc_port` to `\"0\"` for Prefill and "
+"`\"1\"` for Decode."
+msgstr ""
+"测试配置中，Prefill 的 `lookup_rpc_port` 设为 `\"0\"`，Decode 的 `lookup_rpc_port` 设为 "
+"`\"1\"`。"
