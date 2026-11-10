@@ -487,9 +487,7 @@ def _percentile(values: list[float], q: float) -> float:
     return ordered[min(len(ordered) - 1, int(round(q * (len(ordered) - 1))))]
 
 
-def _collect_perf(
-    runner: Any, prompt_tokens: int, *, reset_local_cache: bool = False
-) -> tuple[float, float, float]:
+def _collect_perf(runner: Any, prompt_tokens: int, *, reset_local_cache: bool = False) -> tuple[float, float, float]:
     """Sample the hit state; end-to-end latency with max_tokens=1 proxies TTFT.
 
     Hybrid legs keep the local prefix cache on. Only the pooled leg must drop
