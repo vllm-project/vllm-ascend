@@ -1,0 +1,6 @@
+pr: 21431
+entries:
+  - category: feature
+    text: Added GLM-5.3-Flash DFlash2 speculative-decoding support on Ascend. GLM-5.3-Flash targets now expose the auxiliary hidden states required by the v2 model runner, no-RoPE MLA targets skip the QK-Norm+RoPE fusion, and the GLM-Next KV cache planner places speculative-draft caches in dedicated slots.
+    model: GLM-5.3-Flash
+    hardware: [A3]
