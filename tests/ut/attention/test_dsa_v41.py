@@ -206,7 +206,9 @@ def test_a5_smla_metadata_uses_tp_sharded_head_count(monkeypatch, tensor_paralle
     metadata_op = Mock(return_value=torch.ones_like(buffer))
     builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=metadata_op)
     builder.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_attention_heads=64, head_dim=512, index_topk=512)),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(num_attention_heads=64, head_dim=512, index_topk=512)
+        ),
         parallel_config=SimpleNamespace(tensor_parallel_size=tensor_parallel_size),
     )
     req = dsa_v41.AscendDSAV41Metadata(
