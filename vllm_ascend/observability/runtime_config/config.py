@@ -728,6 +728,16 @@ class RuntimeConfig:
         return self._reload_interval > 0
 
     @property
+    def config_version(self) -> float:
+        """Monotonic stamp bumped on file reload / control patch.
+
+        Detectors cache this in :meth:`~ConfigBackedDetector.refresh_from_config`
+        so per-step ``_precheck`` can skip re-applying an unchanged section.
+        Curl ``/set_runtime_*`` and hot-reload both advance it before cascade.
+        """
+        return float(self._version)
+
+    @property
     def reload_interval_seconds(self) -> float:
         """Internal poll period when hot-reload is on; 0 when disabled."""
         return self._reload_interval

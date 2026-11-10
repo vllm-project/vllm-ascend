@@ -77,7 +77,13 @@ class AnomalyDetector:
         """Optional hook after dump arm or detect-only alert handling."""
 
     def _precheck(self) -> bool:
-        """Refresh thresholds then return whether this detector is enabled."""
+        """Return whether this detector is enabled (refresh if config moved).
+
+        :class:`ConfigBackedDetector` no-ops the refresh when
+        ``RuntimeConfig.config_version`` is unchanged so per-step checks do
+        not re-apply thresholds; curl / hot-reload cascade still force a
+        refresh by bumping the version first.
+        """
         self.refresh_from_config()
         return self._enabled
 
@@ -97,14 +103,27 @@ class ConfigBackedDetector(AnomalyDetector):
     section_key: str = ""
     schema: DetectorSchema | None = None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # None = never applied; skip refresh only after a successful apply.
+        self._applied_config_version: float | None = None
+
     def refresh_from_config(self) -> None:
         if self._runtime_config is None:
+            return
+        try:
+            version = float(self._runtime_config.config_version)
+        except (TypeError, ValueError, AttributeError):
+            # Tests may pass a bare MagicMock without config_version.
+            version = 0.0
+        if self._applied_config_version is not None and version == self._applied_config_version:
             return
         if self.section_key:
             section = self._runtime_config.detector_section(self.section_key)
         else:
             section = self._runtime_config.detector
         self._apply_detector_section(section)
+        self._applied_config_version = version
 
     def _apply_detector_section(self, section: dict[str, Any] | None) -> None:
         if not isinstance(section, dict):
