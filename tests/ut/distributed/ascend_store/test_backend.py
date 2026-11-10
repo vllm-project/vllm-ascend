@@ -544,6 +544,8 @@ class TestMooncakeBackendSetup(unittest.TestCase):
 
                 self.assertEqual(len(setup_calls), 4)
                 for scheduler_setup in setup_calls[::2]:
+                    self.assertEqual(scheduler_setup["protocol"], "rpc_only")
+                    self.assertNotIn("engine", scheduler_setup)
                     self.assertEqual(scheduler_setup["global_segment_size"], 0)
                     self.assertEqual(scheduler_setup["local_buffer_size"], 0)
                     self.assertNotIn("enable_ssd_offload", scheduler_setup)
@@ -640,6 +642,8 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self._setup_store(backend, store)
 
                 setup_kwargs = store.setup.call_args.kwargs
+                self.assertEqual(setup_kwargs["protocol"], "rpc_only")
+                self.assertNotIn("engine", setup_kwargs)
                 self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")
                 self.assertEqual(setup_kwargs["global_segment_size"], 0)
                 self.assertEqual(setup_kwargs["local_buffer_size"], 0)
@@ -667,6 +671,8 @@ class TestMooncakeBackendSetup(unittest.TestCase):
 
                 store.setup.assert_called_once()
                 setup_kwargs = store.setup.call_args.kwargs
+                self.assertEqual(setup_kwargs["protocol"], "rpc_only")
+                self.assertNotIn("engine", setup_kwargs)
                 self.assertNotIn("enable_ssd_offload", setup_kwargs)
                 self.assertNotIn("ssd_offload_path", setup_kwargs)
                 self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")

@@ -521,6 +521,22 @@ class MooncakeBackend(Backend):
         setup_kwargs.update(self._prefetch_conf.knobs)
         if self.config.tenant_id != DEFAULT_TENANT_ID:
             setup_kwargs["tenant_id"] = self.config.tenant_id
+        # Scheduler clients only query the master. rpc_only skips TransferEngine
+        # init, so this process does not AdxlEngine::Initialize on the replica's
+        # first NPU. A shared or store-owned ascend engine stays alive across
+        # worker sleep and exhausts HCCL streams during training.
+        if not self._contribute_memory:
+            self.local_seg = local_hostname
+            return store.setup(
+                local_hostname=self.local_seg,
+                metadata_server=self.config.metadata_server,
+                global_segment_size=0,
+                local_buffer_size=0,
+                protocol="rpc_only",
+                rdma_devices="",
+                master_server_addr=self.config.master_server_address,
+                **setup_kwargs,
+            )
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
