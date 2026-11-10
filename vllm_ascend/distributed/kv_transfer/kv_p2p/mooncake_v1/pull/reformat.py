@@ -53,6 +53,16 @@ MooncakeConnectorWorker: Any = None
 
 
 class KvCacheReformatMixin:
+    pending_reformat_lock: Any
+    pending_reformat: dict[str, Any]
+    kv_group2layeridx: dict[int, tuple[Any, list[int]]]
+    is_hma_required: bool
+    kv_caches: dict[str, Any]
+    tp_size: int
+    vllm_config: Any
+    num_layers: int
+    block_size: int
+
     def _stash_pending_reformat(
         self,
         request_id: str,

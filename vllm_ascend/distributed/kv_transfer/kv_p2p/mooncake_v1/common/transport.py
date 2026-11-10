@@ -62,7 +62,7 @@ class SizedDict(OrderedDict):
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[Any]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
@@ -135,7 +135,7 @@ def string_to_int64_hash(input_str):
 
 
 def ensure_zmq_send(
-    socket: zmq.Socket,  # type: ignore
+    socket: Any,  # type: ignore
     data: bytes,
     path: str,
     max_retries: int = 3,
@@ -156,7 +156,7 @@ def ensure_zmq_send(
 
 
 def ensure_zmq_recv(
-    socket: zmq.Socket,  # type: ignore
+    socket: Any,  # type: ignore
     path: str,
     max_retries: int = 3,
 ) -> bytes:
@@ -189,12 +189,12 @@ class RemoteSocketPool:
     def __init__(self, timeout: float = 1.0):
         self.timeout = timeout
         self.lock = threading.Lock()
-        self.sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)
+        self.sockets: dict[str, deque[Any]] = defaultdict(deque)
         # Sockets created by ``get`` own the context stored here; it is only
         # used by ``close`` to destroy the contexts this pool created.
         self._contexts: dict[Any, Any] = {}
 
-    def get(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
+    def get(self, remote_host: str, remote_handshake_port: int) -> Any:  # type: ignore
         """Get a socket to the remote host."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.lock:
@@ -221,7 +221,7 @@ class RemoteSocketPool:
 
     def return_socket(
         self,
-        sock: zmq.Socket,  # type: ignore
+        sock: Any,  # type: ignore
         remote_host: str,
         remote_handshake_port: int,
     ) -> None:
