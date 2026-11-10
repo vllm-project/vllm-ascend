@@ -51,8 +51,9 @@ variants:
     model_id: Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
     precision: mxfp4
     label: MXFP4(ASCEND)
-    # Provisional loading estimate; not measured for this MXFP4 checkpoint.
-    vram_minimum_gb: 1711
+    # Rough estimate: 2.8T params x 0.5 byte/param x 1.2 headroom = 1680 GB.
+    # Not measured; scale and mixed-precision overheads are not modeled separately.
+    vram_minimum_gb: 1680
     supported_hardware:
       - ascend_950dt
     extra_args:
@@ -93,7 +94,7 @@ variants:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: vllm serve
-    description: ModelSlim MXFP4 with QuaRot for Ascend 950DT (A5). Requires --quantization ascend. Checkpoint not yet public; the 1711 GB loading estimate is provisional and unmeasured.
+    description: ModelSlim MXFP4 with QuaRot for Ascend 950DT (A5). Requires --quantization ascend. Checkpoint not yet public; the 1680 GB loading estimate is provisional and unmeasured.
 
 hardware_overrides:
   ascend_910c:
@@ -149,7 +150,7 @@ hardware_notes:
     body: Keep the Head command unchanged. Before launching Nodes 1-3, append --headless to each generated worker command; retain its distinct --data-parallel-start-rank.
   ascend_950dt:
     title: Mixed-serving worker launch
-    body: Keep the Head command unchanged. Before launching Nodes 1-3, append --headless to each generated worker command; retain its distinct --data-parallel-start-rank. The 1711 GB loading-memory figure is a provisional estimate, not a measurement of this private checkpoint.
+    body: Keep the Head command unchanged. Before launching Nodes 1-3, append --headless to each generated worker command; retain its distinct --data-parallel-start-rank. The 1680 GB loading-memory figure is a provisional estimate, not a measurement of this private checkpoint.
 
 guide_sections:
   section1: |
