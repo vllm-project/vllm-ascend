@@ -38,11 +38,20 @@ RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index https:/
     python3 -m pip install twine attrs psutil
 
 # Install vllm-ascend
+# CANN 9.2.x's custom-op installer validates the packaged .so with dlopen and
+# rejects libcust_opmaster_rt2.0.so because it carries a DT_NEEDED on the
+# build-time stub liboptiling.so, which is not shipped. Pass --force to skip
+# that validation. The grep is a guard: fail here instead of silently building
+# an unpatched wheel if build_aclnn.sh ever changes.
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     cd vllm-ascend && \
+    sed -i 's|--install-path="${custom_ops_install_dir}"|--force --install-path="${custom_ops_install_dir}"|' csrc/build_aclnn.sh && \
+    grep -q -- '--force --install-path' csrc/build_aclnn.sh && \
+    git update-index --assume-unchanged csrc/build_aclnn.sh && \
     python3 setup.py bdist_wheel && \
-    ls -l dist
+    ls -l dist && \
+    test -n "$(find vllm_ascend/_cann_ops_custom -name 'libcust_opmaster_rt2.0.so' -print -quit)"
 
 CMD ["/bin/bash"]
