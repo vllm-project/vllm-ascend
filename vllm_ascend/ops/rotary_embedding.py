@@ -17,6 +17,7 @@
 
 import math
 import os
+from typing import cast
 
 import torch
 import torch_npu
@@ -443,6 +444,10 @@ class _AscendScaledRopeMixin:
     rejects.
     """
 
+    # Built by the `RotaryEmbedding` subclass this is mixed into. Declared so
+    # the mixin type-checks on its own, since nothing it inherits provides it.
+    cos_sin_cache: torch.Tensor
+
     def _init_ascend_rope(self) -> None:
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
@@ -457,8 +462,11 @@ class _AscendScaledRopeMixin:
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,
     ):
+        # The delegate reads only what any `RotaryEmbedding` carries plus
+        # `use_mtp`, which `_init_ascend_rope` sets, so the cast asserts a
+        # contract the mixin satisfies without inheriting from it.
         return AscendRotaryEmbedding.forward_oot(
-            self,
+            cast(AscendRotaryEmbedding, self),
             positions,
             query,
             key,
