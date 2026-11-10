@@ -1,8 +1,21 @@
+{% macro ci_labels() -%}
+ci.vllm.ai/managed-by: lws-cleanup
+ci.vllm.ai/repository-id: {{ ci_repository_id | tojson }}
+ci.vllm.ai/run-id: {{ ci_run_id | tojson }}
+ci.vllm.ai/run-attempt: {{ ci_run_attempt | tojson }}
+ci.vllm.ai/task-id: {{ lws_name | default("vllm") | tojson }}
+{%- endmacro %}
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
   name: {{ lws_name | default("vllm") }}
-  namespace: vllm-project
+  namespace: {{ k8s_namespace | default("vllm-project") | tojson }}
+{% if ci_repository_id is defined %}
+  labels:
+{{ ci_labels() | indent(4, true) }}
+  annotations:
+    ci.vllm.ai/repository: {{ ci_repository | tojson }}
+{% endif %}
 spec:
   replicas: {{ replicas | default(1) }}
   leaderWorkerTemplate:
@@ -15,6 +28,9 @@ spec:
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
           ascend-ci.com/npu-resource-domain: "huawei.com"
           ascend-ci.com/npu-resource-model: "ascend-1980"
+{% if ci_repository_id is defined %}
+{{ ci_labels() | indent(10, true) }}
+{% endif %}
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -155,6 +171,9 @@ spec:
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
           ascend-ci.com/npu-resource-domain: "huawei.com"
           ascend-ci.com/npu-resource-model: "ascend-1980"
+{% if ci_repository_id is defined %}
+{{ ci_labels() | indent(10, true) }}
+{% endif %}
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -286,7 +305,13 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ lws_name | default("vllm") }}-leader
-  namespace: vllm-project
+  namespace: {{ k8s_namespace | default("vllm-project") | tojson }}
+{% if ci_repository_id is defined %}
+  labels:
+{{ ci_labels() | indent(4, true) }}
+  annotations:
+    ci.vllm.ai/repository: {{ ci_repository | tojson }}
+{% endif %}
 spec:
   ports:
     - name: http

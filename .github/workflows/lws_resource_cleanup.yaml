@@ -1,0 +1,90 @@
+name: LWS Resource Cleanup
+
+on:
+  workflow_run:
+    workflows: [Nightly-A2, Nightly-A3, Nightly-A5, Weekly-A3]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: Hardware cluster to scan for this repository's completed runs
+        type: choice
+        required: true
+        options: [a2, a3, a5]
+      dry_run:
+        description: Report eligible resources without deleting them
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cleanup:
+    name: Clean up ${{ matrix.cluster }} resources
+    strategy:
+      matrix:
+        # Start one job in the triggering workflow's cluster, or the manual selection.
+        cluster: >-
+          ${{ github.event_name == 'workflow_dispatch'
+              && fromJSON(format('["{0}"]', inputs.cluster))
+              || fromJSON('{"Nightly-A2":["a2"],"Nightly-A3":["a3"],"Nightly-A5":["a5"],"Weekly-A3":["a3"]}')[github.event.workflow_run.name] }}
+    # Each invocation scans all managed runs in this hardware cluster. A newer
+    # deleting invocation can cover one it replaces; dry-run only reports resources.
+    concurrency:
+      group: lws-resource-cleanup-${{ matrix.cluster }}
+      cancel-in-progress: false
+    runs-on: >-
+      ${{ fromJSON('{
+          "a2":"linux-amd64-cpu-8-hk",
+          "a3":"linux-aarch64-a3-800t-0",
+          "a5":"linux-aarch64-a5-0"
+          }')[matrix.cluster] }}
+    timeout-minutes: 10
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - name: Checkout trusted cleanup code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Decode kubeconfig
+        env:
+          KUBECONFIG_DATA: >-
+            ${{ secrets[fromJSON('{
+                "a2":"KUBECONFIG_HK_001_INTERNAL_B64",
+                "a3":"KUBECONFIG_B64",
+                "a5":"KUBECONFIG_A5_B64"
+                }')[matrix.cluster]] }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KUBECONFIG_DATA" ]; then
+            echo "::error::Missing kubeconfig for cleanup cluster ${{ matrix.cluster }}"
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KUBECONFIG_DATA" | base64 -d > "$RUNNER_TEMP/lws-cleanup-kubeconfig"
+
+      - name: Clean up resources from completed runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KUBECONFIG: ${{ runner.temp }}/lws-cleanup-kubeconfig
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          options=()
+          if [ "$DRY_RUN" = true ]; then
+            options+=(--dry-run)
+          fi
+          python3 .github/workflows/scripts/lws_cleanup.py sweep \
+            --repository "$GITHUB_REPOSITORY" --repository-id "$GITHUB_REPOSITORY_ID" "${options[@]}"
+
+      - name: Remove temporary credentials
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/lws-cleanup-kubeconfig"
