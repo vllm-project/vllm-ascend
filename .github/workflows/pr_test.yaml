@@ -815,14 +815,34 @@ jobs:
         uses: actions/checkout@v7
 
       - name: CODEOWNERS coverage check
+        env:
+          COVERAGE_ERRORS_OUT: ${{ runner.temp }}/coverage_errors.txt
         run: python3 .github/workflows/scripts/codeowner_gate.py check-coverage
 
       - name: CODEOWNERS approval check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
+          APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
         run: |
           python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
             --pr "${{ github.event.pull_request.number }}"
+
+      - name: Upload gate details for the comment bot
+        # Per-PR details for the failure comment: which files lack an owner
+        # (no approval required) and which files are missing owner approvals
+        # (with the exact owners to ask). Always uploaded so the bot can read
+        # empty lists too.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeowner-details-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/unclaimed_files.txt
+            ${{ runner.temp }}/approval_failures.txt
+            ${{ runner.temp }}/coverage_errors.txt
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
@@ -878,9 +898,25 @@ jobs:
             if [ "${OWNER_RESULT}" != "success" ]; then
               fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners (a dismissed review also re-opens the gate). See the codeowner-approval job for details."
             fi
-            PREV_CONCLUSION="$(gh api \
-              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?check_name=ci-gate" \
-              --jq '[.check_runs[] | select(.conclusion != null)][-1].conclusion // "none"')"
+          PREV_FILE="${RUNNER_TEMP}/prev_conclusion.txt"
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+              f"/commits/{os.environ['HEAD_SHA']}/check-runs?check_name=ci-gate",
+              headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              data = json.load(response)
+          concluded = [c for c in data.get("check_runs", []) if c.get("conclusion")]
+          with open(os.environ["PREV_FILE"], "w") as f:
+              f.write(concluded[-1]["conclusion"] if concluded else "none")
+          PY
+          PREV_CONCLUSION="$(cat "${PREV_FILE}")"
             if [ "${PREV_CONCLUSION}" != "success" ]; then
               fail "A review was submitted, but CI for this commit has not passed yet (previous ci-gate conclusion: ${PREV_CONCLUSION}). Waiting for CI or fixing failures does not require a re-review."
             fi
@@ -932,7 +968,7 @@ jobs:
               echo "=== CI Gate: PASSED ==="
               exit 0
             fi
-            fail "This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge. Fix: a maintainer adds exactly one label - 'ready-precise' (recommended), 'ready-all', or 'main2main'; the workflow reruns automatically once the label is added."
+            fail "This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge. Fix: a maintainer adds the 'ready-precise' label; the workflow reruns automatically once the label is added."
           fi
 
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
@@ -953,7 +989,7 @@ jobs:
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
-              fail "This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge.${MATCHED_MODULES:+ Affected modules: ${MATCHED_MODULES}.} Fix: a maintainer adds exactly one label - 'ready-precise' (recommended), 'ready-all', or 'main2main'."
+              fail "This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge.${MATCHED_MODULES:+ Affected modules: ${MATCHED_MODULES}.} Fix: a maintainer adds the 'ready-precise' label."
             fi
             if [ "${TESTS_RESULT}" != "success" ]; then
               if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; then

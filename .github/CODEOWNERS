@@ -63,7 +63,7 @@
 # /vllm_ascend/attention/attention_mask.py
 # /vllm_ascend/attention/attention_v1.py
 /vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
-# /vllm_ascend/attention/fa_v1.py
+/vllm_ascend/attention/fa_v1.py @jiajinzhu2
 /vllm_ascend/attention/fa3_v1.py @Ronald1995
 # /vllm_ascend/attention/flashmla.py
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
@@ -119,7 +119,6 @@
 # scheduler
 /vllm_ascend/core @DavidJiang9
 /vllm_ascend/core/recompute_scheduler.py @nwpu-zxr
-/vllm_ascend/core/scheduler_profiling_chunk.py @weiguihua2
 
 # kv cache
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
@@ -183,9 +182,7 @@
 /vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/models/glm5next @lijiahang226
 /vllm_ascend/models/glm5_dspark.py @lijiahang226
-/vllm_ascend/models/kimi_k3.py @Dawn952
-/vllm_ascend/models/kimi_k3_mtp.py @Dawn952
-/vllm_ascend/models/kimi_k3_dspark.py @Dawn952
+/vllm_ascend/models/kimi_k3 @Dawn952
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py

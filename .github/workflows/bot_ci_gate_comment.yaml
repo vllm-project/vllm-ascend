@@ -46,7 +46,9 @@ concurrency:
 
 jobs:
   comment:
-    if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
+    # Only runs that actually produced a verdict are interesting; cancelled
+    # / timed_out / skipped runs have no gate result worth commenting on.
+    if: ${{ contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Download gate result artifact
@@ -57,6 +59,17 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: result
 
+      - name: Download unclaimed-file list artifact
+        # May not exist on runs older than the artifact's introduction; the
+        # comment simply omits the unclaimed section then.
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: codeowner-unclaimed-${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: unclaimed
+        continue-on-error: true
+
       - name: Post or remove the failure comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,15 +79,23 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import sys
           import urllib.request
 
-          with open("result/ci-gate-result.json") as f:
-              result = json.load(f)
+          # The gate result artifact is missing when the run was cancelled
+          # before packaging; nothing to comment in that case.
+          try:
+              with open("result/ci-gate-result.json") as f:
+                  result = json.load(f)
+          except FileNotFoundError:
+              print("no gate result artifact (run cancelled?); skipping")
+              sys.exit(0)
 
           repo = os.environ["GITHUB_REPOSITORY"]
           token = os.environ["GH_TOKEN"]
           pr = result["pr"]
           conclusion = result["conclusion"]
+          head_sha = result.get("head_sha")
           reason = result.get("reason") or (
               "ci-gate failed; open the workflow run for the detailed log."
           )
@@ -96,11 +117,42 @@ jobs:
                   data = response.read()
                   return json.loads(data) if data else {}
 
-          comments = api(f"/repos/{repo}/issues/{pr}/comments?per_page=100")
-          old_id = next(
-              (c["id"] for c in comments if c.get("body", "").startswith(marker)),
-              None,
-          )
+          # Staleness guard: `workflow_run` fires for runs of ANY commit on
+          # this PR. If newer commits were pushed while this run was in
+          # flight, its verdict is outdated - acting on it could delete a
+          # comment or state a failure that no longer applies to the
+          # current head. Newer runs will handle the current head instead.
+          current_head = api(f"/repos/{repo}/pulls/{pr}")["head"]["sha"]
+          if head_sha and current_head != head_sha:
+              print(f"result is for stale head {head_sha[:7]} "
+                    f"(current: {current_head[:7]}); skipping")
+              sys.exit(0)
+
+          # Find the previous failure comment (hidden marker). Comments are
+          # paginated: a busy PR can push the marker comment past page 1.
+          old_id = None
+          url = f"/repos/{repo}/issues/{pr}/comments?per_page=100"
+          while url and old_id is None:
+              request = urllib.request.Request(
+                  f"https://api.github.com{url}",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  comments = json.load(response)
+                  link = response.headers.get("Link", "")
+              for comment in comments:
+                  if comment.get("body", "").startswith(marker):
+                      old_id = comment["id"]
+                      break
+              nxt = None
+              for part in link.split(","):
+                  segment = part.strip()
+                  if segment.endswith('rel="next"'):
+                      nxt = segment[segment.index("<") + 1 : segment.index(">")]
+              url = nxt[len("https://api.github.com"):] if nxt else None
 
           if conclusion == "success":
               if old_id:
@@ -108,21 +160,58 @@ jobs:
                   print("gate passed; removed stale failure comment")
               else:
                   print("gate passed; no failure comment to remove")
-          else:
-              body = (
-                  f"{marker}\n"
-                  "**ci-gate failed.** Reason:\n\n"
-                  f"> {reason}\n\n"
-                  f"See the [workflow run]({run_url}) for full logs. This "
-                  "comment is deleted and re-posted on each new failure and "
-                  "removed once the gate passes."
+              sys.exit(0)
+
+          body = (
+              f"{marker}\n"
+              "**ci-gate failed.** Reason:\n\n"
+              f"> {reason}\n\n"
+              f"See the [workflow run]({run_url}) for full logs. This "
+              "comment is deleted and re-posted on each new failure and "
+              "removed once the gate passes."
+          )
+          # Per-file CODEOWNERS details: files still missing owner
+          # approvals (with the exact owners to ask) and files with no
+          # owner at all (no approval required for them).
+          def read_detail(name):
+              try:
+                  with open(f"details/{name}") as f:
+                      return [line.strip() for line in f if line.strip()]
+              except OSError:
+                  return []
+
+          coverage_errors = read_detail("coverage_errors.txt")
+          if coverage_errors:
+              listing = "\n".join(f"- {line}" for line in coverage_errors)
+              body += (
+                  "\n\n**CODEOWNERS health issues** (these block every "
+                  "PR until fixed):\n"
+                  f"{listing}"
               )
-              # Delete the previous failure comment (if any), then post a
-              # fresh one at the bottom of the timeline so it is visible and
-              # notifies participants.
-              if old_id:
-                  api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
-              api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
-                  payload={"body": body})
-              print(f"posted failure comment on PR {pr}")
+          approval_failures = read_detail("approval_failures.txt")
+          if approval_failures:
+              listing = "\n".join(f"- {line}" for line in approval_failures)
+              body += (
+                  "\n\n**Missing owner approvals.** Every changed file "
+                  "needs one approval from its CODEOWNERS owner(s):\n"
+                  f"{listing}"
+              )
+          unclaimed = read_detail("unclaimed_files.txt")
+          if unclaimed:
+              listing = "\n".join(f"- `{path}`" for path in unclaimed)
+              body += (
+                  f"\n\n**Unclaimed modules touched ({len(unclaimed)} "
+                  "files).** These files have no CODEOWNERS owner yet, so "
+                  "no approval is required for them; maintainers will "
+                  f"handle claiming:\n{listing}"
+              )
+
+          # Delete the previous failure comment (if any), then post a fresh
+          # one at the bottom of the timeline so it is visible and notifies
+          # participants.
+          if old_id:
+              api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
+          api(f"/repos/{repo}/issues/{pr}/comments", method="POST",
+              payload={"body": body})
+          print(f"posted failure comment on PR {pr}")
           PY

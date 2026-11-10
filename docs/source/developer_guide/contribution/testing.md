@@ -451,10 +451,11 @@ owners before the PR can merge. Key points:
   (a `workflow_run` bot running in the base repository context), so it works
   for fork PRs too - the gate job itself only has a read-only token on fork
   PRs and never posts comments directly.
-- The gate also runs a CODEOWNERS health check: a tracked file without any
-  owner entry, or an entry pointing at a deleted/renamed path, fails the gate
-  for everyone. If your change adds, removes, or renames files, update
-  `.github/CODEOWNERS` in the same PR.
+- The gate also runs a CODEOWNERS health check. Entries pointing at a
+  deleted/renamed path fail the gate for everyone - if your change removes or
+  renames files, update `.github/CODEOWNERS` in the same PR. Files without an
+  owner yet are reported as non-blocking warnings (unclaimed modules are
+  handled by maintainers at their own pace).
 - Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
   deliberately unowned and do not require an owner approval.
 - If an owner is unresponsive, contact the module's other owners or a

@@ -226,7 +226,10 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
     data = gh_api("repos/{owner}/{repo}/pulls/{pr}/reviews", pr=pr_number)
     latest: dict[str, str] = {}
     for review in data:
-        user = review["user"]["login"]
+        # `user` is null for reviews by deleted/ghost accounts; skip them.
+        user = (review.get("user") or {}).get("login")
+        if not user:
+            continue
         if review["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             latest[user] = review["state"]
     return latest
@@ -234,13 +237,23 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
 
 def check_approvals(
     pr_number: int, pr_author: str, rules: list[Rule], files: list[str], reviews: dict[str, str]
-) -> list[str]:
-    """Return list of failures (empty means pass)."""
+) -> tuple[list[str], list[str]]:
+    """Gate on owner approvals.
+
+    Returns ``(failures, unclaimed)``. Unclaimed files (no CODEOWNERS owner
+    at all) are NOT gate failures by policy: nobody can approve them, and
+    maintainers handle claiming at their own pace. The caller surfaces them
+    as a notice (PR comment / warnings) instead.
+    """
     failures = []
+    unclaimed = []
     for path in files:
         owners, skipped = resolve_owners(rules, path)
         if skipped:
             # Deliberately unowned path (SKIP(owner)): no approval required.
+            continue
+        if not owners:
+            unclaimed.append(path)
             continue
         # A pending "changes requested" from any owner of the file (excluding
         # the PR author) blocks it even when another owner approved; the
@@ -258,16 +271,13 @@ def check_approvals(
             continue
         eligible = [o for o in owners if o.lstrip("@") != pr_author]
         approved = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"]
-        if not owners:
-            failures.append(f"{path}: no CODEOWNERS owner matches this file")
-            continue
         if not eligible:
             failures.append(
                 f"{path}: only owner is the PR author ({pr_author}); another owner must be added to CODEOWNERS"
             )
         elif not approved:
             failures.append(f"{path}: waiting for approval from one of: {', '.join(eligible)}")
-    return failures
+    return failures, unclaimed
 
 
 def list_tracked_files(repo_root: str) -> list[str]:
@@ -289,15 +299,22 @@ def is_contentless_file(path: str) -> bool:
         return False
 
 
-def check_coverage(rules: list[Rule], tracked: list[str]) -> list[str]:
-    """CODEOWNERS health: real ownership of tracked files + stale entries.
+def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], list[str]]:
+    """CODEOWNERS health: ownership of tracked files + stale entries.
 
-    Strict mode: a file whose resolved owner set is empty fails the check,
-    even when an ownerless TODO entry nominally covers it - an entry without
-    owners means nobody is accountable. Exempt: ``SKIP(owner)`` paths and
-    contentless (zero-byte) files such as empty ``__init__.py``.
+    Returns ``(errors, warnings)``:
+
+    - **warning**: a file resolves to no owner (unclaimed module). These do
+      not block CI - maintainers handle them at their own pace.
+    - **error** (blocking): a stale entry (rule points at a deleted/renamed
+      path, glob with zero hits) or an active entry without owners (GitHub
+      ignores those silently, so they hide real gaps).
+
+    ``SKIP(owner)`` paths and contentless (zero-byte) files such as empty
+    ``__init__.py`` are exempt from both.
     """
-    failures = []
+    errors: list[str] = []
+    warnings: list[str] = []
 
     for path in tracked:
         if path == CODEOWNERS_PATH or is_contentless_file(path):
@@ -305,21 +322,19 @@ def check_coverage(rules: list[Rule], tracked: list[str]) -> list[str]:
         owners, skipped = resolve_owners(rules, path)
         if skipped or owners:
             continue
-        failures.append(f"file has no CODEOWNERS owner: {path}")
+        warnings.append(f"file has no CODEOWNERS owner: {path}")
 
     tracked_set = set(tracked)
     for rule in rules:
         if rule.status != "active":
             continue
         if not rule.owners:
-            failures.append(
-                f"CODEOWNERS entry has no owner and is ignored by GitHub (line {rule.line}): /{rule.pattern}"
-            )
+            errors.append(f"CODEOWNERS entry has no owner and is ignored by GitHub (line {rule.line}): /{rule.pattern}")
             continue
         hit = any(pattern_matches(rule.pattern, path) for path in tracked_set)
         if not hit:
-            failures.append(f"stale CODEOWNERS entry (line {rule.line}): /{rule.pattern} matches no tracked file")
-    return failures
+            errors.append(f"stale CODEOWNERS entry (line {rule.line}): /{rule.pattern} matches no tracked file")
+    return errors, warnings
 
 
 def load_reviews_from_file(path: str) -> dict[str, str]:
@@ -362,7 +377,17 @@ def main() -> int:
             if not args.author:
                 pr_data = gh_api("repos/{owner}/{repo}/pulls/{pr}", pr=args.pr)
                 args.author = pr_data["user"]["login"]
-        failures = check_approvals(args.pr or 0, args.author, rules, files, reviews)
+        failures, unclaimed = check_approvals(args.pr or 0, args.author, rules, files, reviews)
+        out = os.environ.get("UNCLAIMED_OUT")
+        if out is not None:
+            with open(out, "w") as f:
+                f.write("\n".join(unclaimed))
+        detail_out = os.environ.get("APPROVAL_FAILURES_OUT")
+        if detail_out is not None:
+            with open(detail_out, "w") as f:
+                f.write("\n".join(failures))
+        for path in unclaimed:
+            print(f"  ::warning::{path}: no CODEOWNERS owner yet; no approval required")
         if failures:
             print("codeowner approval check FAILED:")
             for failure in failures:
@@ -376,13 +401,21 @@ def main() -> int:
             tracked = load_files_from_file(args.files_json)
         else:
             tracked = list_tracked_files(args.repo_root)
-        failures = check_coverage(rules, tracked)
-        if failures:
+        errors, warnings = check_coverage(rules, tracked)
+        cov_out = os.environ.get("COVERAGE_ERRORS_OUT")
+        if cov_out is not None:
+            with open(cov_out, "w") as f:
+                f.write("\n".join(errors))
+        for warning in warnings:
+            # Unclaimed files do not block CI (::warning shows in the job
+            # summary); maintainers claim them at their own pace.
+            print(f"  ::warning::{warning}")
+        if errors:
             print("codeowner coverage check FAILED:")
-            for failure in failures:
+            for failure in errors:
                 print(f"  ::error::{failure}")
             return 1
-        print(f"codeowner coverage check PASSED ({len(tracked)} files)")
+        print(f"codeowner coverage check PASSED ({len(tracked)} files, {len(warnings)} unclaimed-file warnings)")
         return 0
 
     return 2
