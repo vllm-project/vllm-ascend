@@ -80,19 +80,6 @@ def _build_packed_cache_slot_mapping_kernel(
     tl.store(coordinates_ptr + tokens * 2 + 1, rows, mask=mask)
 
 
-def supports_packed_slot_mapping(compress_ratio: int, has_positions: bool) -> bool:
-    """Return whether the fused kernel can serve this cache group.
-
-    The kernel only implements the ratio-1 and ratio-2 cache planes. Ratio 1
-    ignores token positions entirely, while ratio 2 reads them for the
-    completion test, so a ratio-2 group without positions has to stay on the
-    eager chain.
-    """
-    if compress_ratio == 1:
-        return True
-    return compress_ratio == 2 and has_positions
-
-
 def build_packed_cache_slot_mapping(
     slots: torch.Tensor,
     positions: torch.Tensor,

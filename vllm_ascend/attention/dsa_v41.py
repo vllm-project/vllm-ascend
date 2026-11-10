@@ -45,9 +45,6 @@ from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.ops.triton.packed_cache_slot_mapping import (
     build_packed_cache_slot_mapping as _fused_packed_slot_mapping,
 )
-from vllm_ascend.ops.triton.packed_cache_slot_mapping import (
-    supports_packed_slot_mapping as _fused_packed_slot_mapping_supported,
-)
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -1165,9 +1162,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 # Whether this cache group fits the kernel is the kernel's own
                 # contract, not a platform gate: the entry keeps the device
                 # check, and the kernel reports which shapes it can serve.
-                if active_slots.device.type == "npu" and _fused_packed_slot_mapping_supported(
-                    plane_ratio, req.positions is not None
-                ):
+                # The kernel implements the ratio-1 and ratio-2 planes only.
+                # Ratio 1 never reads positions, while ratio 2 reads them for
+                # the completion test, so a ratio-2 group without positions has
+                # to stay on the eager chain.
+                fused_slot_mapping_supported = plane_ratio in (1, 2) and (plane_ratio == 1 or req.positions is not None)
+                if active_slots.device.type == "npu" and fused_slot_mapping_supported:
                     prepared_slots, prepared_flat_slots = _fused_packed_slot_mapping(
                         active_slots,
                         # Ratio 1 never dereferences positions; the slot ids only
@@ -1438,29 +1438,6 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
                         torch.zeros_like(input_positions),
                     )
                 )
-                if full_source_cos is not None and full_source_sin is not None:
-                    gather_idx = (
-                        self._c2_source_positions[: req.num_input_tokens]
-                        .reshape(-1, 1, 1, 1)
-                        .expand(
-                            req.num_input_tokens,
-                            1,
-                            1,
-                            full_source_cos.shape[-1],
-                        )
-                    )
-                    torch.gather(
-                        full_source_cos,
-                        0,
-                        gather_idx,
-                        out=self._c2_source_cos[: req.num_input_tokens],
-                    )
-                    torch.gather(
-                        full_source_sin,
-                        0,
-                        gather_idx,
-                        out=self._c2_source_sin[: req.num_input_tokens],
-                    )
 
             self._publish_task(
                 self.common_v41_metadata,
