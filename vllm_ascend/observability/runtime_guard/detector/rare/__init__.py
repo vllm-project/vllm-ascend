@@ -34,7 +34,13 @@ PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 TABLES_DIR = os.path.join(PKG_DIR, "tables")
 CONFIG_RC4 = os.path.join(PKG_DIR, "rc4.json")
 
-from .rare_vocab import THINK_END  # noqa: E402
+from .rare_vocab import (  # noqa: E402
+    THINK_END,
+    build_from_token_bytes,
+    build_from_tokenizer,
+    register as register_rare_table,
+    resolve_think_end_id,
+)
 
 __all__ = [
     "CONFIG_RC4",
@@ -44,4 +50,8 @@ __all__ = [
     "Result",
     "TABLES_DIR",
     "THINK_END",
+    "build_from_token_bytes",
+    "build_from_tokenizer",
+    "register_rare_table",
+    "resolve_think_end_id",
 ]

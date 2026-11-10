@@ -3,10 +3,11 @@ entries:
   - category: performance
     text: >-
       rare_chars collects top-1 and chosen logprobs without a host sync before
-      the sampler returns. Sampled ids stay on device, the pair is copied with
-      the token ids, and one rc4 step scores every live request together.
-  - category: performance
+      the sampler returns. Each step's device pair is attached to that step's
+      AscendAsyncOutput; collect-wait, pair D2H, and rc4 feed run on a dedicated
+      wait queue so get_output only submits.
+  - category: feature
     text: >-
-      rare_chars collect-wait, pair D2H, and rc4 feed run on a dedicated wait
-      queue so get_output only submits (does not issue the pair copy). Request
-      finish flushes look-ahead only after those jobs drain.
+      rare_chars builds its per-tokenizer table at model warmup (table=auto)
+      instead of shipping qwen3/glm/dsv4 npz blobs; the shared rc4_gb model
+      remains packaged. rare_feed_native is built by setup.py / CMake.

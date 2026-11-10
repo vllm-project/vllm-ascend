@@ -171,6 +171,12 @@ class DetectorManager:
             return bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
         return bool(self._rare_chars_det.enabled)
 
+    def warmup_rare_chars(self, tokenizer: Any | None = None) -> None:
+        """Build rare_chars tables from the served tokenizer (no-op when disabled)."""
+        if not self.rare_chars_enabled():
+            return
+        self._rare_chars_det.warmup(tokenizer)
+
     def check_after_spec(
         self,
         sampled_tokens: Any,
