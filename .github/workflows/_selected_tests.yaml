@@ -279,32 +279,32 @@ jobs:
           GIT_PROXY: https://gh-proxy.test.osinfra.cn/
         run: |
           set -euo pipefail
-          FLA_VERSION=26.9.1+deva4a7958
-          FLA_RELEASE_TAG=v26.9.1-beta2
+          FLA_VERSION=26.9.1
+          FLA_RELEASE_TAG=v26.9.1-release
           case "$NPU_TYPE:$(uname -m)" in
             a2:aarch64)
               FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-              FLA_SHA256=7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a
+              FLA_SHA256=aefe29fe3f021db45276b289b1f9882f85a34ce1f9900ba94251bda490af4b6e
               ;;
             a2:x86_64)
               FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"
-              FLA_SHA256=c51b11871b5e8a66b6a0612ef95ea446fd96ba3d8d02b693d93a7b7b5f1b1d0f
+              FLA_SHA256=411927b9544c60f5f396d5e4e1450766f253e30fc3e2f54f2e29fbe2033fcb13
               ;;
             a3:aarch64)
               FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-              FLA_SHA256=6a6f298a23fbc4902e8379a469696bca1cce108db8159d9c5bf6dfe819a22d58
+              FLA_SHA256=0e0febfe0b524df54c02dead985b787cf51f276ef904e4c2f88c5d43707a370b
               ;;
             a3:x86_64)
               FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"
-              FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
+              FLA_SHA256=18b8c9d54eadbefb264fd5989577e3bbdb6f2e5cfc8d60d86a0887f2d8a2f26a
               ;;
             a5:aarch64)
               FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-              FLA_SHA256=014ccd0cce4f21f4b030341a42e6be3065c2e6a436e7595e629de9d5c0547c48
+              FLA_SHA256=c660b90cee1d93c83292bb9b8509371da83493a633efd3e5113f70380d373521
               ;;
             a5:x86_64)
               FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"
-              FLA_SHA256=2f7eef7be3cafdda698f533063dea67bf581fd6837488304c0f5f1a5e67a2fd8
+              FLA_SHA256=f8be7c724050b6b197ad1b90105ab90e01907d3aa9106abd43ee1026782f2aa5
               ;;
             *)
               echo "::error::Unsupported FLA NPU target: $NPU_TYPE:$(uname -m)"
@@ -348,9 +348,9 @@ jobs:
           set -euo pipefail
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          FLA_WHL=flash_linear_attention_npu_a3-26.9.1+deva4a7958-py3-none-manylinux_2_34_x86_64.whl
-          FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
-          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
+          FLA_WHL=flash_linear_attention_npu_a3-26.9.1-py3-none-manylinux_2_34_x86_64.whl
+          FLA_SHA256=18b8c9d54eadbefb264fd5989577e3bbdb6f2e5cfc8d60d86a0887f2d8a2f26a
+          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-release/$FLA_WHL"
           if [ -n "${GIT_PROXY:-}" ]; then
             FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
           fi
