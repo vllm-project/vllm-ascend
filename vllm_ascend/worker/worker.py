@@ -698,9 +698,14 @@ class NPUWorker(WorkerBase):
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
-        )
+        if self.vllm_config.attention_config.hisparse_config is None:
+            profile_result.non_kv_cache_memory = (
+                profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
+            )
+        else:
+            # Reuse Core's measured total, including owners retained from an
+            # earlier profile. Preserve this authority for startup suggestions.
+            self._hisparse_profiled_non_kv_memory = profile_result.non_kv_cache_memory
 
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.peak_activation_memory = profile_result.torch_peak_increase
@@ -1023,6 +1028,8 @@ class NPUWorker(WorkerBase):
                 + self.non_torch_memory
                 + npugraph_memory_bytes
             )
+            if self.vllm_config.attention_config.hisparse_config is not None:
+                non_kv_memory = self._hisparse_profiled_non_kv_memory + npugraph_memory_bytes
             self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer

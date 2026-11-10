@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -14,6 +15,51 @@ from vllm.v1.hisparse.backend import HiSparseBackend
 if TYPE_CHECKING:
     from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _allocate_resolver_workspace(runtime: HiSparseRuntime):
+    from vllm_ascend.hisparse.cache_ops import ResolverWorkspace
+
+    return ResolverWorkspace(
+        max_rows=runtime.max_swap_rows,
+        hot_size=runtime.region_stride,
+        max_union_rows=runtime.max_union_rows,
+        device=runtime.device,
+        max_topk=runtime.index_group.shared_topk.device_topk_rows.shape[1],
+    )
+
+
+def _allocate_attention_lengths(runtime: HiSparseRuntime) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if runtime.kv_dtype != torch.float8_e4m3fn:
+        return None
+    return (
+        torch.arange(runtime.max_swap_rows + 1, dtype=torch.int32, device=runtime.device),
+        torch.empty((1,), dtype=torch.int32, device=runtime.device),
+    )
+
+
+def prepare_hisparse_workspaces(runtimes: Iterable[HiSparseRuntime]) -> None:
+    """Create real next-binding storage inside the existing profile scope.
+
+    Core fixes group geometry when loading the model. Retain one scratch owner
+    per actual group, and fresh C8 lengths for each consumed binding generation.
+    """
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    manager = current_workspace_manager()
+    for runtime in runtimes:
+        group = runtime.index_group
+        workspace = getattr(group, "_ascend_profiled_resolver", None)
+        if workspace is None:
+            # Identity, not shape, separates groups. The manager key does not
+            # retain the runtime or any Host-pool/Graph owner.
+            key = ("ascend_hisparse_resolver", object())
+            workspace = manager.get_persistent_resource(
+                key, lambda runtime=runtime: _allocate_resolver_workspace(runtime)
+            )
+            group._ascend_profiled_resolver = workspace
+        if not hasattr(runtime, "_ascend_profiled_cache_ops"):
+            runtime._ascend_profiled_cache_ops = workspace, _allocate_attention_lengths(runtime)
 
 
 class _CaptureAwareStream(torch.Stream):
@@ -102,20 +148,15 @@ class AscendHiSparseBackend(HiSparseBackend):
         del tensor._hisparse_registration
 
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
-        from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, ResolverWorkspace
+        from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps
 
         group = runtime.index_group
         # Runtime copied the model group's stream reference at layer creation.
         # Adapt the live runtime binding before any graph captures use it.
         group.copy_stream = capture_aware_stream(group.copy_stream)
+        prepared = getattr(runtime, "_ascend_profiled_cache_ops", None)
         if runtime is group.leader:
-            workspace = ResolverWorkspace(
-                max_rows=runtime.max_swap_rows,
-                hot_size=runtime.region_stride,
-                max_union_rows=runtime.max_union_rows,
-                device=runtime.device,
-                max_topk=group.shared_topk.device_topk_rows.shape[1],
-            )
+            workspace = prepared[0] if prepared is not None else _allocate_resolver_workspace(runtime)
         else:
             leader_ops = group.leader.cache_ops
             if not isinstance(leader_ops, HiSparseNPUOps):
@@ -145,17 +186,19 @@ class AscendHiSparseBackend(HiSparseBackend):
             # values describe immutable geometry, not the current valid rows.
             # Prepare them before capture and retain them with this binding;
             # a rebind gets its own table and current physical KV span.
-            attention_lengths = (
-                torch.arange(workspace.max_rows + 1, dtype=torch.int32, device=runtime.device),
-                torch.full((1,), attention_view.shape[0], dtype=torch.int32, device=runtime.device),
-            )
-        return HiSparseNPUOps(
+            attention_lengths = prepared[1] if prepared is not None else _allocate_attention_lengths(runtime)
+            assert attention_lengths is not None
+            attention_lengths[1].fill_(attention_view.shape[0])
+        ops = HiSparseNPUOps(
             mapping,
             workspace,
             attention_capacity=attention_capacity,
             attention_block_stride=attention_block_stride,
             attention_lengths=attention_lengths,
         )
+        if prepared is not None:
+            del runtime._ascend_profiled_cache_ops
+        return ops
 
     def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
         from .binding import get_hisparse_indexer_specs
