@@ -30,19 +30,6 @@ config:
     tp_size: 1
     dp_address: "${NODE_1_IP}"
 
-kv_pool:
-      type: "mooncake"
-      master_port: 50088
-      metrics_port: 50089
-      config:
-        metadata_server: "P2PHANDSHAKE"
-        protocol: "ascend"
-        device_name: ""
-        global_segment_size: "1GB"
-        preferred_segment: false
-        prefer_alloc_in_same_node: true
-        enable_ssd_offload: false
-
 env_common: &env_common
   VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_USE_MODELSCOPE: "true"
@@ -90,7 +77,6 @@ templates:
       - --prefill-context-parallel-size
       - ${CP_SIZE}
       - --enable-expert-parallel
-      - --enable-prefix-caching
       - --seed
       - "1024"
       - --max-model-len
@@ -122,7 +108,8 @@ templates:
       - --additional-config
       - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - --kv-transfer-config
-      - '{"kv_connector": "MultiConnector","kv_role": "kv_producer","kv_connector_extra_config": {"connectors": [ {"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}, { "kv_connector": "AscendStoreConnector","kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "mooncake","lookup_rpc_port": 0}}]}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
+
   - node_index: 1
     envs:
       <<: *env_decode
@@ -174,7 +161,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MultiConnector","kv_role": "kv_consumer","kv_connector_extra_config": {"connectors": [ {"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}, { "kv_connector": "AscendStoreConnector","kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "mooncake","lookup_rpc_port": 1}}]}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
       - --additional-config
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
