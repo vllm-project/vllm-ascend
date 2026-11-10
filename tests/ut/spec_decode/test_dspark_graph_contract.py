@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionMetadata
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -28,7 +28,37 @@ class _BackendA:
         return object
 
 
-def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
+def test_dflash_capture_scopes_plans_to_each_forward(monkeypatch):
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = object()
+    metadata = AscendFlashAttentionMetadata()
+    attn_metadata = {"draft.0": metadata, "draft.1": metadata}
+    capturing = False
+    calls = []
+
+    def forward(*args):
+        assert args == (1, 8, attn_metadata, "slots", None, CUDAGraphMode.FULL)
+        calls.append(metadata.flash_attn_capture_cache)
+
+    def capture(self, wrapped, *args, **kwargs):
+        nonlocal capturing
+        for capturing in (False, True, True):
+            wrapped(1, 8, attn_metadata, "slots", None, CUDAGraphMode.FULL)
+            assert metadata.flash_attn_capture_cache is None
+
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
+    monkeypatch.setattr(aclgraph_module, "communicator_switch", nullcontext)
+    monkeypatch.setattr(aclgraph_module, "model_capture_wrapper", lambda *_args: nullcontext())
+    monkeypatch.setattr(DFlashCudaGraphManager, "capture", capture)
+    manager.capture(forward, None, None, [], None, 4096)
+    assert calls[0] is None
+    assert calls[1] is not None
+    assert calls[2] is not None
+    assert calls[1] is not calls[2]
+
+
+@pytest.mark.parametrize("num_reqs", [1, 2, 4])
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch, num_reqs):
     manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(
         attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
@@ -36,11 +66,17 @@ def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monke
     )
     replay = MagicMock(return_value=object())
     monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
-    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=24, num_reqs=3)
+    manager._graph_replay = MagicMock(side_effect=AssertionError("unexpected FIA task update"))
+    manager._updatable_graph_replay = MagicMock(side_effect=AssertionError("unexpected host graph update"))
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=num_reqs * 4, num_reqs=num_reqs)
 
-    assert manager.run_fullgraph(desc) is replay.return_value
-    replay.assert_called_once_with(desc)
+    for _ in range(3):
+        assert manager.run_fullgraph(desc) is replay.return_value
+    assert replay.call_count == 3
+    replay.assert_called_with(desc)
     manager.speculator.build_draft_attn_metadatas.assert_not_called()
+    manager._graph_replay.assert_not_called()
+    manager._updatable_graph_replay.assert_not_called()
 
 
 def _speculator(**attributes):

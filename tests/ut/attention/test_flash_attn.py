@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,7 +14,11 @@ from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
+from vllm_ascend.attention.fa_v1 import (
+    AscendFlashAttentionBackend,
+    AscendFlashAttentionImpl,
+    flash_attn_capture_context,
+)
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -226,9 +231,11 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
-def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+@pytest.mark.parametrize("enforce_eager", [True, False, None])
+def test_flash_attn_is_selected_for_a5_dflash2_eager_and_graph_drafts(select_flash_attn, dflash2_config, enforce_eager):
     select, profile = select_flash_attn
     config = dflash2_config
+    config.speculative_config.enforce_eager = enforce_eager
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
     profile.supports = lambda _: False
@@ -265,13 +272,11 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     [
         ("method", "eagle3"),
         ("method", "mtp"),
-        ("enforce_eager", False),
-        ("enforce_eager", None),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
 )
-def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
+def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
@@ -357,7 +362,8 @@ def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, cau
 
 
 @pytest.mark.parametrize("cpu_mirrors", [False, True])
-def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch, cpu_mirrors):
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch, cpu_mirrors, for_capture):
     from vllm_ascend.attention import fa_v1 as module
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
@@ -389,7 +395,10 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
     with monkeypatch.context() as patches:
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
-        result = builder.build_for_drafting(common, draft_index=0)
+        if for_capture:
+            result = builder.build_for_graph_capture(common, AscendAttentionState.ChunkedPrefill)
+        else:
+            result = builder.build_for_drafting(common, draft_index=0)
     assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
     assert result.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
     assert not result.causal
@@ -422,7 +431,72 @@ def test_metadata_builder_slices_request_extent():
     assert metadata.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
 
 
-def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
+@pytest.mark.parametrize("warmup", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkeypatch, warmup, scoped):
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
+
+    query = torch.zeros(12, 8, 128, dtype=torch.bfloat16)
+    impl = make_impl(query)
+    output = torch.empty_like(query)
+    metadata = AscendFlashAttentionMetadata(
+        query_start_loc_gpu=torch.tensor([0, 4, 8, -1], dtype=torch.int32),
+        seq_lens_gpu=torch.tensor([256, 254, 0], dtype=torch.int32),
+        block_tables=torch.zeros(3, 4, dtype=torch.int32),
+        max_query_len=4,
+        causal=False,
+    )
+    ops = SimpleNamespace(
+        flash_attn_metadata=Mock(side_effect=lambda *args, **kwargs: torch.empty(16, dtype=torch.int32)),
+        flash_attn=Mock(return_value=(query, None)),
+    )
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    if warmup:
+        impl.forward_impl(query, None, None, None, metadata, output)
+    eager_lengths = metadata.flash_attn_lengths
+    eager_plans = dict(metadata.flash_attn_plans)
+    ops.flash_attn_metadata.reset_mock()
+    ops.flash_attn.reset_mock()
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
+
+    def forbid_host_read(*args, **kwargs):
+        raise AssertionError("captured draft lengths must stay on device")
+
+    # Reuse the same metadata for independent captures, including a padded
+    # request disappearing after rejection. No producer may come from warmup
+    # or from the preceding capture.
+    previous_plans = {id(plan) for plan, _attrs in eager_plans.values()}
+    for boundaries, lengths in (([0, 4, 8, -1], [253, 251, 0]), ([0, 4, 4, -1], [250, 0, 0])):
+        tiling_start = ops.flash_attn_metadata.call_count
+        metadata.query_start_loc_gpu.copy_(torch.tensor(boundaries, dtype=torch.int32))
+        metadata.seq_lens_gpu.copy_(torch.tensor(lengths, dtype=torch.int32))
+        with monkeypatch.context() as patches:
+            for operation in ("tolist", "item", "cpu"):
+                patches.setattr(torch.Tensor, operation, forbid_host_read)
+            scope = flash_attn_capture_context({"draft.0": metadata, "draft.1": metadata}) if scoped else nullcontext()
+            with scope:
+                for _ in range(6):
+                    impl.forward_impl(query, None, None, None, metadata, output)
+        calls = ops.flash_attn_metadata.call_args_list[tiling_start:]
+        assert len(calls) == (1 if scoped else 6)
+        assert metadata.flash_attn_capture_cache is None
+        expected_boundaries = torch.tensor(boundaries, dtype=torch.int32).clamp(min=0).cummax(dim=0).values
+        expected_lengths = torch.tensor(lengths, dtype=torch.int32).clamp(min=1)
+        for call in calls:
+            torch.testing.assert_close(call.kwargs["cu_seqlens_q"], expected_boundaries)
+            torch.testing.assert_close(call.kwargs["seqused_kv"], expected_lengths)
+        captured_plans = {id(call.kwargs["metadata"]) for call in ops.flash_attn.call_args_list[-6:]}
+        assert len(captured_plans) == (1 if scoped else 6)
+        assert captured_plans.isdisjoint(previous_plans)
+        previous_plans.update(captured_plans)
+    assert ops.flash_attn.call_count == 12
+    assert metadata.flash_attn_lengths is eager_lengths
+    assert metadata.flash_attn_plans == eager_plans
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+def test_distinct_attention_geometries_do_not_share_plans(monkeypatch, capturing):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
     ops = SimpleNamespace(
@@ -430,6 +504,7 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
         flash_attn=Mock(side_effect=lambda query, *args, **kwargs: (query, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
     metadata = AscendFlashAttentionMetadata(
         query_start_loc_gpu=torch.tensor([0, 6], dtype=torch.int32),
         seq_lens_gpu=torch.tensor([256], dtype=torch.int32),
@@ -446,13 +521,31 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
         (8, 1, 128, 2048, "PA_BBND"),
         (8, 1, 128, None, "PA_BNBD"),
     ]
-    for _ in range(2):
-        for heads, kv_heads, dim, window, layout in geometries:
-            query = torch.empty(6, heads, dim)
-            impl = make_impl(query, num_kv_heads=kv_heads, window=window, layout=layout)
-            impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
+    with flash_attn_capture_context({"draft": metadata}):
+        for _ in range(2):
+            for heads, kv_heads, dim, window, layout in geometries:
+                query = torch.empty(6, heads, dim)
+                impl = make_impl(query, num_kv_heads=kv_heads, window=window, layout=layout)
+                impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
     assert ops.flash_attn_metadata.call_count == len(geometries)
     assert ops.flash_attn.call_count == 2 * len(geometries)
+
+
+def test_capture_cache_isolates_groups_and_restores_after_failure(monkeypatch):
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
+
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
+    first, second = AscendFlashAttentionMetadata(), AscendFlashAttentionMetadata()
+    with flash_attn_capture_context({"first": first, "first_alias": first, "second": second, "other": object()}):
+        outer = first.flash_attn_capture_cache
+        assert outer is not None
+        assert second.flash_attn_capture_cache is not outer
+        with pytest.raises(RuntimeError, match="capture failed"), flash_attn_capture_context({"first": first}):
+            assert first.flash_attn_capture_cache is not outer
+            raise RuntimeError("capture failed")
+        assert first.flash_attn_capture_cache is outer
+    assert first.flash_attn_capture_cache is None
+    assert second.flash_attn_capture_cache is None
 
 
 @pytest.mark.parametrize("backend", [AscendFlashAttentionBackend, AscendAttentionBackend], ids=["flash", "fia"])

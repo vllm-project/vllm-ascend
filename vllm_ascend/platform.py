@@ -1688,8 +1688,7 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> b
     target = spec.target_model_config
     if spec.method == "dflash":
         return (
-            bool(spec.enforce_eager)
-            and model_tag == "dflash_head"
+            model_tag == "dflash_head"
             and target.hf_text_config.model_type == "glm_moe_dsa"
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )

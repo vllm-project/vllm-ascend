@@ -15,7 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, flash_attn_capture_context
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
@@ -79,10 +79,17 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
         one the installed vLLM expects.
         """
+
+        def forward_with_capture_plans(num_reqs, num_tokens, attn_metadata, *args, **kwargs):
+            # Upstream invokes this once per warmup/captured forward. Allocate
+            # fresh caches even when it reuses metadata across capture sizes.
+            with flash_attn_capture_context(attn_metadata):
+                return forward_fn(num_reqs, num_tokens, attn_metadata, *args, **kwargs)
+
         prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
-                forward_fn,
+                forward_with_capture_plans,
                 input_buffers,
                 block_tables,
                 attn_groups,
