@@ -189,3 +189,100 @@ def test_prefill_singleton_column_mapping_tracks_current_residency():
                 )
         torch.testing.assert_close(gpu_rows.cpu().flatten(), expected, rtol=0, atol=0)
         torch.testing.assert_close(mask.cpu().flatten(), (expected < 0).int(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("pages,stride_rows", [(2, 128), (3, 136)])
+def test_profiled_workspace_rebind_preserves_prior_length_graphs(pages, stride_rows):
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    from vllm_ascend.hisparse.backend import capture_aware_stream
+    from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces as actual_prepare
+
+    prepare_hisparse_workspaces = torch.inference_mode()(actual_prepare)
+
+    if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
+        pytest.skip("HiSparse mapped-host owners currently target Ascend 950")
+    torch.npu.set_device(0)
+    device = torch.device("npu:0")
+    reset_workspace_manager()
+    init_workspace_manager(device)
+    backend = AscendHiSparseBackend()
+    backend.check_available()
+    host = allocate_mapped_host((4096,), torch.uint8)
+    registration = host._hisparse_registration
+    graphs = []
+
+    def runtime():
+        group = SimpleNamespace(
+            copy_stream=capture_aware_stream(torch.Stream(device=device)),
+            shared_topk=SimpleNamespace(device_topk_rows=torch.empty((4, 64), dtype=torch.int32, device=device)),
+        )
+        owner = SimpleNamespace(
+            index_group=group,
+            max_swap_rows=4,
+            region_stride=128,
+            max_union_rows=64,
+            device=device,
+            kv_dtype=torch.float8_e4m3fn,
+            registered_host_pool=host,
+        )
+        group.leader = owner
+        return owner
+
+    def bind(owner, count):
+        raw = torch.empty(count * stride_rows * 656, dtype=torch.float8_e4m3fn, device=device)
+        cache = raw.as_strided((count, 128, 656), (stride_rows * 656, 656, 1))
+        owner.hot = SimpleNamespace(cache=cache, attention_cache=cache, block_size=128)
+        owner.cache_ops = backend.create_cache_ops(owner)
+        return owner.cache_ops
+
+    def capture_lengths(ops):
+        query, key = ops.attention_lengths
+        q_out, k_out = torch.empty_like(query), torch.empty_like(key)
+        q_out.copy_(query)
+        k_out.copy_(key)
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        graphs.append(graph)
+        with torch.npu.graph(graph):
+            q_out.copy_(query)
+            k_out.copy_(key)
+        return graph, q_out, k_out
+
+    try:
+        first = runtime()
+        prepare_hisparse_workspaces([first])
+        pending = first._ascend_profiled_cache_ops
+        workspace = pending[0]
+        prepare_hisparse_workspaces([first])
+        assert first._ascend_profiled_cache_ops is pending
+        for tensor in (workspace.first_refs, workspace.errors, *pending[1]):
+            assert not torch.is_inference(tensor)
+        old = bind(first, pages)
+        assert old.workspace is workspace and not hasattr(first, "_ascend_profiled_cache_ops")
+        captured = [capture_lengths(old)]
+        prepare_hisparse_workspaces([first])
+        new = bind(first, pages + 1)
+        assert new.workspace is workspace
+        for tensor in new.attention_lengths:
+            assert not torch.is_inference(tensor)
+        assert new.attention_lengths[1].data_ptr() != old.attention_lengths[1].data_ptr()
+        captured.append(capture_lengths(new))
+        prepare_hisparse_workspaces([first])
+        third = bind(first, pages + 2)
+        assert third.workspace is workspace
+        for tensor in third.attention_lengths:
+            assert not torch.is_inference(tensor)
+        for index, (graph, q_out, k_out) in enumerate(captured):
+            graph.replay()
+            torch.npu.synchronize()
+            torch.testing.assert_close(q_out.cpu(), torch.arange(5, dtype=torch.int32))
+            torch.testing.assert_close(
+                k_out.cpu(), torch.tensor([(pages + index - 1) * stride_rows + 128], dtype=torch.int32)
+            )
+    finally:
+        torch.npu.synchronize()
+        for graph in graphs:
+            graph.reset()
+        registration.close()
+        reset_workspace_manager()

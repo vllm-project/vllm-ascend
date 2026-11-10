@@ -35,6 +35,21 @@ from vllm_ascend.hisparse.c8 import (
 from vllm_ascend.ops.triton import sfa_indexer_store
 
 
+@pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
+def prepare_workspaces(request):
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces
+
+    reset_workspace_manager()
+    try:
+        if request.param:
+            init_workspace_manager(torch.device("cpu"))
+        yield torch.inference_mode()(prepare_hisparse_workspaces) if request.param else None
+    finally:
+        reset_workspace_manager()
+
+
 @pytest.mark.parametrize("mxfp8", [False, True])
 def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
     from vllm_ascend.attention.utils import PreprocessType
@@ -150,7 +165,7 @@ def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
 
 @pytest.mark.parametrize("max_rows,hot_rows,union_rows", [(1, 16, 8), (9, 48, 24), (37, 128, 72)])
 def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(
-    monkeypatch, max_rows, hot_rows, union_rows
+    monkeypatch, max_rows, hot_rows, union_rows, prepare_workspaces
 ):
     from vllm_ascend.hisparse import resolver
 
@@ -175,7 +190,15 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
             registered_host_pool=NS(_hisparse_registration=object()),
         )
         owner.leader = leader
+        if prepare_workspaces is not None:
+            prepare_workspaces([leader, leader])
+            pending = leader._ascend_profiled_cache_ops
+            prepare_workspaces([leader])
+            assert leader._ascend_profiled_cache_ops is pending
         leader.cache_ops = backend.create_cache_ops(leader)
+        if prepare_workspaces is not None:
+            assert leader.cache_ops.workspace is pending[0]
+        assert not hasattr(leader, "_ascend_profiled_cache_ops")
         follower = NS(**vars(leader))
         return leader, backend.create_cache_ops(follower)
 
@@ -188,6 +211,9 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     assert first_workspace.first_refs.shape == (max_rows * union_rows,)
     assert first_workspace.errors.shape == (max_rows, 8)
     assert first_workspace.max_union_rows == union_rows
+    assert not torch.is_inference(first_workspace.first_refs)
+    assert not torch.is_inference(first_workspace.errors)
+    first_workspace.errors.fill_(17)
     first_workspace.first_refs.fill_(13)
     second_workspace.first_refs.zero_()
     assert torch.all(follower.workspace.first_refs == 13)
@@ -354,7 +380,9 @@ def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
 
 
 @pytest.mark.parametrize("pages,stride_rows,max_rows", [(2, 128, 9), (3, 136, 37)])
-def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(monkeypatch, pages, stride_rows, max_rows):
+def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
+    monkeypatch, pages, stride_rows, max_rows, prepare_workspaces
+):
     from vllm_ascend.hisparse import resolver
 
     monkeypatch.setattr(resolver, "_load_resolver", lambda: NS(hisparse_resolver_scratch_capacity=lambda: 175616))
@@ -376,15 +404,29 @@ def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(monkeypatc
         backing = torch.empty(num_pages * stride_rows * 656, dtype=torch.float8_e4m3fn)
         cache = backing.as_strided((num_pages, 128, 656), (stride_rows * 656, 656, 1))
         runtime.hot = NS(cache=cache, attention_cache=cache, block_size=128)
-        return backend.create_cache_ops(runtime)
+        if prepare_workspaces is not None:
+            prepare_workspaces([runtime])
+            pending = runtime._ascend_profiled_cache_ops
+            prepare_workspaces([runtime])
+            assert runtime._ascend_profiled_cache_ops is pending
+        ops = backend.create_cache_ops(runtime)
+        if prepare_workspaces is not None:
+            assert ops.workspace is pending[0]
+        assert not hasattr(runtime, "_ascend_profiled_cache_ops")
+        return ops
 
     first = bind(pages)
     query, key = first.attention_lengths
+    for tensor in (first.workspace.first_refs, first.workspace.errors, query, key):
+        assert not torch.is_inference(tensor)
+    first.workspace.errors.fill_(17)
     for rows in (1, max_rows, 3, 1):
         torch.testing.assert_close(query[rows : rows + 1], torch.tensor([rows], dtype=torch.int32))
     expected = (pages - 1) * stride_rows + 128
     torch.testing.assert_close(key, torch.tensor([expected], dtype=torch.int32))
     second = bind(pages + 1)
+    if prepare_workspaces is not None:
+        assert second.workspace is first.workspace
     torch.testing.assert_close(second.attention_lengths[1], torch.tensor([expected + stride_rows], dtype=torch.int32))
     torch.testing.assert_close(key, torch.tensor([expected], dtype=torch.int32))
     assert key.data_ptr() != second.attention_lengths[1].data_ptr()
