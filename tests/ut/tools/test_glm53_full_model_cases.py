@@ -108,7 +108,7 @@ class FullModelConfigTests(unittest.TestCase):
                         self.assertNotIn("tpot_threshold", bench)
 
     def test_loads_and_cache_boundaries_share_one_deployment(self):
-        expected = {"prefill": (7, 28, 0, 1, 14), "pd": (40, 160, 1.8, 1024, 80), "decode": (80, 320, 0, 1024, 320)}
+        expected = {"prefill": (16, 28, 0, 1, 32), "pd": (16, 160, 1.8, 1024, 80), "decode": (16, 320, 0, 1024, 320)}
         path = CONFIG_DIR / "GLM-5.3-W8A8C8-A3-ALL-E2E.yaml"
         benches = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmarks"]
         for mode, (concurrency, requests, rate, output, warmup) in expected.items():
@@ -198,7 +198,7 @@ class FullModelConfigTests(unittest.TestCase):
                         self.assertTrue(all(case["case_type"] in ("performance", "curl_cmd") for case in cases[:-1]))
                         self.assertEqual(cases[-1]["dataset_path"], "vllm-ascend/gpqa")
                         self.assertEqual(cases[-1]["max_out_len"], 65536)
-                        self.assertEqual(cases[-1]["batch_size"], 32)
+                        self.assertEqual(cases[-1]["batch_size"], 16 if family.endswith("A3") else 32)
                         self.assertEqual(cases[-1]["baseline"], 86.92)
                         self.assertEqual(cases[-1]["verify_mode"], "ge")
                     else:
@@ -226,7 +226,7 @@ class FullModelConfigTests(unittest.TestCase):
                     self.assertGreaterEqual(seqs, peak_clients)
                     self.assertGreaterEqual(tokens, seqs)
                     continue
-                self.assertGreater(seqs, balanced_peak)
+                self.assertGreaterEqual(seqs, balanced_peak)
                 self.assertLessEqual(seqs, 2 * balanced_peak)
                 spec = json.loads(args[args.index("--speculative-config") + 1])
                 query_length = spec["num_speculative_tokens"] + 1

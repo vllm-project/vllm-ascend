@@ -45,10 +45,10 @@ multiply request-serving replicas. P is one DP1 pipeline across both P hosts.
 
 | Family / phase | Client concurrency ceiling | Average D load at full client concurrency |
 | --- | --- | --- |
-| A3 Prefill | 7 | 0.4375 |
-| A3 PD | 40 | 2.5 |
-| A3 Decode replay | 80 | 5 |
-| A3 GPQA | 32 | 2 |
+| A3 Prefill | 16 | 1 |
+| A3 PD | 16 | 1 |
+| A3 Decode replay | 16 | 1 |
+| A3 GPQA | 16 | 1 |
 | A5 short 20 ms / long 50 ms | 16 | 1 |
 | A5 short 50 ms / GPQA | 32 | 2 |
 | A5 long 30 ms | 8 | 0.5 |
@@ -57,14 +57,16 @@ These are sizing averages, not observed running-request counts. Request lengths,
 arrival rate (A3 PD remains 1.8 requests/s), prompt completion and token-aware
 proxy routing can make live per-rank loads uneven or lower. Collect each D
 engine's running/waiting metrics during measurement before reporting actual
-concurrency. When clients are fewer than DP ranks, some ranks may be idle.
+concurrency. A3 now allows one scheduled sequence per D instance; uneven routing
+can queue requests at an instance. This cap does not enforce even proxy routing.
+When clients are fewer than DP ranks, some ranks may be idle.
 
 | Parameter | A3 P / D | A5 P / D | Reason |
 | --- | --- | --- | --- |
-| `max-num-seqs` | 80 / 8 | 32 / 4 | P covers peak clients; D leaves skew margin above averages 5 / 2. |
-| `max-num-batched-tokens` | 16384 / 48 | 16384 / 24 | P retains chunked-prefill budget; D covers `seqs * (MTP5 + 1)`. |
-| D capture token sizes | 6,12,18,24,30,36,42,48 | 6,12,18,24 | Exact uniform MTP5 batches for every supported request count. |
-| D max capture token size | 48 | 24 | Avoid capturing batches far above tested client loads. |
+| `max-num-seqs` | 16 / 1 | 32 / 4 | A3 D matches16 clients/DP16; A5 D retains margin above average2. |
+| `max-num-batched-tokens` | 16384 / 6 | 16384 / 24 | P retains chunked-prefill budget; D covers `seqs * (MTP5 + 1)`. |
+| D capture token sizes | 6 | 6,12,18,24 | Exact uniform MTP5 batches for every supported request count. |
+| D max capture token size | 6 | 24 | Avoid capturing batches far above tested client loads. |
 | `max-model-len` | 131072 | 135000 | Total input plus output; A3 includes GPQA output65536; A5 retains128K input plus1024 output/headroom. |
 | GPU/NPU memory utilization | 0.92 / 0.92 | 0.90 / 0.95 | Keep tutorial memory reservations; cache capacity still needs measurement. |
 | Worker execution timeout | 3000 seconds | 3000 seconds | A per-step timeout, reduced from30000; not a request or service-start budget. |
@@ -120,15 +122,17 @@ replacement for MiniMax's 99% dataset.
 
 ## Workloads
 
-A3 retains the 16K profiles adapted from release rows 104/124/135. They now share
+A3 retains the 16K datasets and measured counts adapted from release rows
+104/124/135, with all client concurrency ceilings reduced to16 (including GPQA).
+Prefill warmup uses32 prompts so it can fill16 client slots. They share
 one serving recipe and therefore are no longer exact reproductions of the three
 separately tuned release deployments.
 
 | A3 phase | Measured requests | Concurrency | Request rate | Max output | Explicit warmup requests | TPOT limit |
 | --- | --- | --- | --- | --- | --- | --- |
-| Prefill | 28 | 7 | 0 | 1 | 14 | None |
-| PD | 160 | 40 | 1.8 | 1024 | 80 | 20 ms |
-| Decode replay | 320 | 80 | 0 | 1024 | 320 | 20 ms |
+| Prefill | 28 | 16 | 0 | 1 | 32 | None |
+| PD | 160 | 16 | 1.8 | 1024 | 80 | 20 ms |
+| Decode replay | 320 | 16 | 0 | 1024 | 320 | 20 ms |
 
 A3 uses `vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8`.
 The earlier [successful A3 run](https://github.com/vllm-project/vllm-ascend/actions/runs/40859196273/job/123400043943)
@@ -148,7 +152,8 @@ A5 keeps four profiles per phase, using the same 16K dataset and
 Each A5 warmup uses the same request count as its measured phase. All performance
 phases produce separate results. Throughput baselines remain unset until hardware
 calibration; provisional TPOT limits also require validation. GPQA remains last:
-output 65536, temperature 1.0, top-p 0.95, concurrency 32, provisional floor 86.92.
+output 65536, temperature 1.0, top-p 0.95, concurrency16 on A3 /32 on A5,
+provisional floor86.92.
 That floor is not a measured A5 baseline. No deepSwe task is added without its
 dataset and scoring protocol.
 
