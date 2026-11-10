@@ -1,0 +1,5 @@
+pr: 21220
+entries:
+  - category: feature
+    text: Added an opt-in AscendC fusion for INT8 lightning-indexer quantization and key/scale cache writes on A3 with six decode token rows. Enable it with enable_li_quant_cache_fusion; unsupported layouts and shapes retain the native path.
+    hardware: [A3]

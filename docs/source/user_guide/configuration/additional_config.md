@@ -40,6 +40,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
+| `enable_li_quant_cache_fusion`       | bool | `false` | Fuse INT8 lightning-indexer quantization, FP16 scale conversion and cache writes for six decode token rows on A3. Requires INT8 indexer KV cache; other shapes, FP8/C4, PCP and custom indexer backends retain the existing path. |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
@@ -76,6 +77,29 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+### Lightning-indexer quantization and cache fusion
+
+Set `enable_li_quant_cache_fusion` to `true` to opt into the AscendC LI fusion.
+It accepts contiguous BF16/FP16 `[6, 128]` inputs, INT32/INT64 slots, and
+contiguous INT8 key / FP16 scale caches on A3. Six is the token-row count
+(for example, one request with five MTP drafts), not the request concurrency.
+The query quantization path is unchanged. Negative or out-of-capacity slots
+do not update the cache; valid slots must be unique, as in ordinary decode.
+
+The fusion runs at the indexer's existing cache-write point after its layout
+gather. PCP, custom cache layouts, other token-row counts, and older extensions
+without the operator use the current native quantization and cache-write path.
+The option defaults to `false`.
+
+```python
+additional_config = {"enable_li_quant_cache_fusion": True}
+```
+
+Run `tests/e2e/pull_request/one_card/test_li_quant_cache.py` for native-byte
+and changing-input graph checks, and `benchmarks/li_quant_cache.py` for
+paired complete-chain device timings against native quantization plus the
+main branch's fused key/scale store. These operator timings are not serving ITL.
 
 <span id="runtime_guard"></span>**runtime_guard**
 

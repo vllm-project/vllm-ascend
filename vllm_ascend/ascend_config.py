@@ -647,6 +647,9 @@ class AscendConfig:
     enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    # Fuse native-equivalent LI INT8 quantization and cache writes for six
+    # token rows on supported hardware. Other shapes retain the native path.
+    enable_li_quant_cache_fusion: bool = False
     enable_sparse_li_c4: bool = False
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
