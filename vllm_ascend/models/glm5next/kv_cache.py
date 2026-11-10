@@ -163,6 +163,10 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        """Keep the model's engine container separate from the registered view."""
+        self.kv_cache = [kv_cache]
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         return AscendIndexerKPoolTailSpec(
