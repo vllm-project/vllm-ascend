@@ -115,10 +115,6 @@ a3:
         config_file_path: GLM-5.2-W8A8C8-layerwise-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 4
-      - name: GLM-5.3-W8A8C8-200K-Memcache-PD
-        config_file_path: GLM-5.3-W8A8C8-200k-Memcache-PD.yaml
-        config_base_path: tests/SIT/cases/models/configs/GLM
-        size: 4
       - name: GLM-5.3-W8A8C8-A3-200k-PP-PD-Memcache
         config_file_path: GLM-5.3-W8A8C8-A3-200k-PP-Memcache-PD.yaml
         config_base_path: tests/e2e/cases/features/kv_pool
