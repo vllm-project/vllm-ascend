@@ -29,12 +29,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import (
-    _aligned_dspark_index_width,
-    build_dspark_swa_indices,
-    build_dspark_swa_indices_triton,
-    dsv4_dsa_overlap_stream,
-)
+from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -1281,7 +1276,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     lengths_output=lengths_view,
                 )
             else:
-                req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
+                req.ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
                     common.block_table_tensor[: req.num_reqs],
                     num_spec_tokens,
                     window_size,
@@ -1291,8 +1286,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     req.num_actual_tokens,
                     indices_output=indices_view,
                     use_logical_indices=True,
-                    lengths_output=lengths_view,
                 )
+                lengths_view.copy_(ori_topk_length)
+                req.ori_topk_length = lengths_view
         if (
             not noncausal
             and req.ori_sparse_indices is None
