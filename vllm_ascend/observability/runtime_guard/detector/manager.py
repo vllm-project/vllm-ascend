@@ -114,9 +114,18 @@ class DetectorManager:
             det.clear_finished(req_id)
 
     def apply_runtime_config(self) -> None:
-        """All-rank hook after runtime_config JSON sync — refresh detector deps."""
+        """All-rank hook after runtime_config JSON sync — refresh detector deps.
+
+        ``ConfigBackedDetector`` calls :meth:`AnomalyDetector.on_disabled` when
+        a section flips ``enabled`` True→False (private maps only; not Store).
+        """
         for det in self._registry:
             det.refresh_from_config()
+
+    def disable_all(self) -> None:
+        """Clear every detector's private maps (all-detectors-off soft purge)."""
+        for det in self._registry:
+            det.on_disabled()
 
     # ---- detection gating -------------------------------------------------
 
