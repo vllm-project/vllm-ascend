@@ -24,17 +24,23 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from safetensors.torch import load_file
+from transformers import Qwen3Config
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES, WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
 )
+from tests.e2e.common.rlhf.weight_transfer.weight_source import FixedRandomWeightSource
+from vllm_ascend.utils import vllm_version_is
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -187,3 +193,149 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+@pytest.fixture
+def random_weight_cases(tmp_path):
+    cases = []
+    for name, layers in (("target", 2), ("draft", 1)):
+        directory = tmp_path / name
+        Qwen3Config(
+            architectures=["Qwen3ForCausalLM"],
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=layers,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            head_dim=8,
+            tie_word_embeddings=False,
+        ).save_pretrained(directory)
+        cases.append(WeightUpdateModelCase(id=name, model=str(directory), hf_overrides={}))
+    return cases
+
+
+def test_random_target_payload_is_unchanged_when_draft_is_added(random_weight_cases):
+    target_case, draft_case = random_weight_cases
+    plain = FixedRandomWeightSource(target_case, torch.device("cpu"))
+    combined = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
+    assert plain.draft_source is None
+    assert combined.draft_source is not None
+    plain_metadata = plain.metadata() if vllm_version_is("0.32.0") else plain.metadata
+    combined_metadata = combined.metadata() if vllm_version_is("0.32.0") else combined.metadata
+    draft_metadata = combined.draft_source.metadata() if vllm_version_is("0.32.0") else combined.draft_source.metadata
+    assert plain_metadata == combined_metadata
+    for (name, expected), (actual_name, actual) in zip(plain, combined, strict=True):
+        assert name == actual_name
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert len(draft_metadata) < len(combined_metadata)
+    assert all(not meta.name.startswith("draft.") for meta in draft_metadata)
+
+
+def test_draft_payload_is_repeatable_independent_and_does_not_reseed_global_rng(random_weight_cases):
+    target_case, draft_case = random_weight_cases
+    source = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
+    rng_state = torch.get_rng_state()
+    first = dict(source.draft_source)
+    second = dict(source.draft_source)
+    assert torch.equal(torch.get_rng_state(), rng_state)
+    for name in first:
+        torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
+    changed = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case, draft_seed=999)
+    assert not torch.equal(first["model.norm.weight"], dict(changed.draft_source)["model.norm.weight"])
+    assert not torch.equal(first["model.norm.weight"], dict(source)["model.norm.weight"])
+
+
+def test_target_seed_does_not_change_explicit_draft_payload(random_weight_cases):
+    target_case, draft_case = random_weight_cases
+    first = FixedRandomWeightSource(target_case, torch.device("cpu"), seed=1, draft_case=draft_case, draft_seed=3)
+    second = FixedRandomWeightSource(target_case, torch.device("cpu"), seed=2, draft_case=draft_case, draft_seed=3)
+    assert not torch.equal(dict(first)["model.norm.weight"], dict(second)["model.norm.weight"])
+    for name, tensor in first.draft_source:
+        torch.testing.assert_close(tensor, dict(second.draft_source)[name], rtol=0, atol=0)
+
+
+def test_random_checkpoints_contain_exact_target_and_draft_payloads(random_weight_cases, tmp_path):
+    target_case, draft_case = random_weight_cases
+    source = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
+    destination = tmp_path / "checkpoint"
+    # Local configs must never be passed to hf_hub_download.
+    with patch("huggingface_hub.hf_hub_download", side_effect=AssertionError("unexpected download")):
+        source.write_checkpoint(destination)
+    for directory, expected_source, case in (
+        (destination, source, target_case),
+        (destination / "draft", source.draft_source, draft_case),
+    ):
+        checkpoint = load_file(str(directory / "model.safetensors"))
+        payload = dict(expected_source)
+        assert checkpoint.keys() == payload.keys()
+        for name, tensor in payload.items():
+            torch.testing.assert_close(checkpoint[name], tensor, rtol=0, atol=0)
+        assert (directory / "config.json").read_bytes() == (Path(case.model) / "config.json").read_bytes()
+
+
+def test_target_only_checkpoint_keeps_its_original_layout(random_weight_cases, tmp_path):
+    case, _ = random_weight_cases
+    source = FixedRandomWeightSource(case, torch.device("cpu"))
+    destination = tmp_path / "target-only"
+    source.write_checkpoint(destination)
+    assert {path.name for path in destination.iterdir()} == {"config.json", "model.safetensors"}
+    checkpoint = load_file(str(destination / "model.safetensors"))
+    for name, tensor in source:
+        torch.testing.assert_close(checkpoint[name], tensor, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_hccl_client_selects_only_the_start_endpoint(is_draft):
+    from tests.e2e.common.rlhf.weight_transfer import draft_hccl as hccl
+
+    client = hccl.WeightUpdateClient("http://unused")
+    client.is_draft = is_draft
+    with patch.object(client, "_post") as post:
+        client.start_weight_update()
+        client.update_weights({"names": ["model.norm.weight"]})
+        client.finish_weight_update()
+    assert [call.args[0] for call in post.call_args_list] == [
+        "start_draft_weight_update" if is_draft else "start_weight_update",
+        "update_weights",
+        "finish_weight_update",
+    ]
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
+    from tests.e2e.common.rlhf.weight_transfer import draft_hccl as hccl
+
+    server, engine = MagicMock(), MagicMock()
+    client = hccl.WeightUpdateClient("http://unused")
+    source = object()
+    with patch.object(hccl, "_post") as post:
+        hccl.send_update(server, engine, client, source, is_draft=is_draft)
+    assert client.is_draft is is_draft
+    assert engine.source is source
+    engine.send_weights.assert_called_once_with()
+    assert [call.args[1] for call in post.call_args_list] == ["pause", "resume"]
+
+
+def test_hccl_send_does_not_resume_after_a_trainer_failure():
+    from tests.e2e.common.rlhf.weight_transfer import draft_hccl as hccl
+
+    server, engine = MagicMock(), MagicMock()
+    error = RuntimeError("transfer failed")
+    engine.send_weights.side_effect = error
+
+    with (
+        patch.object(hccl, "_post") as post,
+        pytest.raises(RuntimeError, match="transfer failed") as caught,
+    ):
+        hccl.send_update(
+            server,
+            engine,
+            hccl.WeightUpdateClient("http://unused"),
+            object(),
+            is_draft=True,
+        )
+
+    assert caught.value is error
+    engine.send_weights.assert_called_once_with()
+    post.assert_called_once_with(server, "pause")
