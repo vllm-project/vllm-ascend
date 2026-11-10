@@ -340,30 +340,35 @@ class NPUModelRunner(GPUModelRunner):
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
-        if (
-            lmhead_tp_enable()
-            and self.prompt_logprobs_worker is not None
-            and (
-                self.prompt_logprobs_worker.uses_prompt_logprobs.any()
-                or getattr(self.prompt_logprobs_worker, "token_id_scores", {})
-            )
-        ):
-            # The prompt-logprobs worker issues a second compute_logits with
-            # unpadded rows that desyncs the LM-head collectives and hangs.
-            # vLLM #54335 adds fixed-token scoring through the same unpadded
-            # compute_logits path, so it has the same collective restriction.
-            raise NotImplementedError(
-                "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
-            )
+        mirror = getattr(self, "_host_mirror", None)
+        try:
+            if (
+                lmhead_tp_enable()
+                and self.prompt_logprobs_worker is not None
+                and (
+                    self.prompt_logprobs_worker.uses_prompt_logprobs.any()
+                    or getattr(self.prompt_logprobs_worker, "token_id_scores", {})
+                )
+            ):
+                # The prompt-logprobs worker issues a second compute_logits with
+                # unpadded rows that desyncs the LM-head collectives and hangs.
+                # vLLM #54335 adds fixed-token scoring through the same unpadded
+                # compute_logits path, so it has the same collective restriction.
+                raise NotImplementedError(
+                    "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
+                )
 
-        state = self.execute_model_state
-        self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
-        output = super().sample_tokens(grammar_output)
-        self._lmhead_pad_size = None
-        # Close the per-step msprobe dump cycle on the normal last-PP-rank
-        # path (v1 parity: v1 finalizes at the end of sample_tokens).
-        self._finalize_dump_data()
-        return output
+            state = self.execute_model_state
+            self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
+            output = super().sample_tokens(grammar_output)
+            self._lmhead_pad_size = None
+            # Close the per-step msprobe dump cycle on the normal last-PP-rank
+            # path (v1 parity: v1 finalizes at the end of sample_tokens).
+            self._finalize_dump_data()
+            return output
+        finally:
+            if mirror is not None:
+                mirror.join_pending()
 
     def pool(self):
         output = super().pool()
@@ -550,6 +555,12 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            from vllm_ascend.hisparse.host_mirror import overlap_target_host_mirror
+
+            connector = overlap_target_host_mirror(self)
+            self._host_mirror = connector if connector is not self.kv_connector else None
+            self.kv_connector = connector
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -660,87 +671,95 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
-        self._cpp_execution_time_ms = None
-        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        execution_start_time = _start_profiling_chunk_timing(
-            profiling_config,
-            scheduler_output,
-        )
-
-        # Preemption stores must complete before the parent updates states and
-        # reuses or zeroes the preempted requests' physical KV cache blocks.
-        if has_kv_transfer_group():
-            kv_connector_metadata = scheduler_output.kv_connector_metadata
-            assert kv_connector_metadata is not None
-            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
-
-        dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
-        # Eager PrecisionDebugger is started only for real scheduler steps.
-        # Graph dumping is already active from load_model(), so dummy forwards
-        # only need to flush the graph dumper below without writing a step.
-        if dump_forward and not dummy_run:
-            self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
-
-        self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        # Reduced LMHead padding needs synchronized token buckets for V2,
-        # DCP=1. Share the MC2 dispatcher's policy so active masks agree;
-        # DCP>1 retains full capacity and the original coordination policy.
-        # TODO: Merge the requires_lmhead_dp_sync interface into
-        # should_skip_allreduce_across_dp_group in a future refactor.
-        skip_dp_metadata_sync = should_skip_allreduce_across_dp_group(self.vllm_config) and not requires_lmhead_dp_sync(
-            self.vllm_config
-        )
-        dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
-        profile_kwargs = {"randomize_inputs": randomize_inputs}
-        forward_failed = True
-        with dp_coordination_context:
-            try:
-                output = super().execute_model(
-                    scheduler_output,
-                    intermediate_tensors=intermediate_tensors,
-                    dummy_run=dummy_run,
-                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                    is_profile=is_profile,
-                    context_len=context_len,
-                    valid_dummy_state_slots=valid_dummy_state_slots,
-                    **profile_kwargs,
-                )
-                forward_failed = False
-            finally:
-                finish_execution = getattr(self.model_state, "finish_execution", None)
-                if finish_execution is not None:
-                    finish_execution(failed=forward_failed)
-        if not dummy_run and not is_profile:
-            self._maybe_send_draft_kv(scheduler_output)
-        self.model_state.kvpp_is_dummy_run = False
-        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
-            # Idle ranks join the same LMHead collective size as active ranks.
-            if self.execute_model_state is None:
-                raise RuntimeError(
-                    "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
-                )
-            dummy_indices = torch.zeros(
-                self._get_lmhead_pad_size(self.execute_model_state),
-                dtype=torch.int64,
-                device=self.device,
+        mirror = getattr(self, "_host_mirror", None)
+        if mirror is not None:
+            mirror.begin_execution(not dummy_run and not is_profile)
+        try:
+            self._cpp_execution_time_ms = None
+            profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
+            execution_start_time = _start_profiling_chunk_timing(
+                profiling_config,
+                scheduler_output,
             )
-            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
-        self.kvpp.complete_forward()
 
-        if dump_forward:
-            if dummy_run:
-                self._finalize_dump_data(dump=False)
-            elif isinstance(output, IntermediateTensors) and self.is_pooling_model:
-                # Non-last pooling ranks do not reach pool(). Decoding ranks
-                # finalize after sample_tokens(), including non-last PP ranks.
-                self._finalize_dump_data()
+            # Preemption stores must complete before the parent updates states and
+            # reuses or zeroes the preempted requests' physical KV cache blocks.
+            if has_kv_transfer_group():
+                kv_connector_metadata = scheduler_output.kv_connector_metadata
+                assert kv_connector_metadata is not None
+                get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
-        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
-            profiling_config,
-            execution_start_time,
-        )
+            dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
+            # Eager PrecisionDebugger is started only for real scheduler steps.
+            # Graph dumping is already active from load_model(), so dummy forwards
+            # only need to flush the graph dumper below without writing a step.
+            if dump_forward and not dummy_run:
+                self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
-        return output
+            self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
+            # Reduced LMHead padding needs synchronized token buckets for V2,
+            # DCP=1. Share the MC2 dispatcher's policy so active masks agree;
+            # DCP>1 retains full capacity and the original coordination policy.
+            # TODO: Merge the requires_lmhead_dp_sync interface into
+            # should_skip_allreduce_across_dp_group in a future refactor.
+            skip_dp_metadata_sync = should_skip_allreduce_across_dp_group(self.vllm_config) and not requires_lmhead_dp_sync(
+                self.vllm_config
+            )
+            dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
+            profile_kwargs = {"randomize_inputs": randomize_inputs}
+            forward_failed = True
+            with dp_coordination_context:
+                try:
+                    output = super().execute_model(
+                        scheduler_output,
+                        intermediate_tensors=intermediate_tensors,
+                        dummy_run=dummy_run,
+                        skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                        is_profile=is_profile,
+                        context_len=context_len,
+                        valid_dummy_state_slots=valid_dummy_state_slots,
+                        **profile_kwargs,
+                    )
+                    forward_failed = False
+                finally:
+                    finish_execution = getattr(self.model_state, "finish_execution", None)
+                    if finish_execution is not None:
+                        finish_execution(failed=forward_failed)
+            if not dummy_run and not is_profile:
+                self._maybe_send_draft_kv(scheduler_output)
+            self.model_state.kvpp_is_dummy_run = False
+            if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
+                # Idle ranks join the same LMHead collective size as active ranks.
+                if self.execute_model_state is None:
+                    raise RuntimeError(
+                        "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
+                    )
+                dummy_indices = torch.zeros(
+                    self._get_lmhead_pad_size(self.execute_model_state),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
+            self.kvpp.complete_forward()
+
+            if dump_forward:
+                if dummy_run:
+                    self._finalize_dump_data(dump=False)
+                elif isinstance(output, IntermediateTensors) and self.is_pooling_model:
+                    # Non-last pooling ranks do not reach pool(). Decoding ranks
+                    # finalize after sample_tokens(), including non-last PP ranks.
+                    self._finalize_dump_data()
+
+            self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
+                profiling_config,
+                execution_start_time,
+            )
+
+            return output
+        except BaseException:
+            if mirror is not None:
+                mirror.join_pending()
+            raise
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
         """Write draft KV on P, then let D pull the exact allocated cache pages."""
