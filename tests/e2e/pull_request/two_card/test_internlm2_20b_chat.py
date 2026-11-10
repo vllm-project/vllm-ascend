@@ -41,7 +41,7 @@ SHORT_PROMPTS = [
     "请用一句话解释什么是机器学习。",
 ]
 
-# Retrieval over a long prompt: a mis-scaled rotary table degrades gradually
+# Retrieval over a long prompt: an incorrectly scaled rotary table degrades
 # with position, so a fact placed far from the question is the cheapest signal
 # that positions beyond the short-prompt range still resolve.
 NEEDLE = "The access code for the north gate is 73915."
