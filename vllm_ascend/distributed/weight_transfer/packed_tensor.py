@@ -415,8 +415,9 @@ def packed_npu_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16").
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
-        importer: Import cache shared by all chunks of one export. ``None``
-            creates a cache for a single chunk.
+        importer: ``None`` is safe only for single-chunk exports. For a
+            multi-chunk export, pass the same importer for every chunk so
+            the shared mapping is rebuilt only once.
     """
     if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
         raise ValueError(f"device_index must be a non-negative integer, got {device_index!r}")

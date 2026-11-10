@@ -40,6 +40,7 @@ import os
 import sys
 import types
 import weakref
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -396,6 +397,7 @@ def test_packed_export_imported_once_with_fresh_payload_and_release(cleanup):
 
     def rebuild(*args):
         assert args[6] == 0
+        assert args[-1] == f"export-{len(imports) + 1}"
         mapping = staging.view(torch.uint8)
         imports.append(weakref.ref(mapping))
         return mapping
@@ -424,7 +426,8 @@ def test_packed_export_imported_once_with_fresh_payload_and_release(cleanup):
         assert imports[0]() is None
         # Cleanup is idempotent; a later update must open a new mapping.
         getattr(engine, cleanup)()
-        engine.receive_weights(info)
+        next_info = replace(info, ipc_handles={"node-0": (None,) * 6 + (999, "export-2")})
+        engine.receive_weights(next_info)
         assert len(imports) == 2
         engine.shutdown()
         assert imports[1]() is None
