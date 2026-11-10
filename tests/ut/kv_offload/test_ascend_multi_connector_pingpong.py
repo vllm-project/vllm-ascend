@@ -10,7 +10,7 @@ import pytest
 from vllm_ascend.attention.cache_layout import (
     LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT,
 )
-from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (
+from vllm_ascend.distributed.kv_transfer.cann_multi_connector import (
     AscendMultiConnector,
 )
 
@@ -92,12 +92,9 @@ def make_pingpong_connector(
     connector._workspace_generation = 0
     connector._workspace_fence_lock = threading.Lock()
     connector._workspace_fences = {}
-    connector._workspace_layer_order = tuple(
-        f"layer.{layer_id}" for layer_id in range(num_layers)
-    )
+    connector._workspace_layer_order = tuple(f"layer.{layer_id}" for layer_id in range(num_layers))
     connector._workspace_layer_to_index = {
-        layer_name: layer_index
-        for layer_index, layer_name in enumerate(connector._workspace_layer_order)
+        layer_name: layer_index for layer_index, layer_name in enumerate(connector._workspace_layer_order)
     }
     connector._workspace_layer_to_arena = {
         layer_name: layer_index % LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT
@@ -122,24 +119,18 @@ def test_initial_four_layer_get_and_rolling_bank_reuse(monkeypatch) -> None:
     store.save_sources["layer.2"] = layer_two_source
     connector = make_pingpong_connector(store, p2p, num_layers=7)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.ascend_multi_connector.torch.npu.Event",
+        "vllm_ascend.distributed.kv_transfer.cann_multi_connector.torch.npu.Event",
         FakeNpuEvent,
     )
 
     try:
         connector.start_load_kv(object())
         connector.wait_for_layer_load("layer.0")
-        assert store.load_batches == [
-            tuple(f"layer.{layer_id}" for layer_id in range(4))
-        ]
+        assert store.load_batches == [tuple(f"layer.{layer_id}" for layer_id in range(4))]
         connector.wait_for_layer_load("layer.2")
 
-        layer_four_started = store.load_events.setdefault(
-            "layer.4", threading.Event()
-        )
-        layer_six_started = store.load_events.setdefault(
-            "layer.6", threading.Event()
-        )
+        layer_four_started = store.load_events.setdefault("layer.4", threading.Event())
+        layer_six_started = store.load_events.setdefault("layer.6", threading.Event())
         for layer_id in range(4):
             connector.save_kv_layer(
                 f"layer.{layer_id}",
@@ -151,9 +142,7 @@ def test_initial_four_layer_get_and_rolling_bank_reuse(monkeypatch) -> None:
         layer_zero_source.set_result(None)
         assert layer_four_started.wait(timeout=1)
         connector.wait_for_layer_load("layer.4")
-        assert store.load_batches[1] == tuple(
-            f"layer.{layer_id}" for layer_id in range(4, 6)
-        )
+        assert store.load_batches[1] == tuple(f"layer.{layer_id}" for layer_id in range(4, 6))
         assert not layer_six_started.wait(timeout=0.05)
 
         layer_two_source.set_result(None)
@@ -188,7 +177,7 @@ def test_grouped_prefetch_drains_all_bank_fences_after_one_failure(
         ]
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.ascend_multi_connector.torch.npu.Event",
+        "vllm_ascend.distributed.kv_transfer.cann_multi_connector.torch.npu.Event",
         lambda: next(npu_events),
     )
 
@@ -197,9 +186,7 @@ def test_grouped_prefetch_drains_all_bank_fences_after_one_failure(
         connector.save_kv_layer("layer.1", object(), object())
         layer_zero_source.set_exception(RuntimeError("source failed"))
         with ThreadPoolExecutor(max_workers=1) as executor:
-            wait_future = executor.submit(
-                connector._wait_for_workspace_arenas, (0, 1)
-            )
+            wait_future = executor.submit(connector._wait_for_workspace_arenas, (0, 1))
             assert not wait_future.done()
             layer_one_source.set_result(None)
             with pytest.raises(RuntimeError, match="Workspace source transfer failed"):
@@ -285,9 +272,7 @@ def test_repeated_mtp_waits_for_previous_source_before_cache_write() -> None:
         connector.save_kv_layer("layer.mtp", object(), object())
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            wait_future = executor.submit(
-                connector.wait_for_layer_load, "layer.mtp"
-            )
+            wait_future = executor.submit(connector.wait_for_layer_load, "layer.mtp")
             assert mtp_source.result_called.wait(timeout=1)
             assert store.load_order == []
             assert p2p.load_order == []
@@ -317,9 +302,7 @@ def test_non_workspace_wait_only_drains_the_repeated_layer() -> None:
 
         assert store.load_order == ["layer.mtp.1"]
         assert p2p.load_order == ["layer.mtp.1"]
-        assert connector._non_workspace_source_futures == {
-            "layer.mtp.0": [first_source]
-        }
+        assert connector._non_workspace_source_futures == {"layer.mtp.0": [first_source]}
 
         first_source.set_result(None)
         connector.wait_for_save()

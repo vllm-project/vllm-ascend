@@ -5,7 +5,6 @@ from enum import Enum
 from typing import Any
 
 import torch
-import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -17,11 +16,26 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
 )
+
+# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
+# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
+_USE_V2_EXTRA_KWARGS = False
+
+
+def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
+    """Cache whether Ascend extras belong in ``additional_kwargs``.
+
+    Call this from eager config / forward-context setup, not from compiled
+    attention. Require an actual bool: MagicMock configs can be truthy.
+    """
+    global _USE_V2_EXTRA_KWARGS
+    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
 
 
 class MoECommType(Enum):
@@ -127,6 +141,7 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
+    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -340,6 +355,7 @@ def _select_capacity_and_world_size_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    skip_draft_mc2 = False
     if get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
@@ -347,7 +363,14 @@ def _select_capacity_and_world_size_moe_comm_method(
                 # quantized weight layouts. An unquantized (or unsupported-quantized)
                 # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
                 # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
-                pass
+                # The shared capacity is sized for MegaMoE, whose per-rank limit
+                # is larger than the ordinary MC2 dispatch limit.
+                mc2_tokens_capacity = min(
+                    mc2_tokens_capacity,
+                    _MC2_TOKENS_PER_RANK_LIMIT * vllm_config.parallel_config.tensor_parallel_size,
+                )
+                # Ordinary MC2 dispatch fails CANN WinSize tiling for SP draft.
+                skip_draft_mc2 = getattr(vllm_config.parallel_config, "use_sequence_parallel_moe", False)
             else:
                 return MoECommType.FUSED_MC2
     num_experts_per_tok = getattr(
@@ -355,10 +378,15 @@ def _select_capacity_and_world_size_moe_comm_method(
         "num_experts_per_tok",
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
-    world_size = vllm_config.parallel_config.world_size_across_dp
-    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
+    # The EP group spans DP x PCP x TP ranks and never includes PP (each PP
+    # stage owns different layers), so divide out pipeline_parallel_size to get
+    # the real EP group size.
+    ep_world_size = (
+        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    )
+    if not skip_draft_mc2 and (num_tokens is None or num_tokens <= mc2_tokens_capacity) and ep_world_size > 1:
         return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
+    if ep_world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
@@ -469,7 +497,7 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _USE_V2_EXTRA_KWARGS:
             # Unset known extras default to None so optional flags (e.g. `sinks`)
             # can be read with truthiness checks before the V2 path populates them.
             return ctx.additional_kwargs.get(name)
@@ -478,7 +506,7 @@ class _ExtraForwardContextProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _USE_V2_EXTRA_KWARGS:
             ctx.additional_kwargs[name] = value
         else:
             setattr(ctx, name, value)

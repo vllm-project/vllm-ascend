@@ -132,18 +132,6 @@ if not _npu_available:
     sys.modules["mooncake.engine"] = mooncake_engine
     import torch
 
-    # RFC's force_topk sampler compiles with a torch-npu-only option at import
-    # time. CPU UTs exercise its callers without an NPU compiler; retain normal
-    # torch.compile behavior for functions that do not request that backend.
-    _original_torch_compile = torch.compile
-
-    def _compile_without_npu_backend(model=None, *, options=None, **kwargs):
-        if options is not None and "npu_backend" in options:
-            return model if model is not None else lambda function: function
-        return _original_torch_compile(model, options=options, **kwargs)
-
-    torch.compile = _compile_without_npu_backend
-
     try:  # noqa: SIM105
         torch.utils.rename_privateuse1_backend("npu")
     except RuntimeError:
@@ -194,6 +182,10 @@ if not _npu_available:
     torch.npu.graph_task_update_begin = MagicMock()
     torch.npu.graph_task_update_end = MagicMock()
     torch.npu.stream = MagicMock()
+    # cpu-ut is never capturing an ACL graph. Leave this unstubbed and
+    # is_current_stream_capturing() is a truthy MagicMock, which would send
+    # FIA into graph_task_group_begin.
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     # Some code paths do `import torch.npu`; attribute assignment alone is not enough.
     sys.modules["torch.npu"] = torch.npu
     torch_npu.npu.Stream = _NpuStreamStub  # type: ignore[attr-defined]
@@ -295,6 +287,7 @@ if not _npu_available:
     # Re-sync after enable_custom_op / adapt_patch so @patch("torch.npu.*") hits
     # the same object production code uses via `torch.npu`.
     torch.npu.current_device = MagicMock(return_value="cpu")
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     sys.modules["torch.npu"] = torch.npu
 
 # Clean up any stale mock modules that may have been installed by
@@ -347,8 +340,8 @@ def _mock_ascend_store_deps(request):
 
     _pfx = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
     with (
-        patch(f"{_pfx}.pool_worker.get_attention_compute_start_gate", create=True),
-        patch(f"{_pfx}.pool_worker.reset_attention_compute_start_gate", create=True),
-        patch(f"{_pfx}.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {}), create=True),
+        patch(f"{_pfx}.layerwise.pool_worker.get_attention_compute_start_gate"),
+        patch(f"{_pfx}.layerwise.pool_worker.reset_attention_compute_start_gate"),
+        patch(f"{_pfx}.layerwise.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
     ):
         yield

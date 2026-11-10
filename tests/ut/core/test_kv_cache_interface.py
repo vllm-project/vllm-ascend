@@ -7,9 +7,12 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    HiddenStateCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -23,7 +26,16 @@ from vllm_ascend.core.kv_cache_interface import (
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
+    supports_component_major_mla_pd,
 )
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
+# the v0.32.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
+    from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+else:
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
 
 def _mla_spec():
@@ -68,6 +80,15 @@ def test_get_storage_block_size_and_dcp_memory():
     assert spec.max_memory_usage_bytes(vllm_config) > 0
 
 
+def test_get_storage_block_size_for_plain_mla_subclass():
+    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` in both
+    # supported lanes. A plain MLA subclass (HiddenStateCacheSpec) must
+    # resolve to block_size.
+    spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    expected = spec.block_size
+    assert get_storage_block_size(spec) == expected
+
+
 def test_sliding_window_mla_storage_and_page_size():
     spec = AscendSlidingWindowMLASpec(
         block_size=16,
@@ -107,6 +128,36 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     assert not spec.prefix_cacheable and not spec.uses_slot_mapping
     manager.free("request")
     assert pool.get_num_free_blocks() == len(old_ids)
+
+
+def test_component_major_mla_pd_gate():
+    assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert supports_component_major_mla_pd(config)
+
+    for connector in ("MooncakeConnectorV1", "AscendStoreConnector", "MultiConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert not supports_component_major_mla_pd(config)
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path="custom.connector",
+        )
+    )
+    assert not supports_component_major_mla_pd(config)
 
 
 # --- the fields a hand-rebuilt spec has to carry -----------------------------

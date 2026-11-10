@@ -85,6 +85,10 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler: MooncakeBaseConnectorScheduler | None = None
         self.connector_worker: MooncakeBaseConnectorWorker | None = None
 
+    def shutdown(self) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """Use HND to avoid reformatting KV cache before D2D transfer."""
@@ -102,9 +106,11 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         logger.info_once("MooncakeConnector is setting the KV cache layout to HND for direct D2D transfer.")
         return "HND"
 
-    ############################################################
-    # Scheduler-side methods
-    ############################################################
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # vLLM main's scheduler uses this for skip_zeroing_group_ids and for
+        # the DSV4.1 SWA replay-window check; a P/D transfer restores the
+        # request's own blocks, i.e. every transfer group.
+        return self._kv_cache_config.transfer_group_ids
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None

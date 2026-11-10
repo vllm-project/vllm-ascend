@@ -42,7 +42,11 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import (
+    get_potential_max_tokens,
+    npu_stream_switch,
+    oproj_tp_enable,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -194,7 +198,6 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
-    cp_token_range: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -571,11 +574,11 @@ class AscendDSAV41Impl:
             state_metadata = compressor_metadata.state
             if state_metadata.c2_metadata_group_id is not None:
                 wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
-            if getattr(attn, "packed_cache_ops", None) is not None:
+            if getattr(compressor, "_fused", False):
                 # The fused ds41 compressor op takes the raw hidden_states; the
                 # wkv/wgate projection and gated pooling happen inside the op.
                 self._quantize_indexer_query(attn, prepared_indexer, metadata)
-                latent = compressor.pool_projected(hidden_states, state_metadata)
+                latent = compressor.pool_from_hidden_states(hidden_states, state_metadata)
             else:
                 hidden_states_fp32 = hidden_states.float()
                 # Finish the input cast before query quantization starts on the
@@ -583,7 +586,7 @@ class AscendDSAV41Impl:
                 self._quantize_indexer_query(attn, prepared_indexer, metadata)
                 kv = compressor.wkv(hidden_states_fp32)
                 score = compressor.wgate(hidden_states_fp32)
-                latent = compressor.pool_projected_eager(kv, score, state_metadata)
+                latent = compressor.pool_projected(kv, score, state_metadata)
             source_cos = state_metadata.c2_source_cos
             source_sin = state_metadata.c2_source_sin
             if source_cos is None or source_sin is None:
@@ -757,7 +760,22 @@ class AscendDSAV41Impl:
             output = torch.empty_like(hidden_states)
         forward_context = get_forward_context()
         if forward_context.attn_metadata is None:
+            projector = attn.dsa_attn.dsa_attn.impl
             output.zero_()
+            if oproj_tp_enable():
+                capacity = (
+                    projector._oproj_send_buf.shape[1]
+                    if hasattr(projector, "_oproj_send_buf")
+                    else get_potential_max_tokens()
+                )
+                profile_tokens = min(hidden_states.shape[0], capacity)
+                o_proj_input = hidden_states.new_zeros((profile_tokens, attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output[:profile_tokens])
+            elif getattr(projector, "enable_pcp_o_proj_weight_sharding", False):
+                # Match V4 profiling: exercise OTP communication buffers or
+                # PCP resident weight shards before graph capture.
+                o_proj_input = hidden_states.new_zeros((hidden_states.shape[0], attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
         q, qr, prepared_indexer = self._prepare_inputs_and_caches(
@@ -773,7 +791,7 @@ class AscendDSAV41Impl:
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
-            heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
+            heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
         return output
@@ -1559,6 +1577,12 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @staticmethod
     def get_name():
         return "ASCEND_DSA_V41_CACHE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls():

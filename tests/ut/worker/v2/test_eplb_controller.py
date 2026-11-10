@@ -9,10 +9,32 @@ import torch
 import torch.nn as nn
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 
 class TestAscendEPLBController(unittest.TestCase):
+    def test_a5_default_policy_prepares_unpadded_count_and_sampling(self):
+        controller = self._make_controller(policy="default")
+        state = MagicMock()
+        state.uses_custom_load_stats = False
+        state.should_record_tensor = torch.tensor(False)
+        state.allgather_record_tensor = torch.tensor(1)
+        state._has_fresh_recorded_load = False
+        state._should_record_current_step.return_value = True
+        controller.state = state
+        config = SimpleNamespace()
+        with patch(
+            "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            controller.prepare_forward(config, 3)
+        state.prepare_forward.assert_called_once_with(config, 3, None)
+        assert state.should_record_tensor.item()
+        assert state.allgather_record_tensor.item() == -1
+        assert not state._has_fresh_recorded_load
+
     @staticmethod
     def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
@@ -83,7 +105,7 @@ class TestAscendEPLBController(unittest.TestCase):
                     model=nn.Linear(2, 2),
                     set_eplb_state=MagicMock(),
                 )
-                draft_config = SimpleNamespace()
+                draft_config = SimpleNamespace(model="draft")
                 with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
                     added = controller.maybe_register_speculator(
                         speculator, SimpleNamespace(draft_model_config=draft_config), False
@@ -91,7 +113,10 @@ class TestAscendEPLBController(unittest.TestCase):
                 self.assertEqual(added, enabled)
                 self.assertEqual(controller._has_registered_models, enabled)
                 if enabled:
-                    controller.state.add_model.assert_called_once_with(speculator.model, draft_config)
+                    # vLLM main names the draft entry for the EPLB step log.
+                    controller.state.add_model.assert_called_once_with(
+                        speculator.model, draft_config, model_name="draft (draft)"
+                    )
                     speculator.set_eplb_state.assert_called_once_with(controller.state)
                 else:
                     controller.state.add_model.assert_not_called()
@@ -100,7 +125,7 @@ class TestAscendEPLBController(unittest.TestCase):
                     target = nn.Linear(2, 2)
                     model_config = SimpleNamespace(model="target")
                     with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
-                        added = controller.maybe_register_model(target, model_config, False)
+                        added = controller.maybe_register_model(target, model_config)
                     controller.state.add_model.assert_called_once_with(target, model_config)
                     self.assertTrue(added)
                     controller.maybe_start_async_loop(added)
@@ -203,68 +228,37 @@ class TestAscendEPLBController(unittest.TestCase):
         self.assertFalse(state.should_record_tensor.item())
         self.assertFalse(state._has_fresh_recorded_load)
 
-    def test_setup_from_mapping_constructs_state_and_registers_model(self):
+    def test_setup_from_mapping_updates_registered_state(self):
         controller = self._make_controller()
-        model = nn.Linear(2, 2)
+        state = MagicMock()
+        controller.state = state
+        controller._has_registered_models = True
         model_config = SimpleNamespace()
         mapping = torch.tensor([[0, 1]], dtype=torch.int32)
-        state = MagicMock()
-
-        with (
-            patch(
-                "vllm_ascend.worker.v2.eplb._unwrap_moe",
-                return_value=model,
-            ) as unwrap_moe,
-            patch(
-                "vllm_ascend.worker.v2.eplb.is_mixture_of_experts",
-                return_value=True,
-            ),
-            patch(
-                "vllm_ascend.worker.v2.eplb.AscendEplbState.from_mapping",
-                return_value=state,
-            ) as from_mapping,
-        ):
-            controller.setup_from_mapping(
-                model=model,
-                model_config=model_config,
-                expanded_physical_to_logical=mapping,
-                old_num_physical_experts=2,
-            )
-
-        unwrap_moe.assert_called_once_with(model)
-        from_mapping.assert_called_once_with(
-            model=model,
-            model_config=model_config,
-            device=controller.device,
-            parallel_config=controller.parallel_config,
-            expanded_physical_to_logical=mapping,
-            num_valid_physical_experts=2,
-            policy=controller.eplb_policy,
-        )
+        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState.from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
-    def test_setup_from_mapping_rejects_non_moe_model(self):
+    def test_setup_from_mapping_requires_initialized_state(self):
         controller = self._make_controller()
-        model = nn.Linear(2, 2)
+        controller.state = None
+        with self.assertRaises(AssertionError):
+            controller.setup_from_mapping(SimpleNamespace(), torch.tensor([0]))
 
-        with (
-            patch(
-                "vllm_ascend.worker.v2.eplb._unwrap_moe",
-                return_value=model,
-            ),
-            patch(
-                "vllm_ascend.worker.v2.eplb.is_mixture_of_experts",
-                return_value=False,
-            ),
-            self.assertRaises(AssertionError),
-        ):
-            controller.setup_from_mapping(
-                model=model,
-                model_config=SimpleNamespace(),
-                expanded_physical_to_logical=torch.tensor([0]),
-                old_num_physical_experts=1,
-            )
+    def test_setup_from_mapping_preserves_live_state_and_communicator(self):
+        controller = self._make_controller()
+        state = MagicMock()
+        controller.state = state
+        model_config = SimpleNamespace()
+        mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState.from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
+        self.assertIs(controller.state, state)
 
 
 class TestUnwrapMoe(unittest.TestCase):

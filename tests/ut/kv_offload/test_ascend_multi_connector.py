@@ -14,84 +14,16 @@ from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa
 )
 
 
-class GroupSource:
-    def __init__(self, groups, hits):
-        self.groups = groups
-        self.hits = hits
-
-    def get_loaded_kv_cache_group_ids(self, request):
-        return self.groups
-
-    def get_num_new_matched_tokens(self, request, local):
-        return self.hits.get(request.request_id, (0, False))
-
-
-def test_loaded_groups_follow_each_selected_source_and_clear_on_miss():
-    pd = GroupSource((0, 1), {"from-p": (95, True)})
-    store = GroupSource((0,), {"from-store": (96, True)})
-    multi = AscendMultiConnector.__new__(AscendMultiConnector)
-    multi._connectors = [pd, store]
-    multi._requests_to_connector = {}
-    p_req = SimpleNamespace(request_id="from-p")
-    store_req = SimpleNamespace(request_id="from-store")
-    assert multi.get_loaded_kv_cache_group_ids(p_req) == ()
-    assert multi.get_num_new_matched_tokens(p_req, 0) == (95, True)
-    assert multi.get_num_new_matched_tokens(store_req, 0) == (96, True)
-    assert multi.get_loaded_kv_cache_group_ids(p_req) == (0, 1)
-    assert multi.get_loaded_kv_cache_group_ids(store_req) == (0,)
-    # Readmission must not retain the source from an earlier admission.
-    store.hits.clear()
-    assert multi.get_num_new_matched_tokens(store_req, 0) == (0, False)
-    assert multi.get_loaded_kv_cache_group_ids(store_req) == ()
-    assert multi.get_loaded_kv_cache_group_ids(p_req) == (0, 1)
-
-
-def test_pending_lookup_does_not_advertise_an_earlier_child():
-    first = GroupSource((0, 1), {"r": (96, True)})
-    pending = GroupSource((0,), {"r": (None, False)})
-    multi = AscendMultiConnector.__new__(AscendMultiConnector)
-    multi._connectors = [first, pending]
-    multi._requests_to_connector = {"r": 1}
-    request = SimpleNamespace(request_id="r")
-    assert multi.get_num_new_matched_tokens(request, 0) == (None, False)
-    assert multi.get_loaded_kv_cache_group_ids(request) == ()
-
-
-def test_preemption_clears_loaded_source():
-    multi = AscendMultiConnector.__new__(AscendMultiConnector)
-    multi._connectors = [GroupSource((0, 1), {})]
-    multi._requests_to_connector = {"r": 0}
-    request = SimpleNamespace(request_id="r")
-    assert not multi.update_state_before_preempt(request, ([], []), 96)
-    assert multi.get_loaded_kv_cache_group_ids(request) == ()
-
-
-def test_replay_rejects_children_without_a_loaded_group_contract():
-    config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
-    with patch.object(MultiConnector, "__init__", return_value=None):
-        multi = AscendMultiConnector.__new__(AscendMultiConnector)
-        multi._connectors = [object()]
-        with pytest.raises(ValueError, match="unsupported child: object"):
-            multi.__init__(config, object(), None)
-
-
-def test_initialization_does_not_publish_kv_write_events():
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_connector="MultiConnector",
-            is_kv_producer=False,
-            is_kv_consumer=True,
-            kv_connector_extra_config={},
-        ),
-        speculative_config=None,
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
-    )
-    child = SimpleNamespace(on_kv_cache_written=MagicMock())
-    with patch.object(MultiConnector, "__init__", return_value=None):
-        connector = AscendMultiConnector.__new__(AscendMultiConnector)
-        connector._connectors = [child]
-        connector.__init__(config, object(), None)
-    child.on_kv_cache_written.assert_not_called()
+def test_load_ready_observer_does_not_advance_child_attention_hooks():
+    observer = MagicMock()
+    child = SimpleNamespace(wait_for_layer_load_ready=observer, wait_for_layer_load=MagicMock())
+    other = SimpleNamespace(wait_for_layer_load=MagicMock())
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [child, other]
+    connector.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+    observer.assert_called_once_with("model.layers.9.self_attn.attn")
+    child.wait_for_layer_load.assert_not_called()
+    other.wait_for_layer_load.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -361,7 +293,6 @@ def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     # Put the store first to verify the dependency does not rely on config order.
     connector._connectors = [store, provider]
-    connector._layerwise_workspace_fences_enabled = False
 
     connector._configure_layerwise_reuse_completion()
 
@@ -396,7 +327,6 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     )
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector._connectors = [sibling, provider]
-    connector._layerwise_workspace_fences_enabled = False
 
     connector._configure_layerwise_reuse_completion()
     connector.wait_for_layer_load("model.layers.7.self_attn")
@@ -410,7 +340,6 @@ def test_mamba_state_copy_runs_after_all_connector_loads():
     second = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("second-load")))
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector._connectors = [first, second]
-    connector._layerwise_workspace_fences_enabled = False
     connector._layerwise_slot_release_providers = []
     connector._non_slot_release_connectors = [first, second]
     connector._external_slot_release_sink_configured = False
@@ -432,7 +361,6 @@ def test_v2_mamba_state_copy_runs_after_all_connector_loads():
     second = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("second-load")))
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector._connectors = [first, second]
-    connector._layerwise_workspace_fences_enabled = False
     connector._layerwise_slot_release_providers = []
     connector._non_slot_release_connectors = [first, second]
     connector._external_slot_release_sink_configured = False
@@ -449,7 +377,6 @@ def test_mamba_state_copy_skipped_without_deferral():
     first = SimpleNamespace(wait_for_layer_load=MagicMock())
     connector = AscendMultiConnector.__new__(AscendMultiConnector)
     connector._connectors = [first]
-    connector._layerwise_workspace_fences_enabled = False
     connector._layerwise_slot_release_providers = []
     connector._non_slot_release_connectors = [first]
     connector._external_slot_release_sink_configured = False

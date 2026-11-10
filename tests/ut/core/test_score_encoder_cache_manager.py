@@ -4,8 +4,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from transformers import CLIPVisionConfig, Qwen2_5_VLConfig
+from vllm import SamplingParams
 from vllm.config import EncoderCacheManagerConfig
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.request import Request
 
 from vllm_ascend.ec_manager.score_ec_manager import (
     CacheEntry,
@@ -37,12 +40,21 @@ def _build_manager(
     )
 
 
-def _build_request(request_id: str, mm_hash: str, num_embeds: int):
-    request = MagicMock()
-    request.request_id = request_id
-    request.mm_features = [SimpleNamespace(identifier=mm_hash)]
-    request.get_num_encoder_embeds.return_value = num_embeds
-    return request
+def _build_request(request_id: str, mm_hash: str, num_embeds: int) -> Request:
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=[0] * num_embeds,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier=mm_hash,
+                mm_position=PlaceholderRange(offset=0, length=num_embeds),
+            )
+        ],
+    )
 
 
 def test_qualified_class_name_resolves_score_manager():
@@ -209,16 +221,20 @@ def test_allocate_reuse_promote_free_and_reset_preserve_invariants():
     manager = _build_manager(npu_cache_size=4, cpu_cache_size=4)
     request = _build_request("request", "image", 2)
 
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
     assert manager.can_allocate(request, 0, 2, 0)
     manager.allocate(request, 0)
     manager._check_invariant()
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 2
 
     manager.free_encoder_input(request, 0)
     manager._check_invariant()
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 2
 
     assert manager.check_and_update_cache(request, 0)
     manager._check_invariant()
     assert "image" in manager.npu_cache
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 2
 
     metadata = manager.get_manager_metadata()
     assert metadata.promoting_mm_hashes == ["image"]
@@ -229,9 +245,81 @@ def test_allocate_reuse_promote_free_and_reset_preserve_invariants():
 
     manager.reset()
     manager._check_invariant()
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
     metadata = manager.get_manager_metadata()
     assert metadata.npu_freed == []
     assert metadata.cpu_freed == []
+
+
+@pytest.mark.parametrize("promote", [False, True])
+def test_cached_embed_count_survives_cpu_eviction_only_if_npu_resident(promote: bool):
+    manager = _build_manager(npu_cache_size=2, cpu_cache_size=2)
+    owner = _build_request("owner", "shared", 2)
+    manager.allocate(owner, 0)
+    manager.free(owner)
+    if promote:
+        assert manager.check_and_update_cache(owner, 0)
+        manager.free(owner)
+
+    # Pressure evicts the CPU copy; an NPU copy, if present, stays reusable.
+    pressure = _build_request("pressure", "other", 2)
+    assert manager.can_allocate(pressure, 0, 2, 0)
+    manager._check_invariant()
+    assert "shared" not in manager.cpu_cache
+    assert manager.get_cached_num_encoder_embeds(owner, 0) == (2 if promote else None)
+
+    if promote:
+        entry = manager.npu_freeable.pop("shared")
+        manager.evict_from_npu(entry)
+        manager._check_invariant()
+        assert manager.get_cached_num_encoder_embeds(owner, 0) is None
+
+    # After the last copy is evicted, the same identifier can have a new size.
+    replacement = _build_request("replacement", "shared", 1)
+    manager.allocate(replacement, 0)
+    assert manager.get_cached_num_encoder_embeds(replacement, 0) == 1
+    manager.free(replacement)
+    manager._check_invariant()
+
+
+def test_zero_cached_embeds_is_distinct_from_cache_miss():
+    manager = _build_manager()
+    request = _build_request("empty", "empty-image", 0)
+
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
+    manager.allocate(request, 0)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 0
+    manager.free(request)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 0
+    manager.reset()
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
+    manager._check_invariant()
+
+
+def test_cached_embed_count_survives_npu_eviction_and_repromotion():
+    manager = _build_manager(npu_cache_size=2, cpu_cache_size=2)
+    owner = _build_request("owner", "shared", 2)
+    manager.allocate(owner, 0)
+    manager.free(owner)
+    assert manager.check_and_update_cache(owner, 0)
+    manager.free(owner)
+
+    entry = manager.npu_freeable.pop("shared")
+    manager.evict_from_npu(entry)
+    manager._check_invariant()
+    assert "shared" not in manager.npu_cache
+    assert manager.get_cached_num_encoder_embeds(owner, 0) == 2
+
+    assert manager.check_and_update_cache(owner, 0)
+    assert manager.npu_cache["shared"] is manager.cpu_cache["shared"]
+    assert manager.get_cached_num_encoder_embeds(owner, 0) == 2
+    manager._check_invariant()
+
+    # Reset also invalidates actively referenced entries in both tiers.
+    manager.reset()
+    assert manager.get_cached_num_encoder_embeds(owner, 0) is None
+    assert not manager.request_cached_ids
+    manager._check_invariant()
 
 
 def test_on_request_does_not_run_full_invariant_check():

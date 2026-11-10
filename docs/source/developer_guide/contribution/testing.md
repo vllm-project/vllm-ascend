@@ -199,10 +199,10 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
     # Run a certain test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py::test_qwen3_dense_graph_mode
     ```
 
 === "Multi-card"
@@ -257,7 +257,7 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 #### E2E test examples
 
-- Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
+- Offline test example: [`tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py)
 
 ### Csrc incremental build cache checks
 
@@ -298,7 +298,7 @@ You can preview locally which runners a set of tests would be routed to:
 
 ```bash
 python3 .github/workflows/scripts/select_tests.py \
-  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
 # Full suite routing (mirrors the ready-all mode)
 python3 .github/workflows/scripts/select_tests.py --all-tests
@@ -351,7 +351,6 @@ Workflows with a native GitHub cron trigger:
 | `schedule_doc_translate.yaml` | `workflow_dispatch` |
 | `schedule_e2e_upstream_test.yaml` | - |
 | `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
-| `schedule_main2main.yaml` | `workflow_dispatch` |
 | `schedule_stale_manage.yaml` | `issue_comment` |
 
 Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
@@ -361,6 +360,7 @@ Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
 | `schedule_doc_getting_started_test.yaml` | PR path filter |
 | `schedule_e2e_test.yaml` | - |
 | `schedule_image_build_and_push.yaml` | PR label, tag `push` |
+| `schedule_main2main.yaml` | - |
 | `schedule_nightly_test_310p.yaml` | - |
 | `schedule_nightly_test_a2.yaml` | - |
 | `schedule_nightly_test_a3.yaml` | - |
@@ -415,3 +415,61 @@ The detailed report will be written to:
 
 - `docs/_build/linkcheck/output.txt`
 - `docs/_build/linkcheck/output.json`
+
+## PR testing requirements
+
+Use this section when preparing or reviewing a pull request to decide which
+test coverage and validation evidence the change needs. See the preceding
+sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
+for PR CI.
+
+### Choose coverage for the change
+
+Run the affected tests and required repository checks. Expand coverage when the
+change affects shared behavior, failures expose additional risks, or reviewers
+need more evidence. A full local test-suite run is not required for every change.
+
+| Change | Expected coverage |
+| ------ | ----------------- |
+| New behavior | Unit tests for the happy path, failure modes, and relevant boundary cases, such as empty input, single-element input, sequence-length limits, or overflow. |
+| Bug fix | A regression test that reproduces the original failure and passes with the fix. |
+| Integration behavior | Relevant E2E tests for the affected models, configuration, or distributed execution paths. |
+| NPU performance path | Realistic hardware benchmarks and performance regression coverage, including memory use when affected. Add nightly coverage where appropriate. |
+| Documentation or metadata | Focused checks such as Markdown linting, link validation, or parsing changed configuration. Add runtime tests when the change affects runtime behavior. |
+
+Unit tests live in `tests/ut/`, E2E tests in `tests/e2e/`, and nightly tests in
+`tests/e2e/nightly/`.
+
+### Hardware and performance evidence
+
+NPU-specific behavior requires validation on actual hardware before merge.
+Record the affected hardware, relevant software versions, model, configuration,
+commands, and results so reviewers can assess and reproduce the validation.
+
+If local hardware or dependencies are unavailable, continue preparing the PR
+with the checks that can run. Identify the remaining hardware checks for CI or
+reviewers; CPU mocks and static checks do not establish NPU correctness.
+
+For performance changes, compare the baseline and changed implementation under
+the same workload and environment. Include throughput or latency results and,
+when affected, memory use, fragmentation, and CPU-NPU synchronization behavior.
+
+### Report validation in the PR
+
+Complete the PR template's **How was this patch tested?** section with:
+
+- Tests added or updated, including relevant boundary cases.
+- Commands and observed results for local or manual checks.
+- CI jobs or hardware runs that provide additional evidence.
+- Failed, skipped, or unrun checks, the reason, and the validation still needed.
+
+If no tests were added, explain which existing tests or focused checks cover
+the change, or why validation remains pending. Distinguish code inspection,
+CPU tests, NPU execution, and end-to-end validation when reporting results.
+
+### PR submission checklist
+
+- [ ] The title contains a change-type tag accepted by the [CI title check](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml#L59), such as `[BugFix]`, `[Feature]`, or `[Doc]`.
+- [ ] The applicable test coverage and validation results are recorded in the PR.
+- [ ] Required CI checks pass before merge.
+- [ ] Outstanding NPU hardware or performance validation is completed before merge.

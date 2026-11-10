@@ -3,6 +3,8 @@ import gc
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -43,6 +45,20 @@ def golden_inplace_partial_rotary_mul(
 
 
 @pytest.mark.parametrize(
+    "negate_sin",
+    [
+        pytest.param(False, id="explicit-sin"),
+        pytest.param(
+            True,
+            id="negate-sin",
+            marks=pytest.mark.skipif(
+                get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+                reason="The negate_sin attribute requires Ascend A2/A3",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     "num_tokens",
     [1, 16, 128, 1000],
 )
@@ -54,7 +70,7 @@ def golden_inplace_partial_rotary_mul(
         (torch.float32, 1e-5, 1e-5),
     ],
 )
-def test_inplace_partial_rotary_mul(num_tokens: int, dtype, atol, rtol):
+def test_inplace_partial_rotary_mul(num_tokens: int, dtype, atol, rtol, negate_sin: bool):
     torch.manual_seed(0)
 
     # x: (T, 1, H, D); cos/sin: (T, 1, 1, R) fp32, no repeat_interleave
@@ -63,43 +79,45 @@ def test_inplace_partial_rotary_mul(num_tokens: int, dtype, atol, rtol):
     cos = torch.cos(base)
     sin = torch.sin(base)
 
-    # ---- 1. positive sin: negate_sin=False ----
-    out = x.clone().npu()
-    torch.ops._C_ascend.inplace_partial_rotary_mul(
-        out,
-        cos.npu(),
-        sin.npu(),
-        rotary_mode="interleave",
-        partial_slice=[NOPE_DIM, HEAD_DIM],
-        negate_sin=False,
-    )
-    ref = golden_inplace_partial_rotary_mul(x, cos, sin, negate_sin=False)
-    torch.testing.assert_close(out.cpu(), ref.to(dtype), atol=atol, rtol=rtol)
+    # The shared path covers both positive and explicitly negated sine inputs.
+    if not negate_sin:
+        out = x.clone().npu()
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            out,
+            cos.npu(),
+            sin.npu(),
+            rotary_mode="interleave",
+            partial_slice=[NOPE_DIM, HEAD_DIM],
+            negate_sin=False,
+        )
+        ref = golden_inplace_partial_rotary_mul(x, cos, sin, negate_sin=False)
+        torch.testing.assert_close(out.cpu(), ref.to(dtype), atol=atol, rtol=rtol)
 
-    # ---- 2. negative sin: raw sin + negate_sin=True ----
+    # Only the A2/A3 variant exercises the negate_sin attribute.
     out_neg = x.clone().npu()
     torch.ops._C_ascend.inplace_partial_rotary_mul(
         out_neg,
         cos.npu(),
-        sin.npu(),
+        (sin if negate_sin else -sin).npu(),
         rotary_mode="interleave",
         partial_slice=[NOPE_DIM, HEAD_DIM],
-        negate_sin=True,
+        negate_sin=negate_sin,
     )
     ref_neg = golden_inplace_partial_rotary_mul(x, cos, sin, negate_sin=True)
     torch.testing.assert_close(out_neg.cpu(), ref_neg.to(dtype), atol=atol, rtol=rtol)
 
-    # ---- 3. cross check: negate_sin=True equals -sin input (legacy), bit-wise ----
-    out_neg2 = x.clone().npu()
-    torch.ops._C_ascend.inplace_partial_rotary_mul(
-        out_neg2,
-        cos.npu(),
-        (-sin).npu(),
-        rotary_mode="interleave",
-        partial_slice=[NOPE_DIM, HEAD_DIM],
-        negate_sin=False,
-    )
-    assert torch.equal(out_neg.cpu(), out_neg2.cpu())
+    # Preserve the bitwise equivalence check for the legacy attribute.
+    if negate_sin:
+        out_neg2 = x.clone().npu()
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            out_neg2,
+            cos.npu(),
+            (-sin).npu(),
+            rotary_mode="interleave",
+            partial_slice=[NOPE_DIM, HEAD_DIM],
+            negate_sin=False,
+        )
+        assert torch.equal(out_neg.cpu(), out_neg2.cpu())
 
     gc.collect()
     torch.npu.empty_cache()

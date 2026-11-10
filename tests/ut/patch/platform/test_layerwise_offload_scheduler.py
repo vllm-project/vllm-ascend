@@ -26,9 +26,7 @@ def fake_async_scheduler(monkeypatch):
             num_external_computed_tokens=0,
         ):
             del request
-            self.original_calls.append(
-                (num_new_local_computed_tokens, num_external_computed_tokens)
-            )
+            self.original_calls.append((num_new_local_computed_tokens, num_external_computed_tokens))
             return num_new_tokens - 1
 
     monkeypatch.setattr(layerwise_patch, "AsyncScheduler", FakeAsyncScheduler)
@@ -78,9 +76,7 @@ def test_patch_preserves_final_prefill_decode_and_empty_chunks(
     fake_async_scheduler, computed_tokens, proposed_tokens, expected
 ):
     scheduler = _enabled_scheduler(fake_async_scheduler)
-    assert scheduler._mamba_block_aligned_split(
-        _request(computed_tokens=computed_tokens), proposed_tokens
-    ) == expected
+    assert scheduler._mamba_block_aligned_split(_request(computed_tokens=computed_tokens), proposed_tokens) == expected
 
 
 def test_alignment_rejects_invalid_granularity():

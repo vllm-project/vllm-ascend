@@ -20,10 +20,7 @@ if TYPE_CHECKING:
 LAYERWISE_CACHE_LAYOUT_SCHEMA_VERSION = 1
 LAYERWISE_PREFILL_GET_GROUP_SIZE = 2
 LAYERWISE_PREFILL_WORKSPACE_BANK_COUNT = 2
-LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT = (
-    LAYERWISE_PREFILL_GET_GROUP_SIZE
-    * LAYERWISE_PREFILL_WORKSPACE_BANK_COUNT
-)
+LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT = LAYERWISE_PREFILL_GET_GROUP_SIZE * LAYERWISE_PREFILL_WORKSPACE_BANK_COUNT
 DEFAULT_CACHE_ALIGNMENT_BYTES = 64
 
 
@@ -59,10 +56,7 @@ class CacheComponentDescriptor:
         if not self.shape_per_block or any(dim <= 0 for dim in self.shape_per_block):
             raise ValueError(f"Invalid per-block shape: {self.shape_per_block}")
         if self.page_bytes <= 0 or self.page_stride_bytes < self.page_bytes:
-            raise ValueError(
-                "page_stride_bytes must be greater than or equal to a "
-                "positive page_bytes"
-            )
+            raise ValueError("page_stride_bytes must be greater than or equal to a positive page_bytes")
         if self.alignment_bytes <= 0:
             raise ValueError("alignment_bytes must be positive")
 
@@ -98,8 +92,7 @@ class LayerCacheLayoutDescriptor:
         return tuple(
             component
             for component in self.components
-            if component.component_role
-            in (CacheComponentRole.MAIN_KV, CacheComponentRole.MAIN_K_ROPE)
+            if component.component_role in (CacheComponentRole.MAIN_KV, CacheComponentRole.MAIN_K_ROPE)
         )
 
     @property
@@ -107,8 +100,7 @@ class LayerCacheLayoutDescriptor:
         return tuple(
             component
             for component in self.components
-            if component.component_role
-            in (CacheComponentRole.INDEXER_K, CacheComponentRole.INDEXER_SCALE)
+            if component.component_role in (CacheComponentRole.INDEXER_K, CacheComponentRole.INDEXER_SCALE)
         )
 
 
@@ -243,9 +235,7 @@ def build_mla_layer_cache_descriptor(
                 kv_cache_spec.block_size,
                 kv_cache_spec.num_kv_heads,
                 index_head_dim,
-                kv_cache_spec.c8_k_cache_dtype
-                if kv_cache_spec.cache_sparse_c8
-                else kv_cache_spec.dtype,
+                kv_cache_spec.c8_k_cache_dtype if kv_cache_spec.cache_sparse_c8 else kv_cache_spec.dtype,
                 alignment_bytes=alignment_bytes,
             )
         )
@@ -298,10 +288,7 @@ def bind_layer_cache_views(
     views: dict[CacheComponentRole, torch.Tensor] = {}
     for component in descriptor.components:
         if component.tensor_index >= len(raw_cache_tuple):
-            raise ValueError(
-                f"{descriptor.layer_name} is missing cache tensor index "
-                f"{component.tensor_index}"
-            )
+            raise ValueError(f"{descriptor.layer_name} is missing cache tensor index {component.tensor_index}")
         tensor = raw_cache_tuple[component.tensor_index]
         expected_tail = component.shape_per_block
         if tensor.dtype != component.dtype:
@@ -316,8 +303,7 @@ def bind_layer_cache_views(
             )
         if tensor.stride(0) * tensor.element_size() != component.page_stride_bytes:
             raise ValueError(
-                f"{descriptor.layer_name}/{component.component_role.value} has "
-                "an incompatible page stride"
+                f"{descriptor.layer_name}/{component.component_role.value} has an incompatible page stride"
             )
         views[component.component_role] = tensor
     return LayerCacheViews(views)

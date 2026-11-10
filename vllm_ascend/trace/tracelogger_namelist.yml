@@ -137,7 +137,7 @@ targets:
               if os.getenv("ROLE") == "prefill":
                   log_action("success add to seq groups", item.request_id)
               else:
-                  log_action("Start append running sequece for decode", item.request_id)
+                  log_action("Start append running sequence for decode", item.request_id)
               super().append(item)
 
       if not getattr(self.running, "_vllm_ascend_trace_running", False):
@@ -263,7 +263,7 @@ targets:
     entry_operation: *scheduler_update_entry
     exit_operation: *scheduler_update_exit
 
-  - module: "vllm_ascend.worker.model_runner_v1:NPUModelRunner"
+  - module: "vllm_ascend.worker.v1.model_runner:NPUModelRunner"
     trace_scope: worker
     function_name: execute_model
     entry_operation: |
@@ -296,7 +296,7 @@ targets:
                   f"{main_model_end_time}|{execute_model_cost_time}|{engine_core_str}"
               )
 
-  - module: "vllm_ascend.worker.model_runner_v1:NPUModelRunner"
+  - module: "vllm_ascend.worker.v1.model_runner:NPUModelRunner"
     trace_scope: worker
     function_name: propose_draft_token_ids
     entry_operation: |

@@ -26,8 +26,15 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     uses_a5_packed_cache,
 )
 from vllm_ascend.models.deepseek_v41.mixed_quant_attention import quantize_query_mxfp4
-from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
-from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
+from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
+from vllm_ascend.ops.triton.prepare_indexer_indices import (
+    prepare_indexer_indices,
+    register_indexer_warmup,
+)
+from vllm_ascend.ops.triton.quantize_indexer_query import (
+    _QUANTIZE_INDEXER_QUERY_KERNEL,
+    quantize_indexer_query,
+)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -66,6 +73,10 @@ class DeepseekV41Indexer(nn.Module):
         # FP32 copy of the K RMSNorm weight for ``indexer_prologue_k``; stays
         # ``None`` until ``process_weights_after_loading`` runs.
         self._prologue_norm_weight: torch.Tensor | None = None
+        # Declarative JIT warmup for both indexer kernels; the model runner
+        # holds the registry window open during model construction.
+        register_indexer_warmup(self.index_topk, compress_ratio, vllm_config)
+        _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(vllm_config)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
         self.wq_b = ReplicatedLinear(
@@ -139,6 +150,17 @@ class DeepseekV41Indexer(nn.Module):
     def update_keys(self, latent, slots, cos, sin):
         """Publish source-owned index K before latent is RoPE'd as long KV."""
         if not self.owns_k or latent.shape[0] == 0:
+            return
+        if self.packed_cache_ops is not None and indexer_prologue_k is None:
+            key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
+            DeviceOperator.apply_partial_rotary_inplace(
+                key, cos, sin, start=self.width - self.rope_width, end=self.width
+            )
+            key = key.squeeze(1)
+            k_cache, scale_cache = self.k_cache.kv_cache[0]
+            self.packed_cache_ops.write_index_cache((k_cache, scale_cache), slots, key)
+            if self.k_cache_folded is not None:
+                fold_indexer_cache_rows((k_cache, scale_cache), self.k_cache_folded.kv_cache[0], slots)
             return
         k_cache, scale_cache = self.k_cache.kv_cache[0]
         if self.packed_cache_ops is not None:

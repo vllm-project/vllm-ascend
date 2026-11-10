@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS, uses_a5_packed_cache
+from vllm_ascend.ops.cann_packaged_attention import has_ds41_ops
 from vllm_ascend.utils import maybe_trans_nz
 
 
@@ -60,7 +61,7 @@ class DeepseekV41Compressor(nn.Module):
         self.ratio = ratio
         # The fused ds41 compressor op exists only in the A5 wheel
         # environment; other devices keep the eager Triton pooling path.
-        self._fused = uses_a5_packed_cache()
+        self._fused = uses_a5_packed_cache() and has_ds41_ops()
         self._ring_num_cores = None
         self.width = config.head_dim
         dim = config.hidden_size
@@ -118,7 +119,7 @@ class DeepseekV41Compressor(nn.Module):
 
             self._ring_num_cores = _cube_core_num()
 
-    def pool_projected(self, hidden_states, metadata):
+    def pool_from_hidden_states(self, hidden_states, metadata):
         """Fused ds41 compressor path: project + gated-pool inside the op.
 
         The op (cann_ops_transformer.ops.ds41.compressor) takes the raw
@@ -156,7 +157,7 @@ class DeepseekV41Compressor(nn.Module):
         out = self.norm(pooled)
         return out
 
-    def pool_projected_eager(self, kv, scores, metadata):
+    def pool_projected(self, kv, scores, metadata):
         """Eager Triton path (non-A5): pool pre-projected KV/scores over the ring state."""
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 

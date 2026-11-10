@@ -10,6 +10,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 
+from vllm_ascend.attention.utils import uses_pcp_sharded_layout
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
@@ -18,7 +19,6 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 @pytest.fixture
 def state(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     monkeypatch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: False)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=32),
@@ -196,10 +196,12 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
     metadata = object()
 
     def build(prefix, common, **kwargs):
-        # RFC's real PCP builder receives context through kwargs, including
-        # on ranks that own none of the retained suffix queries.
-        assert kwargs["pcp_context"] is state.replay_pcp_context
-        assert kwargs["pcp_cache_group_idx"] == 1
+        # Exercise the same layout guard as the real PCP attention builder.
+        # Gathered slots are invalid unless the common metadata owns a context,
+        # including on ranks with no retained suffix queries.
+        assert uses_pcp_sharded_layout(common, True)
+        assert common.pcp_context is state.replay_pcp_context
+        assert common.pcp_cache_group_idx == 1
         assert common.slot_mapping.numel() == 4
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2
@@ -412,14 +414,6 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
     assert gather_padding.call_count == int(sequence_parallel)
-
-
-def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: True)
-    state.config.parallel_config.tensor_parallel_size = 4
-    state.prepare(inputs(), CUDAGraphMode.NONE)
-    assert state.layers.num_actual_rows == 5
-    assert state.layers.rows.numel() == 8
 
 
 @pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])

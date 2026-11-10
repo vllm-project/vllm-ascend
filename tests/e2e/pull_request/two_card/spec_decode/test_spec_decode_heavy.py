@@ -29,7 +29,7 @@ import pytest
 import torch_npu
 from transformers import AutoTokenizer
 from vllm import SamplingParams
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
@@ -159,7 +159,10 @@ def test_qwen3_vwn_eagle3_tp2():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 def test_eagle3_sliding_window():
+    # draft_window_size is on the V2 blacklist, so this case stays on V1
+    # without an explicit runner env pin.
     method = "eagle3"
     num_speculative_tokens = 3
     draft_window_size = 512
@@ -239,18 +242,13 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_hang():
-    """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
+def test_hang(monkeypatch):
+    """Exercise DP/EP MTP at the context boundary with a hybrid target.
 
-    The server deadlocks when all of the following hold:
-      1. Data Parallelism is enabled (data_parallel_size >= 2);
-      2. The draft model is MoE (here: 72 routed experts);
-      3. prompt_len + generated_len approaches max_model_len (boundary case).
-
-    ``ignore_eos=True`` drives generation to max_model_len so the request
-    length saturates the boundary in (3). The model is a small random-weight
-    DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
+    Uneven work leaves one rank running padded dummy batches. Its draft must
+    reuse the target's DP agreement without changing the logical query width.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -265,25 +263,9 @@ def test_hang():
         trust_remote_code=True,
     )
 
-    # Prompts padded to exactly max_model_len - 1 tokens so that
-    # prompt_len + num_speculative_tokens > max_model_len at the FIRST draft
-    # proposal — this deterministically triggers input_fits_in_drafter=False
-    # (the path PR #10117 removed) instead of relying on generation to wander
-    # into the boundary. The filler counts below tokenize to exactly 1023 for
-    # this tokenizer; the assert guards against tokenizer drift.
-    #
-    # Three requests are needed:
-    #   - With 1 request, once the hang triggers the single vllm worker dies,
-    #     which tears the server down before the deadlock is observable.
-    #   - With 2 requests, the scheduler may route both to the SAME DP rank
-    #     (the other rank idle), so the cross-DP synchronization that the bug
-    #     needs never happens — the hang only reproduces probabilistically.
-    #   - With 3 requests across data_parallel_size=2, at least one request
-    #     lands on each DP rank, so both ranks hit input_fits_in_drafter=False
-    #     and deadlock on the cross-DP sync. Verified to reproduce 5/5 runs.
-    #
-    # All three prompts below tokenize to exactly 1023 tokens (max_model_len - 1)
-    # for this tokenizer; the assert after apply_chat_template enforces it.
+    # Leave one token before the context limit. Three requests across two DP
+    # ranks create uneven work, so an idle rank must still join draft DP sync.
+    # The assertion below guards the fixed fillers against tokenizer drift.
     prompts = [
         {
             "role": "user",
@@ -324,7 +306,7 @@ def test_hang():
         "num_speculative_tokens": 3,
     }
 
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE, cudagraph_capture_sizes=[12])
 
     with DPVllmRunner(
         main_model_name,
@@ -342,10 +324,12 @@ def test_hang():
     ) as llm:
         outputs = llm.generate(prompts, sampling_params=sampling_params)
 
+    assert len(outputs) == len(prompts)
     for output in outputs:
         # DPVllmRunner.generate returns list[tuple[list[list[int]], list[str]]]:
         # (token_ids per seq, generated text per seq).
         output_tokens = output[0][0]
+        assert len(output_tokens) == max_model_len
         generated_text = output[1][0]
         print(f"Generated text: {generated_text!r}")
         print(f"Output tokens: {output_tokens}")

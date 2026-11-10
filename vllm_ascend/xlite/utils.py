@@ -57,11 +57,17 @@ def set_dummy_tensor(tensor: torch.Tensor) -> None:
 class _TensorRepr:
     """
     A simple class to provide a string representation of a tensor or an iterable of tensors.
+
+    Attributes:
+        value (Any): The tensor or iterable of tensors to represent, or any other object. If the value is not a tensor
+            or iterable of tensors, its standard representation is used.
+        max_it (int | None): The maximum number of items to show in the representation for iterables. If the iterable
+            has more items than `max_it`, an ellipsis ("...") is used as padding. If `max_it <= 0`, all items are shown.
     """
 
-    def __init__(self, value: Any, /, *, max_it: int = 3) -> None:
-        self.value = value
-        self.max_it = max(1, max_it)  # ensure max_it is at least 1
+    def __init__(self, value: Any, /, *, max_it: int | None = 3) -> None:
+        self.value: Any = value
+        self.max_it: int = max_it if isinstance(max_it, int) else 0
 
     def _prune_list_repr(self, repr_list: list[str], /) -> list[str]:
         """Prune a list of string representations to a maximum number of items, adding an ellipsis if pruned."""
@@ -69,7 +75,7 @@ class _TensorRepr:
         pruned_repr_list: list[str] = []
         last_item_is_ellipsis = False
         for i, s in enumerate(repr_list):
-            if i >= self.max_it:
+            if i >= self.max_it and self.max_it > 0:
                 if not last_item_is_ellipsis:
                     last_item_is_ellipsis = True
                     pruned_repr_list.append("...")
@@ -84,12 +90,14 @@ class _TensorRepr:
             repr_set.add(s)
         return pruned_repr_list
 
-    @staticmethod
-    def _single_tensor_repr(tensor: torch.Tensor, /) -> str:
-        tensor_format_str = ""
+    def _single_tensor_repr(self, tensor: torch.Tensor, /) -> str:
+        tensor_info: list[str] = [f"shape={tuple(tensor.shape)}"]
+        if not tensor.is_contiguous():
+            tensor_info.append(f"stride={tensor.stride()}")
+        tensor_info.append(f"dtype={str(tensor.dtype).strip().lstrip('torch.')}")
         if tensor.device.type == "npu" and (tensor_format := torch_npu.get_npu_format(tensor)) != torch_npu.Format.ND:
-            tensor_format_str = f", format={str(tensor_format)}"
-        return f"Tensor(shape={tuple(tensor.shape)}, dtype={tensor.dtype}{tensor_format_str})"
+            tensor_info.append(f"format={str(tensor_format)}")
+        return f"Tensor({', '.join(tensor_info)})"
 
     def _iterable_tensor_repr(self, iterable: torch.Tensor | Sequence[torch.Tensor], /) -> str:
         if isinstance(iterable, torch.Tensor):
@@ -461,6 +469,7 @@ class WeightGetterConfig(TypedDict, total=False):
     mask: Sequence[bool] | None
     secondary_flattening: str | slice | None
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None
+    check_is_contiguous: bool
 
 
 def get_layer_weights(
@@ -470,6 +479,7 @@ def get_layer_weights(
     mask: Sequence[bool] | None = None,
     secondary_flattening: str | slice | None = None,
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    check_is_contiguous: bool = True,
     **kwargs: Any,
 ) -> list[torch.Tensor]:
     """Extract specified weights from a sequence of layers with optional secondary flattening and post-processing.
@@ -503,6 +513,8 @@ def get_layer_weights(
             Cannot be specified at the same time as `mask`.
         post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
             each retrieved tensor before returning the final list of weights.
+        check_is_contiguous (bool, optional): If True, checks that each retrieved tensor is contiguous in memory. If
+            any tensor is not contiguous, a ValueError is raised. Default is True.
         **kwargs: Additional keyword arguments for future extensions.
 
     Returns:
@@ -549,6 +561,8 @@ def get_layer_weights(
 
         if post_processor:
             weights = [post_processor(weight) for weight in weights]
+        if check_is_contiguous and not all(weight.is_contiguous() for weight in weights):
+            raise ValueError("xlite: Found non-contiguous tensor in the retrieved weights.")
 
         if weights:
             return weights

@@ -112,6 +112,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3SparseBackend,
     AscendMiniMaxM3SparseImpl,
     AscendMiniMaxM3SparseMetadata,
+    _get_minimax_m3_dense_backend,
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
@@ -126,6 +127,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 
 _FP8_E4M3_MAX = 448.0
+_MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
 
 
 def _resolve_layer_kv_cache_dtype(
@@ -479,12 +481,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
 
     def _can_fuse_sparse_prepare(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> bool:
-        # Direct cache stores benefit decode batches; retain the existing path
-        # for larger batches where per-token programs become more expensive.
-        max_fused_tokens = 512
+        # The kernel launches one program per token. A3 measurements keep it
+        # ahead of the separate prepare/cache chain through 256K-token prefill;
+        # retain the fallback beyond the validated range.
         return (
             HAS_TRITON
-            and hidden_states.shape[0] <= max_fused_tokens
+            and hidden_states.shape[0] <= _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16
             and positions.ndim == 1
@@ -926,6 +928,9 @@ class MiniMaxM3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
+        # Preserve upstream selection and its implementation; specialize only
+        # the standard backend's M3 mixed-KV block declaration before planning.
+        self.attn.attn_backend = _get_minimax_m3_dense_backend(self.attn.attn_backend)
 
     def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q_shape = q.shape
@@ -1116,7 +1121,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self._enable_eagle3_aux_hidden_states = (
-            vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "eagle3"
+            vllm_config.speculative_config is not None and vllm_config.speculative_config.method in ("eagle3", "dspark")
         )
 
         self.vocab_size = text_config.vocab_size

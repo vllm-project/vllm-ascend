@@ -199,8 +199,13 @@ Use the startup logs (`GPU KV cache size` and `Maximum concurrency for ... token
 
 Batch invariance has been tested and verified on the following models:
 
-- **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`
-- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-235B-A22B`
+| Model | Atlas A2 | Atlas A3 | 950PR&950DT Products |
+| --- | :---: | :---: | :---: |
+| `Qwen/Qwen3-1.7B` | ✅ | ✅ | ✅ |
+| `Qwen/Qwen3-8B` | ✅ | ✅ | ✅ |
+| `Qwen/Qwen3-30B-A3B` | ✅ | ✅ | ✅ |
+| `Qwen/Qwen3-235B-A22B` | ✅ | ✅ | ✅ |
+| `Qwen/Qwen3.5-35B-A3B` | ✅ | ✅ | ❌ |
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm-ascend/issues/new/choose).
 

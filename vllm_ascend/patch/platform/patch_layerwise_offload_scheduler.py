@@ -10,7 +10,6 @@ from typing import Any
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
-
 _HOOK_NAME = "_mamba_block_aligned_split"
 _PATCH_MARKER = "_vllm_ascend_layerwise_offload_patched"
 _LAYERWISE_SCHEDULER_MARKER = "_vllm_ascend_layerwise_offload_enabled"
@@ -38,9 +37,7 @@ def align_prefill_chunk_for_store(
     if effective_computed_tokens + prompt_part >= prompt_tokens:
         return proposed_tokens
 
-    aligned_end = (
-        (effective_computed_tokens + prompt_part) // granularity
-    ) * granularity
+    aligned_end = ((effective_computed_tokens + prompt_part) // granularity) * granularity
     return max(aligned_end - effective_computed_tokens, 0)
 
 
@@ -63,9 +60,7 @@ def _make_block_alignment_hook(original_hook: Callable[..., int]) -> Callable[..
             )
 
         effective_computed_tokens = (
-            request.num_computed_tokens
-            + num_new_local_computed_tokens
-            + num_external_computed_tokens
+            request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         )
         return align_prefill_chunk_for_store(
             request,
@@ -75,7 +70,7 @@ def _make_block_alignment_hook(original_hook: Callable[..., int]) -> Callable[..
         )
 
     setattr(layerwise_block_alignment_hook, _PATCH_MARKER, True)
-    setattr(layerwise_block_alignment_hook, "_vllm_ascend_original", original_hook)
+    layerwise_block_alignment_hook._vllm_ascend_original = original_hook
     return layerwise_block_alignment_hook
 
 

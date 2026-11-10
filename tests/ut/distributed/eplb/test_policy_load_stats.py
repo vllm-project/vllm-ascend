@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
@@ -30,6 +31,8 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     upstream_step = MagicMock()
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
     state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
     state.policy = _custom_policy()
     state.model_states = {"model": _model_state()}
     state.expert_load_window_size = 2
@@ -55,6 +58,56 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     torch.testing.assert_close(state._physical_load_sample_slots, torch.tensor([-1, 1]))
     assert state._num_recorded_load_steps == 2
     assert upstream_step.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "is_dummy,source_eligible,gathered,expected",
+    [
+        (True, False, 1, True),
+        (False, False, 1, True),
+        (False, True, 0, False),
+        (True, False, 0, False),
+    ],
+)
+def test_allgather_step_uses_remote_eligibility_for_owner_load(
+    monkeypatch, is_dummy, source_eligible, gathered, expected
+):
+    upstream_step = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state.policy = None
+    state._is_load_sampling_step = True
+    state._should_collect_local_load = source_eligible
+    state._uses_phase_filter = True
+    state.allgather_record_tensor = torch.tensor(gathered)
+    state._has_fresh_recorded_load = False
+    state.step(is_dummy=is_dummy)
+    assert state._has_fresh_recorded_load == expected
+    assert upstream_step.call_args.kwargs["is_dummy"] == (is_dummy and not expected)
+
+
+def test_a5_default_policy_marks_freshness_only_on_actual_step(monkeypatch):
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", MagicMock())
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state.policy = None
+    state._is_load_sampling_step = True
+    state._should_collect_local_load = True
+    state.allgather_record_tensor = torch.tensor(1)
+    state._has_fresh_recorded_load = False
+    state.step(is_profile=True)
+    assert not state._has_fresh_recorded_load
+    state._is_load_sampling_step = True
+    state.step()
+    # step consumes the forward flags: a new forward must publish eligibility.
+    assert not state._has_fresh_recorded_load
+    state._is_load_sampling_step = True
+    state._should_collect_local_load = True
+    state.step()
+    assert state._has_fresh_recorded_load
 
 
 def test_mapping_change_discards_old_samples():

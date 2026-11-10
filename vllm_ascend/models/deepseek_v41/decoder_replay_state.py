@@ -12,7 +12,6 @@ import torch.distributed as dist
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
@@ -25,7 +24,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
@@ -80,7 +79,6 @@ class DecoderReplayState:
         self.num_actual_tokens = 0
         self.dp_tokens: torch.Tensor | None = None
         self.replay_pcp_context: AscendPCPAttentionContext | None = None
-        self._replay_logged = False
 
     def _pcp_kept_lengths(self, inputs: DecoderReplayInputs) -> tuple[np.ndarray, int, torch.Tensor] | None:
         context = inputs.pcp_context
@@ -287,8 +285,6 @@ class DecoderReplayState:
             num_tokens = batch.num_tokens_after_padding
         else:
             num_tokens = int(kept_lens.sum())
-            if enable_dsa_cp():
-                num_tokens = round_up(num_tokens, self.config.parallel_config.tensor_parallel_size)
 
         return _DecoderReplayPlan(
             kept_lens=kept_lens,
@@ -346,16 +342,6 @@ class DecoderReplayState:
         self.layers.rows = self.rows[:num_selected_rows]
         self.layers.num_actual_rows = self.num_actual_tokens
         self.layers.context_factory = self.forward_context
-        if not self._replay_logged:
-            logger.info(
-                "SWA decoder bounded replay active (MRV2): %d -> %d local tokens (%d padded; PCP=%d, DP=%d).",
-                batch.num_tokens_after_padding,
-                self.num_actual_tokens,
-                self.num_tokens,
-                getattr(self.config.parallel_config, "prefill_context_parallel_size", 1),
-                self.config.parallel_config.data_parallel_size,
-            )
-            self._replay_logged = True
 
     def _build_metadata(self, inputs: DecoderReplayInputs, offsets: np.ndarray) -> dict[str, AscendDSAV41Metadata]:
         batch = inputs.batch
@@ -386,6 +372,8 @@ class DecoderReplayState:
                 attn_state=batch.attn_state,
                 is_prefilling=torch.from_numpy(batch.is_prefilling_np[:num_reqs]),
                 replay_start=self.replay_start[:num_reqs],
+                pcp_context=self.replay_pcp_context,
+                pcp_cache_group_idx=group_id if self.replay_pcp_context is not None else None,
             )
             value = builder.build(
                 0,
@@ -394,12 +382,6 @@ class DecoderReplayState:
                 common_v41_batch_metadata=batch_shared,
                 common_v41_metadata=group_shared.setdefault(group_id, {}),
                 rope_views=rope,
-                # The RFC builders take PCP context as keyword arguments.
-                # Later upstream moved these into CommonAttentionMetadata;
-                # keep the existing RFC interface instead of importing that
-                # unrelated attention-wide refactor.
-                pcp_context=self.replay_pcp_context,
-                pcp_cache_group_idx=group_id if self.replay_pcp_context is not None else None,
             )
             for task in builder.take_device_metadata_tasks():
                 task.run()

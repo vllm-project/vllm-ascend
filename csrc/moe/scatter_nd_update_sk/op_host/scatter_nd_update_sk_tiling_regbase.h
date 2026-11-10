@@ -57,6 +57,7 @@ protected:
     void CalcDeterministicUpdateSplit(int64_t ubBlock);
     void CalcDeterministicIndicesSplit(int64_t ubBlock);
     void CalculateMask();
+    void UpdateSimdSortDecision();
     uint64_t GetTilingKey() const override;
     void ComputeCoreSplitAfterAxis();
     void InitFactors(int64_t halfUbSize, int64_t indicesSize, int64_t alignNum);

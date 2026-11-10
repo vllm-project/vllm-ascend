@@ -95,16 +95,12 @@ def test_validate_decode_host_kv_caches_rejects_wrong_memory_kind():
     descriptor = _descriptor(0)
     main = descriptor.main_components[0]
     components = tuple(
-        replace(component, decode_memory_kind=MemoryKind.DEVICE)
-        if component is main
-        else component
+        replace(component, decode_memory_kind=MemoryKind.DEVICE) if component is main else component
         for component in descriptor.components
     )
     invalid_descriptor = replace(descriptor, components=components)
 
-    with pytest.raises(
-        ValueError, match="requires Host Main and Device Indexer"
-    ):
+    with pytest.raises(ValueError, match="requires Host Main and Device Indexer"):
         validate_decode_host_kv_caches(
             {0: 1},
             [invalid_descriptor],

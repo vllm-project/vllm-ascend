@@ -101,7 +101,7 @@ set_directory_properties(PROPERTIES
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 set(VLLM_ASCEND_CANN_COMPAT_HEADER "${OPS_TRANSFORMER_DIR}/common/include/cann_compat.h")
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
-list(APPEND OPS_COMPILE_OPTIONS -include${VLLM_ASCEND_CANN_COMPAT_HEADER})
+list(APPEND OPS_COMPILE_OPTIONS -includecann_compat.h)
 add_compile_options(
     $<$<COMPILE_LANGUAGE:CXX>:-include${VLLM_ASCEND_CANN_COMPAT_HEADER}>
 )
@@ -139,7 +139,7 @@ if (BUILD_OPEN_PROJECT)
         if (ENABLE_STATIC)
             include(cmake/static.cmake)
         endif()
-        if (ENABLE_AICPU)
+        if (ENABLE_AICPU OR AICPU_CUST_OBJ_TARGETS)
             include(cmake/symbol.cmake)
             gen_cust_aicpu_json_symbol()
             gen_cust_aicpu_kernel_symbol()
@@ -544,9 +544,7 @@ if (BUILD_OPS_RTY_KERNEL)
         )
     endforeach ()
 
-    install(DIRECTORY ${OPS_ADV_UTILS_KERNEL_INC}/
-            DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
-    )
+    install_common_kernel_headers("${IMPL_INSTALL_DIR}/ascendc/common")
 
     foreach (op_dir ${OP_DIR_LIST})
         get_filename_component(_op_name "${op_dir}" NAME)

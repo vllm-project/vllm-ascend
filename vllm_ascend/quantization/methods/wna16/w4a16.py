@@ -193,9 +193,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         # Omni-EPLB converts MoE weights to list form; V2 model runner keeps
         # the tensor form.
         eplb_config = get_ascend_config().eplb_config
-        self.dynamic_eplb = (
-            False if vllm_config.use_v2_model_runner else eplb_config.convert_weight_to_list
-        )
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else eplb_config.convert_weight_to_list
 
     def get_weight(
         self,

@@ -158,26 +158,30 @@ def _minimax_m3_index_score(
     init_blocks: int = 0,
     local_blocks: int = 0,
 ) -> torch.Tensor:
-    """Compute MSA index scores with the bundled AscendC operator.
+    """Compute MSA index scores with the CANN operator.
 
     ``start_loc`` is the current query block in the complete block table.
     A causal mask selects sparse mode 3; passing no mask selects dense mode 0.
     ``init_blocks`` and ``local_blocks`` are kept for parity with the index
     scoring interface; candidate forcing is applied by the TopK stage.
     """
+    from cann_ops_transformer.ops import msa_index_score
+
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)
-    return torch.ops._C_ascend.npu_msa_index_score(
+    return msa_index_score(
         idx_q,
         index_kv_cache,
-        block_table,
         start_loc,
+        block_table=block_table,
         atten_mask=causal_mask,
         actual_seq_qlen=cu_seqlens_q,
         actual_seq_klen=seq_lens,
         layout_key="BBND",
         sparse_mode=3 if causal_mask is not None else 0,
+        init_blocks=0,
+        local_blocks=0,
     )
 
 

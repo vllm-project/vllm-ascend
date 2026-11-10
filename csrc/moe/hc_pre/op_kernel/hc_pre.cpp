@@ -99,7 +99,38 @@ extern "C" __global__ __aicore__ void hc_pre(GM_ADDR x, GM_ADDR hc_fn, GM_ADDR h
             pipe.Destroy();
 
             TPipe pipeStage2;
-            HcPre::HcPreMembaseKSplitCorePart2<DTYPE_X> op2;
+            HcPre::HcPreMembaseKSplitCorePart2<DTYPE_X, false> op2;
+            op2.Init(x, hc_scale, hc_base, y, post, comb_frag, pre_mix, pre, userWs, tilingData, &pipeStage2);
+            op2.Process();
+
+            pipeStage2.Destroy();
+        } else if (TILING_KEY_IS(1)) {
+            GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
+            const HcPreTilingData *__restrict tilingData = &tiling_data_in;
+            HcPre::HcPreMembaseKSplitCorePart1<DTYPE_X> op;
+            op.Init(x, hc_fn, userWs, tilingData, &pipe);
+            op.Process();
+
+            pipe.Destroy();
+
+            TPipe pipeStage2;
+            HcPre::HcPreMembaseKSplitCorePart2<DTYPE_X, true> op2;
+            op2.Init(x, hc_scale, hc_base, y, post, comb_frag, pre_mix, pre, userWs, tilingData, &pipeStage2);
+            op2.Process();
+
+            pipeStage2.Destroy();
+        } else if (TILING_KEY_IS(2)) {
+            // preMix 场景使用独立的 Part2 实现。
+            GET_TILING_DATA_WITH_STRUCT(HcPreTilingData, tiling_data_in, tiling);
+            const HcPreTilingData *__restrict tilingData = &tiling_data_in;
+            HcPre::HcPreMembaseKSplitCorePart1<DTYPE_X> op;
+            op.Init(x, hc_fn, userWs, tilingData, &pipe);
+            op.Process();
+
+            pipe.Destroy();
+
+            TPipe pipeStage2;
+            HcPre::HcPreMembaseKSplitCorePremixPart2<DTYPE_X> op2;
             op2.Init(x, hc_scale, hc_base, y, post, comb_frag, pre_mix, pre, userWs, tilingData, &pipeStage2);
             op2.Process();
 

@@ -15,7 +15,6 @@ from vllm.config import (
     CUDAGraphMode,
     DeviceConfig,
     EngramConfig,
-    EPLBConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -23,6 +22,7 @@ from vllm.config import (
     VllmConfig,
     replace,
 )
+from vllm.config.parallel import EPLBConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -30,12 +30,12 @@ from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
-from vllm_ascend.worker.v2.spec_decode.autoregressive import (
-    speculator as speculator_module,
-)
 from vllm_ascend.worker.v2.spec_decode.eagle import (
     speculator as eagle_speculator_module,
 )
@@ -48,6 +48,12 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import (
+    speculator as speculator_module,
+)
+
+# vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main.
+_DP_SYNC_KWARG = "dp_sync_state"
 
 
 @pytest.fixture(autouse=True)
@@ -102,21 +108,14 @@ def _make_padded_input_batch() -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("target_pcp_size", "dcp_size", "dp_size", "engram", "expected_draft_eplb"),
-    [
-        (2, 4, 2, False, True),
-        (2, 8, 2, False, True),
-        (1, 4, 2, False, True),
-        (2, 1, 1, True, False),
-        (2, 1, 2, True, True),
-    ],
+    ("target_pcp_size", "dcp_size", "dp_size", "engram"),
+    [(2, 4, 2, False), (2, 8, 2, False), (1, 4, 2, False), (2, 1, 1, True), (2, 1, 2, True)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
     target_pcp_size: int,
     dcp_size: int,
     dp_size: int,
     engram: bool,
-    expected_draft_eplb: bool,
 ) -> None:
     draft_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=2,
@@ -205,7 +204,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             side_effect=fake_replace,
         ),
         patch.object(
-            speculator_module.AutoRegressiveSpeculator,
+            TargetDependentARSpeculator,
             "__init__",
             new=fake_parent_init,
         ),
@@ -233,7 +232,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     else:
         assert "reconstruction_dcp_size" not in captured
     assert execution_parallel_config.enable_expert_parallel
-    assert execution_parallel_config.enable_eplb is expected_draft_eplb
+    assert execution_parallel_config.enable_eplb == (target_pcp_size == 1 or dp_size > 1)
     assert execution_parallel_config.rank == target_parallel_config.rank
     assert execution_parallel_config.data_parallel_size == dp_size
     assert execution_parallel_config.data_parallel_rank == dp_size - 1
@@ -309,8 +308,11 @@ def eplb_worker_config(tmp_path):
         patch("vllm.config.vllm.HAS_TRITON", True),
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
+        # Keep the model dtype float-compatible with the bfloat16 KV cache the
+        # draft loader override below sets: vLLM main rejects a mismatched
+        # explicit float KV dtype.
         model_config = ModelConfig(
-            model=str(tmp_path), skip_tokenizer_init=True, dtype="float32", enforce_eager=True, max_model_len=128
+            model=str(tmp_path), skip_tokenizer_init=True, dtype="bfloat16", enforce_eager=True, max_model_len=128
         )
         parallel_config = ParallelConfig(
             prefill_context_parallel_size=8,
@@ -440,7 +442,7 @@ def test_eagle_draft_config_disables_profiling_chunk() -> None:
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
 def test_run_model_broadcasts_only_actual_replicated_hidden_states(replicated_pcp, shared, contiguous):
-    speculator = object.__new__(speculator_module.AscendAutoRegressiveSpeculator)
+    speculator = object.__new__(speculator_module.AscendTargetDependentARSpeculator)
     speculator.replicated_pcp = replicated_pcp
     last_hidden = torch.arange(48, dtype=torch.float32).view(6, 8)[:, ::2]
     other_hidden = (torch.arange(48, dtype=torch.float32) + 50).view(6, 8)[:, ::2]
@@ -460,7 +462,7 @@ def test_run_model_broadcasts_only_actual_replicated_hidden_states(replicated_pc
 
     group = SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
     with (
-        patch.object(speculator_module.AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden, hidden)),
+        patch.object(TargetDependentARSpeculator, "_run_model", return_value=(last_hidden, hidden)),
         patch.object(pcp_manager_module, "get_pcp_group", return_value=group) as get_group,
     ):
         result_last, result_hidden = speculator._run_model(4, None, None, None)
@@ -622,7 +624,7 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering(cudagraph_run
     local_slot_mappings = MagicMock()
 
     with patch.object(
-        speculator_module.AutoRegressiveSpeculator,
+        TargetDependentARSpeculator,
         "_prefill",
     ) as parent_prefill:
         speculator._prefill(
@@ -857,15 +859,21 @@ def test_graph_prefill_uses_local_dummy_metadata(attn_architecture: str) -> None
         assert kwargs["seq_lens_cpu_upper_bound"] is speculator.input_batch.seq_lens_cpu_upper_bound
 
 
-@pytest.mark.parametrize("replicated", [False, True])
-def test_capture_preserves_prepared_prefill_inputs(replicated: bool) -> None:
+@pytest.mark.parametrize(("replicated", "num_steps"), [(False, 1), (True, 1), (False, 3)])
+def test_capture_preserves_prepared_prefill_inputs(replicated: bool, num_steps: int) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = replicated
     speculator.pcp_manager = object()
     speculator.model_state = SimpleNamespace(pcp_manager=speculator.pcp_manager)
     speculator.last_token_indices = torch.ones(2, dtype=torch.int32)
-    speculator.num_speculative_steps = 1
+    speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
+    speculator.max_num_reqs = 2
+    speculator.num_speculative_steps = num_steps
+    speculator.share_mtp_topk_indices = True
+    speculator.model = SimpleNamespace(model=MagicMock())
     speculator.prefill_cudagraph_manager = MagicMock(use_breakable_cg=False)
+    speculator.decode_cudagraph_manager = MagicMock()
+    speculator.input_buffers = object()
     speculator.target_input_buffers = object()
     speculator.block_tables = object()
     speculator.attn_groups = []
@@ -883,7 +891,7 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool) -> None:
     speculator.prefill_cudagraph_manager.capture.side_effect = capture
     with (
         patch.object(speculator_module, "build_attn_metadata_wrapper") as metadata_wrapper,
-        patch.object(speculator_module.AutoRegressiveSpeculator, "_prefill") as upstream_prefill,
+        patch.object(TargetDependentARSpeculator, "_prefill") as upstream_prefill,
     ):
         metadata_context = metadata_wrapper.return_value
         speculator.capture()
@@ -891,8 +899,16 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool) -> None:
         chosen.assert_called_once_with(metadata, slots)
         unused = speculator._prefill if replicated else upstream_prefill
         unused.assert_not_called()
-    metadata_context.__exit__.assert_called_once()
+    assert metadata_context.__exit__.call_count == (2 if num_steps > 1 else 1)
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
+    assert speculator.last_token_indices.tolist() == speculator.idx_mapping.tolist() == [0, 0]
+    assert [c.args[0] for c in speculator.model.model.set_skip_topk.call_args_list] == (
+        [False, True, False] if num_steps > 1 else [False]
+    )
+    compact = speculator.model.model.compact_topk_indices
+    assert compact.call_count == (1 if num_steps > 1 else 0)
+    if num_steps > 1:
+        assert compact.call_args.args[0].tolist() == [0, 0]
 
 
 @pytest.mark.parametrize(
@@ -941,7 +957,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
                 dp_size=2,
                 dp_rank=0,
                 need_eager=True,
-                dp_sync=args[11],
+                **{_DP_SYNC_KWARG: args[11]},
             )
         assert sync.call_count == int(replicated_pcp)
         return expected
@@ -966,7 +982,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
         actual = speculator.propose(
             input_batch,
             *[MagicMock() for _ in range(10)],
-            dp_sync=target_sync,
+            **{_DP_SYNC_KWARG: target_sync},
         )
 
     assert actual is expected

@@ -11,8 +11,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from vllm_ascend.attention.cache_layout import LayerCacheLayoutDescriptor
     from vllm.v1.kv_cache_interface import KVCacheSpec
+
+    from vllm_ascend.attention.cache_layout import LayerCacheLayoutDescriptor
 
 
 @dataclass(frozen=True)
@@ -57,22 +58,16 @@ class DsaOffloadAttentionBackendCapability:
 
     @staticmethod
     def get_dsa_offload_layer_count() -> int:
-        raise NotImplementedError(
-            "DSA offload backend does not provide a layer count"
-        )
+        raise NotImplementedError("DSA offload backend does not provide a layer count")
 
     @staticmethod
     def get_dsa_offload_group_specs(num_hidden_layers: int) -> Sequence[Any]:
         del num_hidden_layers
-        raise NotImplementedError(
-            "DSA offload backend does not provide cache group specifications"
-        )
+        raise NotImplementedError("DSA offload backend does not provide cache group specifications")
 
     @staticmethod
     def get_dsa_offload_default_pool_size() -> int:
-        raise NotImplementedError(
-            "DSA offload backend does not provide a default pool size"
-        )
+        raise NotImplementedError("DSA offload backend does not provide a default pool size")
 
     @staticmethod
     def get_dsa_offload_topk() -> int | None:
@@ -83,9 +78,7 @@ class DsaOffloadAttentionBackendCapability:
     @staticmethod
     def get_dsa_offload_cache_dimensions(attn_impl: Any) -> tuple[int, int]:
         del attn_impl
-        raise NotImplementedError(
-            "DSA offload backend does not provide cache dimensions"
-        )
+        raise NotImplementedError("DSA offload backend does not provide cache dimensions")
 
     @staticmethod
     def bind_dsa_offload_runtime(
@@ -94,9 +87,7 @@ class DsaOffloadAttentionBackendCapability:
         layer_id: int,
     ) -> None:
         del attn_impl, runtime, layer_id
-        raise NotImplementedError(
-            "DSA offload backend does not support runtime binding"
-        )
+        raise NotImplementedError("DSA offload backend does not support runtime binding")
 
     @staticmethod
     def bind_dsa_cache_layout_descriptor(
@@ -104,9 +95,7 @@ class DsaOffloadAttentionBackendCapability:
         descriptor: LayerCacheLayoutDescriptor,
     ) -> None:
         del attn_impl, descriptor
-        raise NotImplementedError(
-            "DSA offload backend does not support cache descriptor binding"
-        )
+        raise NotImplementedError("DSA offload backend does not support cache descriptor binding")
 
     @classmethod
     def build_layer_cache_descriptor(
@@ -121,9 +110,7 @@ class DsaOffloadAttentionBackendCapability:
     ) -> LayerCacheLayoutDescriptor:
         del cls, layer_name, layer_id, group_id, cache_family_id, kv_cache_spec
         del is_mtp_layer
-        raise NotImplementedError(
-            "DSA offload backend does not provide a cache layout descriptor"
-        )
+        raise NotImplementedError("DSA offload backend does not provide a cache layout descriptor")
 
     @classmethod
     def get_dsa_offload_cache_memory(
@@ -133,9 +120,7 @@ class DsaOffloadAttentionBackendCapability:
         kv_cache_spec: KVCacheSpec,
     ) -> DsaOffloadCacheMemory:
         del cls, layer_name, kv_cache_spec
-        raise NotImplementedError(
-            "DSA offload backend does not provide cache memory accounting"
-        )
+        raise NotImplementedError("DSA offload backend does not provide cache memory accounting")
 
     @classmethod
     def is_dsa_offload_speculative_layer(
@@ -183,6 +168,7 @@ def get_dsa_offload_backends(
         # and sparse-attention selection path.
         from vllm.config import set_current_vllm_config
         from vllm.v1.attention.selector import get_attn_backend
+
         from vllm_ascend.ops.dsa_offload import get_dsa_config_value
 
         model_config = vllm_config.model_config
@@ -207,9 +193,7 @@ def get_dsa_offload_backends(
     for layer_name in layer_names:
         layer = layers.get(layer_name)
         if layer is None:
-            raise RuntimeError(
-                f"DSA Host offload cannot find attention layer {layer_name}"
-            )
+            raise RuntimeError(f"DSA Host offload cannot find attention layer {layer_name}")
         backend = layer.get_attn_backend()
         if not is_dsa_offload_backend(backend):
             raise NotImplementedError(

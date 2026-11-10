@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, SlidingWindowSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_scheduler, pool_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann import pool_scheduler, pool_worker
 
 
 @pytest.mark.parametrize("prefix_match_unit", [None, 32])
@@ -22,7 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_schedu
 def test_store_worker_and_scheduler_use_matching_hash_units(schema, prefix_match_unit):
     register_all_kvcache_specs(None)
     if schema == "legacy":
-        if "prefix_match_unit" not in CacheConfig.__dataclass_fields__:
+        if "hash_block_size" in CacheConfig.__dataclass_fields__:
             pytest.skip("Requires the vLLM 0.30 CANN CacheConfig schema")
         cache_config = CacheConfig(block_size=128, prefix_match_unit=prefix_match_unit, enable_prefix_caching=True)
         assert not hasattr(cache_config, "hash_block_size")

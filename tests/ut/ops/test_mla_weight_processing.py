@@ -88,6 +88,7 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     impl.is_pcp_decode_sharded = False
     impl.fa_quant_layer = False
     impl.enable_mlapo = True
+    impl.use_dcp = False
     impl._mlapo_uses_native_weights = False
     impl.q_lora_rank = 4
     impl.fused_qkv_a_proj = SimpleNamespace(weight=torch.ones(8, 10), weight_scale=torch.ones(10))
@@ -103,7 +104,6 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     profile.supports.return_value = False
     with (
         patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile", return_value=profile),
-        patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False),
         patch(
             "vllm_ascend.attention.mla_v1.get_ascend_config",
             return_value=SimpleNamespace(mlapo_keep_prefill_weights=False),

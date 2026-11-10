@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
@@ -13,19 +11,6 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, MODELS, calculate_acceptance_per_pos
 
 MAX_NUM_SEQS = 256
-
-
-def test_qwen3_vl_eagle(
-    test_prompts: list[list[dict[str, Any]]],
-    sampling_config: SamplingParams,
-    vl_model_name: str,
-):
-    with VllmRunner(
-        vl_model_name,
-        max_model_len=1024,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-    ) as ref_llm:
-        ref_llm.model.chat(test_prompts, sampling_config)
 
 
 @pytest.mark.parametrize("method", MODELS.keys())

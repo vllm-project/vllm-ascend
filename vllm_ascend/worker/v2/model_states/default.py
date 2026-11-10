@@ -43,7 +43,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -221,9 +221,6 @@ class AscendModelState(DefaultModelState):
             self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
 
         self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
-        if enable_dsa_cp():
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            self._decoder_replay_num_tokens = ((self._decoder_replay_num_tokens + tp_size - 1) // tp_size) * tp_size
         self._decoder_replay_counts = None
         self._decoder_replay_counts_device = None
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -377,6 +374,16 @@ class AscendModelState(DefaultModelState):
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
+    def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
+        # MRV2 prepares MM embeddings before entering ForwardContext. Upstream
+        # slices input_ids to valid local rows to match the image mask, leaving
+        # different input lengths on PCP ranks. Publish the common padded length
+        # (including graph padding) before that slice, and overwrite it each batch.
+        set_embedding_num_tokens_padded = getattr(self.model, "set_embedding_num_tokens_padded", None)
+        if set_embedding_num_tokens_padded is not None:
+            set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
+        return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
@@ -428,6 +435,8 @@ class AscendModelState(DefaultModelState):
             # Piecewise cudagraphs and eager use the actual request count.
             num_reqs = input_batch.num_reqs
 
+        # TODO: Remove the PIECEWISE dummy condition once the common metadata
+        # path handles padded attention inputs separately from logical queries.
         if (
             cudagraph_mode == CUDAGraphMode.FULL
             or self.vllm_config.parallel_config.prefill_context_parallel_size > 1

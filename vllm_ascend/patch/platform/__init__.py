@@ -16,14 +16,16 @@
 
 import os
 
-import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
+import vllm_ascend.patch.platform.patch_minimax_m3_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
+import vllm_ascend.patch.platform.patch_qwen4_exp_pp  # noqa
+import vllm_ascend.patch.platform.patch_shm_notify  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 from vllm_ascend import envs
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -48,25 +50,23 @@ import vllm_ascend.patch.platform.patch_layerwise_offload_scheduler  # noqa
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
-import vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy  # noqa
+import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
+import vllm_ascend.patch.platform.patch_replayssm_config  # noqa
 
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
-import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 
-# The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.30.0+).
+# The Ascend Engram adapter requires `vllm.config.engram` (vLLM main/v0.31.0+).
 import vllm_ascend.patch.platform.patch_engram_config  # noqa
 
-import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 import vllm_ascend.patch.platform.patch_example_connector  # noqa
-import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 
 if os.getenv("VLLM_ASCEND_TRACE", "0") == "1":
     import vllm_ascend.patch.platform.patch_trace  # noqa
@@ -93,7 +93,8 @@ if os.getenv("VLLM_ASCEND_TRACE", "0") == "1":
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils`
+#   1. `vllm.v1.core.kv_cache_utils` (v0.32.0) /
+#      `vllm.v1.core.kv_cache_planning` (main, vLLM #61183)
 #    Why:
 #       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
 #       topology, where MLA and compressed indexer caches share block IDs while

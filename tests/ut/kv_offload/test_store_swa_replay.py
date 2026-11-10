@@ -22,40 +22,40 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, UniformT
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
-from tests.ut.kv_offload.utils import create_model_runner_output
-from tests.ut.patch.platform.test_patch_swa_bounded_replay_legacy import (
+from tests.ut.kv_offload.replay_utils import (
     BLOCK_SIZE,
     WINDOW,
+    _initialize_replay_window,
     _pd_request,
-    enable_legacy_replay,  # noqa: F401
 )
-from tests.ut.patch.platform.test_patch_swa_bounded_replay_legacy import (
+from tests.ut.kv_offload.replay_utils import (
     replay_scheduler as _replay_scheduler_fixture,
 )
+from tests.ut.kv_offload.utils import create_model_runner_output
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    get_storage_block_size,
 )
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_scheduler, pool_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann import pool_scheduler, pool_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann.config_data import (
     AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
     get_block_hashes,
     store_replay_enabled,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
-from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import _initialize_replay_window
 
 replay_scheduler = _replay_scheduler_fixture
 
@@ -473,9 +473,19 @@ def test_unsupported_store_replay_layouts_fail_explicitly(store_runtime, pcp, dc
 @pytest.mark.parametrize("ratio", [4, 128])
 def test_compressed_store_hashes_are_not_grouped_twice(store_runtime, ratio):
     r = store_runtime
-    groups = r.pool.kv_cache_config.kv_cache_groups
+    groups = list(r.pool.kv_cache_config.kv_cache_groups)
     block_size = 16 * ratio
-    coord = AscendStoreCoordinator(groups, block_size, 16, [16, 16], [f"c{ratio}", "default"])
+    groups[0] = KVCacheGroupSpec(
+        ["full"],
+        AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            tokens_per_state=ratio,
+        ),
+    )
+    coord = AscendStoreCoordinator(groups, block_size, 16, [block_size, 16], [f"c{ratio}", "default"])
     raw_hashes = [bytes([i % 251]) * 32 for i in range(2 * ratio)]
     hashes = get_block_hashes(raw_hashes, block_size, 16)
     pool = ExternalCachedBlockPool(16, {(0, h) for h in hashes})
@@ -525,7 +535,6 @@ def test_native_compressed_specs_preserve_logical_pages_and_physical_bytes(store
         head_size=8,
         dtype=torch.bfloat16,
         tokens_per_state=ratio,
-        storage_block_size=128 // ratio,
         model_version="deepseek_v41",
     )
     swa = AscendSlidingWindowMLASpec(
@@ -620,7 +629,6 @@ def test_small_private_rings_do_not_enter_store_hashing(store_runtime, bounded_r
             head_size=8,
             dtype=torch.bfloat16,
             tokens_per_state=ratio,
-            storage_block_size=128 // ratio,
             model_version="deepseek_v41",
         )
     specs[3] = AscendSlidingWindowMLASpec(
@@ -642,9 +650,7 @@ def test_small_private_rings_do_not_enter_store_hashing(store_runtime, bounded_r
     ):
         worker = AscendStoreConnector(config, KVConnectorRole.WORKER, plan)
     caches = {
-        f"group{index}": (
-            torch.full((32, getattr(spec, "storage_block_size", None) or spec.block_size, 1, 8), 42, dtype=spec.dtype),
-        )
+        f"group{index}": (torch.full((32, get_storage_block_size(spec), 1, 8), 42, dtype=spec.dtype),)
         for index, spec in enumerate(specs)
     }
     worker.register_kv_caches(caches)

@@ -20,6 +20,11 @@
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_cumulative_log_p_kernel,
+    _compute_global_residual_mass,
+    _compute_local_residual_mass_kernel,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_global_logsumexp as _compute_global_lse,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
@@ -27,6 +32,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
+from vllm_ascend.utils import vllm_version_is
 
 
 @triton.jit
@@ -76,10 +82,16 @@ def _probabilistic_rejection_kernel(
     pos_ptr,
     # [num_speculative_steps]
     synthetic_conditional_rates_ptr,
+    # [num_logits]
+    cumulative_log_p_ptr,
+    # [num_logits, num_blocks]
+    local_residual_mass_ptr,
+    local_residual_mass_stride,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
+    USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     # Cast to int64 before pointer arithmetic: triton-ascend computes
@@ -92,7 +104,7 @@ def _probabilistic_rejection_kernel(
     seed = tl.load(seed_ptr + req_state_idx)  # noqa: F841
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
-    rejected_step = 0
+    rejected_step = tl.full((), 0, tl.int64)
     target_lse = 0.0
     draft_lse = 0.0
     accepted = True
@@ -135,6 +147,42 @@ def _probabilistic_rejection_kernel(
                 else:
                     accepted &= target_argmax == draft_sampled
                     tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
+            elif USE_BLOCK_VERIFICATION:
+                accepted = draft_sampled >= 0
+                if accepted:
+                    u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                    u_seed = tl.randint(seed, u_pos)
+                    u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                    u = tl.maximum(u, 4.6566127342e-10)
+                    prefix_joint_ratio = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32))
+                    next_draft_token = tl.load(
+                        draft_sampled_ptr + logit_idx + 2,
+                        mask=i < num_tokens - 2,
+                        other=-1,
+                    ).to(tl.int64)
+                    if next_draft_token >= 0:
+                        residual_mass = _compute_global_residual_mass(
+                            local_residual_mass_ptr,
+                            local_residual_mass_stride,
+                            prefix_joint_ratio,
+                            target_logits_ptr,
+                            target_logits_stride,
+                            target_local_max_ptr,
+                            target_local_max_stride,
+                            target_local_sumexp_ptr,
+                            target_local_sumexp_stride,
+                            next_draft_token,
+                            logit_idx + 1,
+                            vocab_num_blocks,
+                            PADDED_VOCAB_NUM_BLOCKS,
+                            HAS_DRAFT_LOGITS,
+                        )
+                        denom = residual_mass + 1.0 - prefix_joint_ratio
+                        h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
+                    else:
+                        h = prefix_joint_ratio
+                    rejected_step = tl.where(u <= h, i + 1, rejected_step)
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             else:
                 # -1 is used for placeholder draft token ids that should be
                 # rejected.
@@ -200,8 +248,30 @@ def _probabilistic_rejection_kernel(
                 # -1 placeholder draft tokens can never be accepted.
                 accepted &= is_valid_draft
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
-            rejected_step += accepted
+            if not USE_BLOCK_VERIFICATION or temp == 0.0:
+                rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
+    if USE_BLOCK_VERIFICATION and (temp != 0.0 and rejected_step < num_tokens - 1):
+        rejected_idx = start_idx + rejected_step
+        target_lse = _compute_global_lse(
+            target_local_max_ptr,
+            target_local_max_stride,
+            target_local_sumexp_ptr,
+            target_local_sumexp_stride,
+            rejected_idx,
+            vocab_num_blocks,
+            PADDED_VOCAB_NUM_BLOCKS,
+        )
+        if HAS_DRAFT_LOGITS:
+            draft_lse = _compute_global_lse(
+                draft_local_max_ptr,
+                draft_local_max_stride,
+                draft_local_sumexp_ptr,
+                draft_local_sumexp_stride,
+                rejected_idx,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS,
+            )
     tl.store(target_rejected_logsumexp_ptr + req_idx, target_lse)
     tl.store(draft_rejected_logsumexp_ptr + req_idx, draft_lse)
 
@@ -231,17 +301,48 @@ def rejection_sample(
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
-    # TODO: refactor speculative decoding functionality in a future PR.
-    # `use_block_verification` is accepted but not yet implemented on NPU;
-    # wire it up when the block verification path is supported.
     use_block_verification: bool = False,
+    # vLLM main (#59554) forwards these watermarking kwargs when a watermark
+    # key is configured; the NPU kernels do not implement watermarking.
+    contexts: torch.Tensor | None = None,
+    watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
+    watermark_key: int | None = None,
+    # vLLM main (#53987) added FLy, an ROCm-only entropy-gated verification
+    # mode. Accept the kwargs so the shared call site keeps working, but reject
+    # the mode itself.
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
+    if fly_window_size > 0:
+        raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
+    if (
+        contexts is not None
+        or watermarking is not None
+        or watermarking_skip_mask is not None
+        or watermark_key is not None
+    ):
+        raise NotImplementedError("Watermarking is not supported in the NPU rejection sampler.")
+    if use_block_verification:
+        assert synthetic_conditional_rates is None, (
+            "Block verification is incompatible with synthetic acceptance rates."
+        )
 
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
+
+    # vLLM main renamed the `num_speculative_steps` argument of the logits-stats
+    # kernels to `num_logits` and moved bonus-token detection into
+    # `_is_bonus_logit`, which masks its look-ahead load with the total logit
+    # count. Passing `num_speculative_steps` there makes the kernels treat every
+    # logit after the first one as a bonus token and return early, leaving the
+    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
+    # `num_speculative_steps`.
+    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -284,13 +385,75 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        stats_num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         # TODO: Remove this workaround after the Triton Ascend AutoBlockify
         # bug for max-with-index reductions is fixed.
         has_auto_blockify_blacklist_op=True,
     )
+
+    if use_block_verification:
+        cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
+        _compute_cumulative_log_p_kernel[(num_reqs,)](
+            cumulative_log_p,
+            target_logits,
+            target_logits.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_sampled,
+            draft_logits,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            cu_num_logits,
+            idx_mapping,
+            temperature,
+            vocab_num_blocks,
+            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            num_warps=1,
+        )
+        if has_draft_logits:
+            local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+            if num_logits > 1:
+                _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                    local_residual_mass,
+                    local_residual_mass.stride(0),
+                    cumulative_log_p,
+                    target_logits,
+                    target_logits.stride(0),
+                    target_local_max,
+                    target_local_max.stride(0),
+                    target_local_sumexp,
+                    target_local_sumexp.stride(0),
+                    draft_logits,
+                    draft_logits.stride(0),
+                    draft_logits.stride(1),
+                    draft_local_max,
+                    draft_local_max.stride(0),
+                    draft_local_sumexp,
+                    draft_local_sumexp.stride(0),
+                    draft_sampled,
+                    expanded_idx_mapping,
+                    expanded_local_pos,
+                    temperature,
+                    vocab_size,
+                    stats_num_logits,
+                    vocab_num_blocks,
+                    BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+                    PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                )
+        else:
+            local_residual_mass = None
+    else:
+        cumulative_log_p = None
+        local_residual_mass = None
 
     # Sample up until the first rejected/bonus token, and store
     # the step.
@@ -326,10 +489,14 @@ def rejection_sample(
         seed,
         pos,
         synthetic_conditional_rates,
+        cumulative_log_p,
+        local_residual_mass,
+        local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+        USE_BLOCK_VERIFICATION=use_block_verification,
         num_warps=1,
     )
 
@@ -348,5 +515,7 @@ def rejection_sample(
         seed,
         pos,
         has_draft_logits=has_draft_logits,
+        cumulative_log_p=cumulative_log_p,
+        use_block_verification=use_block_verification,
     )
     return sampled, num_sampled

@@ -30,12 +30,15 @@ class WorkspaceKey:
     workspace_generation: int
 
     def __post_init__(self) -> None:
-        if min(
-            self.execution_id,
-            self.layer_id,
-            self.arena_id,
-            self.workspace_generation,
-        ) < 0:
+        if (
+            min(
+                self.execution_id,
+                self.layer_id,
+                self.arena_id,
+                self.workspace_generation,
+            )
+            < 0
+        ):
             raise ValueError("Workspace identity fields must be non-negative")
 
 
@@ -74,9 +77,7 @@ class LayerWorkspaceFence:
         identity: WorkspaceKey,
     ) -> None:
         if identity != self.key:
-            raise WorkspaceIdentityError(
-                f"Future identity {identity!r} does not match fence {self.key!r}"
-            )
+            raise WorkspaceIdentityError(f"Future identity {identity!r} does not match fence {self.key!r}")
         with self._condition:
             if self._closed:
                 raise RuntimeError("Cannot add a source future after registration closes")
@@ -89,15 +90,10 @@ class LayerWorkspaceFence:
         identity: WorkspaceKey,
     ) -> None:
         if identity != self.key:
-            raise WorkspaceIdentityError(
-                f"Compute release identity {identity!r} does not match "
-                f"fence {self.key!r}"
-            )
+            raise WorkspaceIdentityError(f"Compute release identity {identity!r} does not match fence {self.key!r}")
         with self._condition:
             if self._closed:
-                raise RuntimeError(
-                    "Cannot set a compute release event after registration closes"
-                )
+                raise RuntimeError("Cannot set a compute release event after registration closes")
             if self._compute_release_event is not None:
                 raise RuntimeError("Compute release event is already set")
             self._compute_release_event = event
@@ -133,9 +129,7 @@ class LayerWorkspaceFence:
             if not completed:
                 raise TimeoutError(f"Timed out waiting for workspace fence {self.key!r}")
             if self._failure is not None:
-                raise WorkspaceTransferError(
-                    f"Workspace source transfer failed for {self.key!r}"
-                ) from self._failure
+                raise WorkspaceTransferError(f"Workspace source transfer failed for {self.key!r}") from self._failure
 
     def wait_workspace_reusable(self, timeout: float | None = None) -> None:
         """Wait until neither transfer nor compute can access the workspace."""
@@ -150,9 +144,7 @@ class LayerWorkspaceFence:
 
         compute_error: BaseException | None = None
         if compute_release_event is None:
-            compute_error = RuntimeError(
-                f"Compute release event is missing for workspace fence {self.key!r}"
-            )
+            compute_error = RuntimeError(f"Compute release event is missing for workspace fence {self.key!r}")
         else:
             try:
                 compute_release_event.synchronize()

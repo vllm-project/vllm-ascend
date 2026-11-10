@@ -1,0 +1,821 @@
+{
+  "status": "cpu_validation_complete_with_baseline_failures_and_pending_npu_validation",
+  "source": "128a25b0af9a048a4346f6a66237b565db015f9b",
+  "release": "21609b11ee574c477e5f36c925921e2355df160c",
+  "vllm_core": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+  "versions": {
+    "python": "3.13.12",
+    "torch": "2.14.0+cpu",
+    "vllm": "0.32.0+empty",
+    "pytest": "9.0.3"
+  },
+  "environment": {
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    "VLLM_TARGET_DEVICE": "cpu",
+    "VLLM_VERSION": "0.32.0",
+    "VLLM_PLUGINS": "",
+    "OMP_NUM_THREADS": "1"
+  },
+  "execution": "Each test file ran in a fresh process with pytest -q. File isolation avoids module-mock pollution. Latest targeted reruns replace earlier file results.",
+  "test_files": [
+    "tests/ut/distributed/cann_ascend_store/test_layerwise_keys.py",
+    "tests/ut/distributed/cann_ascend_store/test_config_data.py",
+    "tests/ut/distributed/cann_ascend_store/test_ascend_store_connector.py",
+    "tests/ut/distributed/cann_ascend_store/test_layerwise_cache_layout.py",
+    "tests/ut/distributed/cann_ascend_store/test_backend.py",
+    "tests/ut/distributed/cann_ascend_store/test_pool_scheduler.py",
+    "tests/ut/distributed/cann_ascend_store/test_kv_transfer.py",
+    "tests/ut/distributed/cann_ascend_store/test_metrics.py",
+    "tests/ut/distributed/cann_ascend_store/test_coordinator.py",
+    "tests/ut/distributed/cann_ascend_store/test_pool_worker.py",
+    "tests/ut/distributed/ascend_store/test_request_lifecycle.py",
+    "tests/ut/distributed/ascend_store/test_dspark_prefix_cache.py",
+    "tests/ut/distributed/ascend_store/test_qsa_basic_pooling.py",
+    "tests/ut/distributed/ascend_store/test_utils.py",
+    "tests/ut/distributed/ascend_store/test_layerwise_keys.py",
+    "tests/ut/distributed/ascend_store/test_mooncake_pipeline.py",
+    "tests/ut/distributed/ascend_store/test_segmented_cache_transfer.py",
+    "tests/ut/distributed/ascend_store/test_ascend_store_connector.py",
+    "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py",
+    "tests/ut/distributed/ascend_store/test_backend.py",
+    "tests/ut/distributed/ascend_store/test_pool_scheduler.py",
+    "tests/ut/distributed/ascend_store/test_mooncake_layerwise.py",
+    "tests/ut/distributed/ascend_store/test_kv_transfer.py",
+    "tests/ut/distributed/ascend_store/test_metrics.py",
+    "tests/ut/distributed/ascend_store/test_metadata.py",
+    "tests/ut/distributed/ascend_store/test_reuse_snapshot_blocks.py",
+    "tests/ut/distributed/ascend_store/test_reuse_publication_fence.py",
+    "tests/ut/distributed/ascend_store/test_coalesced_cache_transfer.py",
+    "tests/ut/distributed/ascend_store/test_coordinator.py",
+    "tests/ut/distributed/ascend_store/test_mooncake_hybrid.py",
+    "tests/ut/distributed/ascend_store/test_layerwise_strided_roundtrip.py",
+    "tests/ut/distributed/ascend_store/test_pool_worker.py",
+    "tests/ut/distributed/ascend_store/test_glm53_store.py",
+    "tests/ut/distributed/ascend_store/test_reuse_snapshot_identity.py",
+    "tests/ut/kv_offload/test_store_swa_replay.py",
+    "tests/ut/kv_offload/test_hybrid_prefix_truncation.py",
+    "tests/ut/kv_offload/test_ascend_multi_connector.py",
+    "tests/ut/kv_offload/test_ascend_multi_connector_pingpong.py",
+    "tests/ut/kv_offload/test_cann_mooncake_layerwise_connector.py",
+    "tests/ut/kv_offload/test_prefill_workspace_planner.py",
+    "tests/ut/kv_offload/test_dsa_offload_runtime.py",
+    "tests/ut/kv_offload/test_dsa_offload_state.py",
+    "tests/ut/kv_offload/test_decode_host_kv_pool.py",
+    "tests/ut/kv_offload/test_mooncake_hybrid_connector.py",
+    "tests/ut/models/test_deepseek_v41_cache.py",
+    "tests/ut/models/test_deepseek_v41_decoder_replay.py",
+    "tests/ut/models/test_deepseek_v41_decoder_replay_state.py",
+    "tests/ut/models/test_deepseek_v41_hyper_connection.py",
+    "tests/ut/models/test_deepseek_v41_replay_distributed.py",
+    "tests/ut/ops/test_packaged_attention.py",
+    "tests/ut/sample/test_force_topk.py",
+    "tests/ut/quantization/methods/w4a8/test_w4a8_mxfp4.py",
+    "tests/ut/patch/platform/test_layerwise_offload_scheduler.py",
+    "tests/ut/worker/test_model_runner_v1.py",
+    "tests/ut/worker/test_model_runner_v2.py",
+    "tests/ut/worker/test_attn_utils_v2.py",
+    "tests/ut/worker/test_pcp_manager_v2.py",
+    "tests/ut/eplb/adaptor/test_vllm_adaptor.py",
+    "tests/ut/ops/test_fused_moe.py",
+    "tests/ut/test_ascend_config.py",
+    "tests/ut/models/test_deepseek_v41_dspark.py",
+    "tests/ut/kv_offload/test_ascend_store_legacy_config.py",
+    "tests/ut/kv_offload/test_cann_upgrade_dispatch.py",
+    "tests/ut/kv_offload/test_native_store_swa_replay.py",
+    "tests/ut/test_platform.py",
+    "tests/ut/core/test_swa_replay_downgrade.py",
+    "tests/ut/kv_offload/test_layerwise_store_session.py",
+    "tests/ut/tokenization/test_lopt_tokenizer.py",
+    "tests/ut/patch/platform/test_patch_lopt_tokenization.py",
+    "tests/ut/kv_offload/test_cache_layout.py",
+    "tests/ut/examples/test_swa_bench.py"
+  ],
+  "totals": {
+    "files": 71,
+    "successful_files": 63,
+    "files_with_baseline_failures": 8,
+    "passed": 3130,
+    "failed": 48,
+    "skipped": 18,
+    "errors": 1
+  },
+  "key_swa_cases": {
+    "native_store": 78,
+    "retained_cann_store": 192
+  },
+  "failure_comparisons": [
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_backend.py",
+      "baseline_path": "tests/ut/distributed/ascend_store/test_backend.py",
+      "baseline_summary": "1 warning, 1 error in 0.42s",
+      "current_summary": "1 warning, 1 error in 0.40s",
+      "new_failure_nodes": [],
+      "collection_error": true,
+      "baseline_failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_kv_transfer.py",
+      "baseline_path": "tests/ut/distributed/ascend_store/test_kv_transfer.py",
+      "baseline_summary": "13 failed, 21 passed, 1 warning in 0.63s",
+      "current_summary": "1 failed, 33 passed, 1 warning in 0.11s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerRecvingThread::test_handle_request",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_handle_request_all_exist_last_chunk_final_layer",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_handle_request_all_exist_not_last",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_handle_request_last_chunk_final_layer_with_missing",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_handle_request_puts_missing",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_handle_request_with_current_event",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_layerwise_kv_event_not_published_before_final_layer",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_layerwise_kv_event_published_on_final_layer",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreLayerSendingThread::test_layerwise_kv_event_uses_missing_blocks_from_previous_layers",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreRecvingThread::test_hybrid_c128_async_load_aggregates_pages_and_loads_directly",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreRecvingThread::test_hybrid_c128_async_load_does_not_merge_failed_chunk",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreSendingThread::test_hybrid_c128_put_publishes_only_complete_512_frontier",
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreSendingThread::test_hybrid_c128_put_uses_non_cumulative_c128_keys_and_full_pages"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_coordinator.py",
+      "baseline_path": "tests/ut/distributed/ascend_store/test_coordinator.py",
+      "baseline_summary": "14 failed, 6 passed, 1 warning in 0.47s",
+      "current_summary": "10 failed, 10 passed, 1 warning in 0.15s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_512_transfer_uses_common_prefix_across_c128_and_swa",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_compressed_group_hits_on_effective_granularity",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_compressed_masks_use_full_attention_reachability",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_compressed_spec_does_not_apply_ratio_twice",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_legacy_reachable_mask_ignores_new_boundary_argument",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_lookup_mask_uses_reachability_without_retention",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_missing_required_group_returns_zero",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_transfer_value_block_range_maps_chunk_to_native_blocks",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestFindReachableHitTokens::test_hit_length_derived_from_callback_hits",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestFindReachableHitTokens::test_no_hits_returns_zero_without_deriving",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestFindReachableHitTokens::test_passes_mask_allowed_hashes_to_query_callback"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_pool_worker.py",
+      "baseline_path": "tests/ut/distributed/ascend_store/test_pool_worker.py",
+      "baseline_summary": "8 failed, 50 passed, 1 warning in 0.65s",
+      "current_summary": "6 failed, 52 passed, 1 warning in 0.60s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerHelpers::test_external_coordinator_lookup_disables_eagle_drop",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_lookup_layerwise",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_lookup_scheduler_layerwise",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_register_kv_caches_registers_c128_staging_separately",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_start_load_kv_c128_aggregates_chunks_into_one_page",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_start_load_kv_c128_loads_page_directly"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py",
+      "baseline_path": "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py",
+      "baseline_summary": "1 failed, 39 passed, 1 warning",
+      "current_summary": "1 failed, 39 passed, 1 warning in 0.23s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py::test_reuse_config_is_scoped_to_layerwise_backend_connector"
+      ]
+    },
+    {
+      "path": "tests/ut/kv_offload/test_cann_mooncake_layerwise_connector.py",
+      "baseline_path": "tests/ut/kv_offload/test_mooncake_layerwise_connector.py",
+      "baseline_summary": "18 failed, 54 passed, 1 warning in 1.78s",
+      "current_summary": "18 failed, 54 passed, 1 warning in 1.67s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_final_layer_metadata_error_sends_failed_completion",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_final_layer_transfer_error_completes_reuse_gate_and_request",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_quantized_main_staging_buffer_not_used_for_indexer",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_resharding_preparation_waits_for_source_in_sending_thread",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_transfer_merges_main_and_indexer_components",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_transfer_negative_return_reports_reuse_error",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnector::test_cache_written_hook_delegates_to_worker",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorSchedulerMatchedTokens::test_fully_local_prefix_preserves_remote_cached_tokens",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorSchedulerMatchedTokens::test_update_state_after_alloc_hybrid_trims_remote_block_with_only_last_token",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_groups_optional_indexer_by_physical_layer",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_rejects_components_in_different_groups",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_rejects_dcp_replicated_indexer_scale",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_rejects_sparse_sfa_c8_main_cache",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_uses_main_cache_for_quant_staging_buffer",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_layerwise_reuse_state_tracks_shared_physical_slots",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_layerwise_reuse_wait_propagates_mooncake_error",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_mooncake_save_consumes_early_cache_write_event",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_mooncake_save_records_fallback_event_without_early_hook"
+      ]
+    },
+    {
+      "path": "tests/ut/kv_offload/test_prefill_workspace_planner.py",
+      "baseline_path": "tests/ut/kv_offload/test_prefill_workspace_planner.py",
+      "baseline_summary": "11 failed, 6 passed, 1 warning in 0.46s",
+      "current_summary": "11 failed, 6 passed, 1 warning in 0.40s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_admission_counts_indexer_and_dsa_workspace_not_full_main",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_override_rejects_capacity_above_real_profiled_hbm",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_override_rejects_less_than_one_max_length_request",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_override_uses_real_profiled_capacity_and_shrinks_tensors",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_accepts_merged_ascend_mla_spec[3]",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_accepts_merged_ascend_mla_spec[None]",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_accepts_zero_memory_for_minimal_profile",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_rejects_zero_memory_without_profile_override",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_feature_gate_delegates_when_disabled",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_merged_mla_group_is_expanded_per_layer",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_prefill_planner_accepts_merged_ascend_mla_spec"
+      ]
+    },
+    {
+      "path": "tests/ut/test_ascend_config.py",
+      "baseline_path": "tests/ut/test_ascend_config.py",
+      "baseline_summary": "1 failed, 149 passed, 1 warning, 248 subtests passed in 6.79s",
+      "current_summary": "1 failed, 151 passed, 1 warning, 248 subtests passed in 6.55s",
+      "new_failure_nodes": [],
+      "collection_error": false,
+      "baseline_failure_nodes": [
+        "tests/ut/test_ascend_config.py::test_config_modules_do_not_load_vllm_config"
+      ]
+    }
+  ],
+  "unmatched_failure_nodes": [],
+  "comparison_limit": "Failure-node matching establishes the same tests already fail at the fixed baseline; it does not prove correctness of unvalidated legacy features or NPU execution.",
+  "checks": {
+    "ruff_check": "passed (vllm_ascend, tests/ut, tools/trace)",
+    "ruff_format": "passed",
+    "git_diff_check": {
+      "delta_to_fixed_032_release": "passed",
+      "first_parent_merge_diff": "Contains inherited upstream whitespace/CRLF warnings; no mass formatting of upstream content."
+    },
+    "python_package_init": "passed",
+    "logger": "passed",
+    "symbolic_meta": "passed",
+    "forbidden_imports": "passed",
+    "boolean_context_managers": "passed",
+    "codespell": "passed on delta relative to 0.32",
+    "typos": "passed on delta relative to 0.32",
+    "bash_format_sh_ci": {
+      "status": "blocked during dependency bootstrap",
+      "exit_code": 3,
+      "reason": "nodeenv HTTPS certificate verification failed; a retry using installed Node 22.22.0 then failed on truncated npm registry JSON. Hooks were also run individually where available."
+    },
+    "npu_build_accuracy_performance": "not run: no Ascend hardware/toolchain on this host",
+    "long_functions": "passed on delta relative to 0.32"
+  },
+  "results": [
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_layerwise_keys.py",
+      "exit_code": 0,
+      "seconds": 9.74,
+      "summary": "4 passed, 1 warning, 10 subtests passed in 0.04s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_config_data.py",
+      "exit_code": 0,
+      "seconds": 9.25,
+      "summary": "62 passed, 1 warning, 8 subtests passed in 0.08s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_ascend_store_connector.py",
+      "exit_code": 0,
+      "seconds": 9.86,
+      "summary": "21 passed, 1 warning in 0.07s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_layerwise_cache_layout.py",
+      "exit_code": 0,
+      "seconds": 10.06,
+      "summary": "29 passed, 1 warning in 0.06s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_backend.py",
+      "exit_code": 2,
+      "seconds": 10.26,
+      "summary": "1 warning, 1 error in 0.40s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_pool_scheduler.py",
+      "exit_code": 0,
+      "seconds": 10.05,
+      "summary": "23 passed, 1 warning in 0.09s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_kv_transfer.py",
+      "exit_code": 1,
+      "seconds": 9.8,
+      "summary": "1 failed, 33 passed, 1 warning in 0.11s",
+      "failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_kv_transfer.py::TestKVCacheStoreSendingThread::test_hybrid_c128_put_publishes_only_complete_512_frontier"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_metrics.py",
+      "exit_code": 0,
+      "seconds": 9.72,
+      "summary": "2 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_coordinator.py",
+      "exit_code": 1,
+      "seconds": 9.84,
+      "summary": "10 failed, 10 passed, 1 warning in 0.15s",
+      "failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_compressed_masks_use_full_attention_reachability",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_legacy_reachable_mask_ignores_new_boundary_argument",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_lookup_mask_uses_reachability_without_retention",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestAscendStoreCoordinator::test_transfer_value_block_range_maps_chunk_to_native_blocks",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestFindReachableHitTokens::test_hit_length_derived_from_callback_hits",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestFindReachableHitTokens::test_no_hits_returns_zero_without_deriving",
+        "tests/ut/distributed/ascend_store/test_coordinator.py::TestFindReachableHitTokens::test_passes_mask_allowed_hashes_to_query_callback"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/cann_ascend_store/test_pool_worker.py",
+      "exit_code": 1,
+      "seconds": 10.24,
+      "summary": "6 failed, 52 passed, 1 warning in 0.60s",
+      "failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerHelpers::test_external_coordinator_lookup_disables_eagle_drop",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_register_kv_caches_registers_c128_staging_separately",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_start_load_kv_c128_aggregates_chunks_into_one_page",
+        "tests/ut/distributed/ascend_store/test_pool_worker.py::TestKVPoolWorkerRegisterAndTransfer::test_start_load_kv_c128_loads_page_directly"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_request_lifecycle.py",
+      "exit_code": 0,
+      "seconds": 19.98,
+      "summary": "100 passed, 12 skipped, 1 warning in 10.08s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_dspark_prefix_cache.py",
+      "exit_code": 0,
+      "seconds": 10.0,
+      "summary": "36 passed, 1 warning in 0.09s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_qsa_basic_pooling.py",
+      "exit_code": 0,
+      "seconds": 9.96,
+      "summary": "24 passed, 1 warning in 0.13s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_utils.py",
+      "exit_code": 0,
+      "seconds": 9.73,
+      "summary": "5 passed, 1 warning in 0.05s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_layerwise_keys.py",
+      "exit_code": 0,
+      "seconds": 9.96,
+      "summary": "5 passed, 1 warning, 14 subtests passed in 0.05s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_mooncake_pipeline.py",
+      "exit_code": 0,
+      "seconds": 11.06,
+      "summary": "11 passed, 1 warning, 4 subtests passed in 1.18s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_segmented_cache_transfer.py",
+      "exit_code": 0,
+      "seconds": 9.79,
+      "summary": "18 passed, 1 warning in 0.07s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_ascend_store_connector.py",
+      "exit_code": 0,
+      "seconds": 10.82,
+      "summary": "39 passed, 1 warning, 13 subtests passed in 0.57s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py",
+      "exit_code": 1,
+      "seconds": 10.38,
+      "summary": "1 failed, 39 passed, 1 warning in 0.23s",
+      "failure_nodes": [
+        "tests/ut/distributed/ascend_store/test_layerwise_cache_layout.py::test_reuse_config_is_scoped_to_layerwise_backend_connector"
+      ]
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_backend.py",
+      "exit_code": 0,
+      "seconds": 10.5,
+      "summary": "140 passed, 1 warning, 109 subtests passed in 0.55s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_pool_scheduler.py",
+      "exit_code": 0,
+      "seconds": 10.68,
+      "summary": "95 passed, 1 warning, 59 subtests passed in 0.73s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_mooncake_layerwise.py",
+      "exit_code": 0,
+      "seconds": 9.89,
+      "summary": "16 passed, 1 warning, 6 subtests passed in 0.07s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_kv_transfer.py",
+      "exit_code": 0,
+      "seconds": 9.79,
+      "summary": "51 passed, 1 warning, 46 subtests passed in 0.15s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_metrics.py",
+      "exit_code": 0,
+      "seconds": 9.7,
+      "summary": "2 passed, 1 warning in 0.04s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_metadata.py",
+      "exit_code": 0,
+      "seconds": 10.01,
+      "summary": "76 passed, 1 warning, 10 subtests passed in 0.13s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_reuse_snapshot_blocks.py",
+      "exit_code": 0,
+      "seconds": 9.95,
+      "summary": "8 passed, 1 warning, 17 subtests passed in 0.06s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_reuse_publication_fence.py",
+      "exit_code": 0,
+      "seconds": 9.69,
+      "summary": "2 passed, 1 warning, 8 subtests passed in 0.05s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_coalesced_cache_transfer.py",
+      "exit_code": 0,
+      "seconds": 11.13,
+      "summary": "33 passed, 1 warning in 1.67s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_coordinator.py",
+      "exit_code": 0,
+      "seconds": 9.86,
+      "summary": "14 passed, 1 warning, 5 subtests passed in 0.06s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_mooncake_hybrid.py",
+      "exit_code": 0,
+      "seconds": 10.36,
+      "summary": "18 passed, 1 warning in 0.63s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_layerwise_strided_roundtrip.py",
+      "exit_code": 0,
+      "seconds": 11.03,
+      "summary": "120 passed, 1 warning in 1.23s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_pool_worker.py",
+      "exit_code": 0,
+      "seconds": 11.41,
+      "summary": "132 passed, 1 warning, 142 subtests passed in 1.91s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_glm53_store.py",
+      "exit_code": 0,
+      "seconds": 10.73,
+      "summary": "14 passed, 1 warning, 12 subtests passed in 0.87s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/distributed/ascend_store/test_reuse_snapshot_identity.py",
+      "exit_code": 0,
+      "seconds": 9.65,
+      "summary": "2 passed, 1 warning in 0.04s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_store_swa_replay.py",
+      "exit_code": 0,
+      "seconds": 17.02,
+      "summary": "192 passed, 1 warning in 6.92s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_hybrid_prefix_truncation.py",
+      "exit_code": 0,
+      "seconds": 10.21,
+      "summary": "9 passed, 1 warning in 0.47s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_ascend_multi_connector.py",
+      "exit_code": 0,
+      "seconds": 9.79,
+      "summary": "30 passed, 1 warning in 0.06s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_ascend_multi_connector_pingpong.py",
+      "exit_code": 0,
+      "seconds": 10.06,
+      "summary": "7 passed, 1 warning in 0.16s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_cann_mooncake_layerwise_connector.py",
+      "exit_code": 1,
+      "seconds": 11.3,
+      "summary": "18 failed, 54 passed, 1 warning in 1.67s",
+      "failure_nodes": [
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_final_layer_metadata_error_sends_failed_completion",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_final_layer_transfer_error_completes_reuse_gate_and_request",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_quantized_main_staging_buffer_not_used_for_indexer",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_resharding_preparation_waits_for_source_in_sending_thread",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_transfer_merges_main_and_indexer_components",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestKVCacheSendingLayerThread::test_transfer_negative_return_reports_reuse_error",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnector::test_cache_written_hook_delegates_to_worker",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorSchedulerMatchedTokens::test_fully_local_prefix_preserves_remote_cached_tokens",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorSchedulerMatchedTokens::test_update_state_after_alloc_hybrid_trims_remote_block_with_only_last_token",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_groups_optional_indexer_by_physical_layer",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_rejects_components_in_different_groups",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_rejects_dcp_replicated_indexer_scale",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_rejects_sparse_sfa_c8_main_cache",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::TestMooncakeLayerwiseConnectorWorker::test_register_kv_caches_uses_main_cache_for_quant_staging_buffer",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_layerwise_reuse_state_tracks_shared_physical_slots",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_layerwise_reuse_wait_propagates_mooncake_error",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_mooncake_save_consumes_early_cache_write_event",
+        "tests/ut/kv_offload/test_mooncake_layerwise_connector.py::test_mooncake_save_records_fallback_event_without_early_hook"
+      ]
+    },
+    {
+      "path": "tests/ut/kv_offload/test_prefill_workspace_planner.py",
+      "exit_code": 1,
+      "seconds": 10.09,
+      "summary": "11 failed, 6 passed, 1 warning in 0.40s",
+      "failure_nodes": [
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_admission_counts_indexer_and_dsa_workspace_not_full_main",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_override_rejects_capacity_above_real_profiled_hbm",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_override_rejects_less_than_one_max_length_request",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_override_uses_real_profiled_capacity_and_shrinks_tensors",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_accepts_merged_ascend_mla_spec[3]",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_accepts_merged_ascend_mla_spec[None]",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_accepts_zero_memory_for_minimal_profile",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_decode_planner_rejects_zero_memory_without_profile_override",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_feature_gate_delegates_when_disabled",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_merged_mla_group_is_expanded_per_layer",
+        "tests/ut/kv_offload/test_prefill_workspace_planner.py::test_prefill_planner_accepts_merged_ascend_mla_spec"
+      ]
+    },
+    {
+      "path": "tests/ut/kv_offload/test_dsa_offload_runtime.py",
+      "exit_code": 0,
+      "seconds": 9.75,
+      "summary": "7 passed, 1 warning in 0.04s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_dsa_offload_state.py",
+      "exit_code": 0,
+      "seconds": 9.72,
+      "summary": "2 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_decode_host_kv_pool.py",
+      "exit_code": 0,
+      "seconds": 9.75,
+      "summary": "5 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_mooncake_hybrid_connector.py",
+      "exit_code": 0,
+      "seconds": 10.08,
+      "summary": "17 passed, 1 warning, 36 subtests passed in 0.22s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v41_cache.py",
+      "exit_code": 0,
+      "seconds": 10.44,
+      "summary": "110 passed, 1 warning in 0.78s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v41_decoder_replay.py",
+      "exit_code": 0,
+      "seconds": 9.76,
+      "summary": "12 passed, 1 warning in 0.11s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v41_decoder_replay_state.py",
+      "exit_code": 0,
+      "seconds": 9.72,
+      "summary": "33 passed, 1 warning in 0.09s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v41_hyper_connection.py",
+      "exit_code": 0,
+      "seconds": 9.87,
+      "summary": "11 passed, 1 warning in 0.13s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v41_replay_distributed.py",
+      "exit_code": 0,
+      "seconds": 9.9,
+      "summary": "1 passed, 1 warning in 0.19s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/ops/test_packaged_attention.py",
+      "exit_code": 0,
+      "seconds": 9.77,
+      "summary": "9 passed, 1 warning in 0.09s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/sample/test_force_topk.py",
+      "exit_code": 0,
+      "seconds": 10.0,
+      "summary": "10 passed, 1 warning in 0.30s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/quantization/methods/w4a8/test_w4a8_mxfp4.py",
+      "exit_code": 0,
+      "seconds": 9.92,
+      "summary": "23 passed, 1 warning, 16 subtests passed in 0.10s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/patch/platform/test_layerwise_offload_scheduler.py",
+      "exit_code": 0,
+      "seconds": 9.67,
+      "summary": "7 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/worker/test_model_runner_v1.py",
+      "exit_code": 0,
+      "seconds": 10.65,
+      "summary": "117 passed, 1 warning, 227 subtests passed in 0.81s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/worker/test_model_runner_v2.py",
+      "exit_code": 0,
+      "seconds": 10.35,
+      "summary": "171 passed, 1 skipped, 1 warning in 0.60s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/worker/test_attn_utils_v2.py",
+      "exit_code": 0,
+      "seconds": 10.24,
+      "summary": "215 passed, 2 skipped, 1 warning in 0.60s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/worker/test_pcp_manager_v2.py",
+      "exit_code": 0,
+      "seconds": 9.72,
+      "summary": "101 passed, 1 warning in 0.18s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/eplb/adaptor/test_vllm_adaptor.py",
+      "exit_code": 0,
+      "seconds": 10.98,
+      "summary": "8 passed, 1 warning in 1.29s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/ops/test_fused_moe.py",
+      "exit_code": 0,
+      "seconds": 10.53,
+      "summary": "238 passed, 1 warning in 0.83s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/test_ascend_config.py",
+      "exit_code": 1,
+      "seconds": 16.08,
+      "summary": "1 failed, 151 passed, 1 warning, 248 subtests passed in 6.55s",
+      "failure_nodes": [
+        "tests/ut/test_ascend_config.py::test_config_modules_do_not_load_vllm_config"
+      ]
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v41_dspark.py",
+      "exit_code": 0,
+      "seconds": 10.07,
+      "summary": "11 passed, 1 warning in 0.51s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_ascend_store_legacy_config.py",
+      "exit_code": 0,
+      "seconds": 9.67,
+      "summary": "4 passed, 2 skipped, 1 warning in 0.05s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_cann_upgrade_dispatch.py",
+      "exit_code": 0,
+      "seconds": 9.57,
+      "summary": "9 passed, 1 warning in 0.08s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_native_store_swa_replay.py",
+      "exit_code": 0,
+      "seconds": 12.51,
+      "summary": "78 passed, 1 warning in 2.98s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/test_platform.py",
+      "exit_code": 0,
+      "seconds": 10.62,
+      "summary": "163 passed, 1 skipped, 1 warning, 90 subtests passed in 0.81s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/core/test_swa_replay_downgrade.py",
+      "exit_code": 0,
+      "seconds": 9.55,
+      "summary": "15 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_layerwise_store_session.py",
+      "exit_code": 0,
+      "seconds": 9.94,
+      "summary": "17 passed, 1 warning in 0.06s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/tokenization/test_lopt_tokenizer.py",
+      "exit_code": 0,
+      "seconds": 10.03,
+      "summary": "26 passed, 1 warning in 0.39s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/patch/platform/test_patch_lopt_tokenization.py",
+      "exit_code": 0,
+      "seconds": 9.3,
+      "summary": "7 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/kv_offload/test_cache_layout.py",
+      "exit_code": 0,
+      "seconds": 9.25,
+      "summary": "6 passed, 1 warning in 0.03s",
+      "failure_nodes": []
+    },
+    {
+      "path": "tests/ut/examples/test_swa_bench.py",
+      "exit_code": 0,
+      "seconds": 11.89,
+      "summary": "12 passed, 1 warning in 2.54s",
+      "failure_nodes": []
+    }
+  ]
+}

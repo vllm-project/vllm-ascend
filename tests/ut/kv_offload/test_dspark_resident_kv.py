@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -441,7 +441,9 @@ def test_hot_cache_rows_follow_request_slots_not_query_width(monkeypatch, width,
     k, v = allocate_kv_offload_topk_buffer_pair(runtime, config)
     query_rows = min(64, 4 * width)
     request_rows = 2 * (4 + 2)
-    expected_rows = (max(query_rows, request_rows) if keep_device else request_rows) if fused else query_rows
+    # Mixed debug batches attend the retained device KV, so Copy-SFA hot
+    # buffers need only request-slot rows even with keep_device_kv_cache.
+    expected_rows = request_rows if fused else query_rows
     stride = 512 if fused else 256
     assert k.shape == (expected_rows, stride, 1, 4)
     assert v.shape == (expected_rows, stride, 1, 2)

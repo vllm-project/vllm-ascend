@@ -114,6 +114,20 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 
     If the PR spans more than one category, please include all relevant prefixes.
 
+## Release Notes
+
+If users can notice your change, include a release note fragment in the same PR:
+`release_notes/fragments/<PR number>.yaml`. This covers new model, hardware, or operator
+support, new features, changes to user-facing APIs, parameters, or configuration, behavior
+or default changes, dependency and toolchain updates, performance improvements, and
+important bug fixes. Internal changes, such as refactors, tests, CI, tooling, and
+documentation edits, do not need a fragment.
+
+The fragment is reviewed together with the code. When unsure whether a fragment is needed,
+add one: extra entries can be dropped by the release manager at release time, while a missing
+entry is hard to recover later. See `release_notes/README.md` in the repository root for the
+principles, the format, and the template.
+
 ## Others
 
 You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing).

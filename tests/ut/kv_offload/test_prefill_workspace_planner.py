@@ -25,8 +25,8 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_max_memory_usage_bytes_from_groups,
     _get_group_layer_kv_cache_specs,
     _get_layerwise_decode_kv_cache_config,
-    _get_layerwise_prefill_max_memory_usage_bytes,
     _get_layerwise_prefill_kv_cache_config,
+    _get_layerwise_prefill_max_memory_usage_bytes,
     is_layerwise_host_offload_decode,
     is_layerwise_host_offload_prefill,
 )
@@ -55,9 +55,7 @@ def _patch_dsa_offload_backend_resolution(monkeypatch):
     monkeypatch.setattr(
         patch_kv_cache_utils,
         "get_dsa_offload_backends",
-        lambda _config, layer_names: {
-            layer_name: _TestDsaOffloadBackend for layer_name in layer_names
-        },
+        lambda _config, layer_names: {layer_name: _TestDsaOffloadBackend for layer_name in layer_names},
     )
 
 
@@ -116,9 +114,7 @@ def test_prefill_planner_shares_four_base_bundles_and_counts_mtp() -> None:
     config = _config()
     config.model_config.hf_text_config.num_hidden_layers = 8
     group = _group()
-    page_size = group.kv_cache_spec.kv_cache_specs[
-        "model.layers.0.self_attn.attn"
-    ].page_size_bytes
+    page_size = group.kv_cache_spec.kv_cache_specs["model.layers.0.self_attn.attn"].page_size_bytes
     available_memory = page_size * 5 * 17
 
     result = _get_layerwise_prefill_kv_cache_config(
@@ -131,12 +127,9 @@ def test_prefill_planner_shares_four_base_bundles_and_counts_mtp() -> None:
     assert len(result.kv_cache_tensors) == 5
     for arena_id in range(4):
         assert result.kv_cache_tensors[arena_id].layers == [
-            f"model.layers.{layer_id}.self_attn.attn"
-            for layer_id in range(arena_id, 8, 4)
+            f"model.layers.{layer_id}.self_attn.attn" for layer_id in range(arena_id, 8, 4)
         ]
-    assert result.kv_cache_tensors[4].layers == [
-        "model.layers.8.self_attn.attn"
-    ]
+    assert result.kv_cache_tensors[4].layers == ["model.layers.8.self_attn.attn"]
     assert sum(item.size for item in result.kv_cache_tensors) == available_memory
 
 
@@ -149,9 +142,7 @@ def test_prefill_memory_check_counts_four_base_bundles_and_mtp() -> None:
         prefill_context_parallel_size=1,
     )
     group = _group()
-    page_size = group.kv_cache_spec.kv_cache_specs[
-        "model.layers.0.self_attn.attn"
-    ].page_size_bytes
+    page_size = group.kv_cache_spec.kv_cache_specs["model.layers.0.self_attn.attn"].page_size_bytes
 
     result = _get_layerwise_prefill_max_memory_usage_bytes(config, [group])
 
@@ -221,8 +212,7 @@ def test_prefill_planner_rejects_incompatible_workspace_layers() -> None:
 def test_feature_gate_delegates_when_disabled(monkeypatch) -> None:
     sentinel = object()
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils."
-        "_orig_get_kv_cache_config_from_groups",
+        "vllm_ascend.patch.platform.patch_kv_cache_utils._orig_get_kv_cache_config_from_groups",
         lambda *_args: sentinel,
     )
     assert (
@@ -249,10 +239,7 @@ def _merged_mla_group(
         c8_k_scale_cache_dtype=torch.float16,
     )
     return KVCacheGroupSpec(
-        [
-            f"model.layers.{layer_id}.self_attn.attn"
-            for layer_id in range(num_layers)
-        ],
+        [f"model.layers.{layer_id}.self_attn.attn" for layer_id in range(num_layers)],
         spec,
     ), spec
 
@@ -281,8 +268,7 @@ def test_prefill_planner_accepts_merged_ascend_mla_spec() -> None:
     assert len(result.kv_cache_tensors) == 4
     for arena_id in range(4):
         assert result.kv_cache_tensors[arena_id].layers == [
-            group.layer_names[layer_id]
-            for layer_id in range(arena_id, len(group.layer_names), 4)
+            group.layer_names[layer_id] for layer_id in range(arena_id, len(group.layer_names), 4)
         ]
 
 
@@ -293,9 +279,7 @@ def test_decode_planner_accepts_merged_ascend_mla_spec(
 ) -> None:
     config = _config(enabled=True, role="kv_consumer")
     config.speculative_config = (
-        None
-        if num_speculative_tokens is None
-        else SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+        None if num_speculative_tokens is None else SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     )
     config.model_config.max_model_len = 1024
     config.scheduler_config = SimpleNamespace(max_num_seqs=1)
@@ -343,9 +327,7 @@ def test_decode_planner_accepts_zero_memory_for_minimal_profile(monkeypatch) -> 
         assert available_memory >= spec.page_size_bytes
         return KVCacheConfig(
             num_blocks=1,
-            kv_cache_tensors=[
-                KVCacheTensor(size=spec.page_size_bytes, layers=groups[0].layer_names)
-            ],
+            kv_cache_tensors=[KVCacheTensor(size=spec.page_size_bytes, layers=groups[0].layer_names)],
             kv_cache_groups=groups,
         )
 

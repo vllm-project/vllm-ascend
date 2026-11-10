@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import replace
-from functools import partial
 from typing import Any
 
 from vllm_ascend import envs
@@ -32,7 +31,7 @@ if envs.VLLM_ASCEND_LOPT_ENABLE:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from vllm.inputs import TextPrompt, TokensPrompt  # noqa: E402
-from vllm.logger import init_logger  # noqa: E402
+from vllm.logger import logger  # noqa: E402
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer  # noqa: E402
 from vllm.renderers.hf import HfRenderer  # noqa: E402
 from vllm.renderers.params import ChatParams, TokenizeParams  # noqa: E402
@@ -42,8 +41,6 @@ from vllm_ascend.tokenization.lopt_tokenizer import (  # noqa: E402
     LoptConfig,
     LosslessParallelTokenizer,
 )
-
-logger = init_logger(__name__)
 
 _PATCH_APPLIED = False
 _original_hf_renderer_init = HfRenderer.__init__

@@ -18,7 +18,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
-from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
 
 
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
@@ -40,7 +39,6 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, rep
     config.model_config.hf_config.compress_ratios = [1, 2]
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.swa_bounded_replay = replay
-    apply_legacy_replay_patch(config)
     full = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     swa = AscendSlidingWindowMLASpec(
         block_size=128,
@@ -125,7 +123,6 @@ def test_pd_consumer_without_prefix_caching_reuses_received_swa(length, monkeypa
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.enable_prefix_caching = False
     config.cache_config.swa_bounded_replay = True
-    apply_legacy_replay_patch(config)
     full = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     swa = AscendSlidingWindowMLASpec(
         block_size=128,
