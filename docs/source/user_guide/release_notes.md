@@ -93,6 +93,9 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - Improved MoE and EPLB stability by fixing expert-weight transfers, routing consistency, worker initialization, and communication selection under pipeline parallelism. [#18425](https://github.com/vllm-project/vllm-ascend/pull/18425) [#18502](https://github.com/vllm-project/vllm-ascend/pull/18502) [#18878](https://github.com/vllm-project/vllm-ascend/pull/18878) [#19073](https://github.com/vllm-project/vllm-ascend/pull/19073) [#20711](https://github.com/vllm-project/vllm-ascend/pull/20711) [#20490](https://github.com/vllm-project/vllm-ascend/pull/20490)
 - Fixed MegaMoE configuration validation and MiniMax FlashAttention-3 initialization issues, improving compatibility and startup reliability across supported Ascend configurations. [#20506](https://github.com/vllm-project/vllm-ascend/pull/20506) [#20935](https://github.com/vllm-project/vllm-ascend/pull/20935)
 
+### Known Issues
+
+- For GLM-5.3-Flash W8A8 on Atlas 800 A2, image understanding may return incorrect answers with vLLM 0.32.0. Add `--no-mm-device-do-normalize` to the `vllm serve` command as a workaround. [#20115](https://github.com/vllm-project/vllm-ascend/issues/20115)
 
 ## v0.30.0rc1 - 2026.10.11
 
