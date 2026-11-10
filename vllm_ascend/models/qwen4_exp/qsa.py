@@ -45,13 +45,15 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
-from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
-if vllm_version_is("0.32.0"):
+# Select the upstream QSA API layout independently of nightly version strings.
+_USES_QSA_CACHE_LAYOUT = hasattr(upstream_qsa, "Qwen4ExpQSAFlashAttentionBackend")
+
+if _USES_QSA_CACHE_LAYOUT:
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_indexer  # type: ignore[import-not-found]
 
@@ -64,7 +66,7 @@ else:
 
 # The upstream backend class is renamed per tree; the class definition below
 # carries the resulting valid-type/misc ignores.
-if vllm_version_is("0.32.0"):
+if _USES_QSA_CACHE_LAYOUT:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSAFlashAttentionBackend  # type: ignore[attr-defined]
 else:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
@@ -266,7 +268,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             first_positions,
         )
 
-    if vllm_version_is("0.32.0"):
+    if _USES_QSA_CACHE_LAYOUT:
 
         def forward(  # type: ignore[misc, override]
             self,
@@ -450,7 +452,7 @@ class AscendQSAImpl:
     supports_dcp = False
     supports_pcp = False
 
-    if vllm_version_is("0.32.0"):
+    if _USES_QSA_CACHE_LAYOUT:
 
         def __init__(self, *args: object, **kwargs: object) -> None:
             del kwargs
@@ -499,7 +501,7 @@ class AscendQSAImpl:
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
         _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
-    if vllm_version_is("0.32.0"):
+    if _USES_QSA_CACHE_LAYOUT:
 
         def forward_qsa(
             self,
@@ -716,7 +718,7 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
 # structure, cache specifications and weight mapping in upstream vLLM.
 upstream_indexer.apply_qsa_rope = apply_qsa_rope
 upstream_qsa.QSAIndexer = AscendQSAIndexer
-if vllm_version_is("0.32.0"):
+if _USES_QSA_CACHE_LAYOUT:
     upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl  # type: ignore[attr-defined]
     upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend  # type: ignore[attr-defined]
 else:
@@ -784,7 +786,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 raise RuntimeError("Fused QSA preparation requires an output gate")
             gate.copy_(projected_gate.view_as(gate))
 
-        if vllm_version_is("0.32.0"):
+        if _USES_QSA_CACHE_LAYOUT:
             selected = cast(
                 torch.Tensor,
                 self.indexer(  # type: ignore[call-arg]
@@ -817,7 +819,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # name and signature follow the tree's upstream ABI.
         impl: Any = self.impl
         with attention_transfer_window():
-            if vllm_version_is("0.32.0"):
+            if _USES_QSA_CACHE_LAYOUT:
                 impl.forward_qsa(
                     self,
                     query,
