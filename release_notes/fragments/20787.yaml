@@ -1,0 +1,5 @@
+pr: 20787
+entries:
+  - category: feature
+    text: Added opt-in lossless StateTree BF16 weight compression for eligible linear layers on Ascend 950.
+    hardware: [A5]

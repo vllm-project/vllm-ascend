@@ -140,6 +140,18 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         return torch.ops.vllm.unquantized_gemm(x, layer.weight, bias)
 
 
+def _create_unquantized_linear_method() -> QuantizeMethodBase:
+    from vllm_ascend.ops.statetree import is_statetree_enabled
+
+    if is_statetree_enabled():
+        # Lazy import avoids loading the Ascend C compiler path unless the
+        # experimental representation is explicitly requested.
+        from vllm_ascend.ops.statetree.methods import StateTreeLinearMethod
+
+        return StateTreeLinearMethod()
+    return AscendUnquantizedLinearMethod()
+
+
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
 class AscendLinearBase(LinearBase):
     def __init__(
@@ -166,7 +178,7 @@ class AscendLinearBase(LinearBase):
         self.quant_config = quant_config
         self.prefix = prefix
         if quant_config is None:
-            self.quant_method: QuantizeMethodBase | None = AscendUnquantizedLinearMethod()
+            self.quant_method: QuantizeMethodBase | None = _create_unquantized_linear_method()
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias

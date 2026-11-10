@@ -25,9 +25,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+import torch
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tests.ut.base import TestBase
 from tests.ut.kvpp_utils import make_kvpp_config
@@ -370,6 +372,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
+        self.assertFalse(ascend_config.enable_statetree)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
@@ -497,6 +500,34 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
+
+    def test_statetree_dotted_cli_switch(self):
+        parser = FlexibleArgumentParser()
+        parser.add_argument("--additional-config", type=json.loads)
+        args = parser.parse_args(["--additional-config.enable_statetree", "true"])
+        self.assertEqual(args.additional_config, {"enable_statetree": True})
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_statetree_typed_switch(self, mock_fix_incompatible_config, mock_is_950):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config.dtype = torch.bfloat16
+        test_vllm_config.model_config.quantization = None
+        test_vllm_config.model_config.enable_sleep_mode = False
+        test_vllm_config.additional_config = {"enable_statetree": "true"}
+
+        self.assertTrue(init_ascend_config(test_vllm_config).enable_statetree)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.is_950", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_statetree_rejects_other_hardware(self, mock_fix_incompatible_config, mock_is_950):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_statetree": True}
+
+        with self.assertRaisesRegex(ValueError, "only on Ascend 950"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

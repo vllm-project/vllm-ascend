@@ -26,6 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+import torch
 from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
@@ -454,6 +455,7 @@ class AscendConfig:
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
+            "enable_statetree": false,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
@@ -623,6 +625,9 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # Experimental lossless 12-bit weight storage and fused small-batch GEMM
+    # for Ascend 950. Unsupported layers retain the native BF16 path.
+    enable_statetree: bool = False
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -686,6 +691,21 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.enable_statetree:
+            if not is_950():
+                raise ValueError("enable_statetree is supported only on Ascend 950")
+            model_config = vc.model_config
+            if model_config is not None:
+                if model_config.dtype != torch.bfloat16:
+                    raise ValueError("enable_statetree requires a BF16 model")
+                if model_config.quantization is not None:
+                    raise ValueError("enable_statetree cannot be combined with a quantized model")
+                if model_config.enable_sleep_mode:
+                    raise ValueError("enable_statetree does not yet support sleep mode")
+            if self.rl_config.enabled:
+                raise ValueError("enable_statetree cannot be combined with rl_config.enabled")
+            if getattr(vc, "weight_transfer_config", None) is not None:
+                raise ValueError("enable_statetree does not yet support runtime weight transfer")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

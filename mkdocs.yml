@@ -295,6 +295,7 @@ nav:
         - user_guide/feature_guide/cpu_binding.md
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
         - user_guide/feature_guide/quantization.md
+        - user_guide/feature_guide/statetree.md
         - user_guide/feature_guide/sleep_mode.md
         - user_guide/feature_guide/runtime_guard.md
         - user_guide/feature_guide/structured_output.md
@@ -340,6 +341,7 @@ nav:
         - developer_guide/Design_Documents/index.md
         - developer_guide/Design_Documents/persistent_csrc_build_cache.md
         - developer_guide/Design_Documents/patch.md
+        - developer_guide/Design_Documents/statetree.md
         - developer_guide/Design_Documents/cpu_binding.md
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
