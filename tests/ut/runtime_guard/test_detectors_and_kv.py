@@ -152,6 +152,7 @@ def test_token_repeat_detector_hit_and_miss(tmp_path: Path):
     RequestGuardStore.reset_for_tests()
     RequestIoSnapshotManager.reset_for_tests()
     tr["enabled"] = False
+    cfg._version = float(cfg.config_version) + 1e-6
     det.refresh_from_config()
     for _ in range(20):
         assert det.check_all([[7]], req_ids=["off"]) == []

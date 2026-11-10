@@ -2439,6 +2439,7 @@ def test_v30c_partial_disable_clears_detector_private_state_not_store():
         store.append_output_ids("r1", [3, 4])
 
         cfg = MagicMock()
+        cfg.config_version = 1.0
         cfg.detector_section.return_value = {
             "enabled": False,
             "window": 8,
@@ -2453,6 +2454,8 @@ def test_v30c_partial_disable_clears_detector_private_state_not_store():
         det._consumed_len["r1"] = 2
         det._alerted.add("r1")
 
+        # Simulate a control/hot-reload bump so refresh re-applies the section.
+        cfg.config_version = 2.0
         det.refresh_from_config()
 
         assert det.enabled is False
@@ -2465,3 +2468,41 @@ def test_v30c_partial_disable_clears_detector_private_state_not_store():
         assert st.output_token_ids == [3, 4]
     finally:
         RequestGuardStore.reset_for_tests()
+
+
+def test_v30d_refresh_skips_unchanged_config_version():
+    """Per-step refresh is a no-op until RuntimeConfig.config_version moves."""
+    from vllm_ascend.observability.runtime_guard.detector.token_repeat import (
+        TokenRepeatDetector,
+    )
+
+    cfg = MagicMock()
+    cfg.config_version = 1.0
+    cfg.detector_section.return_value = {
+        "enabled": True,
+        "window": 8,
+        "repeat_sum_threshold": 4,
+        "min_tokens": 0,
+        "consecutive_hits": 1,
+        "ignore_token_ids": [],
+    }
+    det = TokenRepeatDetector(runtime_config=cfg, runner=None)
+    assert det._applied_config_version == 1.0
+    assert det.enabled is True
+
+    with patch.object(det, "_apply_detector_section") as apply:
+        det.refresh_from_config()
+        apply.assert_not_called()
+
+    cfg.config_version = 2.0
+    cfg.detector_section.return_value = {
+        "enabled": False,
+        "window": 8,
+        "repeat_sum_threshold": 4,
+        "min_tokens": 0,
+        "consecutive_hits": 1,
+        "ignore_token_ids": [],
+    }
+    det.refresh_from_config()
+    assert det.enabled is False
+    assert det._applied_config_version == 2.0
