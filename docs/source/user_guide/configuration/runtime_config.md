@@ -115,18 +115,19 @@ Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | bool | `false` | Alert on visible garbled / foreign-script / illegal UTF-8 (rc4) |
-| `table` | str | `"qwen3"` | Shipped name (`qwen3` / `glm` / `dsv4`) or path to a `*_rare.npz` built from the served tokenizer |
-| `think_end` | str | `"auto"` | `"</think>"` token id, `auto` for shipped tables, or `none` (chat / no think boundary) |
+| `table` | str | `"auto"` | `auto` = build from the served tokenizer at model warmup; or path to a prebuilt `*_rare.npz` |
+| `think_end` | str | `"auto"` | `"</think>"` token id, `auto` (resolve from tokenizer), or `none` (chat / no think boundary) |
 | `alert_monitor` | bool | `false` | Also raise on rc4 monitor-tier rules (looser false-positive band) |
 
 Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
 stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
 ``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
-logits by stride. After collect, ``get_output`` only submits to a dedicated
-rare-pair wait queue; that worker waits for collect, issues the pair D2H,
-then pack+feeds — so the sample return path does not touch the pair copy
-stream. Request finish flushes rc4 look-ahead only after those jobs drain.
-Tables are per-tokenizer; `rc4_gb` is shared. Prefer shadow/`report` first —
+logits by stride. Each step's device pair is attached to that step's
+``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to a
+dedicated rare-pair wait queue; that worker waits for collect, issues the pair
+D2H, then pack+feeds. Request finish flushes rc4 look-ahead only after those
+jobs drain. The shared GB model (`rc4_gb.npz`) ships with the package; the
+per-tokenizer rare table is built online. Prefer shadow/`report` first —
 strict-tier holdout false-positive rate can exceed 0.1% on some corpora.
 
 Each step runs a device ``isfinite`` reduction and one all-finite gate. Default

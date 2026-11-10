@@ -481,9 +481,15 @@ def _repo_path(path):
 class RareDetector:
     def __init__(self, corpus, config, think_end='auto'):
         self.T = load_rare(corpus)
-        if think_end == 'auto' and corpus not in THINK_END:
-            raise ValueError(f"think_end='auto' needs a shipped table ({sorted(THINK_END)}); pass the '</think>' id or None")
-        self.think_end = THINK_END[corpus] if think_end == 'auto' else think_end
+        if think_end == 'auto':
+            if corpus not in THINK_END:
+                raise ValueError(
+                    "think_end='auto' needs a known corpus name or an explicit "
+                    "'</think>' id / None (chat); Guard warmup resolves this from the tokenizer"
+                )
+            self.think_end = THINK_END[corpus]
+        else:
+            self.think_end = think_end
         self.cfg = json.load(open(config)) if isinstance(config, str) else config
         self.rules = self.cfg['rules']
         self.need = needs(self.rules)

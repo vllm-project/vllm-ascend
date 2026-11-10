@@ -223,6 +223,21 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         except Exception:
             logger.debug("[runtime_guard] action worker stop failed", exc_info=True)
 
+    def warmup_detectors(self) -> None:
+        """Build detector artifacts that must exist before the first real step.
+
+        Called from ModelRunner warmup / post-``load_model``. Currently builds
+        the rare_chars per-tokenizer table when that detector is enabled.
+        """
+        try:
+            tok = self._get_detector_tokenizer()
+        except Exception:
+            tok = None
+        try:
+            self.detectors.warmup_rare_chars(tok)
+        except Exception:
+            logger.exception("[runtime_guard] rare_chars warmup failed")
+
     # ---- step entry (all ranks) --------------------------------------------
 
     def refresh_config(
@@ -677,20 +692,35 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             logger.exception("[runtime_guard: rare_chars] collect failed")
 
     def _queue_rare_pair_device_only(self, packed: Any) -> None:
-        """Hold device ``[rows, 2]`` and record collect-done on main (no D2H yet)."""
+        """Record collect-done and stash this step's device ``[rows, 2]`` hold.
+
+        The hold is transferred onto ``AscendAsyncOutput`` via
+        :meth:`take_step_rare_pair` so async overlapping steps cannot share a
+        single runner slot.
+        """
         import torch
 
-        self._drop_unconsumed_rare_pair()
-        runner = self.runner
-        main_stream = getattr(runner, "main_stream", None)
+        leaked = getattr(self, "_step_rare_pair", None)
+        if leaked is not None:
+            # Previous step never wrapped / consumed — sync+drop to avoid leak.
+            hold, event = leaked
+            if event is not None:
+                event.synchronize()
+            del hold
+            logger.warning("[runtime_guard: rare_chars] dropped unconsumed step rare pair")
+        main_stream = getattr(self.runner, "main_stream", None)
         collect_ev = torch.cuda.Event(blocking=True)
         if main_stream is not None:
             collect_ev.record(main_stream)
         else:
             collect_ev.record()
-        runner._rg_rare_pair_hold = packed
-        # Host buffer is materialized in ``_materialize_rare_pair_cpu``.
-        self._pending_rare_pair = (None, collect_ev)
+        self._step_rare_pair = (packed, collect_ev)
+
+    def take_step_rare_pair(self) -> tuple[Any, Any] | None:
+        """Detach this step's ``(device_hold, collect_event)`` for AsyncOutput."""
+        pending = getattr(self, "_step_rare_pair", None)
+        self._step_rare_pair = None
+        return pending
 
     def _materialize_rare_pair_cpu(self, packed: Any, collect_event: Any) -> Any:
         """Wait for collect, then D2H ``[rows, 2]`` to pinned host memory."""
@@ -716,30 +746,17 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         copy_ev.synchronize()
         return cpu
 
-    def _drop_unconsumed_rare_pair(self) -> None:
-        pending = getattr(self, "_pending_rare_pair", None)
-        if pending is None:
-            return
-        _cpu, event = pending
-        if event is not None:
-            event.synchronize()
-        self._pending_rare_pair = None
-        if getattr(self, "runner", None) is not None:
-            self.runner._rg_rare_pair_hold = None
-
-    def consume_rare_pairs(self, output: Any) -> None:
+    def consume_rare_pairs(self, output: Any, *, pending: tuple[Any, Any] | None = None) -> None:
         """After token-id ``get_output``: issue pair D2H and feed rc4.
 
-        Submit collect-wait + D2H + pack + feed to :class:`RarePairWaitQueue`
-        so this path does not touch the copy stream on the inference thread.
+        ``pending`` is the per-step ``(device_hold, collect_event)`` attached to
+        ``AscendAsyncOutput``. Submit collect-wait + D2H + pack + feed to
+        :class:`RarePairWaitQueue` so this path does not touch the copy stream
+        on the inference thread.
         """
-        pending = getattr(self, "_pending_rare_pair", None)
-        self._pending_rare_pair = None
-        hold = getattr(self.runner, "_rg_rare_pair_hold", None)
-        self.runner._rg_rare_pair_hold = None
         if pending is None:
             return
-        _cpu_unused, collect_event = pending
+        hold, collect_event = pending
         req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
         n_req = len(req_ids)
         sampled = getattr(output, "sampled_token_ids", None)

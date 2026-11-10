@@ -132,6 +132,14 @@ def load(corpus):
 _CATS = {}
 
 
+def invalidate_cats(corpus=None):
+    """Drop cached cat tables (warmup re-register / tests)."""
+    if corpus is None:
+        _CATS.clear()
+    else:
+        _CATS.pop(corpus, None)
+
+
 def load_cats(corpus):
     """character-category tables only (no counts), for a learned score without reference inputs (rc4, "ref": "cats"): built from
     the tokenizer's rare_vocab table at load (about 0.1 s), so they exist for every corpus, DeepSeek included"""

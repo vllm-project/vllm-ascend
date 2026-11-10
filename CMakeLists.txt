@@ -244,3 +244,33 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
+
+# ---------------------------------------------------------------------------
+# rare_chars CPU feed (pure CPython C API; no Ascend / torch_npu link).
+# Built with the same cmake_build_ext pass as vllm_ascend_C; also available as
+# a setuptools Extension when COMPILE_CUSTOM_KERNELS=0.
+# ---------------------------------------------------------------------------
+set(RARE_FEED_NATIVE_SRC
+  ${CMAKE_CURRENT_SOURCE_DIR}/vllm_ascend/observability/runtime_guard/detector/rare/rare_feed_native.c
+)
+set(RARE_FEED_NATIVE_INSTALL_DIR
+  ${VLLM_ASCEND_INSTALL_PATH}/observability/runtime_guard/detector/rare
+)
+add_library(rare_feed_native MODULE ${RARE_FEED_NATIVE_SRC})
+target_include_directories(rare_feed_native PRIVATE ${PYTHON_INCLUDE_PATH})
+# Leave undefined symbols for libpython; the interpreter resolves them at load.
+set_target_properties(rare_feed_native PROPERTIES
+  PREFIX ""
+  OUTPUT_NAME "rare_feed_native"
+  # Keep a stable sidecar name so rare_native.py can load rare_feed_native.so
+  # next to the package (matches the historical hand-built artifact).
+  SUFFIX ".so"
+)
+if(APPLE)
+  target_link_options(rare_feed_native PRIVATE "-undefined" "dynamic_lookup")
+endif()
+install(TARGETS rare_feed_native
+  LIBRARY DESTINATION ${RARE_FEED_NATIVE_INSTALL_DIR}
+  RUNTIME DESTINATION ${RARE_FEED_NATIVE_INSTALL_DIR}
+  ARCHIVE DESTINATION ${RARE_FEED_NATIVE_INSTALL_DIR}
+)
