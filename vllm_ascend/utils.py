@@ -87,12 +87,16 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
+@functools.cache
 def supports_triton() -> bool:
     """Return whether Triton kernels may run on this installation.
 
     Upstream ``HAS_TRITON`` only describes the Python environment. 310P does
     not support Triton-Ascend, so an accidentally installed package must not
     make the inference path import, compile, or launch Triton kernels.
+
+    The hardware profile and installed backend are fixed for this process.
+    Cache discovery so each kernel launch does not repeat the Python imports.
     """
     if not get_current_hardware_profile().supports(HardwareCapability.TRITON_KERNELS):
         return False

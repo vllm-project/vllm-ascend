@@ -47,7 +47,11 @@ def test_supports_triton_combines_hardware_and_software_capability(device_type, 
         mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
         mock.patch("vllm.triton_utils.HAS_TRITON", has_triton),
     ):
-        assert utils.supports_triton() is (has_triton and device_type is not AscendDeviceType._310P)
+        utils.supports_triton.cache_clear()
+        try:
+            assert utils.supports_triton() is (has_triton and device_type is not AscendDeviceType._310P)
+        finally:
+            utils.supports_triton.cache_clear()
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
