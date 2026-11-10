@@ -46,7 +46,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 # isort: on
 
@@ -195,7 +194,7 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
 
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
     @staticmethod
-    def _make_worker() -> KVPoolWorker:
+    def _make_worker() -> LayerwiseKVPoolWorker:
         worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False

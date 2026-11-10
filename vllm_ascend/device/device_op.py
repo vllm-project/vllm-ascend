@@ -255,36 +255,6 @@ class BaseDeviceAdaptor:
         return scale
 
     @staticmethod
-    def moe_gating_top_k(
-        x: torch.Tensor,
-        *,
-        k: int,
-        k_group: int,
-        group_count: int,
-        group_select_mode: int,
-        renorm: int,
-        norm_type: int,
-        out_flag: bool,
-        routed_scaling_factor: float = 1.0,
-        eps: float = 1e-20,
-        bias_opt: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
-            x,
-            k=k,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=renorm,
-            norm_type=norm_type,
-            out_flag=out_flag,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-            bias_opt=bias_opt,
-        )
-        return topk_weights, topk_ids.to(torch.int32), out
-
-    @staticmethod
     def npu_mm_reduce_scatter_base(
         x1: torch.Tensor,
         x2: torch.Tensor,
@@ -1219,38 +1189,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
 
     @staticmethod
-    def moe_gating_top_k(
-        x: torch.Tensor,
-        *,
-        k: int,
-        k_group: int,
-        group_count: int,
-        group_select_mode: int,
-        renorm: int,
-        norm_type: int,
-        out_flag: bool,
-        routed_scaling_factor: float = 1.0,
-        eps: float = 1e-20,
-        bias_opt: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
-            x,
-            k=k,
-            bias=bias_opt,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=0,
-            norm_type=norm_type,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-        )
-        if norm_type == 0 and renorm == 1:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
-        return topk_weights, topk_ids.to(torch.int32), out
-
-    @staticmethod
     def npu_mm_reduce_scatter_base(
         x1: torch.Tensor,
         x2: torch.Tensor,
@@ -1994,41 +1932,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
         )
-
-    @staticmethod
-    def index_fill(
-        tensor: torch.Tensor,
-        dim: int,
-        indices: torch.Tensor,
-        value: int,
-    ) -> torch.Tensor:
-        """Temporarily emulate ``index_fill_`` with ``scatter_`` on A5.
-
-        The current A5 torch-npu implementation converts the device index
-        tensor to a host vector, which introduces device-to-host synchronization
-        proportional to the number of indices. Remove this workaround once the
-        native A5 ``index_fill_`` path accepts device indices without syncing.
-        """
-        if indices.numel() == 0:
-            return tensor
-
-        if dim < 0:
-            dim += tensor.dim()
-        if dim < 0 or dim >= tensor.dim():
-            raise IndexError(
-                f"Dimension out of range (expected to be in range of "
-                f"[-{tensor.dim()}, {tensor.dim() - 1}], but got {dim})"
-            )
-
-        dim_size = tensor.size(dim)
-        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
-        index_shape = [1] * tensor.dim()
-        index_shape[dim] = norm_indices.numel()
-        scatter_shape = list(tensor.shape)
-        scatter_shape[dim] = norm_indices.numel()
-        scatter_indices = norm_indices.reshape(index_shape).expand(scatter_shape)
-        tensor.scatter_(dim, scatter_indices, value)
-        return tensor
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):

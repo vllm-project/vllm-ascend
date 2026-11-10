@@ -165,13 +165,12 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.vllm_ascend_branch }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -240,36 +239,6 @@ jobs:
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
           install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
 
-      - name: Clear resources
-        run: |
-          set -euo pipefail
-          TIMEOUT=120
-          SLEEP_INTERVAL=2
-
-
-          echo "Deleting leaderworkerset [$LWS_NAME] in namespace [$NAMESPACE]..."
-          kubectl delete leaderworkerset "$LWS_NAME" -n "$NAMESPACE" --ignore-not-found
-          kubectl delete service "${LWS_NAME}-leader" -n "$NAMESPACE" --ignore-not-found
-
-          echo "Waiting for pods of leaderworkerset [$LWS_NAME] to be deleted..."
-          START_TIME=$(date +%s)
-          while true; do
-            ELAPSED=$(( $(date +%s) - START_TIME ))
-            if [[ $ELAPSED -ge $TIMEOUT ]]; then
-              echo "Timeout reached ($TIMEOUT seconds), some pods still exist:"
-              kubectl get pods -n "$NAMESPACE" | grep "^${LWS_NAME}-" || true
-              exit 1
-            fi
-            PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
-              | tr ' ' '\n' | grep "^${LWS_NAME}-" || true)
-            if [[ -z "$PODS_EXIST" ]]; then
-              echo "All pods for [$LWS_NAME] deleted."
-              break
-            fi
-            echo "Waiting for pods to be deleted: $PODS_EXIST"
-            sleep $SLEEP_INTERVAL
-          done
-
       - name: Launch cluster
         env:
           BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
@@ -296,6 +265,8 @@ jobs:
           config_base_path="${{ inputs.config_base_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
           is_pr_test="${{ inputs.request_id != '' }}"
+          # All multi-node LWS pods are queued by the unified FIFO scheduler.
+          scheduler_name="npu-scheduler"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           vllm_ref="${{ inputs.vllm_ref }}"
@@ -328,6 +299,7 @@ jobs:
             -D npu_per_node="$npu_per_node" \
             -D fail_tag="$fail_tag" \
             -D is_pr_test="$is_pr_test" \
+            -D scheduler_name="$scheduler_name" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
             -D vllm_ref="$vllm_ref" \
@@ -361,24 +333,14 @@ jobs:
         run: |
           set -euo pipefail
           SIZE="${{ inputs.size }}"
-          TIMEOUT=1200
 
-          echo "Waiting for all pods to become Running and Ready (timeout ${TIMEOUT}s)..."
-          START_TIME=$(date +%s)
+          echo "Waiting for all pods to become Running and Ready..."
           while true; do
-            ELAPSED=$(( $(date +%s) - START_TIME ))
-            if [[ $ELAPSED -ge $TIMEOUT ]]; then
-              echo "Timeout reached after ${ELAPSED}s, dumping pod status:"
-              kubectl get pods -n "$NAMESPACE"
-              kubectl describe pod "$LEADER_POD" -n "$NAMESPACE"
-              exit 1
-            fi
-
             ALL_READY=true
             for ((i=1; i<SIZE; i++)); do
               POD="${LWS_NAME}-0-${i}"
               PHASE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-              READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
+              READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
               echo "Worker [$POD] phase=$PHASE ready=$READY"
               if [[ "$PHASE" != "Running" || "$READY" != "true" ]]; then
                 ALL_READY=false
@@ -387,7 +349,7 @@ jobs:
             done
 
             LEADER_PHASE=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-            LEADER_READY=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
+            LEADER_READY=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
             echo "Leader [$LEADER_POD] phase=$LEADER_PHASE ready=$LEADER_READY"
             if [[ "$LEADER_PHASE" != "Running" || "$LEADER_READY" != "true" ]]; then
               ALL_READY=false
@@ -397,11 +359,12 @@ jobs:
               echo "All pods are Running and Ready."
               break
             fi
-            sleep 2
+            sleep 15
           done
 
       - name: Stream logs
         id: stream_logs
+        timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
         run: |
           set -euo pipefail
 

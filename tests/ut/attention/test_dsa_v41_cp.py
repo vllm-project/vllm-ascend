@@ -9,6 +9,7 @@ tests check persistent addresses and state controls, not NPU graph replay.
 """
 
 import importlib
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -257,7 +258,28 @@ def builders(monkeypatch):
             builder.prepare_source_rope()
         return result
 
-    return make
+    def make_specialized(*args, specialized=False, ratio=2, **kwargs):
+        result = make(*args, **kwargs)
+        if not specialized and ratio == 2:
+            return result
+        role_classes = {
+            "swa": dsa_v41_cp.AscendDSAV41PCPSWAMetadataBuilder,
+            "long_kv": dsa_v41_cp.AscendDSAV41PCPAttentionMetadataBuilder,
+            "index_k": dsa_v41_cp.AscendDSAV41PCPIndexerMetadataBuilder,
+            "compressor_state": dsa_v41_cp.AscendDSAV41PCPStateMetadataBuilder,
+        }
+        for kind, builder in result.items():
+            spec = builder.kv_cache_spec
+            if kind in {"long_kv", "index_k"}:
+                spec = replace(spec, tokens_per_state=ratio)
+            builder_cls = role_classes[kind] if specialized else type(builder)
+            result[kind] = builder_cls(spec, builder.layer_names, builder.vllm_config, torch.device("cpu"))
+            result[kind].prepare_source_rope()
+        if specialized:
+            dsa_v41_cp.AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(result.values())
+        return result
+
+    return make_specialized
 
 
 def _batch(world, rank, scenario, *, decode_sharded=False):
@@ -382,6 +404,10 @@ def _batch(world, rank, scenario, *, decode_sharded=False):
         is_prefilling=torch.tensor(local_flags),
         attn_state=scenario,
     )
+    # Populate the new common-metadata interface while retaining keyword
+    # arguments at call sites for compatibility with the branch's runner.
+    local.pcp_context = context
+    local.pcp_cache_group_idx = 0
     return SimpleNamespace(
         local=local,
         context=context,

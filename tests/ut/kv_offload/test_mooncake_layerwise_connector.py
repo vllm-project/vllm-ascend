@@ -1,6 +1,7 @@
 import contextlib
 import ctypes
 import importlib.util
+import inspect
 import os
 import sys
 import threading
@@ -47,13 +48,11 @@ for k in list(sys.modules):
 for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin  # noqa: E402
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
-    KVConnectorBase_V1,
     KVConnectorRole,
     LayerMetadata,
     MLAAttentionSpec,
@@ -77,6 +76,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
 # For keys that our real import loaded, overwrite with the saved mock.
 for _k, _v in _saved_modules.items():
     sys.modules[_k] = _v
+
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector  # noqa: E402
+
+# The deferred-finalize hook only exists on the newer connector API; the
+# release lane finalizes inside post_forward().
+DEFERS_FINALIZE = "defer_finalize" in inspect.signature(ActiveKVConnector.post_forward).parameters
 
 GET_META_MSG = b"get_meta_msg"
 DONE_SENDING_MSG = b"done_sending_msg"
@@ -1441,19 +1446,19 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
         self.connector.build_connector_worker_meta = MagicMock(return_value=None)
 
     def _run_producer_steps(self, has_sync_kv_loads):
-        runner_globals = KVConnectorModelRunnerMixin._get_kv_connector_output.__wrapped__.__globals__
+        # register_kv_caches is the only constructor hook that needs a real
+        # kv_cache_config; bind/load/save stay real throughout the test.
+        self.connector.register_kv_caches = MagicMock()
         with (
-            patch.dict(
-                runner_globals,
-                # The isolated connector imports above create a fresh base
-                # class. Scope its runner binding to this test; reloading the
-                # shared runner leaks through its parent package to other tests.
-                KVConnectorBase=KVConnectorBase_V1,
-                get_kv_transfer_group=lambda: self.connector,
-                get_forward_context=lambda: SimpleNamespace(),
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
+                return_value=self.connector,
             ),
+            patch("vllm.v1.worker.gpu.kv_connector.is_forward_context_available", return_value=True),
+            patch("vllm.v1.worker.gpu.kv_connector.get_forward_context", return_value=SimpleNamespace()),
             patch("torch.npu.Event", side_effect=lambda: MagicMock()),
         ):
+            runner = ActiveKVConnector(self.worker.vllm_config, {})
             for step in range(2):
                 metadata = MooncakeLayerwiseConnectorMetadata()
                 metadata.requests["req"] = SimpleNamespace(local_block_ids=[[3]], remote_block_ids=[[5]])
@@ -1462,20 +1467,24 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
                     has_sync_kv_loads=has_sync_kv_loads,
                     finished_req_ids=set(),
                 )
-                # Execute the real runner's before/after-forward load ordering.
-                with KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output, defer_finalize=True):
-                    self.assertEqual(self.worker.current_layer, 0)
-                    self.assertEqual(self.worker._cache_write_events, [None, None])
-                    self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
-                    self.assertEqual(metadata.requests["req"].remote_block_ids, [[10, 11]])
-                    self.connector.on_kv_cache_written("layer0")
-                    event = self.worker._cache_write_events[0]
-                    self.connector.save_kv_layer("layer0", [], MagicMock())
-                    task = self.worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
-                    self.assertIs(task.wait_event, event)
-                    self.assertEqual(task.layer_idx, 0)
-                # The deferred start_load_kv must not reset the MTP position or
-                # expand the scheduler block IDs a second time.
+                # Execute the runner's pre-forward hook: bind the step metadata
+                # (which prepares layerwise counters and send mappings), then
+                # start sync loads. Async loads are deferred to post_forward.
+                runner.pre_forward(scheduler_output)
+                self.assertEqual(self.worker.current_layer, 0)
+                self.assertEqual(self.worker._cache_write_events, [None, None])
+                self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
+                self.assertEqual(metadata.requests["req"].remote_block_ids, [[10, 11]])
+                self.connector.on_kv_cache_written("layer0")
+                event = self.worker._cache_write_events[0]
+                self.connector.save_kv_layer("layer0", [], MagicMock())
+                task = self.worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
+                self.assertIs(task.wait_event, event)
+                self.assertEqual(task.layer_idx, 0)
+                # The deferred start_load_kv (in post_forward) must not reset
+                # the MTP position or expand the scheduler block IDs a second
+                # time.
+                runner.post_forward(set(), defer_finalize=True)
                 self.assertEqual(self.worker.current_layer, 1)
                 self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
                 self.connector.on_kv_cache_written("mtp.layer1")
@@ -1484,24 +1493,22 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
                 self.assertEqual(task.layer_idx, 1)
                 self.assertEqual(self.worker.current_layer, 2)
                 self.assertEqual(self.worker._get_kv_split_metadata.call_count, step + 1)
-                self.connector.clear_connector_metadata()
+                runner.finalize_step()
                 self.assertFalse(self.connector.has_connector_metadata())
 
+    @unittest.skipUnless(
+        DEFERS_FINALIZE,
+        "the connector API has no deferred finalize hook on this vLLM version",
+    )
     def test_deferred_load_prepares_first_forward_and_preserves_mtp_across_steps(self):
         self._run_producer_steps(has_sync_kv_loads=False)
 
+    @unittest.skipUnless(
+        DEFERS_FINALIZE,
+        "the connector API has no deferred finalize hook on this vLLM version",
+    )
     def test_pre_forward_load_does_not_prepare_twice(self):
         self._run_producer_steps(has_sync_kv_loads=True)
-
-    def test_runner_base_binding_is_restored_for_other_connectors(self):
-        runner_globals = KVConnectorModelRunnerMixin._get_kv_connector_output.__wrapped__.__globals__
-
-        class PreviouslyImportedBase:
-            pass
-
-        with patch.dict(runner_globals, KVConnectorBase=PreviouslyImportedBase):
-            self._run_producer_steps(has_sync_kv_loads=False)
-            self.assertIs(runner_globals["KVConnectorBase"], PreviouslyImportedBase)
 
     def test_empty_producer_step_resets_state_without_sending(self):
         self.worker.current_layer = 2

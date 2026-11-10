@@ -48,7 +48,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
 
     selected = torch.zeros((2, 3), dtype=torch.int32)
     # Main's indexer returns (selection, prepared main outputs).
-    indexer = Mock(return_value=selected if vllm_version_is("0.32.0") else (selected, None))
+    indexer = Mock(return_value=selected if vllm_version_is("0.33.0") else (selected, None))
     indexer.output_width = 3
     indexer.raw_key_cache = SimpleNamespace(prefix=side_prefix)
     layer.indexer = indexer
@@ -84,7 +84,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     torch.testing.assert_close(update_args[1], projected_k.view(2, 1, 4))
     torch.testing.assert_close(update_args[2], projected_v.view(2, 1, 4))
     assert layer.impl.forward_qsa.call_count + layer.impl.forward.call_count == 1
-    forward_call = layer.impl.forward_qsa if vllm_version_is("0.32.0") else layer.impl.forward
+    forward_call = layer.impl.forward_qsa if vllm_version_is("0.33.0") else layer.impl.forward
     forward_args = forward_call.call_args.args
     torch.testing.assert_close(forward_args[1], projected_q.view(2, 2, 4))
 

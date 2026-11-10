@@ -51,7 +51,7 @@ DP_SIZE = 2
 # pre-downloaded (see .github/workflows/misc/model_dataset_list.json): CI runs
 # with VLLM_USE_MODELSCOPE=1 and HF_HUB_OFFLINE=1, so an unlisted checkpoint
 # cannot be fetched. VLLM_TEST_MODEL overrides it, as in
-# tests/e2e/pull_request/one_card/rlhf/conftest.py.
+# tests/e2e/common/rlhf/common.py.
 DP_PAUSE_MODEL = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
 

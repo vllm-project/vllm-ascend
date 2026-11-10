@@ -126,7 +126,7 @@ def prepare_dflash_inputs_factory(
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -138,7 +138,12 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         with disable_profiling_chunk_for_draft(self.vllm_config):
-            return super().load_draft_model(target_model, target_attn_layer_names)
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        # QuaRot targets require draft weights to be aligned after sharing
+        # target layers, using the restored target configuration.
+        if hasattr(model, "post_process"):
+            model.post_process(self.vllm_config)
+        return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
