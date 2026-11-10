@@ -541,18 +541,22 @@ class RequestGuardStore:
                 return True
             mark = int(current_wave)
             state.finish_mark_wave = mark
-        # Rare-pair feeds must complete before clear. Do not force-reap while
-        # pins remain (pins release in the pair-wait job ``finally``).
+        # Rare-pair feeds should complete before clear. Soft-defer for one
+        # ``max_deferred_waves`` window; then force-reap so a stuck waiter
+        # cannot pin request state forever.
         if state.rare_pair_jobs > 0:
             age = int(current_wave) - mark
-            if age >= int(self.max_deferred_waves) and age % int(self.max_deferred_waves) == 0:
+            cap = int(self.max_deferred_waves)
+            if age < cap:
+                return False
+            if age == cap or (cap > 0 and age % cap == 0):
                 logger.warning(
-                    "[runtime_guard reap] defer clear for req=%s rare_pair_jobs=%s age_waves=%s",
+                    "[runtime_guard reap] force clear for req=%s rare_pair_jobs=%s age_waves=%s",
                     state.req_id,
                     state.rare_pair_jobs,
                     age,
                 )
-            return False
+            state.rare_pair_jobs = 0
         if state.cpu_jobs > 0 or state.dump_jobs > 0:
             if int(current_wave) - mark < int(self.max_deferred_waves):
                 return False

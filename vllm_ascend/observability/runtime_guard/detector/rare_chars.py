@@ -16,18 +16,17 @@
 """Runtime Guard wrapper for rare_chars rc4 (visible garbled / foreign-script).
 
 Collects ``(top1_logprob, chosen_logprob)`` via sampler-side narrow collect on
-Guard-stashed pre-sample logits + sampled ids (v35 Triton
-``_v35_partials`` / ``_v35_finish`` — no full logprob table / ranks). Does
-**not** require ``SamplingParams.logprobs`` and never injects logprobs into the
-API response. CPU rules use the vendored rc4 ``RareDetector`` (see
-``detector/rare/``).
+Guard-stashed pre-sample logits + sampled ids (v35 Triton). Does **not**
+require ``SamplingParams.logprobs``. Per-tokenizer tables are built at warmup
+from the served tokenizer (``table: auto``).
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -36,8 +35,15 @@ import torch
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_config.schema import ConfigField, DetectorSchema
-from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
-from vllm_ascend.observability.runtime_guard.detector.rare import CONFIG_RC4, THINK_END, RareDetector, RareRowBatch
+from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector
+from vllm_ascend.observability.runtime_guard.detector.rare import (
+    CONFIG_RC4,
+    RareDetector,
+    RareRowBatch,
+    build_from_tokenizer,
+    register_rare_table,
+    resolve_think_end_id,
+)
 from vllm_ascend.observability.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.observability.runtime_guard.state import ILL_TYPE_NONE, Incident
 
@@ -46,40 +52,7 @@ if TYPE_CHECKING:
 
 logger = init_logger_ascend(__name__)
 
-
-def _flatten_sampled_token_ids(sampled_token_ids: Any) -> list[list[int]]:
-    """Normalize sampler / postprocess sampled ids to ``list[list[int]]``."""
-    if sampled_token_ids is None:
-        return []
-    if isinstance(sampled_token_ids, torch.Tensor):
-        if sampled_token_ids.numel() == 0:
-            return []
-        t = sampled_token_ids.detach()
-        if t.dim() == 1:
-            t = t.unsqueeze(-1)
-        rows = t.tolist()
-        out: list[list[int]] = []
-        for row in rows:
-            if isinstance(row, list):
-                out.append([int(x) for x in row if int(x) >= 0])
-            else:
-                tid = int(row)
-                out.append([tid] if tid >= 0 else [])
-        return out
-    if isinstance(sampled_token_ids, (list, tuple)):
-        out = []
-        for row in sampled_token_ids:
-            if row is None:
-                out.append([])
-            elif isinstance(row, (list, tuple)):
-                out.append([int(x) for x in row if int(x) >= 0])
-            elif isinstance(row, torch.Tensor):
-                out.append([int(x) for x in row.detach().tolist() if int(x) >= 0])
-            else:
-                tid = int(row)
-                out.append([tid] if tid >= 0 else [])
-        return out
-    return []
+_SERVED_TABLE_KEY = "served"
 
 
 def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
@@ -104,12 +77,7 @@ def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
 
 
 def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Token ids and logprob columns for one step, without a Python list per row.
-
-    ``cpu`` is the pinned ``[rows, 2]`` pair tensor. ``sampled`` is the trimmed
-    output ids (tensor, ndarray, or a list of per-request ids). The returned
-    arrays are length ``min(n_req, rows)`` and are safe to hand to another thread.
-    """
+    """Token ids and logprob columns for one step, without a Python list per row."""
     if isinstance(cpu, torch.Tensor):
         pairs = cpu.detach()
         if pairs.device.type != "cpu":
@@ -167,57 +135,6 @@ def _last_token_ids(sampled: Any, n: int) -> np.ndarray:
     return out
 
 
-def top1_and_chosen_logprobs(
-    logits: torch.Tensor,
-    token_ids: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Natural-log top-1 and selected-token logprobs per row (raw logits).
-
-    Same units as vLLM ``raw_logprobs`` (natural log). rc4 converts to log10
-    internally. Prefers the Ascend V2 sampler v35 Triton path
-    (``compute_top1_and_chosen_logprobs``: ``_v35_partials`` / ``_v35_finish``)
-    — no full ``log_softmax`` table and no ranks. Falls back to portable
-    ``log_softmax`` + max/gather for CPU / UT.
-    """
-    if not isinstance(logits, torch.Tensor) or not isinstance(token_ids, torch.Tensor):
-        raise TypeError("logits and token_ids must be torch.Tensor")
-    if logits.dim() != 2:
-        raise ValueError(f"logits must be 2-D [rows, vocab], got shape={tuple(logits.shape)}")
-    ids = token_ids.reshape(-1).to(dtype=torch.long, device=logits.device)
-    if ids.numel() != logits.shape[0]:
-        raise ValueError(f"token_ids length {ids.numel()} != logits rows {logits.shape[0]}")
-
-    try:
-        from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
-
-        return compute_top1_and_chosen_logprobs(logits, ids)
-    except Exception:
-        # CPU UT / missing Triton: full-row log_softmax is fine at test vocab.
-        log_probs = torch.log_softmax(logits.float(), dim=-1)
-        top1 = log_probs.max(dim=-1).values
-        chosen = log_probs.gather(1, ids.unsqueeze(-1)).squeeze(1)
-        return top1, chosen
-
-
-def _resolve_table(table: str) -> str:
-    """Shipped corpus name or absolute/relative ``*_rare.npz`` path."""
-    t = (table or "qwen3").strip()
-    if t.endswith(".npz"):
-        if not os.path.isfile(t):
-            raise FileNotFoundError(f"rare_chars table not found: {t}")
-        return t
-    return t  # RareDetector load() resolves shipped names under rare/tables/
-
-
-def _resolve_think_end(table: str, think_end: str) -> int | None | str:
-    raw = (think_end or "auto").strip().lower()
-    if raw == "auto":
-        return "auto"
-    if raw in ("none", "null", ""):
-        return None
-    return int(raw)
-
-
 @dataclass
 class RareCharsReqState:
     """Per-request streaming RareDetector state."""
@@ -244,21 +161,22 @@ class RareCharsDetector(ConfigBackedDetector):
             "Visible garbled text (rc4 rare_chars): foreign-script fragments, "
             "illegal UTF-8, low-confidence rare tokens. Guard uses sampler-side "
             "v35 Triton narrow collect on stashed pre-sample logits "
-            "for (top1, chosen) — API SamplingParams.logprobs not required."
+            "for (top1, chosen) — API SamplingParams.logprobs not required. "
+            "Per-tokenizer tables are built at warmup (table=auto)."
         ),
         fields=(
             ConfigField("enabled", False, "bool", help="Master switch"),
             ConfigField(
                 "table",
-                "qwen3",
+                "auto",
                 "str",
-                help="Shipped table name (qwen3|glm|dsv4) or path to *_rare.npz",
+                help="auto = build from served tokenizer at warmup; or path to *_rare.npz",
             ),
             ConfigField(
                 "think_end",
                 "auto",
                 "str",
-                help="'</think>' token id, 'auto' for shipped tables, or 'none' (chat)",
+                help="'</think>' token id, 'auto' (resolve from tokenizer), or 'none' (chat)",
             ),
             ConfigField(
                 "alert_monitor",
@@ -281,162 +199,104 @@ class RareCharsDetector(ConfigBackedDetector):
         self._think_end_cfg = str(defaults["think_end"])
         self._alert_monitor = bool(defaults["alert_monitor"])
         self._engine: RareDetector | None = None
-        self._engine_key: tuple[str, str] | None = None
+        self._engine_key: tuple[str, int | None] | None = None
+        self._corpus_key: str | None = None
+        self._think_end_id: int | None = None
+        self._warmed = False
         self._states: dict[str, RareCharsReqState] = {}
-        # Request-axis rc4 state. One row per live req; a step feeds every row together.
         self._row_batch: RareRowBatch | None = None
         self._row_of: dict[str, int] = {}
+        # Serializes feed / finish / clear across rare-pair-wait, async output,
+        # and ActionQueue threads (native feed releases the GIL).
+        self._lock = threading.RLock()
         if runtime_config is not None:
             self.refresh_from_config()
 
-    def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
+    def _apply_detector_values(self, getter) -> None:
         self._table = str(getter("table", self._table))
         self._think_end_cfg = str(getter("think_end", self._think_end_cfg))
         self._alert_monitor = bool(getter("alert_monitor", self._alert_monitor))
-        # Drop engine if table / think_end changed.
+        # Config change invalidates the warm engine; next warmup / ensure rebuilds.
         key = (self._table, self._think_end_cfg)
-        if self._engine_key != key:
+        if getattr(self, "_cfg_key", None) != key:
+            self._cfg_key = key
             self._engine = None
             self._engine_key = None
+            self._warmed = False
+
+    def warmup(self, tokenizer: Any | None = None) -> None:
+        """Build / load the rare table before serving (called from model warmup)."""
+        self.refresh_from_config()
+        if not self._enabled:
+            return
+        with self._lock:
+            self._warmup_locked(tokenizer)
+
+    def _warmup_locked(self, tokenizer: Any | None) -> None:
+        table_cfg = (self._table or "auto").strip()
+        if table_cfg.endswith(".npz"):
+            if not os.path.isfile(table_cfg):
+                raise FileNotFoundError(f"rare_chars table not found: {table_cfg}")
+            self._corpus_key = table_cfg
+        else:
+            # auto (and legacy shipped names) → build from served tokenizer.
+            if tokenizer is None:
+                from vllm_ascend.observability.runtime_guard.io import load_model_tokenizer
+
+                tokenizer = load_model_tokenizer(self._runner)
+            if tokenizer is None:
+                raise RuntimeError("rare_chars warmup needs a served tokenizer (table=auto)")
+            built = build_from_tokenizer(tokenizer)
+            self._corpus_key = register_rare_table(_SERVED_TABLE_KEY, built)
+            logger.info(
+                "[runtime_guard: rare_chars] built table vocab=%s partial=%s key=%s",
+                len(built["rcls"]),
+                int(built["u8"].sum()),
+                self._corpus_key,
+            )
+        self._think_end_id = resolve_think_end_id(tokenizer, self._think_end_cfg)
+        self._ensure_engine_locked()
+        self._warmed = True
 
     def clear_finished(self, req_id: str) -> None:
-        row = self._row_of.pop(req_id, None)
-        batch = self._row_batch
-        if batch is not None and batch._native is not None and batch._id_map is not None:
-            batch._native.map_del(batch._id_map, req_id)
-        if row is not None and batch is not None:
-            if row < len(batch._req_at):
-                batch._req_at[row] = None
-            batch.release(row)
-        self._states.pop(req_id, None)
+        with self._lock:
+            row = self._row_of.pop(req_id, None)
+            batch = self._row_batch
+            if batch is not None and batch._native is not None and batch._id_map is not None:
+                batch._native.map_del(batch._id_map, req_id)
+            if row is not None and batch is not None:
+                if row < len(batch._req_at):
+                    batch._req_at[row] = None
+                batch.release(row)
+            self._states.pop(req_id, None)
 
-    def _ensure_engine(self) -> RareDetector:
-        key = (self._table, self._think_end_cfg)
+    def _ensure_engine_locked(self) -> RareDetector:
+        if self._corpus_key is None:
+            raise RuntimeError("rare_chars engine used before warmup (table not registered)")
+        key = (self._corpus_key, self._think_end_id)
         if self._engine is not None and self._engine_key == key:
             return self._engine
-        corpus = _resolve_table(self._table)
-        think = _resolve_think_end(corpus, self._think_end_cfg)
-        if think == "auto" and not (isinstance(corpus, str) and corpus in THINK_END):
-            # Path-based table: default to chat mode (no think boundary).
-            think = None
         with open(CONFIG_RC4, encoding="utf-8") as f:
             cfg = json.load(f)
-        self._engine = RareDetector(corpus, cfg, think_end=think)
+        self._engine = RareDetector(self._corpus_key, cfg, think_end=self._think_end_id)
         self._engine_key = key
         self._row_batch = RareRowBatch(self._engine)
         self._row_of.clear()
         logger.info(
             "[runtime_guard: rare_chars] loaded rc4 table=%s think_end=%s native=%s",
-            corpus,
-            think,
+            self._corpus_key,
+            self._think_end_id,
             self._row_batch._native is not None,
         )
         return self._engine
-
-    def check_from_logits(
-        self,
-        *,
-        logits: torch.Tensor | None,
-        sampled_token_ids: Any,
-        req_ids: list[str] | None = None,
-        skip_req_ids: set[str] | None = None,
-        top1_logprobs: Sequence[float] | torch.Tensor | None = None,
-        chosen_logprobs: Sequence[float] | torch.Tensor | None = None,
-    ) -> list[Incident]:
-        """Score (top1, chosen) from stashed logits (or precomputed) and feed rc4.
-
-        When ``top1_logprobs`` / ``chosen_logprobs`` are provided (sampler-side
-        narrow collect already ran), skips the NPU collect and only feeds CPU
-        rules. Otherwise runs fused max+LSE+gather on ``logits``.
-        """
-        if not self._precheck():
-            return []
-
-        has_precomputed = top1_logprobs is not None and chosen_logprobs is not None
-        if not has_precomputed and (not isinstance(logits, torch.Tensor) or logits.numel() == 0):
-            return []
-
-        runner = self._runner
-        log_leader = runner_tp_rank(runner) == 0
-        req_ids = resolve_batch_req_ids(runner, req_ids)
-        rows = _flatten_sampled_token_ids(sampled_token_ids)
-        if not req_ids or not rows:
-            return []
-
-        num_rows_cap = len(req_ids)
-        if isinstance(logits, torch.Tensor) and logits.numel() > 0:
-            num_rows_cap = min(num_rows_cap, int(logits.shape[0]))
-        n = min(num_rows_cap, len(rows))
-        if n <= 0:
-            return []
-
-        token_ids_for_rows: list[int] = []
-        row_to_req: list[int] = []
-        for i in range(n):
-            ids = rows[i]
-            if not ids:
-                continue
-            token_ids_for_rows.append(int(ids[-1]))
-            row_to_req.append(i)
-        if not token_ids_for_rows:
-            return []
-
-        try:
-            if top1_logprobs is not None and chosen_logprobs is not None:
-                top1_list, chosen_list = self._coerce_pair_lists(
-                    top1_logprobs, chosen_logprobs, len(token_ids_for_rows)
-                )
-            else:
-                if not isinstance(logits, torch.Tensor) or logits.numel() == 0:
-                    return []
-                row_idx = torch.tensor(row_to_req, dtype=torch.long, device=logits.device)
-                logits_rows = logits.index_select(0, row_idx)
-                tid_t = torch.tensor(token_ids_for_rows, dtype=torch.long, device=logits.device)
-                top1_t, chosen_t = top1_and_chosen_logprobs(logits_rows, tid_t)
-                top1_list = [float(x) for x in top1_t.detach().float().cpu().tolist()]
-                chosen_list = [float(x) for x in chosen_t.detach().float().cpu().tolist()]
-        except Exception as exc:
-            logger.warning("[runtime_guard: rare_chars] logprob collect failed: %s", exc)
-            return []
-
-        try:
-            engine = self._ensure_engine()
-        except Exception as exc:
-            logger.warning("[runtime_guard: rare_chars] engine init failed: %s", exc)
-            return []
-
-        skip = skip_req_ids or set()
-        keep_ids: list[str] = []
-        keep_idx: list[int] = []
-        keep_tok: list[int] = []
-        keep_top1: list[float] = []
-        keep_chosen: list[float] = []
-        for scored_i, batch_idx in enumerate(row_to_req):
-            req_id = req_ids[batch_idx]
-            if not req_id or req_id in skip:
-                continue
-            keep_ids.append(req_id)
-            keep_idx.append(batch_idx)
-            keep_tok.append(token_ids_for_rows[scored_i])
-            keep_top1.append(top1_list[scored_i])
-            keep_chosen.append(chosen_list[scored_i])
-        return self._feed_token_batch(
-            engine=engine,
-            req_ids=keep_ids,
-            req_idxs=keep_idx,
-            token_ids=keep_tok,
-            top1=keep_top1,
-            chosen=keep_chosen,
-            log_leader=log_leader,
-        )
 
     def feed_precomputed(
         self,
         *,
         req_ids: list[str],
-        token_ids: list[int],
-        top1_logprobs: list[float],
-        chosen_logprobs: list[float],
+        token_ids: Sequence[int],
+        top1_logprobs: Sequence[float],
+        chosen_logprobs: Sequence[float],
     ) -> list[Incident]:
         """Feed rc4 from host pairs. Caller runs this off the sample return path."""
         if not self._precheck():
@@ -444,35 +304,42 @@ class RareCharsDetector(ConfigBackedDetector):
         n = min(len(req_ids), len(token_ids), len(top1_logprobs), len(chosen_logprobs))
         if n <= 0:
             return []
-        try:
-            engine = self._ensure_engine()
-        except Exception as exc:
-            logger.warning("[runtime_guard: rare_chars] engine init failed: %s", exc)
-            return []
-        keep_ids: list[str] = []
-        keep_idx: list[int] = []
-        keep_tok: list[int] = []
-        keep_top1: list[float] = []
-        keep_chosen: list[float] = []
-        for i in range(n):
-            req_id = req_ids[i]
-            token_id = int(token_ids[i])
-            if not req_id or token_id < 0:
-                continue
-            keep_ids.append(req_id)
-            keep_idx.append(i)
-            keep_tok.append(token_id)
-            keep_top1.append(float(top1_logprobs[i]))
-            keep_chosen.append(float(chosen_logprobs[i]))
-        return self._feed_token_batch(
-            engine=engine,
-            req_ids=keep_ids,
-            req_idxs=keep_idx,
-            token_ids=keep_tok,
-            top1=keep_top1,
-            chosen=keep_chosen,
-            log_leader=runner_tp_rank(self._runner) == 0,
-        )
+        with self._lock:
+            if not self._warmed:
+                try:
+                    self._warmup_locked(None)
+                except Exception as exc:
+                    logger.warning("[runtime_guard: rare_chars] lazy warmup failed: %s", exc)
+                    return []
+            try:
+                engine = self._ensure_engine_locked()
+            except Exception as exc:
+                logger.warning("[runtime_guard: rare_chars] engine init failed: %s", exc)
+                return []
+            keep_ids: list[str] = []
+            keep_idx: list[int] = []
+            keep_tok: list[int] = []
+            keep_top1: list[float] = []
+            keep_chosen: list[float] = []
+            for i in range(n):
+                req_id = req_ids[i]
+                token_id = int(token_ids[i])
+                if not req_id or token_id < 0:
+                    continue
+                keep_ids.append(req_id)
+                keep_idx.append(i)
+                keep_tok.append(token_id)
+                keep_top1.append(float(top1_logprobs[i]))
+                keep_chosen.append(float(chosen_logprobs[i]))
+            return self._feed_token_batch_locked(
+                engine=engine,
+                req_ids=keep_ids,
+                req_idxs=keep_idx,
+                token_ids=keep_tok,
+                top1=keep_top1,
+                chosen=keep_chosen,
+                log_leader=runner_tp_rank(self._runner) == 0,
+            )
 
     def _ensure_row_batch(self, engine: RareDetector) -> RareRowBatch:
         if self._row_batch is None or self._row_batch.det is not engine:
@@ -488,7 +355,7 @@ class RareCharsDetector(ConfigBackedDetector):
         lpc = batch._recent_lpc[row, :n]
         st.recent = [{"token_id": int(tok[i]), "top1": float(lp1[i]), "chosen": float(lpc[i])} for i in range(n)]
 
-    def _feed_native(
+    def _feed_native_locked(
         self,
         *,
         req_ids: Sequence[str],
@@ -498,7 +365,6 @@ class RareCharsDetector(ConfigBackedDetector):
         chosen: Sequence[float],
         log_leader: bool,
     ) -> list[Incident]:
-        """Resolve rows and update recent inside the GIL-free feed. Incidents only for hits."""
         batch = self._row_batch
         if batch is None or batch._native is None:
             return []
@@ -577,7 +443,7 @@ class RareCharsDetector(ConfigBackedDetector):
                 alerts.append(alert)
         return alerts
 
-    def _feed_token_batch(
+    def _feed_token_batch_locked(
         self,
         *,
         engine: RareDetector,
@@ -588,10 +454,9 @@ class RareCharsDetector(ConfigBackedDetector):
         chosen: list[float],
         log_leader: bool,
     ) -> list[Incident]:
-        """One new token per request, scored together on ``RareRowBatch``."""
         batch = self._ensure_row_batch(engine)
         if batch._native is not None:
-            return self._feed_native(
+            return self._feed_native_locked(
                 req_ids=req_ids,
                 req_idxs=req_idxs,
                 token_ids=token_ids,
@@ -687,7 +552,7 @@ class RareCharsDetector(ConfigBackedDetector):
             "reason": st.last_reason,
             "fired_at": int(getattr(res, "fired_at", -1)),
             "tokens_seen": st.tokens_seen,
-            "table": self._table,
+            "table": self._corpus_key or self._table,
             "recent": list(st.recent),
             "source": source,
             "api_logprobs_required": False,
@@ -726,52 +591,32 @@ class RareCharsDetector(ConfigBackedDetector):
             detail=detail,
         )
 
-    @staticmethod
-    def _coerce_pair_lists(
-        top1_logprobs: Sequence[float] | torch.Tensor,
-        chosen_logprobs: Sequence[float] | torch.Tensor,
-        n: int,
-    ) -> tuple[list[float], list[float]]:
-        """Normalize precomputed (top1, chosen) to host float lists of length ``n``."""
-        if isinstance(top1_logprobs, torch.Tensor):
-            top1_list = [float(x) for x in top1_logprobs.detach().float().cpu().reshape(-1).tolist()]
-        else:
-            top1_list = [float(x) for x in top1_logprobs]
-        if isinstance(chosen_logprobs, torch.Tensor):
-            chosen_list = [float(x) for x in chosen_logprobs.detach().float().cpu().reshape(-1).tolist()]
-        else:
-            chosen_list = [float(x) for x in chosen_logprobs]
-        if len(top1_list) < n or len(chosen_list) < n:
-            raise ValueError(
-                f"precomputed logprobs too short: top1={len(top1_list)} chosen={len(chosen_list)} need={n}"
-            )
-        return top1_list[:n], chosen_list[:n]
-
     def finish_request(self, req_id: str) -> Incident | None:
         """Flush held-back token at request end (rc4 look-ahead)."""
-        st = self._states.get(req_id)
-        if st is None or st.alerted:
-            return None
-        row = self._row_of.get(req_id)
-        if row is None or self._row_batch is None:
-            return None
-        try:
-            res = self._row_batch.finish_row(row)
-            mon = self._row_batch.monitor_at(row)
-        except Exception as exc:
-            logger.warning("[runtime_guard: rare_chars] finish failed req=%s: %s", req_id, exc)
-            return None
-        if self._row_batch._native is not None:
-            self._copy_recent(st, self._row_batch, row)
-        return self._incident_from_row(
-            st,
-            res=res,
-            mon=mon,
-            req_id=req_id,
-            req_idx=0,
-            token_id=None,
-            top1=None,
-            chosen=None,
-            log_leader=runner_tp_rank(self._runner) == 0,
-            source="guard_rare_chars_rc4_finish",
-        )
+        with self._lock:
+            st = self._states.get(req_id)
+            if st is None or st.alerted:
+                return None
+            row = self._row_of.get(req_id)
+            if row is None or self._row_batch is None:
+                return None
+            try:
+                res = self._row_batch.finish_row(row)
+                mon = self._row_batch.monitor_at(row)
+            except Exception as exc:
+                logger.warning("[runtime_guard: rare_chars] finish failed req=%s: %s", req_id, exc)
+                return None
+            if self._row_batch._native is not None:
+                self._copy_recent(st, self._row_batch, row)
+            return self._incident_from_row(
+                st,
+                res=res,
+                mon=mon,
+                req_id=req_id,
+                req_idx=0,
+                token_id=None,
+                top1=None,
+                chosen=None,
+                log_leader=runner_tp_rank(self._runner) == 0,
+                source="guard_rare_chars_rc4_finish",
+            )

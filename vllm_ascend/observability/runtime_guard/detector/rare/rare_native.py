@@ -19,6 +19,7 @@ Feature ids and GB input kinds are the enums in ``rare_feed_native.c``.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from pathlib import Path
 
@@ -64,20 +65,40 @@ _MOD_TRIED = False
 
 
 def _module():
+    """Load the compiled extension built by setup.py / CMake.
+
+    Prefer the installed package module (setuptools Extension or cmake
+    ``rare_feed_native`` target). Fall back to a sidecar ``rare_feed_native.so``
+    for hand-built / editable copies next to this file.
+    """
     global _MOD, _MOD_TRIED
     if _MOD_TRIED:
         return _MOD
     _MOD_TRIED = True
-    path = Path(__file__).with_name("rare_feed_native.so")
-    if not path.is_file():
-        return None
-    spec = importlib.util.spec_from_file_location("rare_feed_native", path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _MOD = module
-    return module
+
+    pkg_name = "vllm_ascend.observability.runtime_guard.detector.rare.rare_feed_native"
+    try:
+        _MOD = importlib.import_module(pkg_name)
+        return _MOD
+    except Exception:
+        pass
+
+    here = Path(__file__).resolve().parent
+    candidates = [here / "rare_feed_native.so", *sorted(here.glob("rare_feed_native*.so"))]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("rare_feed_native", path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            continue
+        _MOD = module
+        return module
+    return None
 
 
 def _log(msg: str) -> None:
