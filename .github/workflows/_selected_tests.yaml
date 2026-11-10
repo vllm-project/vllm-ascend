@@ -396,6 +396,19 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+      # TEMPORARY (fork smoke validation only, do not merge): 线下 karc 的 ARC
+      # 容器钩子在 job 收尾时用 `tar cf - -C / __w` 经 k8s exec 把整个工作区
+      # 回传给 runner，实测超过约 60 秒会被截断（tar-fs 报
+      # "Unexpected end of data"），导致 Post Checkout 失败。构建产物对后续
+      # 步骤没有用处，这里先删掉，减少回传体积。
+      - name: Trim workspace before runner copies it back
+        if: ${{ always() && matrix.group.npu_type != 'cpu' }}
+        continue-on-error: true
+        run: |
+          du -sh /__w 2>/dev/null || true
+          rm -rf build vllm-empty/build 2>/dev/null || true
+          du -sh /__w 2>/dev/null || true
+
   upload-coverage-to-obs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
