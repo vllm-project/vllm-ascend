@@ -11,7 +11,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -97,3 +97,55 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
     assert starts[0] == 384
     assert run("shorter", 512)[0] == 384
     assert run("longer", 514)[0] == 512
+
+
+def test_layerwise_prefill_truncation_precedes_local_prefix_lookup():
+    block_size = 16
+    config = create_vllm_config(
+        block_size=block_size,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeLayerwiseConnector",
+            kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
+            kv_role="kv_producer",
+        ),
+    )
+    config.cache_config.mamba_cache_mode = "align"
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    full = FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    mamba = MambaSpec(
+        block_size=block_size,
+        shapes=((8,), (8,)),
+        dtypes=(torch.float32, torch.float32),
+        mamba_cache_mode="align",
+    )
+    plan = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["mamba"], mamba)],
+    )
+    plan.kv_transfer_config = config.kv_transfer_config
+    config.cache_config.num_gpu_blocks = plan.num_blocks
+    register_all_kvcache_specs(None)
+    init_none_hash(sha256)
+    scheduler = Scheduler(
+        config, plan, StructuredOutputManager(config), block_size=block_size, hash_block_size=block_size
+    )
+    request = Request(
+        request_id="prefill",
+        prompt_token_ids=list(range(block_size + 1)),
+        pooling_params=None,
+        sampling_params=SamplingParams(max_tokens=1, extra_args={"kv_transfer_params": {"do_remote_decode": True}}),
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+
+    # Seed a full prefix block in each cache group before admitting the request.
+    cache = scheduler.kv_cache_manager
+    assert cache.allocate_slots(request, num_new_tokens=block_size) is not None
+    cache.free(request)
+    assert cache.get_computed_blocks(request)[1] == block_size
+
+    scheduler.add_request(request)
+
+    # The local lookup must leave a token to compute for the shortened prompt.
+    assert request.num_prompt_tokens == block_size
+    assert cache.get_computed_blocks(request)[1] == 0

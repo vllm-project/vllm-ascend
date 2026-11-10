@@ -912,19 +912,21 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.scheduler.need_truncate = True
         request = MockRequest("req1", prompt_token_ids=list(range(17)), kv_transfer_params={"do_remote_prefill": True})
 
+        self.scheduler.on_new_request(request)
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
 
         self.assertEqual(tokens, 16)
         self.assertTrue(async_flag)
+        self.assertEqual(request.num_prompt_tokens, 17)
 
-    def test_get_num_new_matched_tokens_hybrid_truncates_prefill_request(self):
+    def test_on_new_request_hybrid_truncates_prefill_request(self):
         self.scheduler.need_truncate = True
         request = MockRequest("req1", prompt_token_ids=list(range(4)), kv_transfer_params={"do_remote_decode": True})
         # Request hashed the full prompt at construction.
         request.block_hashes = [tuple(request._all_token_ids)]
 
-        tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
-        # Preemption/reschedule must not drop a second token.
+        self.scheduler.on_new_request(request)
+        self.scheduler.on_new_request(request)
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)
 
         self.assertEqual(tokens, 0)
