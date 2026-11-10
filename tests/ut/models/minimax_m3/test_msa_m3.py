@@ -215,9 +215,10 @@ def _make_vllm_config(
 
 
 def _make_sparse_builder(
-    device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16
+    device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16, *, use_union: bool = False
 ) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
+    vllm_config.additional_config = {"minimax_m3_union": {"mode": "union" if use_union else "off"}}
     vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
     spec = FullAttentionSpec(
         block_size=128,
@@ -581,9 +582,10 @@ def test_minimax_m3_sparse_forward_zeros_output_without_dict_metadata(
     ],
     ids=lambda case: case.name,
 )
-def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
+@pytest.mark.parametrize("use_union", [False, True])
+def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops, use_union: bool) -> None:
     device = torch.device("cpu")
-    builder = _make_sparse_builder(device)
+    builder = _make_sparse_builder(device, use_union=use_union)
     common = _create_common_attn_metadata(batch_spec, block_size=128, device=device)
     metadata = builder.build(0, common)
 
@@ -601,6 +603,8 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         assert metadata.prefill.cu_seqlens_k.shape[0] == batch_spec.batch_size + 1
         assert metadata.prefill.total_kv_blocks == 5
         assert metadata.prefill.max_kv_blocks == 3
+        expected_groups = sum((length + 7) // 8 for length in batch_spec.query_lens) if use_union else 0
+        assert metadata.prefill.num_union_groups == expected_groups
         assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
         rebuilt = builder.build(0, common)
         assert rebuilt.prefill is not None
@@ -1620,6 +1624,7 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
     )
 
 
+@pytest.mark.parametrize("use_union", [False, True])
 @pytest.mark.parametrize(
     "use_ascendc,triton_sorts,expected_sorted",
     [(True, False, True), (True, True, True), (False, True, True), (False, False, False)],
@@ -1635,10 +1640,13 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     use_ascendc: bool,
     triton_sorts: bool,
     expected_sorted: bool,
+    use_union: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", use_ascendc)
     monkeypatch.setattr(msa_m3_module, "_TRITON_DECODE_SUPPORTS_SORTED_INDICES", triton_sorts)
+    mock_union = MagicMock()
+    monkeypatch.setattr(msa_m3_module, "UnionSparseAttention", MagicMock(return_value=mock_union))
     impl = AscendMiniMaxM3SparseImpl(
         num_heads=2,
         head_size=4,
@@ -1646,6 +1654,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
         num_kv_heads=2,
         topk_blocks=8,
         sparse_block_size=128,
+        use_union=use_union,
     )
     metadata = AscendMiniMaxM3SparseMetadata(
         seq_lens=torch.tensor([5, 7], dtype=torch.int32),
@@ -1694,16 +1703,24 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
 
     assert result is output
     mock_sparse_attn_decode.assert_called_once()
-    mock_sparse_attn_prefill.assert_called_once()
+    if use_union:
+        mock_sparse_attn_prefill.assert_not_called()
+        mock_union.assert_called_once()
+        assert mock_union.call_args.args[2] is prefill_topk
+        assert mock_union.call_args.args[5] is metadata.prefill.cu_seqlens_k
+    else:
+        mock_sparse_attn_prefill.assert_called_once()
+        mock_union.assert_not_called()
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_decode.call_args.kwargs["select_num_idx"] is decode_select_num_idx
     assert mock_sparse_attn_decode.call_args.kwargs["cu_seqlens_q"] is metadata.decode.cu_seqlens_q
     assert mock_sparse_attn_decode.call_args.kwargs["indices_are_sorted"] is expected_sorted
     assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
-    assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
-    assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
-    assert mock_sparse_attn_prefill.call_args.kwargs["max_kv_blocks"] == 1
+    if not use_union:
+        assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
+        assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
+        assert mock_sparse_attn_prefill.call_args.kwargs["max_kv_blocks"] == 1
 
 
 @pytest.mark.parametrize(("supports_fp8", "expected_inner_precise"), [(False, 0), (True, 1)])

@@ -39,10 +39,12 @@ from vllm.config import (
     ParallelConfig,
     VllmConfig,
     get_current_vllm_config,
+    get_current_vllm_config_or_none,
 )
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -115,6 +117,11 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _get_minimax_m3_dense_backend,
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
+)
+from vllm_ascend.models.minimax_m3.union_policy import (
+    UNION_MAX_Q_HEADS,
+    UNION_PAGE_SIZE,
+    UnionPrefillConfig,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.v2.pp_transport import (
@@ -319,6 +326,37 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             prefix,
             vllm_config.model_config,
         )
+        union_config = UnionPrefillConfig.from_dict(
+            (getattr(vllm_config, "additional_config", None) or {}).get("minimax_m3_union")
+        )
+        use_union = False
+        if union_config.mode != "off":
+            if (
+                get_ascend_device_type() != AscendDeviceType.A5
+                or tp_size != self.total_idx_heads
+                or self.num_kv_heads != 1
+                or not 1 <= self.num_heads <= UNION_MAX_Q_HEADS
+                or sparse_cfg["sparse_block_size"] != UNION_PAGE_SIZE
+                or vllm_config.cache_config.block_size != UNION_PAGE_SIZE
+                or self.kv_cache_torch_dtype not in (torch.bfloat16, torch.float16)
+            ):
+                raise ValueError(
+                    "MiniMax M3 Union requires Ascend950, one selector/KV head per TP rank, "
+                    "at most 16 local Q heads, page128 and BF16/FP16 KV cache"
+                )
+            use_union = union_config.use_union(
+                self.layer_name,
+                get_tensor_model_parallel_rank(),
+                vllm_config.model_config.hf_text_config.num_hidden_layers,
+                self.total_idx_heads,
+            )
+            logger.info(
+                "MiniMax M3 prefill route: layer=%s selector_head=%d path=%s policy_sha256=%s",
+                self.layer_name,
+                get_tensor_model_parallel_rank(),
+                "union" if use_union else "q-gather-kv",
+                union_config.policy_sha256,
+            )
         self.attn_backend = AscendMiniMaxM3SparseBackend
         self.impl = AscendMiniMaxM3SparseImpl(
             self.num_heads,
@@ -328,6 +366,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype=self.kv_cache_dtype,
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
+            use_union=use_union,
         )
         self.topk_blocks = sparse_cfg["sparse_topk_blocks"]
         self.sparse_block_size = sparse_cfg["sparse_block_size"]
@@ -793,6 +832,10 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        vllm_config = get_current_vllm_config_or_none()
+        union_config = UnionPrefillConfig.from_dict(
+            (getattr(vllm_config, "additional_config", None) or {}).get("minimax_m3_union")
+        )
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             is_sequence_parallel=is_sequence_parallel,
@@ -815,6 +858,9 @@ class MiniMaxM3MoE(nn.Module):
             apply_routed_scale_to_output=True,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            # Only this opt-in model path requests stable graph-boundary MoE
+            # outputs. Default MiniMax and all other models retain their entry.
+            runner_args={"use_shared_output_buffers": union_config.mode != "off"},
         )
 
         # Ascend dispatch uses this metadata to size the global physical

@@ -352,6 +352,45 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
         assert compilation_config.splitting_ops == []
 
 
+@pytest.mark.parametrize(
+    "graph_mode,mode,architecture,expected",
+    [
+        (CUDAGraphMode.PIECEWISE, "off", "MiniMaxM3SparseForCausalLM", False),
+        (CUDAGraphMode.PIECEWISE, "union", "MiniMaxM3SparseForCausalLM", True),
+        (CUDAGraphMode.PIECEWISE, "policy", "MiniMaxM3SparseForConditionalGeneration", True),
+        (CUDAGraphMode.PIECEWISE, "union", "Qwen3ForCausalLM", False),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, "policy", "MiniMaxM3SparseForCausalLM", True),
+        (CUDAGraphMode.FULL, "union", "MiniMaxM3SparseForCausalLM", False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, "union", "MiniMaxM3SparseForCausalLM", False),
+        (CUDAGraphMode.NONE, "union", "MiniMaxM3SparseForCausalLM", False),
+    ],
+)
+def test_union_graph_boundaries_are_model_local_and_opt_in(graph_mode, mode, architecture, expected):
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=graph_mode,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={"ascend_compilation_config": {}, "minimax_m3_union": {"mode": mode}},
+        model_config=SimpleNamespace(enforce_eager=False, architectures=[architecture]),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    for op in ("vllm::ascend_moe_forward_shared_out", "vllm::minimax_m3_sparse_forward"):
+        assert compilation_config.splitting_ops.count(op) == int(expected)
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():

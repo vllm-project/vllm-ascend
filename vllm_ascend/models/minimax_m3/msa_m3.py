@@ -61,6 +61,8 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_prefill as minimax_m3_index_prefill_ascendc,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_union import UnionSparseAttention
+from vllm_ascend.models.minimax_m3.union_policy import UNION_SIZE, UnionPrefillConfig
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 
@@ -768,6 +770,7 @@ class AscendMiniMaxM3SparsePrefillMetadata:
     max_seq_len: int
     total_kv_blocks: int
     max_kv_blocks: int
+    num_union_groups: int = 0
 
 
 @dataclass
@@ -808,6 +811,12 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.use_union = (
+            UnionPrefillConfig.from_dict(
+                (getattr(vllm_config, "additional_config", None) or {}).get("minimax_m3_union")
+            ).mode
+            != "off"
+        )
         self.block_size = kv_cache_spec.block_size
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self.context_len_buffer = torch.empty(
@@ -986,6 +995,11 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 max_seq_len=common_attn_metadata.max_seq_len,
                 total_kv_blocks=total_kv_blocks,
                 max_kv_blocks=max_kv_blocks,
+                # Round each request separately: groups must never cross a
+                # request boundary, including partial chunked-prefill groups.
+                num_union_groups=(
+                    int(((prefill_query_lens_cpu + UNION_SIZE - 1) // UNION_SIZE).sum().item()) if self.use_union else 0
+                ),
             )
 
         decode_metadata: AscendMiniMaxM3SparseDecodeMetadata | None = None
@@ -1035,6 +1049,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        use_union: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1044,6 +1059,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
+        self.union_attention = UnionSparseAttention() if use_union else None
 
     def forward(
         self,
@@ -1109,22 +1125,37 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None and prefill_topk is not None
-            minimax_m3_sparse_attn(
-                q[num_decode_tokens:],
-                kv_cache,
-                prefill_topk,
-                p.block_table,
-                p.cu_seqlens_q,
-                p.seq_lens,
-                p.context_lens,
-                p.max_query_len,
-                self.num_kv_heads,
-                self.scale,
-                out[num_decode_tokens:],
-                block_size=self.block_size,
-                total_kv_blocks=p.total_kv_blocks,
-                max_kv_blocks=p.max_kv_blocks,
-            )
+            if self.union_attention is not None:
+                self.union_attention(
+                    q[num_decode_tokens:],
+                    kv_cache,
+                    prefill_topk,
+                    p.block_table,
+                    p.cu_seqlens_q,
+                    p.cu_seqlens_k,
+                    p.seq_lens,
+                    p.num_union_groups,
+                    p.max_kv_blocks,
+                    self.scale,
+                    out[num_decode_tokens:],
+                )
+            else:
+                minimax_m3_sparse_attn(
+                    q[num_decode_tokens:],
+                    kv_cache,
+                    prefill_topk,
+                    p.block_table,
+                    p.cu_seqlens_q,
+                    p.seq_lens,
+                    p.context_lens,
+                    p.max_query_len,
+                    self.num_kv_heads,
+                    self.scale,
+                    out[num_decode_tokens:],
+                    block_size=self.block_size,
+                    total_kv_blocks=p.total_kv_blocks,
+                    max_kv_blocks=p.max_kv_blocks,
+                )
         return output
 
     @staticmethod

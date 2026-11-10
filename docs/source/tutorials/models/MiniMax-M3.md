@@ -20,6 +20,9 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
+An experimental, opt-in [Union sparse-prefill path with frozen layer/head routing](MiniMax-M3-Union.md)
+is available with separately installed custom CANN operators on Ascend950.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
