@@ -78,9 +78,11 @@ request mappings, padding and completion-before-reuse rules.
 
 ## Validation and performance
 
-Ascend 950 eager/Graph components and TP8/MTP3 full-model checks cover the
-supported paths. A matched C8 test with two rounds per arm, fixed inputs and
-8K outputs measured these mean SSE TPOT increases:
+Ascend 950 eager/Graph components and TP8/MTP3 full-model checks were recorded
+at the source revisions below. The default-direct C8 Prolog write path still
+requires fresh device and model qualification. A historical matched C8 test
+with two rounds per arm, fixed inputs and 8K outputs measured these mean SSE
+TPOT increases:
 
 | Input / concurrency | Reported residency | ON versus OFF |
 | --- | --- | --- |

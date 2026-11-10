@@ -117,8 +117,12 @@ def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("rows", [4, 16])
-def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture, slot_dtype):
     _setup()
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+
     from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
@@ -133,10 +137,6 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
     impl.local_num_heads, impl.has_indexer = 8, True
     impl.is_kv_consumer, impl.rl_weight_update_enabled = False, False
     impl.sfa_qsfa_tile_size = block
-    impl._kv_staging_capacity = block
-    # This case exercises the staged destination, not the separately bound
-    # direct-Resident capture path installed by the model runner.
-    impl._direct_prolog_slots = None
 
     def mx_layer(inputs, outputs):
         weight, scale = torch_npu.npu_dynamic_mx_quant(
@@ -159,24 +159,35 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
     # the oracle. This case tests ownership/addressing, not Prolog arithmetic.
     impl._process_weights_for_fused_prolog_v3()
     impl.sfa_qsfa_kr_cache_dummy = torch.empty(0, dtype=torch.bfloat16, device=device)
-    staging = torch.empty((1, block, 1, width), dtype=impl.c8_cache_dtype, device=device)
+    reference = torch.empty((1, block, 1, width), dtype=impl.c8_cache_dtype, device=device)
     local_slots = torch.arange(block, dtype=torch.int64, device=device)
-    impl._c8_prolog_workspace = lambda: (staging, local_slots)
     raw = torch.full((3, 2, block, width), 90, dtype=torch.uint8, device=device)
-    destination = raw[:, 1].view(impl.c8_cache_dtype)
     logical = [-1, 129, 0, 257, 128][:rows] + list(range(16, 16 + max(0, rows - 5)))
-    slots = torch.tensor(logical, dtype=torch.int64, device=device)
-    impl.hisparse_cache = SimpleNamespace(write_target=lambda count, slot_count: (destination, slots, count))
+    slots = torch.tensor(logical, dtype=slot_dtype, device=device)
+    cache = HiSparseCacheHandle(SimpleNamespace(max_num_reqs=rows, kv_dtype=impl.c8_cache_dtype, row_width=width))
+    cache.bind_cache(
+        raw.view(-1),
+        byte_offset=block * width,
+        block_stride=2 * block * width,
+        num_blocks=3,
+        block_size=block,
+        block_table=torch.empty(0, dtype=torch.int32, device=device),
+        slot_mapping=slots,
+    )
+    cache.dummy_batch = True  # This component test has no Host-mirror connector.
+    cache.num_actual_tokens = rows
+    impl.hisparse_cache = cache
     metadata = SimpleNamespace(
-        query_start_loc=torch.tensor([0, rows], dtype=torch.int32, device=device), hisparse_for_capture=True
+        query_start_loc=torch.tensor([0, rows], dtype=torch.int32, device=device), hisparse_for_capture=capture
     )
     x = torch.randn(rows, 6144, dtype=torch.bfloat16, device=device)
     cos = torch.ones(rows, 1, 1, 64, dtype=x.dtype, device=device)
     sin = torch.zeros_like(cos)
-    reference = torch.empty_like(staging)
 
     def forward():
-        return impl._sfa_preprocess_prolog_v3(x, (), cos, sin, slots, attn_metadata=metadata)
+        context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+        with override_forward_context(context):
+            return impl._sfa_preprocess_prolog_v3(x, (), cos, sin, slots, attn_metadata=metadata)
 
     def compare(actual, expected):
         if isinstance(actual, tuple):
@@ -198,9 +209,18 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):
                 captured = forward()
-        for valid in (rows - 1, 2):
+        for valid in (rows - 1, 2, 0, rows):
             x.neg_()
             metadata.query_start_loc[-1:].fill_(valid)
+            # The real slot producer marks dummy and padded rows with -1.
+            # Replay consumes these changed device values at fixed addresses.
+            slots.copy_(
+                torch.tensor(
+                    [slot if row < valid else -1 for row, slot in enumerate(logical)], dtype=slot_dtype, device=device
+                )
+            )
+            if not capture:
+                cache.num_actual_tokens = valid
             raw.fill_(90)
             if graph is None:
                 actual = forward()
