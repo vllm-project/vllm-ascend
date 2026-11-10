@@ -442,10 +442,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
             physical = physical_topk[start:end]
             keys = positions + (physical < 0).to(torch.float32) * physical.shape[-1]
             physical = physical.gather(1, keys.sort(dim=-1).indices)
-            valid_lengths = (physical >= 0).sum(dim=-1, dtype=torch.int32)
+            valid = physical >= 0
+            valid_lengths = valid.sum(dim=-1, dtype=torch.int32)
             selected_latent, selected_rope = latent[:count], rope[:count]
             pack_attention_rows(packed_cache, physical, selected_latent, selected_rope, self.kv_lora_rank)
-            selected_indices = torch.where(physical[:, None, :] >= 0, indices, -1)
+            selected_indices = torch.where(valid[:, None, :], indices, -1)
             result = torch.ops._C_ascend.npu_sparse_flash_attention(
                 query=query[start:end],
                 key=selected_latent.view(-1, 128, 1, self.kv_lora_rank),
@@ -465,7 +466,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             )
             if isinstance(result, tuple):
                 result = result[0]
-            result = result.masked_fill(~(physical >= 0).any(dim=-1)[:, None, None], 0)
+            result = result.masked_fill((valid_lengths == 0)[:, None, None], 0)
             outputs.append(result)
         return torch.cat(outputs, dim=0) if len(outputs) > 1 else outputs[0]
 
@@ -595,10 +596,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 )
                 try:
                     selected = logical[num_decode:]
-                    block_ids = selected.clamp_min(0).to(torch.int64) // metadata.block_size
+                    nonnegative = selected.clamp_min(0)
+                    block_ids = nonnegative.to(torch.int64) // metadata.block_size
                     request_tables = staged_table[req_ids.to(torch.int64)]
                     physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
-                    physical = physical + selected.clamp_min(0) % metadata.block_size
+                    physical = physical + nonnegative % metadata.block_size
                     physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
                     prefill_output = self._attention_physical(query, query_rope, staged, physical)
                 finally:
