@@ -247,7 +247,9 @@ class _FakeKVCacheSpec:
 
 
 class _FakeAttentionSpec(_FakeKVCacheSpec):
-    pass
+    # Mirror vLLM's AttentionSpec: attention caches are sharded across DCP,
+    # which the layerwise DCP key/validation paths rely on.
+    dcp_sharded = True
 
 
 class _FakeFullAttentionSpec(_FakeAttentionSpec):

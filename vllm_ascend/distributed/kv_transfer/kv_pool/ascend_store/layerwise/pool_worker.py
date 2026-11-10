@@ -31,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import (
+    is_layerwise_dcp_save_leader,
     layerwise_dcp_rank,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
@@ -717,16 +718,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         shard, while the put_step groups span DIFFERENT shards -- the plain
         dedup would drop every non-zero DCP shard from the pool. The leader
         is the smallest tp_rank inside the rank's own (dcp, head) group.
+        ``bind_layerwise_keys`` guarantees ``put_step >= dcp_size`` so every
+        content class has a leader.
         """
-        if self.dcp_size <= 1:
-            return self.tp_rank % self.put_step == 0
-        head = self.tp_rank // self.put_step
-        peers = [
-            t for t in range(head * self.put_step, (head + 1) * self.put_step) if t % self.dcp_size == self.dcp_rank
-        ]
-        if not peers:
-            return True
-        return self.tp_rank == min(peers)
+        return is_layerwise_dcp_save_leader(self.tp_rank, self.put_step, self.dcp_size, self.dcp_rank)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
         if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):

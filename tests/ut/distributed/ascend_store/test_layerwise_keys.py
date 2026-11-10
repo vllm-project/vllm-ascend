@@ -16,7 +16,10 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import layerwise_dcp_rank
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import (
+    is_layerwise_dcp_save_leader,
+    layerwise_dcp_rank,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
@@ -94,6 +97,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                     cache = self.make_cache_config(num_groups)
                     builders = []
                     for dcp_size in (1, 2, 4):
+                        config.parallel_config.tensor_parallel_size = max(2, dcp_size)
                         config.parallel_config.decode_context_parallel_size = dcp_size
                         builders.append(
                             MooncakeBackend.bind_layerwise_keys(
@@ -206,10 +210,27 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         self.assertEqual(layerwise_dcp_rank(0, 1, 2, 4), 1)
         self.assertEqual(layerwise_dcp_rank(1, 1, 2, 4), 3)
 
-    def test_dcp_rejects_prefix_match_unit(self):
+    def test_dcp_accepts_noop_prefix_match_unit(self):
         config = self.make_config()
         config.parallel_config.decode_context_parallel_size = 2
+        # Equal to the smallest cacheable block size: the pool computes the same
+        # hash granularity as without the override, so this is a no-op.
         config.cache_config.prefix_match_unit = 16
+        builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=config,
+            kv_cache_config=self.make_cache_config(1),
+            model_name="model",
+            use_hybrid=False,
+            grouped_block_size=[32],
+        )
+        keys = builder.make_hit_check_keys(0, "hash", 1)
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(len(set(keys)), 2)
+
+    def test_dcp_rejects_prefix_match_unit_with_other_values(self):
+        config = self.make_config()
+        config.parallel_config.decode_context_parallel_size = 2
+        config.cache_config.prefix_match_unit = 32
         with self.assertRaisesRegex(ValueError, "prefix_match_unit"):
             MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,
@@ -242,6 +263,49 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 use_hybrid=True,
                 grouped_block_size=[32],
             )
+
+    def test_dcp_rejects_put_step_smaller_than_dcp(self):
+        config = self.make_config()
+        config.parallel_config.tensor_parallel_size = 8
+        config.parallel_config.decode_context_parallel_size = 2
+        config.model_config.get_total_num_kv_heads = lambda: 8
+        with self.assertRaisesRegex(ValueError, "put_step >= decode_context_parallel_size"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=self.make_cache_config(1),
+                model_name="model",
+                use_hybrid=False,
+                grouped_block_size=[32],
+            )
+
+    def test_dcp_accepts_gqa_put_step_covering_dcp(self):
+        config = self.make_config()
+        config.parallel_config.tensor_parallel_size = 4
+        config.parallel_config.decode_context_parallel_size = 2
+        # GQA: TP=4, 2 KV heads -> put_step=2, exactly covering DCP=2.
+        config.model_config.get_total_num_kv_heads = lambda: 2
+        builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=config,
+            kv_cache_config=self.make_cache_config(1),
+            model_name="model",
+            use_hybrid=False,
+            grouped_block_size=[32],
+        )
+        keys = builder.make_hit_check_keys(0, "hash", 2)
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(len(set(keys)), 4)
+
+    def test_dcp_save_leader_covers_every_content_class(self):
+        # GQA TP=8, 2 KV heads -> put_step=4; DCP=2. Each (head, shard)
+        # content class must have exactly one leader.
+        leaders: dict[tuple[int, int], list[int]] = {}
+        for tp_rank in range(8):
+            dcp_rank = tp_rank % 2
+            if is_layerwise_dcp_save_leader(tp_rank, 4, 2, dcp_rank):
+                leaders.setdefault((tp_rank // 4, dcp_rank), []).append(tp_rank)
+        self.assertEqual(leaders, {(0, 0): [0], (0, 1): [1], (1, 0): [4], (1, 1): [5]})
+        # put_step == dcp_size: every TP rank owns a distinct content class.
+        self.assertTrue(all(is_layerwise_dcp_save_leader(rank, 2, 2, rank % 2) for rank in range(4)))
 
     def test_dcp_rejects_mixed_block_size_granularity(self):
         config = self.make_config()
@@ -315,6 +379,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
             model_config=SimpleNamespace(
                 get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // 2],
                 get_total_num_hidden_layers=lambda: 7,
+                get_total_num_kv_heads=lambda: 1,
                 compute_hash=lambda: "model-config",
             ),
             cache_config=SimpleNamespace(block_size=16, cache_dtype="auto", compute_hash=lambda: "cache-config"),

@@ -320,6 +320,7 @@ class MooncakeBackend(Backend):
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
         parallel = vllm_config.parallel_config
+        cache_config = getattr(vllm_config, "cache_config", None)
 
         def parallel_size(name: str) -> int:
             value = getattr(parallel, name, 1)
@@ -340,18 +341,37 @@ class MooncakeBackend(Backend):
         ):
             raise ValueError("Mooncake layerwise context parallelism does not support enable_kvpp layer-sharded caches")
         if dcp_size > 1:
-            mooncake_layerwise.validate_dcp_groups(kv_cache_config)
-            if getattr(vllm_config.cache_config, "prefix_match_unit", None) is not None:
+            smallest_cacheable_block_size = mooncake_layerwise.validate_dcp_groups(kv_cache_config)
+            put_step, num_kv_heads = mooncake_layerwise.layerwise_put_step(
+                vllm_config, kv_cache_config, parallel.tensor_parallel_size
+            )
+            # A saving-head group spans ``put_step`` consecutive TP ranks; it
+            # can only own every DCP shard when it is at least as wide as the
+            # DCP group. Otherwise the hit check demands more objects than any
+            # rank writes and every block misses forever.
+            if put_step < dcp_size:
                 raise ValueError(
-                    "Mooncake layerwise DCP requires prefix_match_unit to be unset; the pool "
-                    "derives block-hash granularity from the DCP-scaled cache-group block size."
+                    "Mooncake layerwise DCP requires put_step >= decode_context_parallel_size so that "
+                    "every DCP shard has exactly one saving rank; got "
+                    f"put_step={put_step}, tensor_parallel_size={parallel.tensor_parallel_size}, "
+                    f"num_kv_heads={num_kv_heads}, decode_context_parallel_size={dcp_size}. "
+                    "Increase the TP size or reduce the DCP size."
+                )
+            prefix_match_unit = getattr(cache_config, "prefix_match_unit", None)
+            if prefix_match_unit is not None and prefix_match_unit != smallest_cacheable_block_size:
+                raise ValueError(
+                    "Mooncake layerwise DCP only accepts a no-op prefix_match_unit equal to the "
+                    f"smallest prefix-cacheable block size ({smallest_cacheable_block_size}); got "
+                    f"prefix_match_unit={prefix_match_unit}. Unset it or use that value."
                 )
             logger.info(
-                "Mooncake layerwise DCP: tp=%d pp=%d dcp=%d; a prefix hit requires one committed "
-                "object per DCP rank, PP stage and saving head",
+                "Mooncake layerwise DCP: tp=%d pp=%d dcp=%d put_step=%d num_kv_heads=%d; a prefix hit "
+                "requires one committed object per DCP rank, PP stage and saving head",
                 parallel.tensor_parallel_size,
                 parallel.pipeline_parallel_size,
                 dcp_size,
+                put_step,
+                num_kv_heads,
             )
         mooncake_layerwise.validate_pp_groups(kv_cache_config, parallel)
         namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
@@ -363,7 +383,7 @@ class MooncakeBackend(Backend):
                 namespace,
                 parallel.rank,
                 pp_size,
-                vllm_config.cache_config.block_size,
+                getattr(cache_config, "block_size", None),
                 [mooncake_layerwise.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
                 if kv_cache_config is not None
                 else [],
