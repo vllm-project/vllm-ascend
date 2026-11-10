@@ -8,6 +8,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Lock
 
 import torch
 from vllm.logger import logger
@@ -28,6 +29,32 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
 DIRECTION_D2H = 1
+
+
+@dataclass(eq=False)
+class _PinnedMmapRegistration:
+    """Own the mapping even when its worker never finishes construction."""
+
+    mmap_region: SharedOffloadRegion
+    tensors: list[torch.Tensor]
+
+    def unregister(self) -> None:
+        if self.tensors:
+            # A failed sync/unregister must leave both ownership and the
+            # remaining range list intact so a later attempt can retry.
+            torch.npu.synchronize()
+            while self.tensors:
+                torch.ops._C_ascend.unregister_pinned_host_mmap(self.tensors[-1])
+                self.tensors.pop()
+        with _PINNED_MMAP_REGISTRATIONS_LOCK:
+            _PINNED_MMAP_REGISTRATIONS.discard(self)
+
+
+# A native registration outlives Python worker ownership on failed rollback.
+# Keep a process-scoped root until successful unregister, or process exit.
+# The lock protects registry membership; ACL calls run outside the lock.
+_PINNED_MMAP_REGISTRATIONS: set[_PinnedMmapRegistration] = set()
+_PINNED_MMAP_REGISTRATIONS_LOCK = Lock()
 
 
 @dataclass
@@ -287,6 +314,7 @@ class NPUOffloadingWorker(OffloadingWorker):
         self._mmap_region = mmap_region
         self._mmap_pinned = False
         self._pinned_tensors: list[torch.Tensor] = []
+        self._pinned_registration: _PinnedMmapRegistration | None = None
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
 
@@ -396,6 +424,12 @@ class NPUOffloadingWorker(OffloadingWorker):
         else:
             tensors = [self._mmap_region.base_tensor]
 
+        if self._pinned_registration is None:
+            registration = _PinnedMmapRegistration(self._mmap_region, self._pinned_tensors)
+            with _PINNED_MMAP_REGISTRATIONS_LOCK:
+                _PINNED_MMAP_REGISTRATIONS.add(registration)
+            self._pinned_registration = registration
+
         try:
             for tensor in tensors:
                 torch.ops._C_ascend.register_pinned_host_mmap(tensor)
@@ -404,7 +438,7 @@ class NPUOffloadingWorker(OffloadingWorker):
                 self._mmap_pinned = True
         except Exception:
             logger.warning(
-                "Failed to pin shared offload mmap; using pageable mmap",
+                "Failed to pin shared offload mmap; rolling back registrations",
                 exc_info=True,
             )
             self._unpin_shared_region()
@@ -419,15 +453,10 @@ class NPUOffloadingWorker(OffloadingWorker):
         )
 
     def _unpin_shared_region(self) -> None:
-        if not self._pinned_tensors:
+        if self._pinned_registration is None:
             return
-        # Both DMA directions must finish before releasing host registrations.
-        # If synchronization or unregister fails, preserve the remaining views
-        # and propagate the error so the caller does not close a pinned mmap.
-        torch.npu.synchronize()
-        while self._pinned_tensors:
-            torch.ops._C_ascend.unregister_pinned_host_mmap(self._pinned_tensors[-1])
-            self._pinned_tensors.pop()
+        self._pinned_registration.unregister()
+        self._pinned_registration = None
         self._mmap_pinned = False
         logger.info("Unpinned shared offload mmap")
 

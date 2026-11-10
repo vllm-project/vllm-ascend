@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Shared host registration lifecycle; ACL operations are mocked on CPU."""
 
+import gc
+import os
+import weakref
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -24,7 +28,8 @@ def pin_ops(monkeypatch):
     )
     monkeypatch.setattr(torch.ops, "_C_ascend", ops)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(synchronize=Mock()), raising=False)
-    return ops
+    yield ops
+    assert not getattr(cpu_npu_mod, "_PINNED_MMAP_REGISTRATIONS", ())
 
 
 def _worker(region):
@@ -32,6 +37,7 @@ def _worker(region):
     worker._mmap_region = region
     worker._mmap_pinned = False
     worker._pinned_tensors = []
+    worker._pinned_registration = None
     return worker
 
 
@@ -252,3 +258,123 @@ def test_unpin_retry_does_not_unregister_released_ranges_twice(pin_ops):
     worker._unpin_shared_region()
     assert [c.args[0].data_ptr() for c in pin_ops.unregister_pinned_host_mmap.call_args_list] == pointers[1::-1]
     assert not worker._mmap_pinned
+
+
+@pytest.mark.parametrize("construction_failure", ["registration", "handler"])
+@pytest.mark.parametrize("release_failure", ["synchronize", "unregister"])
+def test_failed_constructor_keeps_registered_mapping_alive(monkeypatch, pin_ops, construction_failure, release_failure):
+    has_slots = hasattr(SharedOffloadRegion, "iter_worker_slot_ranges")
+    if construction_failure == "registration" and not has_slots:
+        pytest.skip("This vLLM version registers only the whole region, not multiple slots")
+    # The simulated ACL table holds addresses only, just like the native table.
+    # Mock call histories or a retained exception would hide the lifetime bug.
+    registered: set[int] = set()
+    unregister_attempts: list[int] = []
+    synchronize_attempts: list[bool] = []
+    worker_refs: list[weakref.ReferenceType] = []
+    release_fails = True
+
+    def register(tensor):
+        if construction_failure == "registration" and registered:
+            raise RuntimeError("registration failed")
+        registered.add(tensor.data_ptr())
+
+    def unregister(tensor):
+        unregister_attempts.append(tensor.data_ptr())
+        if release_fails and release_failure == "unregister":
+            raise RuntimeError("release failed")
+        registered.remove(tensor.data_ptr())
+
+    def synchronize():
+        synchronize_attempts.append(True)
+        if release_fails and release_failure == "synchronize":
+            raise RuntimeError("release failed")
+
+    def fail_handler(**kwargs):
+        raise RuntimeError("handler failed")
+
+    original_pin = cpu_npu_mod.NPUOffloadingWorker._pin_shared_region
+
+    def track_worker(worker, *args):
+        worker_refs.append(weakref.ref(worker))
+        return original_pin(worker, *args)
+
+    monkeypatch.setattr(pin_ops, "register_pinned_host_mmap", register)
+    monkeypatch.setattr(pin_ops, "unregister_pinned_host_mmap", unregister)
+    monkeypatch.setattr(torch.npu, "synchronize", synchronize)
+    monkeypatch.setattr(cpu_npu_mod, "is_pin_memory_available", lambda: False)
+    monkeypatch.setattr(cpu_npu_mod, "SingleDirectionNPUOffloadingHandler", fail_handler)
+    # Pytest logging handlers retain exc_info even after caplog.clear().
+    monkeypatch.setattr(cpu_npu_mod.logger, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cpu_npu_mod.NPUOffloadingWorker, "_pin_shared_region", track_worker)
+
+    def construct():
+        page_size = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+        region = SharedOffloadRegion(
+            engine_id=f"pin-constructor-ut-{uuid4().hex}",
+            num_chunks=3,
+            rank=0,
+            kv_bytes_per_chunk=2 * page_size,
+            cpu_page_size=page_size,
+        )
+        region_ref = weakref.ref(region)
+        mapping_ref = weakref.ref(region.mmap_obj)
+        path, fd = region.mmap_path, region.fd
+        caches = SimpleNamespace(
+            tensors=[SimpleNamespace(tensor=torch.empty((4, 4), dtype=torch.int8), page_size_bytes=4)],
+            group_data_refs=[],
+        )
+        # Catch inside this function so no traceback or local owns the worker
+        # or its region when the caller forces garbage collection.
+        try:
+            cpu_npu_mod.NPUOffloadingWorker(
+                kv_caches=caches,
+                blocks_per_chunk=2,
+                num_cpu_blocks=3,
+                mmap_region=region,
+                worker_slot_only=True,
+            )
+        except RuntimeError as error:
+            assert str(error) == "release failed"
+        else:
+            pytest.fail("constructor unexpectedly succeeded")
+        return region_ref, mapping_ref, path, fd
+
+    region_ref, mapping_ref, path, fd = construct()
+    gc.collect()
+    try:
+        assert worker_refs and all(ref() is None for ref in worker_refs)
+        assert len(registered) == (1 if construction_failure == "registration" or not has_slots else 3)
+        expected_attempts = 2 if construction_failure == "registration" else 1
+        assert len(synchronize_attempts) == expected_attempts
+        assert len(unregister_attempts) == (expected_attempts if release_failure == "unregister" else 0)
+        assert region_ref() is not None
+        mapping = mapping_ref()
+        assert mapping is not None and not mapping.closed
+        mapping[0] = 73
+        assert mapping[0] == 73
+        del mapping
+    finally:
+        # Recover the orphan via its independent registration owner, then
+        # release the real mapping so this test leaves no process-global pins.
+        release_fails = False
+        owners = [
+            owner
+            for owner in getattr(cpu_npu_mod, "_PINNED_MMAP_REGISTRATIONS", ())
+            if owner.mmap_region is region_ref()
+        ]
+        for owner in owners:
+            owner.unregister()
+            owner.mmap_region.cleanup()
+        if owners:
+            del owner
+        owners.clear()
+        if region_ref() is None and fd is not None and registered:
+            # Only the unfixed implementation loses the owner before cleanup.
+            os.close(fd)
+            registered.clear()
+        Path(path).unlink(missing_ok=True)
+    assert not registered
+    gc.collect()
+    assert region_ref() is None
+    assert mapping_ref() is None
