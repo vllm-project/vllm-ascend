@@ -368,6 +368,7 @@ def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(monkeypatc
         kv_dtype=torch.float8_e4m3fn,
         registered_host_pool=NS(_hisparse_registration=object()),
     )
+    group.shared_topk = NS(device_topk_rows=torch.empty((max_rows, runtime.max_union_rows), dtype=torch.int32))
     group.leader = runtime
 
     def bind(num_pages):
