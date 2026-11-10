@@ -30,7 +30,7 @@ def gather_rows_kernel(
     BLOCK: tl.constexpr,
     PARALLEL_COLUMNS: tl.constexpr = 0,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(1) if PARALLEL_COLUMNS > 0 else tl.program_id(0)
     offset = tl.arange(0, BLOCK)
     padding = tl.load(state + row) < 0 if HAS_STATE else False
     if PARALLEL_COLUMNS > 0:
@@ -40,7 +40,7 @@ def gather_rows_kernel(
         # Keep enough independent programs for small misses and retain the
         # original contiguous byte-copy shape instead of a wide 2-D payload.
         if ~padding:
-            for col in range(tl.program_id(1), count, PARALLEL_COLUMNS):
+            for col in range(tl.program_id(0), count, PARALLEL_COLUMNS):
                 index = row * TOP_K + col
                 src = tl.load(source + index)
                 dst = tl.load(destination + index)

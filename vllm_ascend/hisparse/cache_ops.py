@@ -296,7 +296,7 @@ class HiSparseNPUOps:
         if rows == 0 or topk == 0:
             return
         parallel_columns = min(topk, 128) if counts is not None else 0
-        gather_rows_kernel[(rows, parallel_columns or topk)](
+        gather_rows_kernel[(parallel_columns, rows) if parallel_columns else (rows, topk)](
             self.host_mapping.address_of(host_cache),
             hot_cache.view(torch.uint8),
             source,
