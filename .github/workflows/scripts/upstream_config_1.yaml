@@ -44,8 +44,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/openai/test_watermarking.py
     estimated_time: 20
-  - name: tests/entrypoints/pooling/basic/test_tiling_engine.py
-    estimated_time: 20
   - name: tests/entrypoints/pooling/scoring/test_late_interaction_serving.py
     estimated_time: 20
   - name: tests/entrypoints/rl/return_routed_experts/test_openai_api.py
@@ -167,8 +165,6 @@ e2e-upstream_singlecard:
   - name: tests/model_executor/model_loader/test_filter_duplicate_safetensors.py
     estimated_time: 20
   - name: tests/model_executor/model_loader/test_mm_encoder_only_weight_filter.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/test_weight_cache.py
     estimated_time: 20
   - name: tests/model_executor/model_loader/test_weight_checksum.py
     estimated_time: 20
@@ -596,8 +592,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/watermarking/test_gumbel.py
     estimated_time: 20
-  - name: tests/watermarking/test_parallel_compatibility.py
-    estimated_time: 20
   - name: tests/watermarking/test_prf.py
     estimated_time: 20
   - name: tests/watermarking/test_watermarking.py
@@ -605,11 +599,13 @@ e2e-upstream_singlecard:
   - name: tests/watermarking/test_watermarking_e2e.py
     estimated_time: 20
 e2e-upstream_a2_2:
-  - name: tests/v1/distributed/test_async_llm_dp.py
+  - name: tests/watermarking/test_parallel_compatibility.py
     estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py
     estimated_time: 20
 e2e-upstream_online_1:
-  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
+  - name: tests/entrypoints/pooling/basic/test_tiling_engine.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/test_weight_cache.py
     estimated_time: 20
