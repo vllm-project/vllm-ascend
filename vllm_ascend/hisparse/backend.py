@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -39,23 +38,27 @@ def _allocate_attention_lengths(runtime: HiSparseRuntime) -> tuple[torch.Tensor,
 
 
 @torch.inference_mode(False)
-def prepare_hisparse_workspaces(runtimes: Iterable[HiSparseRuntime]) -> None:
-    """Create real next-binding storage inside the existing profile scope.
+def prepare_hisparse_workspaces(forward_context: dict[str, Any]) -> None:
+    """Create real next-binding storage before Worker memory profiling.
 
     Core fixes group geometry when loading the model. Retain one scratch owner
     per actual group, and fresh C8 lengths for each consumed binding generation.
+    Core's total-consumption measurement includes these retained allocations.
     """
     from vllm.v1.worker.workspace import current_workspace_manager
 
-    manager = current_workspace_manager()
-    for runtime in runtimes:
+    for layer in forward_context.values():
+        cache = getattr(layer, "hisparse_cache", None)
+        if cache is None:
+            continue
+        runtime = cache.runtime
         group = runtime.index_group
         workspace = getattr(group, "_ascend_profiled_resolver", None)
         if workspace is None:
             # Identity, not shape, separates groups. The manager key does not
             # retain the runtime or any Host-pool/Graph owner.
             key = ("ascend_hisparse_resolver", object())
-            workspace = manager.get_persistent_resource(
+            workspace = current_workspace_manager().get_persistent_resource(
                 key, lambda runtime=runtime: _allocate_resolver_workspace(runtime)
             )
             group._ascend_profiled_resolver = workspace

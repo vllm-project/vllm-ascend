@@ -651,6 +651,11 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces
+
+            prepare_hisparse_workspaces(self.vllm_config.compilation_config.static_forward_context)
+
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
 
         # Fast path: user has explicitly specified KV cache size via

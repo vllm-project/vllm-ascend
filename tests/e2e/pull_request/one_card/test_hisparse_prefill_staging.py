@@ -251,24 +251,25 @@ def test_profiled_workspace_rebind_preserves_prior_length_graphs(pages, stride_r
 
     try:
         first = runtime()
-        prepare_hisparse_workspaces([first])
+        layers = {"target": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=first))}
+        prepare_hisparse_workspaces(layers)
         pending = first._ascend_profiled_cache_ops
         workspace = pending[0]
-        prepare_hisparse_workspaces([first])
+        prepare_hisparse_workspaces(layers)
         assert first._ascend_profiled_cache_ops is pending
         for tensor in (workspace.first_refs, workspace.errors, *pending[1]):
             assert not torch.is_inference(tensor)
         old = bind(first, pages)
         assert old.workspace is workspace and not hasattr(first, "_ascend_profiled_cache_ops")
         captured = [capture_lengths(old)]
-        prepare_hisparse_workspaces([first])
+        prepare_hisparse_workspaces(layers)
         new = bind(first, pages + 1)
         assert new.workspace is workspace
         for tensor in new.attention_lengths:
             assert not torch.is_inference(tensor)
         assert new.attention_lengths[1].data_ptr() != old.attention_lengths[1].data_ptr()
         captured.append(capture_lengths(new))
-        prepare_hisparse_workspaces([first])
+        prepare_hisparse_workspaces(layers)
         third = bind(first, pages + 2)
         assert third.workspace is workspace
         for tensor in third.attention_lengths:

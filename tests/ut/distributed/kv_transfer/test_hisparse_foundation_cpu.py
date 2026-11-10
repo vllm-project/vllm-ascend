@@ -45,7 +45,14 @@ def prepare_workspaces(request):
     try:
         if request.param:
             init_workspace_manager(torch.device("cpu"))
-        yield torch.inference_mode()(prepare_hisparse_workspaces) if request.param else None
+
+        @torch.inference_mode()
+        def prepare(runtimes):
+            layers = {str(i): NS(hisparse_cache=NS(runtime=runtime)) for i, runtime in enumerate(runtimes)}
+            layers.update(ordinary_layer=NS(), unbound_layer=NS(hisparse_cache=None))
+            prepare_hisparse_workspaces(layers)
+
+        yield prepare if request.param else None
     finally:
         reset_workspace_manager()
 
