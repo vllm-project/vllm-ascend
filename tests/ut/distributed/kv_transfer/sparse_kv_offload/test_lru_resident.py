@@ -19,6 +19,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 MAX_AGE = (1 << 31) - 2
 MAX_TOKEN = 128
@@ -132,6 +133,9 @@ def reference_step(tokens, order, ages, selected, reset, stable, probation_age):
 
 
 class TestLRUResident(unittest.TestCase):
+    build_dir: ClassVar[tempfile.TemporaryDirectory[str]]
+    library: ClassVar[ctypes.CDLL]
+
     @classmethod
     def setUpClass(cls):
         compiler = shlex.split(os.environ.get("CXX", "c++"))
@@ -253,7 +257,7 @@ extern "C" bool has_openmp() {
         scenarios = (("hot", [hot] * 6, (topk, topk)), ("scan", scan, (10240, 8192)))
         rounds, warmup_groups, measured_groups = 7, 2, 32
         for name, trace, expected_misses in scenarios:
-            samples = {False: [], True: []}
+            samples: dict[bool, list[float]] = {False: [], True: []}
             for trial in range(rounds):
                 # Alternate policy order to reduce systematic timing bias.
                 for reuse in (False, True) if trial % 2 == 0 else (True, False):
