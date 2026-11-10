@@ -71,6 +71,7 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    RuntimeComponentShape,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -309,6 +310,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 ),
                 num_kv_heads=spec.num_kv_heads,
                 head_size=head_size,
+                kv_lora_rank=attn_module.kv_lora_rank,
+                qk_rope_head_dim=attn_module.qk_rope_head_dim,
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
@@ -1535,6 +1538,44 @@ def _get_cache_attention_groups(
     return attn_groups
 
 
+def create_runtime_component_views(
+    raw: torch.Tensor,
+    shapes: tuple[RuntimeComponentShape, ...],
+    dtypes: tuple[torch.dtype, ...],
+    page_bytes: int,
+    block_stride: int,
+    *,
+    kernel_blocks_per_manager: int = 1,
+    as_tuple: bool = False,
+) -> list[torch.Tensor] | tuple[torch.Tensor, ...]:
+    """Interpret backend byte shapes [B,H,N,C] using the existing NHD ABI."""
+    if not shapes or len(shapes) != len(dtypes):
+        raise ValueError("Each runtime cache component requires a shape and dtype.")
+    if kernel_blocks_per_manager < 1:
+        raise ValueError("Runtime cache views require a positive kernel-block ratio.")
+    if kernel_blocks_per_manager > 1 and block_stride != page_bytes:
+        raise ValueError("Manager-block splitting requires contiguous per-layer pages.")
+    if page_bytes % kernel_blocks_per_manager:
+        raise ValueError("Physical pages must split into whole kernel slots.")
+    page_bytes //= kernel_blocks_per_manager
+    block_stride //= kernel_blocks_per_manager
+    num_blocks = shapes[0][0]
+    if block_stride == page_bytes:
+        if raw.nbytes % page_bytes:
+            raise ValueError("Cache allocation is not a whole number of physical pages.")
+        if raw.nbytes // page_bytes != num_blocks:
+            raise ValueError(f"Cache has {raw.nbytes // page_bytes} blocks, expected {num_blocks}.")
+    if raw.nbytes < (num_blocks - 1) * block_stride + page_bytes:
+        raise ValueError("Cache view exceeds the backing allocation")
+
+    typed_shapes = [
+        (blocks, tokens, heads, content_bytes // dtype.itemsize)
+        for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
+    ]
+    views = create_cache_component_views(raw, typed_shapes, list(dtypes), block_stride)
+    return tuple(views) if as_tuple else views
+
+
 def create_cache_component_views(
     raw_tensor: torch.Tensor,
     cache_shapes: Sequence[tuple[int, ...]],
@@ -1591,26 +1632,20 @@ def create_kv_cache_runtime_views(
                 continue
             spec = specs[name]
             descriptor = placements[name]
-            shapes = group.backend.get_runtime_shapes(
+            runtime = group.backend.get_runtime_shapes(
                 spec,
                 kv_cache_config.num_blocks_of(descriptor),
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
-            if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
-            # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-            # views with the content dimension expressed in dtype elements.
-            cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-            ]
-            caches[name] = create_cache_component_views(
+            caches[name] = create_runtime_component_views(
                 raw_tensors[name],
-                cache_shapes,
-                dtypes,
+                runtime.shapes,
+                runtime.dtypes,
+                spec.page_size_bytes,
                 descriptor.block_stride,
+                kernel_blocks_per_manager=runtime.kernel_blocks_per_manager,
+                as_tuple=runtime.as_tuple,
             )
     for name, target in shared_layers.items():
         caches[name] = caches[target]

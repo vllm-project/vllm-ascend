@@ -15,19 +15,17 @@ from vllm_ascend.worker.v2 import attn_utils
 
 
 def _runtime_views(raw, spec, num_blocks, *, block_stride=None):
-    from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
+    from vllm_ascend.worker.v2.attn_utils import create_runtime_component_views
 
-    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
-    dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,)
-    cache_shapes = [
-        (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-        for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-    ]
-    return create_cache_component_views(
+    runtime = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
+    return create_runtime_component_views(
         raw,
-        cache_shapes,
-        dtypes,
+        runtime.shapes,
+        runtime.dtypes,
+        spec.page_size_bytes,
         spec.page_size_bytes if block_stride is None else block_stride,
+        kernel_blocks_per_manager=runtime.kernel_blocks_per_manager,
+        as_tuple=runtime.as_tuple,
     )
 
 
@@ -304,10 +302,14 @@ def test_dsa_runtime_shapes_are_byte_shapes_from_storage_spec(monkeypatch, scale
         "get_kv_cache_shape",
         Mock(side_effect=AssertionError("Runtime shapes must derive from the spec")),
     )
-    assert AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128) == (
+    runtime = AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128)
+    assert runtime.shapes == (
         (3, 1, 32, 128),
         (3, 1, 32, get_dtype_size(scale_dtype)),
     )
+    assert runtime.dtypes == (spec.dtype, scale_dtype)
+    assert runtime.kernel_blocks_per_manager == 1
+    assert not runtime.as_tuple
     raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
     components = _runtime_views(raw, spec, 3)
     assert components[0].shape == (3, 32, 1, 128)

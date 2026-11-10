@@ -202,6 +202,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
+    # Ordinary MLA component widths; None means the split is not described.
+    kv_lora_rank: int | None = None
+    qk_rope_head_dim: int | None = None
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -263,6 +266,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             (
                 spec.scale_dim,
                 spec.num_heads,
+                spec.kv_lora_rank,
+                spec.qk_rope_head_dim,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
@@ -287,6 +292,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             merged,
             scale_dim=first_spec.scale_dim,
             num_heads=first_spec.num_heads,
+            kv_lora_rank=first_spec.kv_lora_rank,
+            qk_rope_head_dim=first_spec.qk_rope_head_dim,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,

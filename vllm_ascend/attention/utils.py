@@ -52,7 +52,16 @@ MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
 RuntimeComponentShape = tuple[int, int, int, int]
-KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+@dataclass(frozen=True)
+class KVCacheRuntimeShapes:
+    """Backend component byte shapes and their runtime interpretation."""
+
+    shapes: tuple[RuntimeComponentShape, ...]
+    dtypes: tuple[torch.dtype, ...]
+    kernel_blocks_per_manager: int = 1
+    as_tuple: bool = False
 
 
 def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:

@@ -50,6 +50,7 @@ from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
@@ -132,6 +133,32 @@ class AscendMLABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe ordinary NoPE/RoPE components as byte shapes [B,H,N,C]."""
+        if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+            raise ValueError("MLA runtime views require component dimensions in the cache spec.")
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("MLA kernel block size must divide the manager block size.")
+        kernel_blocks_per_manager = spec.block_size // block_size
+        prefix = (num_blocks * kernel_blocks_per_manager, spec.num_kv_heads, block_size)
+        return KVCacheRuntimeShapes(
+            shapes=(
+                (*prefix, spec.kv_lora_rank * spec.dtype.itemsize),
+                (*prefix, spec.qk_rope_head_dim * spec.dtype.itemsize),
+            ),
+            dtypes=(spec.dtype, spec.dtype),
+            kernel_blocks_per_manager=kernel_blocks_per_manager,
+            as_tuple=True,
+        )
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:

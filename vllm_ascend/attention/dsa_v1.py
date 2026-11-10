@@ -13,7 +13,6 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -331,10 +330,12 @@ class AscendDSABackend(AttentionBackend):
         """
         tokens = get_storage_block_size(spec)
         prefix = (num_blocks, spec.num_kv_heads, tokens)
-        shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
+        shapes = [(*prefix, spec.head_size * spec.dtype.itemsize)]
+        dtypes = [spec.dtype]
         if getattr(spec, "scale_dim", 0):
-            shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))
-        return tuple(shapes)
+            shapes.append((*prefix, spec.scale_dim * spec.scale_dtype.itemsize))
+            dtypes.append(spec.scale_dtype)
+        return KVCacheRuntimeShapes(shapes=tuple(shapes), dtypes=tuple(dtypes))
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
