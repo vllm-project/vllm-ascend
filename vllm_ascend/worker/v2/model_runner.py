@@ -105,6 +105,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
+    is_score_encoder_cache_manager,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -155,6 +156,8 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self.sparse_kv_offload_manager = None
+        self.use_score_encoder_cache = is_score_encoder_cache_manager(
+            vllm_config)
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
@@ -294,6 +297,54 @@ class NPUModelRunner(GPUModelRunner):
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
+    
+    def _swap_in_score_encoder_runner(self) -> None:
+        from vllm_ascend.ec_manager.score_encoder_runner import (
+            AscendScoreEncoderRunner,
+        )
+
+        base = self.model_state.encoder_runner
+        self.model_state.encoder_runner = AscendScoreEncoderRunner(
+            model=base.model,
+            max_num_tokens=base.max_num_tokens,
+            hidden_size=base.hidden_size,
+            encoder_cache=base.encoder_cache,
+            dtype=base.dtype,
+            device=base.device,
+            cudagraph_manager=base.cudagraph_manager,
+            enable_timing=base.enable_timing,
+        )
+
+    def add_requests(self, scheduler_output: SchedulerOutput) -> None:
+        super().add_requests(scheduler_output)
+        if self.use_score_encoder_cache:
+            score_runner = self.model_state.encoder_runner
+            for new_req_data in scheduler_output.scheduled_new_reqs:
+                if new_req_data.mm_features:
+                    score_runner.track_request(
+                        new_req_data.req_id, new_req_data.mm_features)
+
+    def _on_request_state_removed(self, req_id: str) -> None:
+        if self.use_score_encoder_cache:
+            self.model_state.encoder_runner.on_request_removed(req_id)
+
+    def _process_encoder_cache_scheduler_output(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        if not self.use_score_encoder_cache:
+            super()._process_encoder_cache_scheduler_output(scheduler_output)
+            return
+        metadata = scheduler_output.ec_manager_metadata
+        if metadata is None:
+            super()._process_encoder_cache_scheduler_output(scheduler_output)
+            return
+        self.model_state.encoder_runner.process_scheduler_metadata(metadata)
+
+    def reset_encoder_cache(self) -> None:
+        super().reset_encoder_cache()
+        if self.use_score_encoder_cache:
+            self.model_state.encoder_runner.reset_encoder_cache()
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         from vllm_ascend.model_executor.warmup.nz_warmup import (
@@ -313,6 +364,9 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        if self.use_score_encoder_cache:
+            self._swap_in_score_encoder_runner()
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
