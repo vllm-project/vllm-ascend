@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -176,7 +176,28 @@ class AscendMLAAttention(MLAAttention):
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
             ),
         )
-        return self.impl.apply_kv_cache_layout(AscendMLAAttentionSpec(**values))
+        # These are per-layer execution decisions, not backend-wide defaults.
+        # The standard backend hook owns the physical packing calculation.
+        values.update(
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            cache_sparse_sfa_turboquant=getattr(self.impl, "enable_sparse_sfa_turboquant", False),
+            cache_sparse_sfa_c8=getattr(self.impl, "enable_sparse_sfa_c8", False),
+            store_on_host=getattr(self.impl, "store_kv_cache_on_host", False),
+        )
+        if values["cache_sparse_sfa_turboquant"]:
+            values.update(dtype=torch.int8, cache_dtype_str=self.impl.kv_cache_dtype, cache_sparse_sfa_c8=False)
+        elif values["cache_sparse_sfa_c8"]:
+            values.update(dtype=self.impl.c8_cache_dtype, cache_dtype_str=self.impl.kv_cache_dtype)
+        elif getattr(self.impl, "fa_quant_layer", False):
+            # FA quantization can differ by layer; a class hook has no layer
+            # identity and must not reselect this mode from global config.
+            values.update(
+                head_size=self.impl.head_size + self.qk_rope_head_dim,
+                dtype=self.impl.dtype,
+                cache_dtype_str=None,
+            )
+        return self.get_attn_backend().customize_spec(AscendMLAAttentionSpec(**values))
 
 
 @dataclass
@@ -1035,18 +1056,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-
-    def apply_kv_cache_layout(self, spec: AscendMLAAttentionSpec) -> AscendMLAAttentionSpec:
-        """Describe the format already selected by this execution instance."""
-        if self.fa_quant_layer:
-            # Retain the existing FA quant storage width, including RoPE.
-            return replace(
-                spec,
-                head_size=self.head_size + self.qk_rope_head_dim,
-                dtype=self.dtype,
-                cache_dtype_str=None,
-            )
-        return spec
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config

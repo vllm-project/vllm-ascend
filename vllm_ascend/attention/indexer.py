@@ -237,7 +237,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
 
         vllm_config = get_current_vllm_config()
-        spec = self.apply_kv_cache_layout(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
+        spec = self._build_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
         self.k_cache = AscendSFAIndexerCache(self.k_cache, spec)
         vllm_indexer.k_cache = self.k_cache
 
@@ -271,7 +271,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def enable_sparse_li_quant(self) -> bool:
         return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
 
-    def apply_kv_cache_layout(self, source: AttentionSpec, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec:
+    def _build_cache_spec(self, source: AttentionSpec, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec:
         """Describe the data/scale format selected once in backend initialization."""
         if self.enable_sparse_li_c4:
             # Two 4-bit values per byte, with one scale per 32 values.

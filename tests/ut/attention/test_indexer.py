@@ -502,7 +502,7 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
         cache_role=SparseCacheRole.INDEXER,
         is_draft=True,
     )
-    spec = backend.apply_kv_cache_layout(source, config)
+    spec = backend._build_cache_spec(source, config)
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.cache_role is source.cache_role and spec.is_draft
     assert spec.sfa_dcp_replicated_indexer_size == replicas
