@@ -643,6 +643,45 @@ class TestNPUWorker(TestBase):
         # snapshot, one after the optional RL extra cleanup and before the unmap.
         self.assertEqual(mock_synchronize_device.call_count, 2)
 
+    @patch("vllm_ascend.worker.worker.global_te")
+    @patch("vllm_ascend.worker.worker.get_kv_transfer_group")
+    @patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True)
+    def test_disconnect_drains_store_before_peers(self, _has_group, get_group, mock_global_te):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        order: list[str] = []
+        store = MagicMock()
+        store.drain_queued_saves.side_effect = lambda: order.append("drain")
+        p2p = MagicMock(spec=["wait_for_save"])
+        connector = MagicMock()
+        connector._connectors = [p2p, store]
+        get_group.return_value = connector
+        mock_global_te.disconnect_all_peers.side_effect = lambda: order.append("disconnect")
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.disconnect_kv_transfer_peers()
+
+        self.assertEqual(order, ["drain", "disconnect"])
+
+    @patch("vllm_ascend.worker.worker.global_te")
+    @patch("vllm_ascend.worker.worker.get_kv_transfer_group")
+    @patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True)
+    def test_disconnect_skips_peers_when_drain_fails(self, _has_group, get_group, mock_global_te):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        store = MagicMock()
+        store.drain_queued_saves.side_effect = RuntimeError("send queue stuck")
+        connector = MagicMock()
+        connector._connectors = [store]
+        get_group.return_value = connector
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        with self.assertRaisesRegex(RuntimeError, "send queue stuck"):
+            worker.disconnect_kv_transfer_peers()
+        mock_global_te.disconnect_all_peers.assert_not_called()
+
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")

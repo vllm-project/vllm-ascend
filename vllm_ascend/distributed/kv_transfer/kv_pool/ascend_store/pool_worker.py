@@ -1525,9 +1525,32 @@ class KVPoolWorker(BaseKVPoolWorker):
             return
 
         self._previous_save_batch = send_thread.add_save_batch(requests)
-        # task_done() runs after m_store.put() returns, so this waits until every
-        # queued batch_put on this TP rank has left execute().
-        send_thread.request_queue.join()
+
+    def drain_queued_saves(self) -> None:
+        """Wait until queued puts on this rank have left execute().
+
+        Called once before peer disconnect. A failed send thread that already
+        acknowledged its queue is logged so sleep can still release memory.
+        A dead thread that left items unacknowledged raises.
+        """
+        send_thread = self.kv_send_thread
+        if not isinstance(send_thread, KVCacheStoreSendingThread):
+            return
+        queue = send_thread.request_queue
+        with queue.all_tasks_done:
+            while queue.unfinished_tasks:
+                send_thread.raise_if_failed()
+                if not send_thread.is_alive() and send_thread._fatal_error is not None:
+                    break
+                queue.all_tasks_done.wait(timeout=0.1)
+        if queue.unfinished_tasks:
+            raise RuntimeError(f"{send_thread.name} exited with {queue.unfinished_tasks} unfinished saves")
+        if send_thread._fatal_error is not None:
+            logger.error(
+                "KV send thread %s failed before disconnect: %s",
+                send_thread.name,
+                send_thread._fatal_error,
+            )
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.

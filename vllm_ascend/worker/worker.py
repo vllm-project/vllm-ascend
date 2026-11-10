@@ -338,7 +338,19 @@ class NPUWorker(WorkerBase):
         )
 
     def disconnect_kv_transfer_peers(self) -> None:
+        self._drain_store_send_queues()
         global_te.disconnect_all_peers()
+
+    def _drain_store_send_queues(self) -> None:
+        if not has_kv_transfer_group():
+            return
+        connector = get_kv_transfer_group()
+        children = getattr(connector, "_connectors", None)
+        targets = children if children is not None else (connector,)
+        for target in targets:
+            drain = getattr(target, "drain_queued_saves", None)
+            if drain is not None:
+                drain()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
