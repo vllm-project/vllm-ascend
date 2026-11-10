@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from collections.abc import Callable
@@ -29,6 +30,26 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
 DIRECTION_D2H = 1
+
+
+def _unlink_created_region_files(mmap_region: SharedOffloadRegion | None) -> None:
+    """Detach creator-owned names on abort/shutdown without unmapping pins."""
+    if mmap_region is None or not getattr(mmap_region, "_creator", False):
+        return
+    segments = getattr(mmap_region, "_segments", None)
+    paths = [entry[0] for entry in segments] if segments is not None else [mmap_region.mmap_path]
+    unlinked = True
+    for path in paths:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            unlinked = False
+            logger.warning("Failed to unlink shared offload file %s", path, exc_info=True)
+    if unlinked:
+        # A later cleanup must not unlink a replacement using the same name.
+        mmap_region._creator = False
 
 
 @dataclass(eq=False)
@@ -377,6 +398,10 @@ class NPUOffloadingWorker(OffloadingWorker):
                 npu_to_cpu=False,
             )
         except Exception:
+            # Initialization has aborted, so no scheduler should attach later.
+            # Unlink separately: failed handler/unpin cleanup must not leak
+            # named shm files, while native registrations still need the mmap.
+            _unlink_created_region_files(mmap_region)
             # Construction failed before worker ownership became visible to
             # the connector. Drop any handler-owned tensor views before
             # closing the mapping, otherwise mmap.close() can fail with an
@@ -487,6 +512,9 @@ class NPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
+        # No new scheduler/worker attachment is needed during shutdown.
+        # Existing mappings remain valid even if releasing a pin fails below.
+        _unlink_created_region_files(self._mmap_region)
         try:
             self._store_handler.shutdown()
         finally:
