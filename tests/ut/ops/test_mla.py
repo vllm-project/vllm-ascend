@@ -24,6 +24,7 @@ class TestAscendSFAIndexerBackend(TestBase):
 
     def _make_vllm_indexer(self):
         mock_indexer = MagicMock()
+        mock_indexer.config = SimpleNamespace()
         mock_indexer.n_head = 64
         mock_indexer.head_dim = 128
         mock_indexer.topk_tokens = 2048

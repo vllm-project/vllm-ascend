@@ -148,8 +148,8 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
     assert inner.impl.is_kimi_k31 is expected_k31
     assert inner.impl.use_rope is (inner_kind != "k31_nope")
     with patch.object(inner.impl, "_try_enable_type", return_value=True):
-        expected = PreprocessType.PROLOG_V3 if expected_k31 else PreprocessType.NATIVE
-        assert inner.impl._resolve_preprocess_type(torch.bfloat16) == expected
+        # Quantized SFA selects PROLOG_V3 independently of the model family.
+        assert inner.impl._resolve_preprocess_type(torch.bfloat16) == PreprocessType.PROLOG_V3
     if inner_kind == "k31_nope":
         tail = torch.randn(2, 12, 64, dtype=torch.bfloat16)
         with patch("torch_npu.npu_interleave_rope", create=True) as rope:

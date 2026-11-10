@@ -676,7 +676,11 @@ def test_sfa_pcp_dcp_empty_local_prefill_uses_global_kv_view(global_has_prefill:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v32"))
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v32"),
+            hf_text_config=SimpleNamespace(model_type="deepseek_v32", index_topk=2048),
+        ),
     )
     builder.decode_threshold = 1
     builder.use_dcp = False
@@ -1624,7 +1628,11 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     builder.decode_threshold = 3
     builder.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v32")),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v32"),
+            hf_text_config=SimpleNamespace(model_type="deepseek_v32", index_topk=2048),
+        ),
     )
     builder.dcp_local_seq_lens_buf = torch.empty(2, dtype=torch.int32)
     slots = torch.arange(sum(query_lens), dtype=torch.int64)

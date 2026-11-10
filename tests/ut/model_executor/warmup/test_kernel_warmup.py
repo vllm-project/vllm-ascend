@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for ``kernel_warmup`` orchestration."""
 
+import ast
 import importlib
 import inspect
 from collections import defaultdict
@@ -310,7 +311,12 @@ def test_merge_rank_stride_is_runtime_and_offset_alignment_is_covered():
     assert {case["lse_ptr"].aligned for case in inputs} == {False, True}
     assert {case["lse_stride_rank"] for case in inputs} == {2}
     assert {case["NATIVE_LAYOUT"] for case in inputs} == {False, True}
-    assert "lse_stride_rank" in dcp_warmup._fused_merge_kernel.do_not_specialize
+    # The no-Triton shim drops JIT metadata; inspect the actual declaration.
+    kernel = dcp_warmup._fused_merge_kernel
+    source = ast.parse(inspect.getsource(getattr(kernel, "fn", kernel)))
+    jit = source.body[0].decorator_list[0]
+    do_not_specialize = next(ast.literal_eval(kw.value) for kw in jit.keywords if kw.arg == "do_not_specialize")
+    assert "lse_stride_rank" in do_not_specialize
 
 
 def test_dcp_target_and_draft_owners_register_before_compilation():
