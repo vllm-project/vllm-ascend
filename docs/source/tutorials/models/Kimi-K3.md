@@ -1760,7 +1760,7 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
 
 !!! note "Context length and DCP"
 
-    The pooled templates below use the basic 256K configuration (`--max-model-len 262144`) with DCP disabled. When the total input and output length is greater than **65536 tokens**, we recommend enabling DCP on Decode: `8` on 950DT products or `16` on A3. For 1M serving, also set `--max-model-len 1048576` on both Prefill and Decode, following [Section 5.3](#53-long-context-and-1m-pd-separation-deployment). Keep the pooled connectors and MemCache settings below unchanged.
+    The pooled templates below follow the 1M configuration in [Section 5.3](#53-long-context-and-1m-pd-separation-deployment): set `--max-model-len 1048576` on both Prefill and Decode and enable DCP on Decode (`--decode-context-parallel-size 8` on 950DT products or `--decode-context-parallel-size 16` on A3). Use the pooled connectors and MemCache settings shown below.
 
 === "950DT products"
 
@@ -1818,7 +1818,7 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name kimi-k3 \
-            --max-model-len 262144 \
+            --max-model-len 1048576 \
             --max-num-batched-tokens 16384 \
             --max-num-seqs 32 \
             --enforce-eager \
@@ -1910,12 +1910,13 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
+            --decode-context-parallel-size 8 \
             --cp-kv-cache-interleave-size 768 \
             --block-size 768 \
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name kimi-k3 \
-            --max-model-len 262144 \
+            --max-model-len 1048576 \
             --max-num-batched-tokens 768 \
             --max-num-seqs 32 \
             --trust-remote-code \
@@ -2024,7 +2025,7 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name kimi-k3 \
-            --max-model-len 262144 \
+            --max-model-len 1048576 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 32 \
             --enforce-eager \
@@ -2117,12 +2118,13 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
+            --decode-context-parallel-size 16 \
             --cp-kv-cache-interleave-size 384 \
             --block-size 384 \
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name kimi-k3 \
-            --max-model-len 262144 \
+            --max-model-len 1048576 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 32 \
             --trust-remote-code \
