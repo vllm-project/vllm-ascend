@@ -659,6 +659,16 @@ class AscendModelSlimConfig(QuantizationConfig):
         gate_types = {quant_types[name] for name in ("g_proj", "f_a_proj", "b_proj")}
         return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
+    def uses_kimi_k3_mixed_mla_projection(self, prefix: str) -> bool:
+        """Keep differently quantized MLA output gates out of the Q/KV pack."""
+        quant_types = []
+        for name in ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"):
+            shard_prefix = self.quant_prefix_mapper("kimi_k3", f"{prefix}.{name}")
+            key = _find_quant_description_key(self.quant_description, shard_prefix)
+            quant_types.append(self.quant_description.get(key) if key is not None else None)
+        # Missing descriptions retain the ordinary packed-layer validation.
+        return None not in quant_types and quant_types[0] == quant_types[1] and quant_types[0] != quant_types[2]
+
     def _has_quant_weight(self, prefix: str) -> bool:
         if _find_quant_description_key(self.quant_description, prefix) is not None:
             return True
@@ -774,6 +784,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
             self.packed_modules_mapping.update(mapping)
+        elif model_type == "kimi_k3_mtp":
+            # MTP uses the same MLA pair without the target's KDA mappings.
+            self.packed_modules_mapping["fused_qkv_a_proj"] = ["q_a_proj", "kv_a_proj_with_mqa"]
         if "experts" not in self.packed_modules_mapping:
             shard_names: set[str] = set()
             for key in self.quant_description:
@@ -818,10 +831,23 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
             quant_type = None
         else:
+            packed_modules_mapping = self.packed_modules_mapping
+            if (
+                model_type in ("kimi_k3", "kimi_linear", "kimi_k3_mtp")
+                and runtime_prefix.endswith(".fused_qkv_a_proj")
+                and len(getattr(layer, "output_sizes", ())) == 3
+            ):
+                # AMD Kimi includes a third gate shard under the same name as
+                # the two-shard draft projection. Validate the actual layout
+                # without changing the shared mapping used by ungated layers.
+                packed_modules_mapping = {
+                    **packed_modules_mapping,
+                    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
+                }
             quant_type = get_quant_type_for_layer(
                 self.quant_description,
                 runtime_prefix,
-                self.packed_modules_mapping,
+                packed_modules_mapping,
                 prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
             )
 
