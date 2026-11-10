@@ -84,7 +84,7 @@ class MappedHostBuffer:
         self.lib = _library(Path(library_path))
         self.allocation = _Allocation()
         self.closed = False
-        self._views = weakref.WeakSet()
+        self._views: weakref.WeakSet[HostTableSlice] = weakref.WeakSet()
         with torch.npu.device(self.device):
             rc = self.lib.host_shared_registered_alloc(
                 self.size, self.device.index, os.fsencode(path), int(owner), ctypes.byref(self.allocation)

@@ -100,6 +100,7 @@ class SharedPoolOwner:
         self._condition = threading.Condition()
         self._leases = set()
         self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.bind((host, port))
         self._listener.listen(128)
         self._listener.settimeout(0.5)

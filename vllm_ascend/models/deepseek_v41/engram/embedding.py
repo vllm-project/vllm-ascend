@@ -14,7 +14,7 @@ storage and lookup; upstream rank selection and hash gathering are reused:
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -69,7 +69,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     ) -> None:
         self._provided_shared_pool = shared_pool
         self._shared_pool_spec = (shared_pool_dir, shared_pool_identity, shared_pool_key)
-        self._shared_pool_client = None
+        self._shared_pool_client: Any | None = None
         if shared_pool_dir and (
             not cpu_offload or storage_dtype != torch.int8 or not shared_pool_identity or not shared_pool_key
         ):
@@ -196,6 +196,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     width=self.dim // self.block_size,
                     dtype=torch.float32,
                 )
+                assert self._codes_uva is not None and self._scales_uva is not None
                 return self._codes_uva.tensor, self._scales_uva.tensor
             except BaseException:
                 client.close()
@@ -236,8 +237,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         stays retryable and a half-finished release never leaves a live
         parameter pointing at memory the other buffer has already freed.
         """
-        if getattr(self, "_shared_pool_client", None) is not None:
-            self._shared_pool_client.close()
+        client = self._shared_pool_client
+        if client is not None:
+            client.close()
             self._shared_pool_client = None
             self._codes_uva = self._scales_uva = None
             self.weight = nn.Parameter(torch.empty(0, dtype=self.storage_dtype, device="meta"), requires_grad=False)
@@ -286,7 +288,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         collective synchronizes writes and propagates loading failures.
         """
         if getattr(self, "_shared_pool_client", None) is not None:
-            expected = self._shared_pool_spec[2] + ".weight"
+            pool_key = self._shared_pool_spec[2]
+            assert pool_key is not None
+            expected = pool_key + ".weight"
             if key != expected:
                 raise ValueError("Shared Engram checkpoint key mismatch")
             return  # The external owner has already loaded and published these rows.

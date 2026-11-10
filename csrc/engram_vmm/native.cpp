@@ -99,7 +99,6 @@ int ReleaseLocal(LocalMapping& mapping) {
     return static_cast<int>(ret);
   };
   int rc = check(aclrtSetDevice(mapping.logical_device), "release set device");
-  if (rc) return rc;
   auto release = [&](void*& va, aclrtDrvMemHandle& pa, bool& mapped) {
     if (mapped) {
       int ret = check(aclrtUnmapMem(va), "unmap");
@@ -118,29 +117,39 @@ int ReleaseLocal(LocalMapping& mapping) {
     }
     return 0;
   };
-  rc = release(mapping.imported_va, mapping.imported_pa, mapping.imported_mapped);
-  if (rc) return rc;
-  rc = release(mapping.owner_va, mapping.owner_pa, mapping.owner_mapped);
-  if (rc) return rc;
+  // Device resources have ordering dependencies; a failed stage remains retryable.
+  if (!rc) rc = release(mapping.imported_va, mapping.imported_pa, mapping.imported_mapped);
+  if (!rc) rc = release(mapping.owner_va, mapping.owner_pa, mapping.owner_mapped);
+  const std::string first_error = rc ? g_error : "";
   if (mapping.descriptor_fd >= 0) {
-    close(mapping.descriptor_fd);
+    if (close(mapping.descriptor_fd) && !rc) {
+      rc = -errno;
+      SetError("close descriptor fd failed");
+    }
     mapping.descriptor_fd = -1;
   }
   if (mapping.owns_ready) {
     if (unlink((mapping.descriptor_path + ".ready").c_str()) && errno != ENOENT) {
-      int err = errno;
-      SetError("unlink owned ready marker failed");
-      return -err;
+      if (!rc) {
+        rc = -errno;
+        SetError("unlink owned ready marker failed");
+      }
+    } else {
+      mapping.owns_ready = false;
     }
-    mapping.owns_ready = false;
   }
-  if (!mapping.descriptor_path.empty()) {
+  // Keep the exclusive claim until all device resources have been released.
+  if (!rc && !mapping.descriptor_path.empty()) {
     if (unlink(mapping.descriptor_path.c_str()) && errno != ENOENT) {
-      int err = errno;
+      rc = -errno;
       SetError("unlink owned descriptor failed");
-      return -err;
+    } else {
+      mapping.descriptor_path.clear();
     }
-    mapping.descriptor_path.clear();
+  }
+  if (rc) {
+    if (!first_error.empty()) SetError(first_error);
+    return rc;
   }
   return 0;
 }

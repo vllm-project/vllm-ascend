@@ -4,6 +4,7 @@
 import importlib
 import importlib.util
 import json
+import socket
 import subprocess
 import sys
 import types
@@ -298,3 +299,11 @@ def test_consumer_launcher_bootstraps_in_separate_process(pool_module, owner, tm
     assert result.stdout.strip() == "service-started"
     assert (local / descriptor).read_bytes() == b"fake-vmm-fabric-handle"
     assert owner.root != local
+
+
+def test_owner_reuses_listener_port(pool_module, owner, tmp_path):
+    assert owner._listener.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) != 0
+    port = owner._listener.getsockname()[1]
+    owner.close(timeout=1)
+    replacement = pool_module.SharedPoolOwner(tmp_path / "replacement", "model-a", device="npu:0", port=port)
+    replacement.close(timeout=1)
