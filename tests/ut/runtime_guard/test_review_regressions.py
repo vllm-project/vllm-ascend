@@ -2409,3 +2409,47 @@ def test_v30b_cascade_skips_purge_when_hooks_stay_on():
         p.wave_tracker.discard_many.assert_not_called()
     finally:
         RequestGuardStore.reset_for_tests()
+
+
+def test_v30c_partial_disable_clears_detector_private_state_not_store():
+    """Turning off one detector calls on_disabled; shared Store IO stays."""
+    from vllm_ascend.observability.runtime_guard.detector.token_repeat import (
+        TokenRepeatDetector,
+        TokenRepeatState,
+    )
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.get_or_create("r1")
+        store.set_prompt_token_ids("r1", [1, 2])
+        store.append_output_ids("r1", [3, 4])
+
+        cfg = MagicMock()
+        cfg.detector_section.return_value = {
+            "enabled": False,
+            "window": 8,
+            "repeat_sum_threshold": 4,
+            "min_tokens": 0,
+            "consecutive_hits": 1,
+            "ignore_token_ids": [],
+        }
+        det = TokenRepeatDetector(runtime_config=cfg, runner=None)
+        det._enabled = True
+        det._states["r1"] = TokenRepeatState()
+        det._consumed_len["r1"] = 2
+        det._alerted.add("r1")
+
+        det.refresh_from_config()
+
+        assert det.enabled is False
+        assert det._states == {}
+        assert det._consumed_len == {}
+        assert det._alerted == set()
+        st = store.get_state("r1")
+        assert st is not None
+        assert st.prompt_token_ids == [1, 2]
+        assert st.output_token_ids == [3, 4]
+    finally:
+        RequestGuardStore.reset_for_tests()

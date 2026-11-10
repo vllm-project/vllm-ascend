@@ -65,6 +65,14 @@ class AnomalyDetector:
     def clear_finished(self, req_id: str) -> None:
         """Drop per-request state when a request finishes."""
 
+    def on_disabled(self) -> None:
+        """Drop all private per-req state when this detector is turned off.
+
+        Shared Store IO (prompt / output) is not owned here — the processor
+        soft-purges outputs only when *all* detectors go off. Override when
+        the detector keeps windows, history, or deferred queues.
+        """
+
     def on_alert_armed(self, alert: Incident) -> None:
         """Optional hook after dump arm or detect-only alert handling."""
 
@@ -98,9 +106,14 @@ class ConfigBackedDetector(AnomalyDetector):
             section = self._runtime_config.detector
         self._apply_detector_section(section)
 
-    def _apply_detector_section(self, section: dict[str, Any]) -> None:
+    def _apply_detector_section(self, section: dict[str, Any] | None) -> None:
+        if not isinstance(section, dict):
+            return
+        was_enabled = bool(self._enabled)
         self._enabled = bool(section.get("enabled", self._enabled))
         self._apply_detector_values(section.get)
+        if was_enabled and not self._enabled:
+            self.on_disabled()
 
     def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
         raise NotImplementedError(f"{type(self).__name__} must implement _apply_detector_values")
