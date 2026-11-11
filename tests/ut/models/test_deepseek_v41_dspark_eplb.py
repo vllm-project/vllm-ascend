@@ -11,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.models.utils import PPMissingLayer
 
+import vllm_ascend.patch.platform.patch_eplb  # noqa: F401 - exercise the Ascend runtime mapping
+from vllm_ascend.distributed.eplb.eplb_state import EXPERT_MAPPING_EP_SIZE
 from vllm_ascend.models.deepseek_v41 import dspark as dspark_module
 from vllm_ascend.models.deepseek_v41.dspark import DeepseekV41DSparkModel, DSparkDeepseekV41ForCausalLM
 
@@ -107,7 +109,11 @@ def test_checkpoint_loader_populates_every_local_physical_expert(draft_factory, 
     loaded = draft.load_weights(iter(weights))
 
     # The loader must match the initial physical placement used by the running EPLB version.
-    expected = EplbState.build_initial_global_physical_to_logical_map(logical, redundant)[begin : begin + local]
+    token = EXPERT_MAPPING_EP_SIZE.set(ep_size)
+    try:
+        expected = EplbState.build_initial_global_physical_to_logical_map(logical, redundant)[begin : begin + local]
+    finally:
+        EXPERT_MAPPING_EP_SIZE.reset(token)
     expected = torch.tensor(expected, dtype=torch.float32)
     torch.testing.assert_close(routed.w13_weight[:, 0], expected)
     torch.testing.assert_close(routed.w13_weight[:, 1], expected)
