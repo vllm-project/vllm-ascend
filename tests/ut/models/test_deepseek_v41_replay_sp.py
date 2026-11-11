@@ -4,6 +4,7 @@
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from vllm.config import CUDAGraphMode
+from vllm.v1 import utils as vllm_v1_utils
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as layers_mod
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
@@ -178,6 +180,15 @@ def _sp_dp_replay_worker(rank, init_method):
 
     try:
         with pytest.MonkeyPatch.context() as patch:
+            # copy_to_gpu() reads PIN_MEMORY independently of the buffer's
+            # pin_memory=False constructor argument. Forked CPU workers must
+            # not enter the accelerator's pinned-memory allocator.
+            patch.setattr(vllm_v1_utils, "PIN_MEMORY", False)
+            patch.setattr(
+                torch.Tensor,
+                "pin_memory",
+                Mock(side_effect=AssertionError("CPU replay must not pin accelerator memory")),
+            )
             patch.setattr(layers_mod, "get_tp_group", lambda: tp)
             patch.setattr(replay_mod, "get_tp_group", lambda: tp)
             patch.setattr(replay_mod, "get_dp_group", lambda: dp)
@@ -287,7 +298,9 @@ def _sp_dp_replay_worker(rank, init_method):
         dist.destroy_process_group()
 
 
-def test_sp_replay_with_dp_trimmed_decode_and_idle_peers(tmp_path):
+@pytest.mark.parametrize("pin_memory_available", [False, True])
+def test_sp_replay_with_dp_trimmed_decode_and_idle_peers(tmp_path, monkeypatch, pin_memory_available):
+    monkeypatch.setattr(vllm_v1_utils, "PIN_MEMORY", pin_memory_available)
     torch.set_num_threads(1)
     mp.start_processes(
         _sp_dp_replay_worker,
