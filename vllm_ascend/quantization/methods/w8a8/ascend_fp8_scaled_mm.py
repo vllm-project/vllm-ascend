@@ -47,6 +47,15 @@ Both paths re-quantize weights that PTPC has already quantized once, so the
 copy carries slightly more error than a direct BF16 -> MXFP8/INT8
 quantization would. Only the drafter reads the copy, so the extra error can
 move the acceptance length but never the target's verification output.
+
+On devices without native MXFP8 the upstream PTPC per-channel quantization
+itself cannot run as written — its fp32-to-e4m3 cast dispatches to an
+``aclnnInplaceCopy`` FP8-format path those devices do not implement, and so
+does every later e4m3 read — so ``register_ascend_fp8_lm_head_kernel`` also
+swaps ``online.fp8._fp8_quant_per_channel`` for a byte-identical variant
+that casts on the CPU and writes through a ``uint8`` view
+(:func:`_patch_ptpc_per_channel_quant_for_ascend`), and
+:func:`_e4m3_rows_to_float32` reads the PTPC weights back the same way.
 """
 
 import logging
@@ -58,6 +67,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
 )
@@ -80,6 +90,11 @@ _MXFP8_GROUP_SIZE = 32
 # fp8_block._ROWS_PER_DEQUANT_STEP.
 _ROWS_PER_DEQUANT_STEP = 1024
 
+# Mirrors upstream online.fp8._QUANT_CHUNK_ELEMS: the fp32 intermediate of
+# one per-channel quantization chunk stays under ~64 MB regardless of how
+# wide the weight is.
+_PTPC_QUANT_CHUNK_ELEMS = 16 * 1024 * 1024
+
 # INT8 symmetric quantization bounds for the per-channel requantization.
 _INT8_MIN = -128
 _INT8_MAX = 127
@@ -99,6 +114,32 @@ def _ptpc_config_failure(c: FP8ScaledMMLinearLayerConfig) -> str | None:
     return None
 
 
+def _e4m3_rows_to_float32(rows_e4m3: torch.Tensor) -> torch.Tensor:
+    """Cast a slice of PTPC e4m3 weights to float32 on the device.
+
+    On devices with native MXFP8 support the cast runs on the NPU. On the
+    others (A3 / A2) every e4m3 copy or cast dispatches to
+    ``aclnnInplaceCopy``'s FP8-format path, which those devices do not
+    implement (CANN error 561103), so the bytes take a CPU detour there:
+    ``uint8`` view -> host -> cast -> device. The values are identical
+    either way; this only runs at model-load time.
+    """
+    from vllm_ascend.device.hardware_profile import (
+        HardwareCapability,
+        get_current_hardware_profile,
+    )
+
+    if get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8):
+        return rows_e4m3.to(torch.float32)
+    return (
+        rows_e4m3.view(torch.uint8)
+        .cpu()
+        .view(rows_e4m3.dtype)
+        .to(torch.float32)
+        .to(rows_e4m3.device)
+    )
+
+
 def _iter_ptpc_row_chunks(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -116,7 +157,7 @@ def _iter_ptpc_row_chunks(
     n = weight_t.shape[0]
     for row_start in range(0, n, _ROWS_PER_DEQUANT_STEP):
         row_end = min(row_start + _ROWS_PER_DEQUANT_STEP, n)
-        chunk = weight_t[row_start:row_end].to(torch.float32)
+        chunk = _e4m3_rows_to_float32(weight_t[row_start:row_end])
         scales = weight_scale[row_start:row_end].to(torch.float32)
         yield row_start, row_end, chunk * scales
 
@@ -171,6 +212,67 @@ def _requantize_ptpc_to_int8(
         )
         scale[row_start:row_end] = row_scale
     return q, scale
+
+
+def _patch_ptpc_per_channel_quant_for_ascend() -> None:
+    """Make the PTPC per-channel FP8 weight quantization run on A3/A2.
+
+    Upstream ``_fp8_quant_per_channel`` materializes each quantized chunk
+    with ``out[rows] = (weight[rows] / scale[rows]).clamp_(...).to(fp8)``.
+    On devices without native MXFP8 support every copy or cast that touches
+    an e4m3 tensor dispatches to ``aclnnInplaceCopy``'s FP8-format path,
+    which those devices do not implement (CANN error 561103), so the cast
+    itself aborts and ``draft_lm_head_quantization="fp8"`` fails during
+    model load before the INT8 execution kernel's
+    ``process_weights_after_loading`` can re-quantize the PTPC layout.
+
+    The replacement keeps the quantization math and the resulting bytes
+    identical but performs the fp32-to-e4m3 cast on the CPU and ships the
+    chunk back as ``uint8`` bytes, a plain byte-copy path every device
+    supports. On devices with native MXFP8 support (A5 / Ascend 950 and
+    later) the original upstream function runs untouched, so the validated
+    A5 path is unchanged. Both runtime call sites (the PTPC linear method
+    and the per-expert MoE loop) resolve the function through the
+    ``online.fp8`` module globals at call time, so replacing the module
+    attribute covers them; the module may already be imported when the
+    worker patch runs, which is why the attribute is swapped instead of
+    relying on import order.
+    """
+    import vllm.model_executor.layers.quantization.online.fp8 as _online_fp8
+
+    upstream_quant = getattr(_online_fp8, "_fp8_quant_per_channel", None)
+    if upstream_quant is None:
+        # vLLM builds without the PTPC online method never call it.
+        return
+
+    def _ascend_fp8_quant_per_channel(
+        weight: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
+        from vllm_ascend.device.hardware_profile import (
+            HardwareCapability,
+            get_current_hardware_profile,
+        )
+
+        if get_current_hardware_profile().supports(
+            HardwareCapability.ENGRAM_MXFP8
+        ):
+            return upstream_quant(weight, scale)
+        fp8_min, fp8_max = get_fp8_min_max()
+        out = torch.empty_like(weight, dtype=current_platform.fp8_dtype())
+        chunk_rows = max(1, _PTPC_QUANT_CHUNK_ELEMS // weight.shape[-1])
+        # Same math and bytes as upstream; only the fp32 -> e4m3 cast moves
+        # to the CPU and the result is written through a uint8 view, so the
+        # unsupported FP8-format copy/cast is never dispatched.
+        out_bytes = out.view(torch.uint8)
+        for start in range(0, weight.shape[0], chunk_rows):
+            rows = slice(start, start + chunk_rows)
+            chunk = (weight[rows] / scale[rows]).clamp_(fp8_min, fp8_max)
+            out_bytes[rows] = (
+                chunk.cpu().to(out.dtype).view(torch.uint8).to(out.device)
+            )
+        return out
+
+    _online_fp8._fp8_quant_per_channel = _ascend_fp8_quant_per_channel
 
 
 class AscendFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -446,6 +548,11 @@ def register_ascend_fp8_lm_head_kernel() -> bool:
         kernel_type="fp8",
     )
 
+    # The INT8 execution kernel consumes the PTPC layout that upstream's
+    # per-channel quantization produces; that quantization itself must run
+    # first, which needs the uint8-view chunk copy on non-MXFP8 devices.
+    _patch_ptpc_per_channel_quant_for_ascend()
+
     # ``fp8_scaled_mm_is_batch_invariant`` only exists on vLLM builds that ship
     # the batch-invariance branch in ``online/fp8.py`` (v0.32.0+/main). On
     # v0.31.0 PTPC's apply() never consults it, so nothing needs patching.
@@ -478,7 +585,9 @@ def register_ascend_fp8_lm_head_kernel() -> bool:
         "Registered %s (MXFP8 execution) and %s (INT8 execution) on the OOT "
         "platform for FP8 PTPC online quantization "
         "(draft_lm_head_quantization='fp8'); is_supported resolves the "
-        "execution format from the hardware.",
+        "execution format from the hardware; on non-MXFP8 devices the PTPC "
+        "per-channel quantization's e4m3 casts run via a uint8-view CPU "
+        "detour.",
         AscendFP8ScaledMMLinearKernel.__name__,
         AscendFP8ScaledMMInt8LinearKernel.__name__,
     )
