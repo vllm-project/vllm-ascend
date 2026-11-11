@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 import torch
 import vllm.envs as envs
@@ -797,11 +797,12 @@ class BaseKVPoolWorker(ABC):
             self._kv_stats = AscendStoreKVConnectorStats()
             return stats
 
-    def _record_invalid_blocks_ids(self, block_ids: list[int]) -> None:
-        if not block_ids:
+    def _record_invalid_blocks_ids(self, block_ids: Iterable[int]) -> None:
+        new_block_ids = tuple(block_ids)
+        if not new_block_ids:
             return
         with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(block_ids)
+            self._invalid_block_ids.update(new_block_ids)
 
     def _record_failed_request(self, request: ReqMeta) -> None:
         request.can_save = False
@@ -1468,7 +1469,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                     ret,
                 )
                 if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
+                    self._record_invalid_blocks_ids(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
@@ -1483,7 +1484,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                     [1] * len(block_id_list_c),
                 )
                 if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
+                    self._record_invalid_blocks_ids(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "

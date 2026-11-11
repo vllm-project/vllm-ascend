@@ -1348,6 +1348,25 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
+    def test_sync_load_failure_is_reported_by_worker(self):
+        for ret in ([1], None):
+            with self.subTest(ret=ret):
+                worker = self._make_worker(extra_config={"backend": "mooncake", "load_async": False})
+                worker.m_store.get = MagicMock(return_value=ret)
+                worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+                req = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=16,
+                    block_ids=[7],
+                    block_hashes=["h0"],
+                    load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+                )
+                meta = AscendConnectorMetadata(set())
+                meta.add_request(req)
+                worker.start_load_kv(meta)
+                self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+                self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
         autospec=True,
