@@ -10,21 +10,20 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
 
-from tests.ut.core.test_scheduler_pause_drain import BLOCK_SIZE, MAX_DRAIN_STEPS, make_scheduler, start_async_load, step
+from tests.ut.core.test_scheduler_pause_drain import (
+    BLOCK_SIZE,
+    MAX_DRAIN_STEPS,
+    SCHEDULERS,
+    make_scheduler,
+    start_async_load,
+    step,
+)
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
 from vllm_ascend.ascend_config import clear_ascend_config
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
-from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
-from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 
-BUDGET_SCHEDULERS = (
-    DyntraLBScheduler,
-    AsyncDyntraLBScheduler,
-    BalanceScheduler,
-    RecomputeScheduler,
-    ProfilingChunkScheduler,
-)
+BUDGET_SCHEDULERS = SCHEDULERS
 
 
 @pytest.fixture(autouse=True)

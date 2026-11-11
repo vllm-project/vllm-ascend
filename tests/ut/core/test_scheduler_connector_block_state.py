@@ -96,6 +96,7 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
         AsyncDyntraLBRecomputeScheduler,
         ProfilingChunkScheduler,
         ProfilingChunkAsyncScheduler,
+        BalanceScheduler,
     ],
 )
 @pytest.mark.parametrize("loaded_groups", [(), (0,), (0, 1)])
@@ -125,6 +126,9 @@ def test_kv_zeroing_preserves_only_async_loaded_groups(scheduler_cls, loaded_gro
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(config),
     )
+    if isinstance(scheduler, BalanceScheduler):
+        scheduler._balance_enabled = True
+        scheduler.balance_queue = [torch.tensor([0], dtype=torch.int)]
     assert scheduler.needs_kv_cache_zeroing
     connector = MagicMock(spec=KVConnectorBase_V1)
     connector.get_num_new_matched_tokens.return_value = (2 * block_size, async_load)

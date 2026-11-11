@@ -8,3 +8,8 @@ entries:
     text: >-
       Fixed DyntraLB and Balance scheduling exceeding the batch input limit
       when speculative decoding requires additional drafting slots.
+  - category: bugfix
+    text: >-
+      Aligned Ascend scheduler overrides with vLLM v0.33.0 and the verified
+      main revision, including asynchronous KV-load admission, encoder cache
+      handling, speculative decoding boundaries, and model-runner metadata.
