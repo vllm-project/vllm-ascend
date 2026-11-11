@@ -745,10 +745,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 group_index=group_index,
                 group_mode=0,
                 swiglu_mode=3,
-                # Step3p5 currently requires a 7.0 limit but does not pass it
-                # into the MoE config, so mlp_compute_input.swiglu_limit may
-                # default to 0.0. Match the unfused SWIGLUSTEP path's 7.0.
-                clamp_limit=7.0,
+                # Step3p5 may omit the limit from MoE config. Fall back to
+                # 7.0 when it is missing, None or zero; otherwise use its value.
+                clamp_limit=getattr(mlp_compute_input, "swiglu_limit", 0.0) or 7.0,
                 dst_type=self.act_quant_type,
                 scale_alg=self._dynamic_mx_quant_scale_alg,
             )
