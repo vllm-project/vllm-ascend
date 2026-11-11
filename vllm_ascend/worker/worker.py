@@ -56,10 +56,13 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -83,7 +86,6 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
 )
-from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout, kv_cache_allocation_bytes
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -95,18 +97,16 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
-    build_layerwise_tensors,
-    get_layerwise_policy,
+    build_layerwise_reuse_layout,
     get_layerwise_reuse_config,
     get_physical_layer_index,
-    infer_layerwise_reuse_layout,
-    validate_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.models.qwen4_exp.cache_config import uses_qwen4_cache_pool
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -118,22 +118,14 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 
-# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
-# in kv_cache_utils, so importing the main-only module breaks worker startup.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
-else:
-    from vllm.v1.core.kv_cache_planning import (
-        unify_hybrid_kv_cache_specs,
-    )
 
-    from vllm_ascend.core.kv_cache_config_builder import get_kv_cache_groups_for_profiling as get_kv_cache_groups
+def get_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -149,18 +141,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
-
-
-class _V1ModelRunnerFactory:
-    """Import the V1 model runner only when one is actually constructed."""
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-        return NPUModelRunner(*args, **kwargs)
-
-
-NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -598,20 +578,16 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
-            logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+            from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-                with torch_cuda_wrapper():
-                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-            else:
-                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
-
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+            with torch_cuda_wrapper():
+                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
         else:
+            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
@@ -789,32 +765,27 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
-        # Engine core resolves and broadcasts the cache layout after its first
-        # get_kv_cache_spec RPC. Grouping is only valid here, during profiling.
-        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
-        if extra_config is not None:
-            speculator = getattr(self.model_runner, "speculator", None)
-            speculative = self.vllm_config.speculative_config
-            draft_names = (
-                set(speculator.draft_attn_layer_names)
-                if speculative is not None and speculative.method == "dspark" and speculator is not None
-                else set()
-            )
-            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
-                kv_cache_spec,
-                extra_config,
-                excluded_layer_names=draft_names,
-            )
+        if (
+            uses_qwen4_cache_pool(kv_cache_spec)
+            and get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
+        ):
+            # This pool is sized from its final physical descriptors on the engine.
+            return available_memory
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
-        # The planning bridge owns layout dispatch. Workers only need to know
-        # whether it already accounts for the physical pool across all groups.
-        # Import lazily at the platform-patch initialization boundary.
-        from vllm_ascend.patch.platform.patch_kv_cache_utils import _has_ascend_multi_allocation_kv_cache_layout
-
-        if _has_ascend_multi_allocation_kv_cache_layout(kv_cache_groups):
-            return available_memory
+        # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
+        # physical storage across all groups. Their budgets must not take the
+        # generic per-layer scale, including when the runner uses sparse SFA.
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
+            )
+            if any(
+                getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41", "glm5_next"} for spec in specs
+            ):
+                return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
         # allocation. For block-compact layouts, Ascend can
@@ -1209,22 +1180,16 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        if vllm_version_is("0.32.0"):
-            # v0.32.0's engine core never issues this RPC, and the upstream
-            # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
-            # helpers do not exist on that lane.
-            return None
-        else:
-            from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-                _find_simple_cpu_offload_connector,
-            )
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
 
-            if not has_kv_transfer_group():
-                return None
-            connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-            if connector is None:
-                return None
-            return connector.get_aligned_num_cpu_blocks()
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
 
     def _get_layerwise_kv_cache_memory_info(
         self,
@@ -1233,60 +1198,53 @@ class NPUWorker(WorkerBase):
         *,
         excluded_layer_names: set[str] | None = None,
     ) -> tuple[int, int, float]:
-        if not kv_cache_spec:
+        if not kv_cache_spec or uses_qwen4_cache_pool(kv_cache_spec):
             return 0, 0, 1.0
-        groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        # Match the allocation planner: persistent draft pages are not target
+        # scratch slots and must be counted once each in the physical budget.
+        excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
+        target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_physical_layer_index(name, base_layers) for name in kv_cache_spec}
-        # Use the same layout dispatch as engine planning. A planner which
-        # charges physical pool bytes has already included reuse savings.
-        # Import lazily because the platform patch registers this boundary.
-        from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-            _ascend_get_kv_cache_config_from_groups,
-            _ascend_pool_bytes_per_block,
-            _has_ascend_multi_allocation_kv_cache_layout,
-            _orig_get_kv_cache_config_from_groups,
+        physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
+        num_layers = len(physical_layers)
+        if num_layers < base_layers:
+            return num_layers, num_layers, 1.0
+        reuse_layout = build_layerwise_reuse_layout(
+            target_specs,
+            base_layers,
+            extra_config,
         )
+        if not reuse_layout.has_layer_reuse:
+            return num_layers, num_layers, 1.0
+        num_buffer_assignments = len(reuse_layout.buffer_slots)
 
-        uses_physical_budget = _has_ascend_multi_allocation_kv_cache_layout(groups)
-        if uses_physical_budget:
-            # A capacity override must not inflate the one-block probe. Copy
-            # only the configuration shells; never mutate the engine's config.
-            probe_config = copy.copy(self.vllm_config)
-            probe_config.cache_config = copy.copy(self.vllm_config.cache_config)
-            probe_config.cache_config.num_gpu_blocks_override = None
-            probe = _ascend_get_kv_cache_config_from_groups(
-                probe_config,
-                groups,
-                _ascend_pool_bytes_per_block(probe_config, groups),
-            )
-        else:
-            probe_config = copy.copy(self.vllm_config)
-            probe_config.cache_config = copy.copy(self.vllm_config.cache_config)
-            probe_config.cache_config.num_gpu_blocks_override = 1
-            probe = _orig_get_kv_cache_config_from_groups(
-                probe_config,
-                groups,
-                sum(spec.page_size_bytes for spec in kv_cache_spec.values()),
-            )
-        policy = get_layerwise_policy(probe, base_layers, extra_config, excluded_layer_names)
-        layout = get_layerwise_layout(probe)
-        if layout is None:
-            probe, layout = infer_layerwise_reuse_layout(probe, policy, base_layers=base_layers)
-        else:
-            validate_layerwise_reuse_layout(probe, layout, policy=policy, base_layers=base_layers)
-        if uses_physical_budget:
-            # Applying the saving again would count it twice. Slot validation
-            # above still runs, including explicit reuse/exclusion conflicts.
-            return len(physical_layers), len(set(layout.layer_buffers.values())), 1.0
-        if not layout.has_layer_reuse:
-            return len(physical_layers), len(physical_layers), 1.0
-        old_bytes = kv_cache_allocation_bytes(probe.kv_cache_tensors)
-        new_bytes = kv_cache_allocation_bytes(build_layerwise_tensors(probe, layout))
-        return len(physical_layers), len(set(layout.layer_buffers.values())), old_bytes / new_bytes
+        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        physical_page_bytes = sum(kv_cache_spec[name].page_size_bytes for name in excluded_layer_names)
+        for slot in reuse_layout.buffer_slots:
+            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
+            for layer in slot:
+                indexer = reuse_layout.layer_cache_specs[layer].indexer
+                if indexer is not None:
+                    physical_page_bytes += indexer.spec.page_size_bytes
+                    break
+        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            speculator = getattr(self.model_runner, "speculator", None)
+            speculative = self.vllm_config.speculative_config
+            draft_names = (
+                set(speculator.draft_attn_layer_names)
+                if speculative is not None and speculative.method == "dspark" and speculator is not None
+                else set()
+            )
+            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
+                kv_cache_spec,
+                extra_config,
+                excluded_layer_names=draft_names,
+            )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
             register_kvpp_draft_layers(
@@ -1365,20 +1323,8 @@ class NPUWorker(WorkerBase):
         )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
-        # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
-        # introduced only to prevent a recycled Mamba block from exposing stale
-        # values when reused by full attention during multi-step speculation.
-        speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_mamba_eagle_zeroing = (
-            kv_cache_config.has_mamba_layers
-            and speculative_config is not None
-            and speculative_config.method == "eagle3"
-            and speculative_config.num_speculative_tokens > 1
-        )
-        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
-        )
+        # set, so its worker-side consumer must use the same condition.
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
@@ -1413,10 +1359,9 @@ class NPUWorker(WorkerBase):
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
             # Else: profiler already initialized. Restart profiling but keep the
             # original trace name from the first initialization.
-            if not vllm_version_is("0.32.0"):
-                # vLLM main supports per-session profiler kwargs; the release
-                # wrapper has no slot for them.
-                self.profiler.set_profiler_kwargs(profiler_kwargs)
+            # vLLM main supports per-session profiler kwargs; the release
+            # wrapper has no slot for them.
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
             if self.profiler is None:

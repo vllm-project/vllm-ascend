@@ -588,6 +588,10 @@ class BaseKVPoolWorker(ABC):
         return shard_bytes
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
+        placement = getattr(getattr(self, "kv_cache_config", None), "placement", None)
+        if placement is not None and not placement.rotating_names:
+            placement = None
+        rotating_entries = []
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
@@ -604,6 +608,7 @@ class BaseKVPoolWorker(ABC):
                 self.physical_layer_to_group_layers.setdefault(phys, []).append(
                     (group_id, len(layer_cache_entry_offsets) - 1)
                 )
+            entry_start = len(group_addrs)
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 caches = self._as_cache_tuple(cache_or_caches)
@@ -616,6 +621,8 @@ class BaseKVPoolWorker(ABC):
                 for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
                         group_cache_entry_segments.append((segment_index, len(segments)))
+                        if placement is not None and layer_name in placement.rotating_names:
+                            rotating_entries.append(len(group_addrs) - entry_start)
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
@@ -627,6 +634,12 @@ class BaseKVPoolWorker(ABC):
                         2 * (caches[0].shape[0] // self.num_blocks),
                         len(combined),
                     )
+            if placement is not None:
+                self.layerwise_component_indices[group_id, len(layer_cache_entry_offsets) - 1] = (
+                    tuple(rotating_entries),
+                    len(group_addrs) - entry_start,
+                )
+                rotating_entries.clear()
             layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
@@ -684,6 +697,7 @@ class BaseKVPoolWorker(ABC):
             self.block_len.append(block_len)
             self.block_stride.append(block_stride)
 
+        self.layerwise_component_indices: dict[tuple[int, int], tuple[tuple[int, ...], int]] = {}
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}

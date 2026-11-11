@@ -1,8 +1,5 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
-For the separate experimental Qwen4Exp hybrid-cache reuse path, see
-[Qwen4Exp layerwise KV cache reuse](qwen4_layerwise_kv_offload.md).
-
 Layerwise and sparse KV cache offloading are supported only in disaggregated
 Prefill/Decode (PD) deployments. Colocated Prefill/Decode serving is not supported.
 
@@ -117,7 +114,26 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 | `layerwise_num_shared_buffers` | Defaults to the number of cache-bearing layers, so omitting it does not enable cross-layer buffer reuse. Explicitly set a smaller count, such as `3`, to enable reuse. Independent layers keep dedicated buffers in addition to this shared-buffer budget; unused slots are not allocated. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
 
-The following log confirms that buffer reuse is enabled:
+For Qwen4Exp on the GVA layerwise connector, the planner splits resident and
+rotating cache names and groups their descriptors by `block_stride`. Within
+each stride bucket, every scheduler group assigns its rotating names in layer
+execution order to buffers `0, 1, ..., N-1` repeatedly. Removing a resident
+cache happens before this assignment: with layer 0 resident and two buffers,
+GDN group 2 assigns layers 1, 4, 6 to buffer 0 and layers 2, 5, 8 to buffer 1.
+Different scheduler groups share corresponding slots using disjoint active
+physical block IDs. Resident names occupy separate slots in the same bucket;
+their slot ordinals also overlay across groups. With layers 0, 3, 16, and 32
+resident, their main K/V or GDN state shares one resident slot in addition to
+the two rotating slots.
+
+QSA main K/V and GDN state participate by default. Raw and compressed indexer
+caches, PLE, and explicitly independent layers retain their device storage.
+Each bucket allocates the maximum resident count among its groups plus the
+maximum used rotating-buffer count. The worker uses `layerwise_prefetch_layers`
+to schedule loads and waits for the previous same-group buffer users to finish
+saving before overwriting their cache.
+
+Models using the original attention-only planner report buffer reuse in the log:
 
 ```text
 Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.

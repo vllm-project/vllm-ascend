@@ -170,7 +170,7 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
 
         self.assertIs(result, mock_method.return_value)
         self.assertIs(layer.scheme, moe_scheme)
-        mock_method.assert_called_once_with(moe_scheme, layer.moe_config, None)
+        mock_method.assert_called_once_with(moe_scheme, layer.moe_config)
 
     def test_no_quant_method(self):
         layer = MagicMock(spec=Attention)

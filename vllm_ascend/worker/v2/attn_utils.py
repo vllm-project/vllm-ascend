@@ -87,7 +87,6 @@ from vllm_ascend.core.kv_cache_interface import (
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
-from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
@@ -132,7 +131,7 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
 
     QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
@@ -307,7 +306,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             compression_ratio = get_kv_cache_compression_ratio(spec)
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
-                reuse=spec.reuse,
                 block_size=spec.block_size,
                 # ``num_heads`` describes physical cache head slots, not query
                 # heads. Kimi K3 publishes one latent KV slot per token; using
@@ -341,7 +339,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
             head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
-                reuse=spec.reuse,
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
@@ -374,13 +371,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             spec = AscendFlashAttentionBackend.customize_spec(spec)
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
-        # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
-        # the spec while specs are built. The v0.32.0 lane has no ``is_draft``
-        # field and annotates EAGLE groups through the packed hook, so only main
-        # propagates the flag here; without it no group is flagged as the draft
-        # model's and the coordinator fallback treats the target groups as
-        # EAGLE groups too.
-        if not vllm_version_is("0.32.0") and getattr(attn_module, "is_draft_layer", False):
+        # Both supported planners identify EAGLE groups through spec.is_draft.
+        if getattr(attn_module, "is_draft_layer", False):
             spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
@@ -1242,11 +1234,7 @@ def _allocate_kv_cache(
     )
     if qwen4_cache_layout is not None:
         backing = _allocate_int8_cache_tensor(
-            next(
-                tensor.size
-                for tensor in kv_cache_config.kv_cache_tensors
-                if qwen4_cache_layout.owner(tensor.layers[0]).role not in (PLE, HIDDEN)
-            ),
+            kv_cache_config.kv_cache_tensors[0].size,
             alignment,
             device,
         )
@@ -1725,6 +1713,15 @@ def _reshape_kv_cache_v2(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
     )
+    qwen_offsets = (
+        {
+            name: tensor.offset + index * tensor.layer_stride
+            for tensor in kv_cache_config.kv_cache_tensors
+            for index, name in enumerate(tensor.layers)
+        }
+        if qwen4_cache_layout is not None
+        else {}
+    )
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         layer_tuple_strides = {
@@ -1781,15 +1778,10 @@ def _reshape_kv_cache_v2(
                 raw_slab = kv_cache_raw_tensors[layer_name]
                 if not isinstance(raw_slab, torch.Tensor):
                     raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
-                slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
-                reuse_layout = get_layerwise_layout(kv_cache_config)
-                if reuse_layout is not None and reuse_layout.has_layer_reuse:
-                    descriptor = next(t for t in kv_cache_config.kv_cache_tensors if layer_name in t.layers)
-                    if owner.role not in (PLE, HIDDEN):
-                        region_name = qwen4_cache_layout.region_name_for_owner(layer_name)
-                        layer_offset = descriptor.offset + descriptor.layers.index(layer_name) * descriptor.layer_stride
-                        slot_offset = layer_offset - qwen4_cache_layout.region(region_name).offset
-
+                slot_offset = 0
+                if owner.role not in (HIDDEN, PLE):
+                    anchor = qwen4_cache_layout.region_name_for_owner(layer_name)
+                    slot_offset = qwen_offsets[layer_name] - qwen4_cache_layout.region(anchor).offset
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
                     region = qwen4_cache_layout.region("r0")

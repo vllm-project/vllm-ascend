@@ -33,7 +33,6 @@ from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadat
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-import vllm_ascend.patch.patch_layerwise_cache_fields  # noqa: F401
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -52,7 +51,7 @@ from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_indexer  # type: ignore[import-not-found]
 
@@ -65,7 +64,7 @@ else:
 
 # The upstream backend class is renamed per tree; the class definition below
 # carries the resulting valid-type/misc ignores.
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.33.0"):
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSAFlashAttentionBackend  # type: ignore[attr-defined]
 else:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
@@ -185,14 +184,6 @@ def apply_qsa_rope(
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
 
-class AscendQSACompressedKeyCache(upstream_indexer.QSACompressedKeyCache):
-    def get_kv_cache_spec(self, vllm_config):
-        return replace(super().get_kv_cache_spec(vllm_config), reuse=True)
-
-
-upstream_indexer.QSACompressedKeyCache = AscendQSACompressedKeyCache
-
-
 class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     """QSA indexer using NPU-compatible cache, RoPE and top-k operators."""
 
@@ -275,7 +266,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             first_positions,
         )
 
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
 
         def forward(  # type: ignore[misc, override]
             self,
@@ -459,7 +450,7 @@ class AscendQSAImpl:
     supports_dcp = False
     supports_pcp = False
 
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
 
         def __init__(self, *args: object, **kwargs: object) -> None:
             del kwargs
@@ -508,7 +499,7 @@ class AscendQSAImpl:
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
         _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
 
         def forward_qsa(
             self,
@@ -725,7 +716,7 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
 # structure, cache specifications and weight mapping in upstream vLLM.
 upstream_indexer.apply_qsa_rope = apply_qsa_rope
 upstream_qsa.QSAIndexer = AscendQSAIndexer
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.33.0"):
     upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl  # type: ignore[attr-defined]
     upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend  # type: ignore[attr-defined]
 else:
@@ -746,9 +737,6 @@ qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
-
-    def get_kv_cache_spec(self, vllm_config):
-        return replace(super().get_kv_cache_spec(vllm_config), reuse=True)
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
@@ -796,7 +784,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 raise RuntimeError("Fused QSA preparation requires an output gate")
             gate.copy_(projected_gate.view_as(gate))
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             selected = cast(
                 torch.Tensor,
                 self.indexer(  # type: ignore[call-arg]
@@ -829,7 +817,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # name and signature follow the tree's upstream ABI.
         impl: Any = self.impl
         with attention_transfer_window():
-            if vllm_version_is("0.32.0"):
+            if vllm_version_is("0.33.0"):
                 impl.forward_qsa(
                     self,
                     query,

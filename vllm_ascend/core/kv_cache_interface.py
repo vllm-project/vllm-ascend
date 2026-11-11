@@ -24,8 +24,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-import vllm_ascend.patch.patch_layerwise_cache_fields  # noqa: F401
-
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -355,7 +353,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             "and DCP replication size."
         )
         return cls(
-            reuse=specs[0].reuse,
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
@@ -437,7 +434,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         if None not in extra_retained_set:
             carried_kwargs.update(declared_kwarg(cls, "extra_retained_tokens", extra_retained_set.pop()))
         return cls(
-            reuse=specs[0].reuse,
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,

@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mla import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
@@ -32,7 +33,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.utils import PPMissingLayer, extract_layer_index, spec_decode_needs_target_embed
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
@@ -307,6 +308,19 @@ def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
 
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
+    vllm_config = kwargs["vllm_config"]
+    # GLM-5.x uses the generic DeepseekV2Model on Ascend. Provision the
+    # last-stage embedding before the normal target checkpoint load, so
+    # upstream DFlash sharing needs no override. Preserve an embedding that
+    # a newer upstream constructor already provides. Draft QuaRot alignment
+    # remains a separate post-processing step on private draft weights.
+    if isinstance(self.embed_tokens, PPMissingLayer) and spec_decode_needs_target_embed(vllm_config):
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{kwargs.get('prefix', '')}.embed_tokens",
+        )
     # V2 relays aux slots upstream; V1 still uses the Ascend tensor payload.
     self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner
     self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)

@@ -277,14 +277,13 @@ used during rollout. See the upstream
 for training-side usage.
 
 `--return-sampling-mask` enables the feature and is disabled by default.
-Model runner V2 and `--logprobs-mode processed_logprobs` are required.
+`--logprobs-mode processed_logprobs` is required.
 The following example also uses `--tokens-only` to expose the token-in/token-out
 API and skip tokenizer initialization. Use `--enable-scale-out` instead to expose the
 same endpoint while retaining the normal serving setup and tokenizer.
 See [Tokens in, tokens out](#tokens-in-tokens-out) for serving details.
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 \
 vllm serve Qwen/Qwen3-0.6B \
     --tokens-only \
     --return-sampling-mask \
@@ -528,19 +527,16 @@ for the supported load-balancing modes.
 
 Trace replay forces the engine to emit a predetermined token sequence during
 decoding while computing real logprobs from the model's unmodified logit
-distribution. It is only supported by model runner V2. When using the normal
-`vllm serve` command with the token-in/token-out endpoint, explicitly enable
-model runner V2 and the scale-out endpoints:
+distribution. When using the normal
+`vllm serve` command with the token-in/token-out endpoint, enable the scale-out
+endpoints:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 \
 vllm serve Qwen/Qwen3-8B \
     --enable-scale-out \
     --enable-trace-replay
 ```
 
-`VLLM_USE_V2_MODEL_RUNNER=1` prevents the server from falling back to model
-runner V1, which is incompatible with trace replay.
 `--enable-scale-out` registers the
 `/inference/v1/generate` endpoint for a normal serving process.
 `--enable-trace-replay` opts the server into accepting trace replay requests.
@@ -576,7 +572,6 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 | `--return-sampling-mask` | Sampling Mask (Distribution Replay) | Return the support set for each generated token; disabled by default |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Sampling Mask and Trace Replay | Select the model runner V2 implementation required by both features |
 | `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 

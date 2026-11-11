@@ -19,7 +19,6 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
-import vllm_ascend.patch.platform.patch_layerwise_cache_planning  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
@@ -80,8 +79,7 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils` (v0.32.0) /
-#      `vllm.v1.core.kv_cache_planning` (main, vLLM #61183)
+#   1. `vllm.v1.core.kv_cache_planning` (both supported versions, vLLM #61183)
 #    Why:
 #       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
 #       topology, where MLA and compressed indexer caches share block IDs while
@@ -95,6 +93,11 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream's generic KV-cache layout supports the
 #       Ascend GLM-Next cache topology.
+#
+#       On both supported versions, Ascend grouping and pool accounting live
+#       in AscendKVCacheConfigBuilder, which the platform selects through
+#       NPUPlatform.get_kv_cache_config_builder_cls. Its default materialization
+#       delegates to the patched planning functions in this file.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

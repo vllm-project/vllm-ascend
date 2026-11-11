@@ -51,14 +51,10 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
 
 # vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
 # that prefix caching requires `mamba_cache_mode="align"` in both supported lanes.
 _MAMBA_CACHING_MODE = "align"
-
-# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -785,8 +781,8 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
     assert worker_mamba_widths == {354}
 
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
-    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec.first_spec, MLAAttentionSpec)
-    assert all(isinstance(group.kv_cache_spec.first_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
+    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec, MLAAttentionSpec)
+    assert all(isinstance(group.kv_cache_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
     scheduler_mamba_widths = {
         group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
         for group in scheduler_config.kv_cache_groups[1:]
@@ -922,19 +918,11 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert result.num_blocks == 7
     assert result.kv_cache_tensors == [planned_tensor]
 
-    if _UPSTREAM_MAX_MEMORY_TAKES_BUILDER:
-        # vLLM #42309 threads the KVCacheConfigBuilder through admission on
-        # main; the DSV4 shared-tuple branch does not read it.
-        needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
-            MagicMock(),
-            vllm_config,
-            kv_cache_config.kv_cache_groups,
-        )
-    else:
-        needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
-            vllm_config,
-            kv_cache_config.kv_cache_groups,
-        )
+    needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+        MagicMock(),
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+    )
     full_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())

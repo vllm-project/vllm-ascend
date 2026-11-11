@@ -1,8 +1,5 @@
 # Layerwise and Sparse KV Cache Offloading Design
 
-The experimental Qwen4Exp hybrid-cache allocation contract is described in
-[Qwen4Exp model-aware layerwise cache plan](qwen4_layerwise_kv_offload.md).
-
 This document explains why Prefill and Decode use different KV cache offload
 strategies, how the two strategies work, and how they preserve correctness when
 used together.
@@ -308,7 +305,7 @@ sender thread remains alive, Prefill may continue waiting.
   build's device metadata before offload allocation; it does not require NPU
   initialization or a runtime SoC query.
 - Layerwise shared-buffer offload requires the Memcache backend and eager mode.
-- Sparse Decode Offload supports Model Runner V1 and V2 with an SFA/MLA
+- Sparse Decode Offload supports an SFA/MLA
   sparse-attention model. The main KV cache must use BF16; packed main caches
   (C8 or TQ4) are rejected. LIC8 quantization is supported separately for the
   device-resident indexer cache.

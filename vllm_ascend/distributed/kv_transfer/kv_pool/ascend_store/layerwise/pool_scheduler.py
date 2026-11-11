@@ -7,16 +7,16 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
-from vllm_ascend.core.layerwise_cache_config import get_layerwise_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    get_layerwise_policy,
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
-    validate_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
@@ -51,15 +51,17 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        self._layerwise_layout = get_layerwise_layout(kv_cache_config)
-        self.load_async = False
-        if self.use_layerwise_transfer:
-            self._init_layerwise_offload(vllm_config, kv_cache_config)
+        self._layerwise_layout = getattr(kv_cache_config, "placement", None)
         self._layerwise_save_blocks = (
             InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
-            if self._layerwise_layout is not None and self._layerwise_layout.has_layer_reuse
+            if self.use_layerwise_transfer
+            and self._layerwise_layout is not None
+            and self._layerwise_layout.rotating_names
             else None
         )
+        self.load_async = False
+        if self.use_layerwise_transfer:
+            self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -99,12 +101,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def update_connector_output(self, connector_output) -> None:
         super().update_connector_output(connector_output)
         tracker = getattr(self, "_layerwise_save_blocks", None)
+        if tracker is None:
+            return
         meta = connector_output.kv_connector_worker_meta
-        if (
-            tracker is not None
-            and isinstance(meta, AscendStoreKVConnectorWorkerMetadata)
-            and self._block_pool is not None
-        ):
+        if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
             tracker.complete(meta.completed_events, self._block_pool)
 
     def has_pending_push_work(self) -> bool:
@@ -119,18 +119,29 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _async_load_enabled(self) -> bool:
         return False
 
-    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
+    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
+        placement = getattr(kv_cache_config, "placement", None)
+        if placement is not None:
+            self.layerwise_offload = bool(placement.rotating_names)
+            return
         reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
         if kv_cache_config is not None and reuse_config is not None:
-            layout = get_layerwise_layout(kv_cache_config)
-            if layout is None:
-                raise ValueError("Layerwise cache configuration has no published reuse layout")
-            policy = get_layerwise_policy(kv_cache_config, self.num_layers, reuse_config)
-            validate_layerwise_reuse_layout(kv_cache_config, layout, policy=policy, base_layers=self.num_layers)
-            self._layerwise_layout = layout
-            self.layerwise_offload = layout.has_layer_reuse
-            return
-        self.layerwise_offload = False
+            reuse_layout = build_layerwise_reuse_layout(
+                get_layerwise_kv_cache_specs(kv_cache_config),
+                self.num_layers,
+                reuse_config,
+            )
+            if reuse_layout.layer_cache_specs:
+                self.num_layers = max(
+                    self.num_layers,
+                    max(reuse_layout.layer_cache_specs) + 1,
+                )
+            self.layerwise_offload = reuse_layout.has_layer_reuse
+        else:
+            self.layerwise_offload = build_layerwise_cache_layout(
+                self.num_layers,
+                extra_config,
+            ).has_layer_reuse
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens

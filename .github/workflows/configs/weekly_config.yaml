@@ -21,6 +21,12 @@ a2:
     test_config:
 
 a3:
+  eight_node:
+    test_config:
+      - name: Kimi-K3-W4A8-A3-1M-PD
+        config_file_path: Kimi-K3-W4A8-A3-1M-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/Kimi
+        size: 8
   multi_node:
     test_config:
       - name: Qwen3.5-397B-w8a8-PD

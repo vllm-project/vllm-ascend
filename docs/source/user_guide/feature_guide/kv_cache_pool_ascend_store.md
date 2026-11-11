@@ -90,10 +90,10 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     ldd --version
     ```
 
-2. Install Mooncake:
+2. The vllm-ascend Docker images install Mooncake. Verify the installation:
 
     ```shell
-    python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
+    python3 -m pip show mooncake-transfer-engine-npu
     ```
 
 #### Step 2: Configure mooncake.json and Start mooncake_master

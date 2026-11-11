@@ -151,6 +151,7 @@ class SharedBlockData:
     block_keys: list[str] | None = None
     save_keys: list[str] = field(default_factory=list)
     load_keys: list[str] = field(default_factory=list)
+    snapshot_gvas: tuple[int, ...] = ()
 
 
 @dataclass
@@ -170,6 +171,8 @@ class LayerTransferTask:
     use_key_major_ranges: bool = False
     # Group-local completion differs from the physical model layer boundary.
     final_group_layer: bool = False
+    component_indices: tuple[int, ...] | None = None
+    snapshot_components: tuple[int, ...] | None = None
 
 
 @dataclass

@@ -14,19 +14,18 @@
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
-from dataclasses import replace
-
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
-try:
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
-except ImportError:
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
-
+from vllm_ascend.models.qwen3_5_vl import (
+    AscendQwen3_5VLProcessor,
+    _AscendProcessorMixin,
+    _AscendVLPreprocessMixin,
+)
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -35,7 +34,6 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from .cache_config import get_qwen4_exp_kv_cache_groups
 from .ple import patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
@@ -57,17 +55,6 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
-
-
-class AscendQwen4GatedDeltaNetAttention(upstream_model.QwenGatedDeltaNetAttention):
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
-        if isinstance(spec, MambaSpec):
-            return replace(spec, reuse=True)
-        return spec
-
-
-upstream_model.QwenGatedDeltaNetAttention = AscendQwen4GatedDeltaNetAttention
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
@@ -93,13 +80,6 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
     @classmethod
-    def get_kv_cache_groups(
-        cls, vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
-    ) -> list[KVCacheGroupSpec]:
-        groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, get_kv_cache_groups)
-        return get_kv_cache_groups(vllm_config, kv_cache_spec) if groups is None else groups
-
-    @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
         # dense bank; only GDN's complete conv+SSM state shares QSA pages.
@@ -112,14 +92,19 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
         return AscendQwen4ExpModelState
 
 
-class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
-    """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4ExpProcessingInfo):
+    """Preserve Qwen4Exp config handling while emitting raw image payloads."""
 
-    @classmethod
-    def get_kv_cache_groups(
-        cls, vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
-    ) -> list[KVCacheGroupSpec]:
-        return AscendQwen4ExpForCausalLM.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    pass
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    AscendQwen3_5VLProcessor,
+    info=AscendQwen4ExpProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
+class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
+    """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

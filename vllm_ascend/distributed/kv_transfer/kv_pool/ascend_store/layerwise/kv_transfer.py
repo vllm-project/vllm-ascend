@@ -161,6 +161,9 @@ class LayerBatchBuilder:
         block_ids_arr: np.ndarray,
         base_gvas_arr: np.ndarray,
         layer_id: int,
+        component_indices: tuple[int, ...] | None = None,
+        snapshot_components: tuple[int, ...] | None = None,
+        snapshot_gvas: tuple[int, ...] = (),
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
         end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
@@ -197,10 +200,24 @@ class LayerBatchBuilder:
             base_gvas_arr.tolist(),
         )
 
+        if component_indices is not None:
+            # Keep remote offsets in the complete per-layer prefix object.
+            selected = list(component_indices)
+            layer_inner_offsets = layer_inner_offsets[selected]
+            layer_block_len = layer_block_len[selected]
+            layer_base_addrs = layer_base_addrs[selected]
+            layer_block_stride = layer_block_stride[selected]
         addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * layer_block_stride[None, :]
         size_arr = np.broadcast_to(layer_block_len, addr_arr.shape)
         gvas_arr = base_gvas_arr[:, None] + rank_layer_offset + layer_inner_offsets[None, :]
 
+        if snapshot_components is not None and snapshot_gvas:
+            # Full prefix objects must remain complete for external hits. A
+            # request-scoped offload snapshot only needs the rotating entries.
+            snapshot_rows = np.isin(base_gvas_arr, snapshot_gvas)
+            rotating = np.isin(np.arange(len(layer_block_len)), snapshot_components)
+            selected_entries = ~snapshot_rows[:, None] | rotating[None, :]
+            return addr_arr[selected_entries], size_arr[selected_entries], gvas_arr[selected_entries]
         return (
             addr_arr.ravel(),
             size_arr.ravel(),
@@ -270,6 +287,7 @@ class LayerBatchBuilder:
         is_last_chunks: list[bool | None] = []
         all_save_keys: list[str] = []
         all_load_keys: list[str] = []
+        snapshot_gvas: set[int] = set()
         collected_load_keys_request_ids: set[int] = set()
         offset = 0
 
@@ -311,6 +329,8 @@ class LayerBatchBuilder:
                 if partial_block_gva is None:
                     partial_block_gva = request.last_block_gva
                 assert partial_block_gva is not None
+                if is_save:
+                    snapshot_gvas.add(partial_block_gva)
                 block_ids_arr[offset] = block_ids_np[block_range.partial_block_index]
                 block_gvas_arr[offset] = partial_block_gva
                 offset += 1
@@ -345,6 +365,7 @@ class LayerBatchBuilder:
             req_ids=req_ids,
             is_last_chunks=is_last_chunks,
             save_keys=all_save_keys,
+            snapshot_gvas=tuple(snapshot_gvas),
             load_keys=all_load_keys,
         )
 
@@ -448,6 +469,8 @@ class LayerBatchBuilder:
         self,
         shared: SharedBlockData,
         layer_id: int,
+        component_indices: tuple[int, ...] | None = None,
+        snapshot_components: tuple[int, ...] | None = None,
     ) -> LayerBatchReqMeta | LayerRangeReqMeta:
         """Compute per-layer addresses from pre-computed shared block data."""
         if shared.block_keys is not None:
@@ -478,7 +501,12 @@ class LayerBatchBuilder:
 
         assert shared.block_gvas_arr is not None
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
-            shared.block_ids_arr, shared.block_gvas_arr, layer_id
+            shared.block_ids_arr,
+            shared.block_gvas_arr,
+            layer_id,
+            component_indices,
+            snapshot_components,
+            shared.snapshot_gvas,
         )
 
         return LayerBatchReqMeta(
@@ -500,7 +528,7 @@ class LayerBatchBuilder:
         shared = self.build_shared(task, is_save)
         if shared is None:
             return None
-        return self.build_addrs(shared, task.layer_idx_in_group)
+        return self.build_addrs(shared, task.layer_idx_in_group, task.component_indices)
 
 
 class KVCacheStoreLayerSendingThreadBase(KVTransferThread):
@@ -1048,7 +1076,11 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 continue
             has_any_save = True
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+            req_meta = (
+                builder.build_addrs(shared, task.layer_idx_in_group, snapshot_components=task.snapshot_components)
+                if task.snapshot_components is not None
+                else builder.build_addrs(shared, task.layer_idx_in_group)
+            )
             if not isinstance(req_meta, LayerBatchReqMeta):
                 raise TypeError(f"Expected GVA layer metadata, got {type(req_meta).__name__}")
             all_save_keys.extend(shared.save_keys)
@@ -1364,7 +1396,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             shared = task.shared_block_data
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
             if shared is not None:
-                built_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                built_meta = builder.build_addrs(shared, task.layer_idx_in_group, task.component_indices)
                 if not isinstance(built_meta, LayerBatchReqMeta):
                     raise TypeError(f"Expected GVA layer metadata, got {type(built_meta).__name__}")
                 req_meta: LayerBatchReqMeta | None = built_meta

@@ -51,7 +51,6 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
-from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -90,21 +89,12 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
         .to(device=packed_param.device, dtype=packed_param.dtype)
         .contiguous()
     )
-    # vLLM main (#62326) keeps the parameter object by default and drops
-    # `prefer_copy`; v0.32.0 still requires `prefer_copy=True`.
-    if vllm_version_is("0.32.0"):
-        replace_parameter(
-            conv1d,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-            prefer_copy=True,
-        )
-    else:
-        replace_parameter(
-            conv1d,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-        )
+    # replace_parameter preserves the parameter object on both supported versions.
+    replace_parameter(
+        conv1d,
+        _PACKED_CONV_WEIGHT_NAME,
+        packed_weight,
+    )
 
 
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
@@ -193,6 +183,12 @@ def _flatten_recurrent_state_indices(
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
     return state_indices[seq_ids, slot_ids].contiguous()
+
+
+# The fla_npu AscendC recurrent GDN kernel silently returns without writing
+# output when a sequence exceeds this many tokens. Wider speculative windows
+# must use the uncapped FLA Triton recurrent kernel instead.
+_MAX_RECURRENT_GDN_TOKENS = 8
 
 
 def _split_head_first_conv_output(
@@ -720,10 +716,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            if attn_metadata.spec_decode_metadata.use_upstream_recurrent:
+            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
+                spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
+            )
+            if use_upstream_recurrent:
                 # The native packed-index API bounds accepted_prev by the
                 # current query length. Reuse vLLM's strided state-table API
-                # for adaptive graphs, whose next query may be only one token.
+                # for adaptive graphs and windows wider than the AscendC cap.
                 core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
                     q=query_spec,
                     k=key_spec,
