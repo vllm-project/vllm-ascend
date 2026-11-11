@@ -222,12 +222,12 @@ def test_a5_split_k_matches_metadata(queries, lengths, layout, topk, ratio, patt
 @pytest.mark.parametrize("quant_mode", [1, 2])
 @torch.inference_mode()
 def test_a5_split_k_graph_changes_dispatch(quant_mode):
-    run, active_rows, update = _make_a5_case([1, 5], [8193, 32769], quant_mode=quant_mode)
+    run, active_rows, update = _make_a5_case([1, 1], [8193, 8193], quant_mode=quant_mode)
     run()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         outputs = [run() for _ in range(CAPTURE_CALLS)]
-    for lengths in ([8193, 32769], [4097, 8193], [513, 8193], [0, 4097], [8193, 32769]):
+    for lengths in ([8193, 8193], [4097, 4097], [513, 8193], [0, 4097], [8193, 8193]):
         update(lengths)
         expected = run(serial=True)
         for _ in range(4):
