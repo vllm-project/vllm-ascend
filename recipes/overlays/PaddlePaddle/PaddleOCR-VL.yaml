@@ -9,7 +9,7 @@ variants:
       - ascend_310p3
     hardware_overrides:
       ascend_310p3:
-        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-310p@sha256:930dcb52a6d80460d823367356b012e95b18327470cff2bc2b94063b49b5f175
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-310p@sha256:041cc7f7b9e9c51cd823da28dc5a6c8ea1ac06df2b203e69a82766fc1668eafa
         docker_serve_command: vllm serve
         install:
           pip: false
@@ -42,7 +42,7 @@ variants:
       - ascend_310p3
     hardware_overrides:
       ascend_310p3:
-        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-310p@sha256:930dcb52a6d80460d823367356b012e95b18327470cff2bc2b94063b49b5f175
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-310p@sha256:041cc7f7b9e9c51cd823da28dc5a6c8ea1ac06df2b203e69a82766fc1668eafa
         docker_serve_command: vllm serve
         install:
           pip: false
@@ -75,7 +75,7 @@ variants:
       - ascend_910b4
     hardware_overrides:
       ascend_910b3:
-        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2@sha256:6348403a0ebb19f52bc1b7497de1daeb6df0e4650f9051c169e47a011527a6c3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0@sha256:28351d337b7f9367073344240fa4e28d99794d549d577eaf317689950064150a
         docker_serve_command: vllm serve
         install:
           pip: false
@@ -101,7 +101,7 @@ variants:
           CPU_AFFINITY_CONF: '1'
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       ascend_910b4:
-        docker_image: quay.io/ascend/vllm-ascend:nightly-main@sha256:4b537a90f25f7d282927b49f474f9d8ecf61fd0bf556c28e9ec1ac54d48371c3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0@sha256:28351d337b7f9367073344240fa4e28d99794d549d577eaf317689950064150a
         docker_serve_command: vllm serve
         install:
           pip: false
@@ -135,9 +135,9 @@ guide_sections:
   ascend: |
     ## Ascend support and version scope
 
-    The current [main tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/PaddleOCR-VL.md) discontinues future PaddleOCR-VL support from v0.30.0 and points to the [historical v0.23.0 tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/PaddleOCR-VL.html). This recipe preserves its original 0.9B model and A2/310P scenarios. The pinned RC configurations and the separately identified nightly-main supplement record their measured environments; they do not promise support in future releases or validate a moving main tag.
+    The current [main tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/PaddleOCR-VL.md) discontinues future PaddleOCR-VL support from v0.30.0 and points to the [historical v0.23.0 tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/PaddleOCR-VL.html). This recipe preserves its original 0.9B model and A2/310P scenarios. The builder uses the stable `v0.30.0` A2 and `v0.30.0-310p` images, pinned to immutable manifest indices. The RC and nightly-main measurements below retain their original version scope; they do not validate these replacement stable images or promise support in future releases.
 
-    The A2 BF16 graph and 310P FP16 graph/eager variants are single-NPU configurations. The pinned 310P image passed 32 recognition requests across both modes, both aliases and four tasks, including 16 warmups. Document parsing and full-dataset results have separate environment identities.
+    The A2 BF16 graph and 310P FP16 graph/eager variants are single-NPU configurations. The previous pinned 310P RC image passed 32 recognition requests across both modes, both aliases and four tasks, including 16 warmups. Document parsing and full-dataset results have separate environment identities.
 
     ## Ascend 310P: original PaddleOCR-VL-0.9B
 
@@ -148,7 +148,7 @@ guide_sections:
     Both public model aliases are served: `PaddlePaddle/PaddleOCR-VL` for this site's
     Verify/Bench clients and `PaddleOCR-VL-0.9B` for the PaddleOCR document pipeline.
 
-    The builder now uses the official `v0.30.0rc2-310p` image (vLLM v0.30.0), pinned to
+    The previous builder used the official `v0.30.0rc2-310p` image (vLLM v0.30.0), pinned to
     `sha256:930dcb52a6d80460d823367356b012e95b18327470cff2bc2b94063b49b5f175`.
     On 2026-11-05 its official and platform-mirror manifest indices matched the pinned digest. Native HiDevLab 310P3 serving passed graph/eager, both aliases and four recognition tasks: 32 requests including 16 warmups, with checked content and finish_reason=stop. CANN 9.2.0, driver 25.5.0, Python 3.12.13 and torch_npu 2.10.0.post7 were used. This is functional recognition evidence, not replacement-image full-dataset accuracy. The former 2026-10-12 nightly digest
     `sha256:3706317b3a91fda5b7b53174d65d97aeb5c762068c8edf96387f0e9f462f9723`
@@ -669,7 +669,7 @@ guide_sections:
 
     The main registry tag resolved to index
     `sha256:4b537a90f25f7d282927b49f474f9d8ecf61fd0bf556c28e9ec1ac54d48371c3`,
-    which the new 910B4 option pins. The platform did not expose the native
+    which was the previous 910B4 builder pin. The platform did not expose the native
     container image ID, so that lookup is recorded separately from its measured
     source/package identity. No normal Docker CLI launch or future-main support
     is claimed. Metadata remains supported rather than verified. Generated
