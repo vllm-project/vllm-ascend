@@ -284,23 +284,7 @@
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
-#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
-#    Why:
-#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
-#       multiple block sizes do not support decode context parallelism.
-#       This restriction is correct for CUDA but not for Ascend, which
-#       implements context parallelism for MLA and SWA-MLA layers separately.
-#    How：
-#       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
-#       + DCP case by returning lcm(block_sizes) * dcp as scheduler_block_size
-#       instead of raising ValueError.
-#    Related PR (if no, explain why):
-#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
-#    Future Plan:
-#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
-#       non-CUDA backends, or exposes a platform hook for this behavior.
-#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
+#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
 #      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
 #    Why:
 #       Ascend cache layouts need platform-specific materialization and memory
