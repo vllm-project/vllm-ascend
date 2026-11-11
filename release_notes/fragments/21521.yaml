@@ -1,0 +1,13 @@
+pr: 21521
+entries:
+  - category: dependency
+    text: >-
+      Upgraded the CANN branch to the Ascend 0.32 release integration and matching
+      vLLM v0.32.0 core. Use the matching runtime and operator environment from
+      the branch Dockerfiles when upgrading from vLLM 0.30.
+  - category: config
+    text: >-
+      CANN deployments use the native 0.32 SWA replay and standard Store paths
+      while retaining CANN-specific cache protocols. Model Runner V2 requires
+      removal of legacy DSA-CP options; replay remains subject to its parallel
+      layout and graph mode checks.

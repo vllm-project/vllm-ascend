@@ -1597,6 +1597,37 @@ class TestUpstreamConfigCompatibility(TestBase):
                 with self.subTest(field="hidden_size", value=3584), patch.object(text_config, "hidden_size", 3584):
                     self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
+    def test_megamoe_v41_uses_release_shape_and_quantization_guards(self):
+        text = SimpleNamespace(
+            model_type="deepseek_v41_text",
+            hidden_size=5120,
+            moe_intermediate_size=2304,
+            num_experts_per_tok=8,
+        )
+        vc = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=text, get_num_experts=lambda: 256),
+            parallel_config=SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1),
+        )
+        # 0.32 has a common aligned-range policy instead of the old A3/A5
+        # whitelist. V4.1's 2304 width already satisfies that policy.
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        for size in (1024, 1536, 2048, 2560, 3072):
+            with self.subTest(moe_intermediate_size=size):
+                text.moe_intermediate_size = size
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        for size in (0, 257, 2305, 4224):
+            with self.subTest(moe_intermediate_size=size):
+                text.moe_intermediate_size = size
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.moe_intermediate_size = 2304
+        text.hidden_size = 896
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.hidden_size = 5120
+        text.moe_quantize = "mxfp4"
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.moe_quantize = "w8a8_dynamic"
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(

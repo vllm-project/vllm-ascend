@@ -1150,7 +1150,9 @@ class TestNPUPlatform(TestBase):
 
         # Missing V2 extras previously sent MXFP weights to the legacy INT
         # dispatch/FFN/combine branch, which requires scale-bias tensors.
-        fused_input = SimpleNamespace(weights=SimpleNamespace(w1_scale_bias=None, w2_scale_bias=None))
+        fused_input = SimpleNamespace(
+            weights=SimpleNamespace(w1_scale_bias=None, w2_scale_bias=None), shared_weights=None
+        )
         with (
             patch("vllm_ascend.ascend_forward_context._USE_V2_EXTRA_KWARGS", True),
             patch(

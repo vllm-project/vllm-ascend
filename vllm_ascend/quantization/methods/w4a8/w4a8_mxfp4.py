@@ -218,6 +218,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 layer=layer,
+                shared_weights=shared_experts,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
@@ -573,3 +574,25 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
             num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
         )
         return param_dict
+
+    def process_weights_after_loading(self, layer):
+        if getattr(layer, "_mxfp4_transformed", False):
+            return
+        # The common 0.32 path owns the canonical MegaMoE/EPLB expert lists.
+        # Reinterpret DeepSeek's semantic E8M0 scales as checkpoint bytes before
+        # it creates the ordinary GMM views and fused-operator scale views.
+        scale_names = ("w13_weight_scale", "w2_weight_scale")
+        layer._ds_mxfp4_scale_dtypes = {name: getattr(layer, name).dtype for name in scale_names}
+        for name in scale_names:
+            scale = getattr(layer, name)
+            scale.data = scale.data.view(torch.uint8)
+        super().process_weights_after_loading(layer)
+
+    def restore_weights_for_rl_loading(self, layer):
+        if not getattr(layer, "_mxfp4_transformed", False):
+            return
+        super().restore_weights_for_rl_loading(layer)
+        for name, dtype in layer._ds_mxfp4_scale_dtypes.items():
+            scale = getattr(layer, name)
+            scale.data = scale.data.view(dtype)
+        del layer._ds_mxfp4_scale_dtypes

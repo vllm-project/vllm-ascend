@@ -51,6 +51,7 @@ class RoutedMoEMilestones:
     shared_activation_overlap_start: torch.npu.Event | None = None
     routed_combine_start: torch.npu.Event | None = None
     routed_finalize_done: torch.npu.Event | None = None
+    shared_experts_fused: bool = False
 
     @property
     def has_fine_grained_stage_events(self) -> bool:
