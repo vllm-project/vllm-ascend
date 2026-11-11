@@ -924,26 +924,36 @@ def main():
             else:
                 _route_explicit_test_target(target, all_groups)
     elif args.all_tests:
-        matched_modules = ["all"]
-        for root in _ALL_TESTS_ROOTS:
-            if _SKIP_CPU_UT and _is_ut_path(root):
-                print(
-                    f"  Skipping {root} (--skip-cpu-ut is set)",
-                    file=sys.stderr,
-                )
-                continue
-            path = Path(root)
-            if _is_ut_path(root):
-                _scan_ut_test_dir(root, all_groups)
-            elif path.is_dir():
-                _scan_e2e_test_dir(root, all_groups)
-            else:
-                print(
-                    f"Warning: Path does not exist: {root}",
-                    file=sys.stderr,
-                )
-        for operator_test in precision_only_e2e.verification_tests:
-            _route_precision_only_e2e_target(operator_test, all_groups, precision_only_e2e)
+        # Temporary: a non-empty verification list replaces the full suite so
+        # the single-card operator check does not start the other runners.
+        # Remove this branch together with verification_tests.
+        if precision_only_e2e.verification_tests:
+            matched_modules = ["operator-verification"]
+            print(
+                "Verification operator tests are set; skipping the rest of the full suite.",
+                file=sys.stderr,
+            )
+            for operator_test in precision_only_e2e.verification_tests:
+                _route_precision_only_e2e_target(operator_test, all_groups, precision_only_e2e)
+        else:
+            matched_modules = ["all"]
+            for root in _ALL_TESTS_ROOTS:
+                if _SKIP_CPU_UT and _is_ut_path(root):
+                    print(
+                        f"  Skipping {root} (--skip-cpu-ut is set)",
+                        file=sys.stderr,
+                    )
+                    continue
+                path = Path(root)
+                if _is_ut_path(root):
+                    _scan_ut_test_dir(root, all_groups)
+                elif path.is_dir():
+                    _scan_e2e_test_dir(root, all_groups)
+                else:
+                    print(
+                        f"Warning: Path does not exist: {root}",
+                        file=sys.stderr,
+                    )
     else:
         if args.curated not in curated_tests:
             print(

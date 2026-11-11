@@ -71,6 +71,7 @@ def test_all_tests_skips_operator_directory(monkeypatch, capsys):
 
     groups = _groups_from_stdout(capsys)
     assert _runners_for(groups, _OPS_TEST) == set()
+    assert _runners_for(groups, _A3_E2E) == set()
     meta = select_tests.yaml.safe_load(
         select_tests.Path(".github/workflows/scripts/test_config.yaml").read_text(encoding="utf-8")
     )
