@@ -1,0 +1,4 @@
+pr: 21748
+entries:
+  - category: config
+    text: Exposed ACLNN_CACHE_LIMIT as a documented environment variable and added a startup advisory when speculative decoding with ACL Graph runs without it; the variable is a diagnostic knob and is not set automatically.

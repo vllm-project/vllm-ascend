@@ -92,6 +92,27 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Maximum number of compiled ACLNN operator descriptors that the CANN
+    # executor keeps cached per worker process. Valid values are positive
+    # integers; unset keeps the CANN default (10000).
+    # When the cache is full, the executor stops reusing descriptors and
+    # recomputes tiling and workspace on the host for every call. In a torch
+    # profile that shows up as a large `aclnn*GetWorkspaceSize` / `*_Tiling`
+    # share, i.e. as host-side overhead rather than NPU time.
+    # Model Runner V2 captures the target and the speculative prefill/decode
+    # graphs separately, so it browses a larger operator/shape working set than
+    # Model Runner V1. Qwen3.6-35B-A3B (TP=2, MTP=3, FULL_AND_PIECEWISE) was
+    # observed holding about 9945 entries after startup, i.e. one warmup away
+    # from the default ceiling.
+    # The variable is exposed for diagnosis and tuning, not as a known fix: in
+    # our own A/B runs on v0.30.0 (Qwen3.6-35B-A3B-w8a8, TP=2, seq=2048 and
+    # seq=8192) raising the limit did not change the prefill wave time beyond
+    # run-to-run noise, so measure before and after instead of assuming a win.
+    # Raising the limit increases host (CPU) memory usage, because more
+    # descriptors are retained per worker. CANN reads this variable when the
+    # ACLNN executor is created, so it must be present in the worker process
+    # environment before startup; it is not sensitive data.
+    "ACLNN_CACHE_LIMIT": lambda: os.getenv("ACLNN_CACHE_LIMIT", None),
 }
 
 # end-env-vars-definition

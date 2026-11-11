@@ -319,3 +319,39 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 26. Why does prefill TTFT regress on Model Runner V2 with speculative decoding?
+
+If a Model Runner V2 deployment with speculative decoding and ACL Graph shows a sustained prefill
+TTFT regression while NPU kernel time is flat or slightly better, check the host side of a torch
+profile first. A profile of one affected configuration reported in
+[#21741](https://github.com/vllm-project/vllm-ascend/issues/21741) shows a large
+`aclnn*GetWorkspaceSize` and `*_Tiling` share, for example:
+
+- `aclnnMatmulGetWorkspaceSize`: 0 calls on the previous runner, ~1000 calls here
+- `MatMulV2_Tiling` / `Transpose_Tiling`: 0 calls on the previous runner, ~1900 / ~3300 calls here
+- `aclnnChunkGatedDeltaRuleFwdGetWorkspaceSize`: same number of calls, ~13x the cost per call
+
+One candidate explanation is the CANN ACLNN operator-descriptor cache. Its capacity is
+`ACLNN_CACHE_LIMIT` per worker process and defaults to `10000`. Model Runner V2 captures the target
+and the speculative prefill/decode graphs separately, so it browses a larger operator/shape working
+set than the previous runner; a worker has been observed holding about 9900 entries right after
+startup. Once the cache is full, the executor stops reusing descriptors and recomputes tiling and
+workspace on the host for every call.
+
+`ACLNN_CACHE_LIMIT` is therefore exposed as a **diagnostic knob**, not as a guaranteed fix. To test
+it on your own workload:
+
+```bash
+# worker processes must see this before startup: CANN reads it when the
+# ACLNN executor is created
+export ACLNN_CACHE_LIMIT=100000
+```
+
+then re-measure the same workload with and without it. Raising the limit increases host (CPU)
+memory usage, since more descriptors are retained per worker, so keep it only if the comparison
+shows a reproducible gain. Our own A/B on vLLM-Ascend `v0.30.0` (Qwen3.6-35B-A3B-w8a8, TP=2,
+MTP=3, 12-wave prefill at 2048 and 8192 tokens) did **not** show a change beyond run-to-run noise,
+which is why the variable is not set automatically and why the framework only logs an advisory:
+vLLM-Ascend warns when speculative decoding with ACL Graph is configured and `ACLNN_CACHE_LIMIT`
+is unset.
