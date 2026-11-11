@@ -31,6 +31,72 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
 logger = logging.getLogger(__name__)
 
+# Strategies whose ``prepare()`` splits the token dimension across the TP group.
+# ALLGATHER is absent on purpose: it gathers the batch before routing.
+_TP_SHARDED_COMM_TYPES = frozenset(
+    {
+        MoECommType.ALLTOALL,
+        MoECommType.MC2,
+        MoECommType.FUSED_MC2,
+    }
+)
+
+
+def _padded_batch_rows(tp_size: int) -> int:
+    """Row count the MoE dispatch padded the token dimension to before splitting it.
+
+    Taken from the target ``prepare()`` padded to rather than from this rank's
+    shard, which only adds up to the total when the split is even: All2All splits
+    a batch with ``num_tokens >= tp_size`` unevenly whenever it is not a multiple
+    of the TP size. There is deliberately no ``shard_rows * tp_size`` fallback --
+    it would silently bring that rank-dependent length back.
+    """
+    prepare_finalize = getattr(_EXTRA_CTX.moe_comm_method, "prepare_finalize", None)
+    padded_num_tokens = getattr(_EXTRA_CTX, "padded_num_tokens", None)
+    num_tokens = getattr(prepare_finalize, "num_tokens", None)
+
+    if getattr(prepare_finalize, "replace_allreduce", False):
+        # Sequence parallel: the model wrapper already chunked the sequence to a
+        # multiple of the TP size, so this batch-wide target is the padded length.
+        total_rows = padded_num_tokens if isinstance(padded_num_tokens, int) else None
+    elif _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
+        # All2All pads to the TP size, and only when the batch is smaller than it.
+        total_rows = max(num_tokens, tp_size) if isinstance(num_tokens, int) else None
+    elif isinstance(num_tokens, int) and isinstance(padded_num_tokens, int):
+        # MC2/FUSED_MC2 pad to ``padded_num_tokens``, and only when the batch is
+        # smaller than that target.
+        total_rows = max(num_tokens, padded_num_tokens)
+    else:
+        total_rows = None
+
+    if total_rows is None:
+        raise AssertionError(
+            "RoutedExpertsCapturer: cannot rebuild the TP-sharded routing batch, the MoE dispatch "
+            f"metadata is missing (comm_type={_EXTRA_CTX.moe_comm_type}, num_tokens={num_tokens!r}, "
+            f"padded_num_tokens={padded_num_tokens!r}). Refusing to infer the length from this rank's "
+            "shard, which is only valid when the split is even."
+        )
+    return total_rows
+
+
+def _gather_tp_sharded_topk_ids(topk_ids: torch.Tensor, tp_size: int, total_rows: int) -> torch.Tensor:
+    """Rebuild the pre-split batch from every TP rank's routing shard.
+
+    ``tensor_split`` reproduces the chunks ``prepare()``/``finalize()`` use, so
+    the all-gather restores the original row order.
+    """
+    gathered = torch.empty(
+        (total_rows, topk_ids.shape[1]),
+        dtype=topk_ids.dtype,
+        device=topk_ids.device,
+    )
+    dist.all_gather(
+        list(torch.tensor_split(gathered, tp_size, dim=0)),
+        topk_ids.contiguous(),
+        get_tp_group().device_group,
+    )
+    return gathered
+
 
 def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
     """Capture expert routing decisions for a specific layer.
@@ -61,6 +127,10 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         few trailing padding rows which are trimmed by the downstream
         ``[:token_num_per_dp]`` slice.
 
+    The TP split also happens with ``DP == 1``: ``ctx.dp_metadata`` does not
+    describe it, but All2All/MC2 still split inside the TP group, so the same
+    all-gather is needed there. ALLGATHER does not split and needs none.
+
     Args:
         layer_id: The layer index.
         topk_ids: Tensor of shape (batch_size, num_routed_experts).
@@ -69,8 +139,21 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
     ctx = get_forward_context()
     if ctx.dp_metadata is None:  # single dp
         start_loc = 0
-        end_loc = topk_ids.shape[0]
-        token_num_per_dp = topk_ids.shape[0]
+        end_loc = token_num_per_dp = topk_ids.shape[0]
+
+        # All2All/MC2 split the token dimension across the TP group even with
+        # DP=1, so ``topk_ids`` only holds this rank's shard. Capturing it as the
+        # whole batch leaves the other ``device_buffer`` rows stale, and routing
+        # replay then serves wrong expert ids for them. The condition is
+        # rank-invariant, so every TP rank gathers in lockstep.
+        if self.tp_size > 1 and _EXTRA_CTX.moe_comm_type in _TP_SHARDED_COMM_TYPES:
+            total_rows = _padded_batch_rows(self.tp_size)
+            topk_ids = _gather_tp_sharded_topk_ids(topk_ids, self.tp_size, total_rows)
+            # Rows past the batch are the padding ``prepare()`` appended, and the
+            # consumer only reads ``device_buffer[:num_tokens]``. Writing the whole
+            # gathered tensor avoids a second token-count estimate; the clamp only
+            # guards an over-padded gather against the buffer size.
+            end_loc = token_num_per_dp = min(topk_ids.shape[0], self.device_buffer.shape[0])
     else:  # multi dp
         num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
         token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())

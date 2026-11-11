@@ -326,6 +326,7 @@ def prepare_dflash_inputs_triton(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    num_reqs_override: int | None = None,
     *,
     kv_cache_block_size: int,
 ) -> None:
@@ -337,11 +338,15 @@ def prepare_dflash_inputs_triton(
             ownership and convert global positions to rank-local positions.
             One physical block may span multiple kernel blocks; its size must
             be divisible by ``block_size`` (for example, 384 versus 128).
+        num_reqs_override: Caps the number of processed requests. vLLM main
+            (#58984) forwards the DP-synced request count during dummy runs so
+            the drafter does not process target request padding; the remaining
+            slots are graph-safely zeroed below.
     """
-    num_reqs = input_batch.num_reqs
-    assert num_reqs > 0
+    num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
+    assert 0 < num_reqs <= input_batch.num_reqs
 
-    max_target_query_len = int(input_batch.num_scheduled_tokens.max())
+    max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
 
     init_device_properties_triton()
     vectorcore_count = get_vectorcore_num()

@@ -10,8 +10,10 @@ copy nor a host-side gather.
 """
 
 import ctypes
+import mmap
 from functools import cache
 from multiprocessing import shared_memory
+from typing import cast
 from unittest.mock import patch
 
 import torch
@@ -25,6 +27,14 @@ SCALE_GROUP = 32
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
+
+
+def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
+    """Ask the kernel to back a shared Engram mapping with shmem THPs."""
+    try:
+        cast(mmap.mmap, shm.buf.obj).madvise(mmap.MADV_HUGEPAGE, 0, size)
+    except (AttributeError, OSError) as exc:
+        logger.warning("madvise(MADV_HUGEPAGE) failed for shared Engram: %s", exc)
 
 
 def engram_cpu_offload(vllm_config) -> bool:
@@ -132,25 +142,48 @@ def _host_library() -> ctypes.CDLL:
     return lib
 
 
+class HostUvaBufferCleanupError(RuntimeError):
+    """Keep a partially constructed host buffer available for cleanup retry."""
+
+    def __init__(self, host_buffer, initialization_error, cleanup_error):
+        super().__init__(
+            f"Host buffer initialization failed: {initialization_error}; "
+            f"cleanup failed: {cleanup_error}. Retry host_buffer.close()."
+        )
+        self.host_buffer = host_buffer
+
+
 class HostUvaBuffer:
     """Host memory the device gathers from directly."""
 
     def __init__(self, shape, dtype, device):
         self.lib = _host_library()
+        self._registered = False
+        self.ptrs = None
+        self.tensor = None
+        self.buffer = None
         rows = int(shape[0])
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
-        self.pointer = ctypes.c_void_p()
-        rc = self.lib.aclrtMallocHost(ctypes.byref(self.pointer), size, 0)
+        # Align the payload to avoid incorrect device reads observed on A3/CANN 9.2;
+        # retain the original allocation for free.
+        alignment = 64 * 1024
+        self._allocation_pointer = ctypes.c_void_p()
+        rc = self.lib.aclrtMallocHost(ctypes.byref(self._allocation_pointer), size + alignment - 1, 0)
         if rc:
             raise RuntimeError(f"aclrtMallocHost failed: rc={rc} size={size}")
-        self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
-        self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
+        allocation_address = self._allocation_pointer.value
+        if allocation_address is None:
+            raise RuntimeError("aclrtMallocHost returned a NULL pointer")
+        self.pointer = ctypes.c_void_p((allocation_address + alignment - 1) // alignment * alignment)
         try:
+            self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
+            self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
             rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
+            self._registered = True
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
@@ -160,14 +193,14 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
-        except Exception:
-            # A half-built buffer must not leave the host range registered: the
-            # caller only sees the exception, so nothing else can release it.
-            self.lib.aclrtHostUnregister(self.pointer)
-            self.lib.aclrtFreeHost(self.pointer)
-            self.tensor = None
-            self.buffer = None
-            self.pointer = ctypes.c_void_p()
+        except Exception as initialization_error:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                # Assignment to the caller's owner has not completed. Retain
+                # this allocation on the exception rather than lose the only
+                # handle capable of retrying unregister/free.
+                raise HostUvaBufferCleanupError(self, initialization_error, cleanup_error) from cleanup_error
             raise
 
     def close(self):
@@ -181,15 +214,18 @@ class HostUvaBuffer:
             return
         if self.ptrs is not None and self.ptrs.device.type == "npu":
             torch.npu.synchronize()
-        rc = self.lib.aclrtHostUnregister(self.pointer)
+        if self._registered:
+            rc = self.lib.aclrtHostUnregister(self.pointer)
+            if rc:
+                raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
+            self._registered = False
+        # A failed free must remain retryable without unregistering twice.
+        rc = self.lib.aclrtFreeHost(self._allocation_pointer)
         if rc:
-            raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
+            raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
         self.tensor = None
         self.buffer = None
         self.ptrs = None
-        rc = self.lib.aclrtFreeHost(self.pointer)
-        if rc:
-            raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
         self.pointer = ctypes.c_void_p()
 
 
@@ -214,6 +250,7 @@ def gather_dequantize_host_uva(
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
     pad_heads = local_heads if pad_heads is None else pad_heads
+    assert codes.tensor is not None
     width = codes.tensor.shape[-1]
     vocab_end = codes.tensor.shape[0] if vocab_end is None else vocab_end
     tokens = ids.shape[0]
@@ -293,6 +330,7 @@ class SharedUvaBuffer:
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
+            _madvise_hugepage(self.shm, size)
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")

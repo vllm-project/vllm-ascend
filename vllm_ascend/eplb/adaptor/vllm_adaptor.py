@@ -29,7 +29,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.NONE, False): ("w13_weight", "w2_weight"),
-    (QuantType.NONE, True): ("w13_weight", "w2_weight"),
+    (QuantType.NONE, True): ("w13_weight_list", "w2_weight_list"),
     (QuantType.W8A8, False): (
         "w13_weight_list",
         "w2_weight_list",
@@ -57,11 +57,9 @@ EPLB_EXPERT_WEIGHT_NAMES = {
         "w2_weight_list",
         "w13_weight_scale_list",
         "w2_weight_scale_list",
+        "w13_scale_bias_list",
+        "w2_scale_bias_list",
     ),
-    (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W4A8MXFP, False): (
         "w13_weight_list",
         "w2_weight_list",
@@ -74,18 +72,28 @@ EPLB_EXPERT_WEIGHT_NAMES = {
         "w13_weight_scale_list",
         "w2_weight_scale_list",
     ),
+    (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, False): ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
+    (QuantType.W8A8MXFP, True): ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
 }
 
-# W4A8MXFP expert weights are FRACTAL_NZ (mxfp C0_16). batch_isend_irecv carries the standalone
-# offset-0 NZ block directly, so their receive buffer must be a matching NZ tensor built with this
-# (customize_dtype, input_dtype) pair (torch.empty_like on NZ falls back to ND). Only the weight
-# lists are NZ; the scale lists stay ND.
-ACL_FORMAT_FRACTAL_NZ = 29
-_W4A8MXFP_NZ_CAST_KWARGS = {
-    "customize_dtype": torch.float8_e4m3fn,
-    "input_dtype": torch_npu.float4_e2m1fn_x2,
-}
 _W4A8MXFP_NZ_WEIGHT_NAMES = {"w13_weight_list", "w2_weight_list"}
+
+
+def _new_w4a8_mxfp_nz_buffer(expert_tensor: torch.Tensor) -> torch.Tensor:
+    """Create an offset-0 NZ receive buffer matching an MXFP expert."""
+    buffer_tensor = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
+    input_dtype = (
+        torch.float4_e2m1fn_x2 if expert_tensor.dtype == torch.float4_e2m1fn_x2 else torch_npu.float4_e2m1fn_x2
+    )
+    torch_npu.npu_format_cast_(
+        buffer_tensor,
+        29,
+        customize_dtype=torch.float8_e4m3fn,
+        input_dtype=input_dtype,
+    )
+    return buffer_tensor
 
 
 class VllmEplbAdaptor:
@@ -104,7 +112,7 @@ class VllmEplbAdaptor:
         super().__init__(**args)
         if hasattr(model, "language_model"):
             self.model = model.language_model
-            self.config = model.config.text_config
+            self.config = model.config.get_text_config()
         else:
             self.model = model
             self.config = model.config
@@ -149,13 +157,10 @@ class VllmEplbAdaptor:
                 continue
             buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
-            quant_type = expert_weight_key[0]
             for buffer_id in range(num_buffer_tensor):
                 for name, expert_tensor in zip(expert_weight_names, expert_tensors):
-                    if quant_type == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
-                        # NZ weight is transferred as-is; build a matching C0_16 NZ receive buffer.
-                        nd = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
-                        buffer_tensor = torch_npu.npu_format_cast(nd, ACL_FORMAT_FRACTAL_NZ, **_W4A8MXFP_NZ_CAST_KWARGS)
+                    if expert_weight_key[0] == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
+                        buffer_tensor = _new_w4a8_mxfp_nz_buffer(expert_tensor)
                     else:
                         buffer_tensor = torch.empty_like(expert_tensor)
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
@@ -178,18 +183,11 @@ class VllmEplbAdaptor:
                 # unspecced MagicMock from fabricating the optional accessor.
                 # The refactored MoERunner declares the accessor because its
                 # RoutedExperts child owns weights; legacy layers expose them
-                # directly. Omni-EPLB list-form weights fall back to the
-                # non-list attribute name when the list form is absent.
+                # directly.
                 get_parameter = (
                     layer.get_eplb_parameter if getattr_static(layer, "get_eplb_parameter", None) is not None else None
                 )
-                if get_parameter is not None:
-                    self.param_dict[param_key] = get_parameter(name)
-                elif hasattr(layer, name):
-                    self.param_dict[param_key] = getattr(layer, name)
-                else:
-                    fallback_name = name.replace("_list", "")
-                    self.param_dict[param_key] = getattr(layer, fallback_name)
+                self.param_dict[param_key] = get_parameter(name) if get_parameter is not None else getattr(layer, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in expert_weight_names:
@@ -242,8 +240,11 @@ class VllmEplbAdaptor:
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+        log2phy = self.log2phy_map_per_layer[layer_id]
+        if log2phy is not None:
+            if updated_log2phy_map.device.type == "cpu":
+                updated_log2phy_map = updated_log2phy_map.to(dtype=log2phy.dtype).pin_memory()
+            log2phy.copy_(updated_log2phy_map, non_blocking=True)
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []

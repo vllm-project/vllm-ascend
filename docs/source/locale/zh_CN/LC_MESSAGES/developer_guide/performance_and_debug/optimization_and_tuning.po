@@ -44,12 +44,6 @@ msgstr "## 优化措施"
 msgid "### 1. Memory Allocator Optimization"
 msgstr "### 1. 内存分配器优化"
 
-msgid "#### 1.1. jemalloc"
-msgstr "#### 1.1. jemalloc"
-
-msgid "#### 1.2. TCMalloc"
-msgstr "#### 1.2. TCMalloc"
-
 msgid "### 2. `torch_npu` Optimization"
 msgstr "### 2. `torch_npu` 优化"
 
@@ -242,14 +236,6 @@ msgstr ""
 "environment)之前安装vLLM和vLLM Ascend，二进制文件将不会使用优化后的Python。"
 
 msgid ""
-"**jemalloc** is a memory allocator that improves performance for multi-"
-"threaded scenarios and can reduce memory fragmentation. jemalloc uses a "
-"local thread memory manager to allocate variables, which can avoid lock "
-"contention between threads and can hugely optimize performance."
-msgstr ""
-"**jemalloc**是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc使用本地线程内存管理器来分配变量，可以避免线程之间的锁竞争，从而大幅优化性能。"
-
-msgid ""
 "**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that "
 "improves overall performance while ensuring low latency by introducing a "
 "multi-level cache structure, reducing lock contention and optimizing large "
@@ -257,3 +243,6 @@ msgid ""
 "[details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)."
 msgstr ""
 "**TCMalloc（线程缓存分配器）**是一种通用内存分配器，通过引入多级缓存结构、减少锁竞争并优化大对象处理流程，在保证低延迟的同时提升整体性能。了解更多[详情](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)。"
+
+msgid "#### 1.1. TCMalloc"
+msgstr "#### 1.1. TCMalloc"

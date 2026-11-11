@@ -5,17 +5,15 @@
 # Install those packages in the log-analysis environment before running it.
 
 import os
-import re
 import sys
 import traceback
 from collections import defaultdict
 
 import openpyxl  # noqa: F401
 import pandas as pd
+import regex as re
 
-_VLLM_INTERNAL_REQUEST_ID_RE = re.compile(
-    r"^(?P<external>.+)-[0-9a-fA-F]{8}$"
-)
+_VLLM_INTERNAL_REQUEST_ID_RE = re.compile(r"^(?P<external>.+)-[0-9a-fA-F]{8}$")
 
 # Map role-sensitive actions to the field name used in time_analysis.xlsx.
 # Actions not listed here keep their original names for every role.
@@ -64,9 +62,7 @@ def _collect_engine_core_timing(root_dir):
 
 
 def parse_trace_logs(root_dir):
-    pattern = (
-        r"<<<Action: (.*?); Timestamp:([\d.]+); RequestID:([^;]+)(?:; Role:(\S+))?"
-    )
+    pattern = r"<<<Action: (.*?); Timestamp:([\d.]+); RequestID:([^;]+)(?:; Role:(\S+))?"
     data_by_request = defaultdict(dict)
     request_role = defaultdict(dict)
     action_timestamps = {}
@@ -107,16 +103,12 @@ def parse_trace_logs(root_dir):
                 df_final.to_excel(writer, sheet_name="time_analysis", index=False)
                 summary_data = {
                     "RequestID": list(data_by_request.keys()),
-                    "ActionCount": [
-                        len(actions) for actions in data_by_request.values()
-                    ],
+                    "ActionCount": [len(actions) for actions in data_by_request.values()],
                 }
                 df_summary = pd.DataFrame(summary_data)
                 df_summary.to_excel(writer, sheet_name="Summary", index=False)
 
-            print(
-                f"Successfully parsed time analysis files. Check {time_analysis_path}."
-            )
+            print(f"Successfully parsed time analysis files. Check {time_analysis_path}.")
 
         else:
             print("No valid action record found in any log files.")
@@ -125,13 +117,9 @@ def parse_trace_logs(root_dir):
         engine_step_headers = _get_engine_step_headers()
         with pd.ExcelWriter(engine_step_path, engine="openpyxl") as writer:
             # engine_step_sheet
-            _engine_step_sheet(
-                engine_step_lines, engine_step_path, writer, engine_step_headers
-            )
+            _engine_step_sheet(engine_step_lines, engine_step_path, writer, engine_step_headers)
 
-            _decode_engine_step_sheet(
-                decode_engine_step_lines, engine_step_path, writer, engine_step_headers
-            )
+            _decode_engine_step_sheet(decode_engine_step_lines, engine_step_path, writer, engine_step_headers)
     except Exception as e:
         print(f"Error occurred: {str(e)}")
         print(traceback.print_exc())
@@ -168,9 +156,7 @@ def _get_final_df(data_by_request, request_role):
         decode = request_role[request_id].get("decode")
         prefill = request_role[request_id].get("prefill")
         if decode is None or prefill is None:
-            print(
-                f'request_id: {request_role[request_id].get("request_id")} decode or prefill is None'
-            )
+            print(f"request_id: {request_role[request_id].get('request_id')} decode or prefill is None")
             continue
         row = {"RequestID": request_id, "P_NODE": prefill, "D_NODE": decode}
         # Add timestamps for each action, "-" for missing actions
@@ -220,9 +206,7 @@ def _get_step_line(
                         if "[]" not in line:
                             engine_step_lines.append(line)
                         else:
-                            line = _set_decode_info(
-                                decode_engine_step_lines, engine_core_info, line
-                            )
+                            line = _set_decode_info(decode_engine_step_lines, engine_core_info, line)
                         continue
                     # for time analysis
                     if "<<<Action" in line:
@@ -248,19 +232,14 @@ def _get_step_line(
                                 or timestamp < data_by_request[request_id][action]
                             ):
                                 data_by_request[request_id][action] = timestamp
-                            if (
-                                action not in action_timestamps
-                                or timestamp < action_timestamps[action]
-                            ):
+                            if action not in action_timestamps or timestamp < action_timestamps[action]:
                                 action_timestamps[action] = timestamp
         except Exception as e:
             print(f"Error reading {log_file_path}: {str(e)}")
             print(traceback.print_exc())
 
 
-def _decode_engine_step_sheet(
-    decode_engine_step_lines, engine_step_path, writer, engine_step_headers
-):
+def _decode_engine_step_sheet(decode_engine_step_lines, engine_step_path, writer, engine_step_headers):
     if len(decode_engine_step_lines) != 0:
         mtp_model_main_model_headers = _get_mtp_model_main_model_headers()
         decode_data = []
@@ -272,17 +251,10 @@ def _decode_engine_step_sheet(
             decode_data.append(row)
 
         df_decode = pd.DataFrame(decode_data, columns=decode_engine_step_headers)
-        df_decode["prefix"] = (
-            df_decode["node"]
-            + "_"
-            + df_decode["engine_core_str"].str.extract(r"(\d+)", expand=False)
-        )
+        df_decode["prefix"] = df_decode["node"] + "_" + df_decode["engine_core_str"].str.extract(r"(\d+)", expand=False)
         df_decode.to_excel(writer, sheet_name="decode_engine_step", index=False)
 
-        print(
-            f"Successfully parsed decode engine step logs. "
-            f"Added 'decode_engine_step' sheet to {engine_step_path}."
-        )
+        print(f"Successfully parsed decode engine step logs. Added 'decode_engine_step' sheet to {engine_step_path}.")
 
         # dump die load and die time
         _decode_die_load_sheet(engine_step_path, writer, df_decode)
@@ -302,9 +274,7 @@ def _get_mtp_model_main_model_headers():
     ]
 
 
-def _engine_step_sheet(
-    engine_step_lines, engine_step_path, writer, engine_step_headers
-):
+def _engine_step_sheet(engine_step_lines, engine_step_path, writer, engine_step_headers):
     if len(engine_step_lines) != 0:
         engine_data = []
         for line in engine_step_lines:
@@ -316,9 +286,7 @@ def _engine_step_sheet(
         df_engine = pd.DataFrame(engine_data, columns=engine_step_headers)
         df_engine.to_excel(writer, sheet_name="engine_step", index=False)
 
-        print(
-            f"Successfully parsed engine step logs. Added 'engine_step' {engine_step_path}."
-        )
+        print(f"Successfully parsed engine step logs. Added 'engine_step' {engine_step_path}.")
     else:
         print("No valid engine step record found in log files.")
 
@@ -339,10 +307,7 @@ def _decode_die_load_sheet(engine_step_path, writer, df_decode):
         wide_blocks.append(filtered.reset_index(drop=True))
     final_df = pd.concat(wide_blocks, axis=1)
     final_df.to_excel(writer, sheet_name="decode_die_load", index=False)
-    print(
-        f"Successfully parsed decode die load. "
-        f"Added 'decode_die_load' sheet to {engine_step_path}."
-    )
+    print(f"Successfully parsed decode die load. Added 'decode_die_load' sheet to {engine_step_path}.")
 
 
 def _get_decode_die_load_columns():
@@ -385,7 +350,7 @@ def _get_action_map() -> dict:
         "Start pull kv": "开始pull kv",
         "Finish pull kv": "结束pull kv",
         "Prefill free kv blocks": "P侧释放KV(和前后列时间戳可能存在时钟误差)",
-        "Start append running sequece for decode": "pull kv结束添加到running队列",
+        "Start append running sequence for decode": "pull kv结束添加到running队列",
         "Start to send output": "触发首个decode token执行",
         "First decode output token": "decoder返回第一个token",
         "Second decode output token": "decoder返回第二个token",

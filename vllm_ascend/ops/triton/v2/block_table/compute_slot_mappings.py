@@ -4,6 +4,11 @@
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.block_table import _load_ptr
 
+# vLLM #56734 ([Bugfix][Spec Decode] Stop dummy draft decode steps from writing
+# KV through stale block-table rows) marks dummy draft decode runs with
+# idx_mapping == -1 and skips the block-table read for those rows, emitting
+# PAD_SLOT_ID.
+
 
 @triton.jit
 def _compute_slot_mappings_kernel(
@@ -53,6 +58,10 @@ def _compute_slot_mappings_kernel(
     kv_block_size = tl.load(block_sizes + group_id)
     kernel_block_size = tl.load(kernel_block_sizes + group_id)
     req_state_idx = tl.load(idx_mapping + batch_idx)
+    # vLLM #56734: idx_mapping == -1 marks a dummy (or CUDA-graph padding)
+    # request that owns no blocks: never read its block-table row and emit
+    # PAD for its tokens.
+    is_real_req = req_state_idx >= 0
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
 
@@ -83,15 +92,14 @@ def _compute_slot_mappings_kernel(
 
         # Stage only the contiguous portion of this request row used by the
         # current token tile. The window bound is selected at launch from the
-        # smallest group block size. Empty requests do not enter this loop, so
-        # their -1 idx_mapping sentinel is never used to address block_table.
+        # smallest group block size.
         INT32_MAX = 2147483647
         valid_block_indices = tl.where(valid, block_indices, INT32_MAX)
         block_idx_base = tl.min(valid_block_indices, axis=0)
         window_offsets = block_idx_base + block_table_offsets
         block_table_window = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + window_offsets,
-            mask=window_offsets < block_table_stride,
+            mask=(window_offsets < block_table_stride) & is_real_req,
             other=0,
         ).to(tl.float32)
         relative_block_indices = tl.where(valid & is_local, block_indices - block_idx_base, 0)
@@ -100,5 +108,6 @@ def _compute_slot_mappings_kernel(
         slot_ids = block_numbers * kernel_block_size + block_offsets
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+        slot_ids = tl.where(is_real_req, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)

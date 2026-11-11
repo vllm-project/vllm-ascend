@@ -1,0 +1,4 @@
+pr: 19245
+entries:
+  - category: bugfix
+    text: Fixed the missing-current-config assertion during Model Runner V2 startup with static kernels enabled.

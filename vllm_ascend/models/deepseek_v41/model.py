@@ -27,6 +27,7 @@ except ImportError:
     # falls back to the in-tree mHC operators there.
     _DS41_WHEEL_OPS = False
 from transformers import PretrainedConfig
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_engram_dp_size,
@@ -65,9 +66,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
+from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
@@ -80,7 +83,6 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    enable_dsa_cp,
     get_rotation_path,
     normalize_deepseek_v41_config,
 )
@@ -91,6 +93,7 @@ from .cache_config import (
     uses_a5_packed_cache,
 )
 from .compressor import DeepseekV41Compressor
+from .decoder_replay_layers import make_decoder_replay
 from .engram import (
     create_engram_hash_state,
     engram_cpu_offload,
@@ -402,10 +405,8 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     self.eps = config.rms_norm_eps
     self.norm_eps = config.rms_norm_eps
     self.scale = self.head_dim**-0.5
-    self.enable_dsa_cp = enable_dsa_cp()
 
-    attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
-    self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
+    self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
     self.wq_a = ReplicatedLinear(
         self.dim,
         self.q_lora_rank,
@@ -416,8 +417,7 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     )
     self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
     self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-    wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
-    self.wq_b = wq_b_cls(
+    self.wq_b = ColumnParallelLinear(
         self.q_lora_rank,
         self.n_heads * self.head_dim,
         bias=False,
@@ -576,7 +576,7 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
-    def __init__(self, head_dim, window_size, dtype, prefix, cache_config):
+    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
@@ -586,6 +586,7 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
             head_size=head_dim,
             dtype=dtype,
             cache_dtype=cache_config.cache_dtype,
+            bounded_replay=bounded_replay,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
         self.head_dim = head_dim
@@ -610,7 +611,6 @@ class DeepseekV41SWAAttention(nn.Module):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        need_gather_q_kv=False,
         *,
         use_yarn=False,
     ):
@@ -642,6 +642,11 @@ class DeepseekV41SWAAttention(nn.Module):
             dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
+            # The target's sliding window is the one bounded replay rebuilds.
+            # The draft reaches this same call through its SWA cache subclass,
+            # which rebuilds the spec without the flag, so the feature is a
+            # strict addition to the target's group.
+            bounded_replay=resolve_bounded_replay(vllm_config, cache_config),
         )
 
         dsa_modules = DSAModules(
@@ -679,7 +684,6 @@ class DeepseekV41SWAAttention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
-            need_gather_q_kv=need_gather_q_kv,
         )
 
 
@@ -698,7 +702,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        need_gather_q_kv=False,
     ):
         layer_idx = int(prefix.split(".")[-2])
         topology = build_layer_plan(config)
@@ -712,7 +715,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=reduce_results,
-            need_gather_q_kv=need_gather_q_kv,
             use_yarn=role.has_long_context,
         )
         block_size = vllm_config.cache_config.block_size
@@ -804,7 +806,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
-        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = self.attention_cls
 
@@ -817,7 +818,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV41MoE(
@@ -963,6 +963,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         return hidden_states, ffn_pre
 
 
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0, "inputs_embeds": 0})
 class DeepseekV41Model(nn.Module, EagleModelMixin):
     """V4.1 backbone with delayed HC collapse and shared attention state."""
 
@@ -1008,6 +1009,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             lambda prefix: self.decoder_layer_cls(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers:
+            if isinstance(layer, DeepseekV41DecoderLayer):
+                impl = layer.self_attn.dsa_attn.dsa_attn.impl
+                if not isinstance(impl, AscendDSAImpl):
+                    continue
+                impl._oproj_buffer_pool = self._oproj_buffer_pool
+                impl.reserve_oproj_buffers(torch.device(self.device), vllm_config.model_config.dtype)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1125,6 +1134,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             # Ascend SWA slot metadata (see engram/hash_state.py).
             swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
             self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
+
+        self.decoder_replay_start = self.end_layer
+        self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1597,6 +1609,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         last_layer = None
         aux_hidden_states = []
         for layer in self.layers:
+            if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
+                hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
+                    hidden_states, pre_mix, positions, input_ids
+                )
+                aux_hidden_states.extend(late_aux)
+                last_layer = self.layers[self.end_layer - 1]
+                break
             last_layer = layer
             # DSpark consumes the residual stream entering its configured
             # target layers. The runner expresses checkpoint IDs as one-based.
@@ -1649,6 +1668,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    def _run_replay_layers(self, hidden_states, pre_mix, positions, input_ids):
+        aux = []
+        for layer_idx in range(self.decoder_replay_start, self.end_layer):
+            layer = self.layers[layer_idx]
+            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+                residual = hidden_states.mean(dim=1)
+                if self.use_sequence_parallel:
+                    residual = sp_all_gather(residual)[: positions.shape[0]]
+                aux.append(residual)
+            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+        return hidden_states, pre_mix, *aux
 
 
 class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, SupportsPP, SupportsLoRA, SupportsEagle3):
@@ -1775,6 +1806,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             lookback_token_ids=lookback_token_ids,
             engram_mask_ready_event=engram_mask_ready_event,
         )
+
+    @property
+    def decoder_replay_layers(self):
+        return self.model.decoder_replay_layers
 
     @property
     def token_lookback_depth(self) -> int:
@@ -1940,12 +1975,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
-                else:
-                    # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                # Handle attention sinks (distributed across ranks)
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 

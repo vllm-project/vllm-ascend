@@ -101,6 +101,7 @@ class Bisector:
                 note=note,
             )
         except DEPLOY_ERRORS as exc:
+            logger.error("Candidate %s deployment failed: %s", candidate.short, exc)
             result = TrialResult(
                 candidate=candidate,
                 verdict="SKIP",

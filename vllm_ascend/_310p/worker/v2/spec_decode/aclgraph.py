@@ -40,7 +40,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.compilation.updatable_graph import SharedSource, UpdatableGraph
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch

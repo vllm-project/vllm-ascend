@@ -79,7 +79,7 @@ def _find_kv_load_failure_classifier(connector: Any) -> Any | None:
         seen.add(id(current))
         impl = getattr(type(current), "get_kv_load_failure_reason", None)
         if impl is not None and impl is not base_stub:
-            return getattr(current, "get_kv_load_failure_reason")
+            return current.get_kv_load_failure_reason
         children = getattr(current, "_connectors", None)
         if children:
             queue.extend(children)
@@ -190,13 +190,9 @@ _KV_LOAD_FAILURE_REASON_PREFIXES = ("kv_handle_expired", "kv_load_failed")
 # English client-facing messages; the marker's code selects the wording.
 _KV_LOAD_FAILURE_MESSAGES = {
     "kv_handle_expired": (
-        "Mooncake KV transfer handle expired during prefill; the request "
-        "produced no output. Please retry."
+        "Mooncake KV transfer handle expired during prefill; the request produced no output. Please retry."
     ),
-    "kv_load_failed": (
-        "Remote KV cache load failed during prefill; the request produced "
-        "no output. Please retry."
-    ),
+    "kv_load_failed": ("Remote KV cache load failed during prefill; the request produced no output. Please retry."),
 }
 
 
@@ -221,9 +217,7 @@ def _kv_load_failure_error_line(reason: str, request_id: str) -> str:
     """
     payload = {
         "error": {
-            "message": (
-                f"{_kv_load_failure_message(reason)} (request_id={request_id})"
-            ),
+            "message": (f"{_kv_load_failure_message(reason)} (request_id={request_id})"),
             "type": "server_error",
             "param": None,
             "code": _kv_load_failure_code(reason),
@@ -248,17 +242,12 @@ def _response_marker_reason(response: Any) -> str | None:
     """Marker stop_reason carried by any choice of a serving response."""
     for choice in response.choices:
         reason = getattr(choice, "stop_reason", None)
-        if (
-            isinstance(reason, str)
-            and reason.startswith(_KV_LOAD_FAILURE_REASON_PREFIXES)
-        ):
+        if isinstance(reason, str) and reason.startswith(_KV_LOAD_FAILURE_REASON_PREFIXES):
             return reason
     return None
 
 
-def _kv_load_failure_error_response(
-    serving: Any, reason: str, request_id: str
-) -> Any:
+def _kv_load_failure_error_response(serving: Any, reason: str, request_id: str) -> Any:
     """HTTP 503 error response carrying the same English message."""
     return serving.create_error_response(
         f"{_kv_load_failure_message(reason)} (request_id={request_id})",
@@ -267,9 +256,7 @@ def _kv_load_failure_error_response(
     )
 
 
-async def _relay_with_error_rescue(
-    lines: Any, pending: dict[int, str], request_id: str
-):
+async def _relay_with_error_rescue(lines: Any, pending: dict[int, str], request_id: str):
     """Forward SSE lines, emitting error chunks for undelivered markers.
 
     ``pending`` maps choice index to the marker stop_reason recorded from
@@ -280,9 +267,7 @@ async def _relay_with_error_rescue(
     delivered: set[str] = set()
     async for line in lines:
         if pending:
-            delivered.update(
-                reason for reason in pending.values() if reason in line
-            )
+            delivered.update(reason for reason in pending.values() if reason in line)
         if line.strip() == "data: [DONE]":
             for _, reason in sorted(pending.items()):
                 if reason in delivered:
@@ -367,10 +352,7 @@ def _wrap_completion_stream_generator() -> bool:
 
     wrapped._kv_load_failure_patched = True  # type: ignore[attr-defined]
     OpenAIServingCompletion.completion_stream_generator = wrapped
-    logger.info(
-        "patch_kv_load_failure_reason wrapped "
-        "OpenAIServingCompletion.completion_stream_generator"
-    )
+    logger.info("patch_kv_load_failure_reason wrapped OpenAIServingCompletion.completion_stream_generator")
     return True
 
 
@@ -443,10 +425,7 @@ def _wrap_chat_stream_generator() -> bool:
 
     wrapped._kv_load_failure_patched = True  # type: ignore[attr-defined]
     OpenAIServingChat.chat_completion_stream_generator = wrapped
-    logger.info(
-        "patch_kv_load_failure_reason wrapped "
-        "OpenAIServingChat.chat_completion_stream_generator"
-    )
+    logger.info("patch_kv_load_failure_reason wrapped OpenAIServingChat.chat_completion_stream_generator")
     return True
 
 
@@ -510,10 +489,7 @@ def _wrap_chat_full_generator() -> bool:
 
     wrapped._kv_load_failure_patched = True  # type: ignore[attr-defined]
     OpenAIServingChat.chat_completion_full_generator = wrapped
-    logger.info(
-        "patch_kv_load_failure_reason wrapped "
-        "OpenAIServingChat.chat_completion_full_generator"
-    )
+    logger.info("patch_kv_load_failure_reason wrapped OpenAIServingChat.chat_completion_full_generator")
     return True
 
 
@@ -549,23 +525,16 @@ def _wrap_completion_create() -> bool:
         if isinstance(response, CompletionResponse):
             reason = _response_marker_reason(response)
             if reason is not None:
-                return _kv_load_failure_error_response(
-                    self, reason, response.id
-                )
+                return _kv_load_failure_error_response(self, reason, response.id)
         return response
 
     wrapped._kv_load_failure_patched = True  # type: ignore[attr-defined]
     OpenAIServingCompletion.create_completion = wrapped
-    logger.info(
-        "patch_kv_load_failure_reason wrapped "
-        "OpenAIServingCompletion.create_completion"
-    )
+    logger.info("patch_kv_load_failure_reason wrapped OpenAIServingCompletion.create_completion")
     return True
 
 
-_WRAPPED_CLASSES = tuple(
-    cls.__name__ for cls in _collect_scheduler_classes() if _wrap_update_from_output(cls)
-)
+_WRAPPED_CLASSES = tuple(cls.__name__ for cls in _collect_scheduler_classes() if _wrap_update_from_output(cls))
 if _WRAPPED_CLASSES:
     logger.info("patch_kv_load_failure_reason wrapped update_from_output on %s", _WRAPPED_CLASSES)
 else:

@@ -46,6 +46,8 @@ import pytest
 import torch
 from einops import rearrange
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.mamba.lightning_attn import (
     AscendLightningAttentionKernel,
     lightning_attention_npu,
@@ -338,6 +340,9 @@ def _get_tolerances(dtype):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("b", "h", "n", "d", "e", "dtype"),
     [
@@ -396,6 +401,9 @@ def test_lightning_attention_npu_single_chunk(b, h, n, d, e, dtype):
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("b", "h", "n", "d", "e", "dtype"),
     [
@@ -445,6 +453,9 @@ def test_lightning_attention_npu_single_chunk_with_kv_history(b, h, n, d, e, dty
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("b", "h", "n", "d", "e", "dtype"),
     [
@@ -508,6 +519,9 @@ def test_lightning_attention_npu_multi_block(b, h, n, d, e, dtype):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("b", "h", "n", "d", "e", "dtype"),
     [
@@ -560,6 +574,9 @@ def test_lightning_attention_npu(b, h, n, d, e, dtype):
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("b", "h", "n", "d", "e", "dtype"),
     [
@@ -610,6 +627,9 @@ def test_lightning_attention_npu_with_kv_history(b, h, n, d, e, dtype):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("h", "n", "d", "e", "dtype"),
     [
@@ -665,6 +685,9 @@ def test_ascend_lightning_attention_kernel_prefix(h, n, d, e, dtype):
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("h", "n", "d", "e", "dtype"),
     [
@@ -714,6 +737,9 @@ def test_ascend_lightning_attention_kernel_prefix_with_history(h, n, d, e, dtype
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("h", "n", "d", "e"),
     [
@@ -762,6 +788,9 @@ def test_ascend_lightning_attention_kernel_prefix_multi_block(h, n, d, e):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_lightning_attention_npu_output_shapes():
     """Verify output tensor shapes match expected shapes."""
     torch.manual_seed(42)
@@ -784,6 +813,9 @@ def test_lightning_attention_npu_output_shapes():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_ascend_kernel_prefix_output_shape():
     """Verify AscendLightningAttentionKernel.jit_linear_forward_prefix output shape."""
     torch.manual_seed(42)
@@ -807,6 +839,9 @@ def test_ascend_kernel_prefix_output_shape():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_lightning_attention_output_no_nan():
     """Verify the output does not contain NaN or Inf values."""
     torch.manual_seed(42)
@@ -829,6 +864,9 @@ def test_lightning_attention_output_no_nan():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_lightning_attention_causal_property():
     """Verify causal property: output at position t should not depend on
     keys/values at positions > t.
@@ -871,6 +909,9 @@ def test_lightning_attention_causal_property():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_lightning_attention_decay_effect():
     """Verify that different decay rates produce different outputs.
 

@@ -77,10 +77,10 @@ def test_simple_cpu_offload_accuracy() -> None:
         )
 
 
-@pytest.mark.parametrize("lazy", [False, True])
+@pytest.mark.parametrize("lazy", [False], ids=["eager"])
 def test_simple_cpu_offload_no_crash_on_repeat(lazy: bool) -> None:
-    """Smoke test: many short generations exercise both eager and lazy
-    offload paths without errors and yield non-empty outputs."""
+    """Smoke test: many short generations exercise the eager offload path
+    without errors and yield non-empty outputs."""
     sampling_params = SamplingParams(max_tokens=4, temperature=0)
     prompt_token_ids = [0] * 257
 

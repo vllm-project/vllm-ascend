@@ -132,6 +132,30 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     cd ..
     ```
 
+    ??? tip "Reinstalling after a CANN version change"
+
+        If you upgrade or downgrade CANN and encounter compatibility issues,
+        consider performing a clean rebuild of vLLM Ascend to avoid reusing
+        build artifacts or caches from the previous CANN environment.
+
+        Run the following commands from the vLLM Ascend repository root
+        after configuring the selected CANN environment:
+
+        ```bash
+        # Remove previous build artifacts and caches.
+        rm -rf csrc/build csrc/build_out csrc/build_cache build
+
+        # Rebuild custom kernels and reinstall vLLM Ascend.
+        pip install -e . \
+            --extra-index-url https://download.pytorch.org/whl/cpu/ \
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+        ```
+
+        **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache
+        is stored in the specified directory instead of `csrc/build_cache`.
+        Clear the custom cache separately after verifying it is safe to
+        remove, especially if it is shared by other builds.
+
 Finally, handle `triton` and `triton-ascend` according to the hardware:
 
 === "A2 / A3 / 950DT Products"

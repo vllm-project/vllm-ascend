@@ -1,7 +1,9 @@
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pytest
+import torch
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import enable_custom_op
@@ -14,6 +16,24 @@ SLOW_COUNT_LIMIT = 5
 
 _per_file_slow_cases = {}
 _current_file = None
+
+
+@pytest.fixture(autouse=True)
+def restore_singlecard_default_device(request):
+    if not request.node.path.is_relative_to(Path(__file__).with_name("singlecard_ops")):
+        yield
+        return
+
+    device = torch.get_default_device()
+    try:
+        yield
+    finally:
+        try:
+            if torch.npu.is_initialized():
+                torch.npu.synchronize()
+        finally:
+            # None also removes the default-device dispatch mode when restoring CPU.
+            torch.set_default_device(None if device.type == "cpu" else device)
 
 
 def pytest_runtest_setup(item):

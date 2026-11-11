@@ -481,7 +481,7 @@ def test_sfa_sparse_flash_attention_precision(
     dtype: torch.dtype,
     tensor_parallel_size: int,
 ) -> None:
-    """SFA kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
+    """SFA V1 kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
     vllm_config = _get_vllm_config(model, dtype, tensor_parallel_size=tensor_parallel_size)
     _run_precision_check(
         BATCH_SPECS[batch_spec_name],

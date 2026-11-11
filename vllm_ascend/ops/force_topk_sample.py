@@ -25,6 +25,8 @@
 #   Phase 4: _sample (Gumbel-max via exponential noise)
 #   Phase 5: logprobs selection (raw vs processed)
 
+from functools import cache
+
 import torch
 
 from vllm_ascend.sample.topk_map import CompactDist
@@ -144,7 +146,6 @@ def _sample(
     return sampled
 
 
-@torch.compile(dynamic=True, options={"npu_backend": "ascendc"})
 def _force_topk_process_logits(
     logits: torch.Tensor,
     temperature: torch.Tensor,
@@ -203,6 +204,13 @@ def _force_topk_process_logits(
     return probs_k, token_index, logprobs
 
 
+@cache
+def _compiled_force_topk_process_logits():
+    # Compile only when the NPU sampler is actually selected. Merely importing
+    # a model runner must not initialize an optional NPU compiler backend.
+    return torch.compile(_force_topk_process_logits, dynamic=True, options={"npu_backend": "ascendc"})
+
+
 def force_topk_sample(
     logits: torch.Tensor,
     temperature: torch.Tensor,
@@ -245,7 +253,10 @@ def force_topk_sample(
           cdist: CompactDist with token_index [B, k] i32 and
               logprobs [B, k] f32.
     """
-    probs_k, token_index, logprobs = _force_topk_process_logits(
+    process_logits = (
+        _compiled_force_topk_process_logits() if logits.device.type == "npu" else _force_topk_process_logits
+    )
+    probs_k, token_index, logprobs = process_logits(
         logits,
         temperature,
         top_p,

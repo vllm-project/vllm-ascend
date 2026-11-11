@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views for GLM-Next."""
 
 from collections.abc import Callable
 
@@ -24,10 +24,10 @@ def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     return strides
 
 
-def _view_kpool_tail_cache(
+def view_kpool_tail_cache(
     layer_name: str,
     kv_cache_spec: AscendIndexerKPoolTailSpec,
-    raw_cache: torch.Tensor,
+    raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
 ) -> list[torch.Tensor]:
     if not isinstance(raw_cache, torch.Tensor):
@@ -44,19 +44,19 @@ def _view_kpool_tail_cache(
     return [
         torch.as_strided(
             typed_slot,
-            size=(num_blocks, 2, kv_cache_spec.block_size, kv_cache_spec.head_size),
-            stride=(page_el, kv_cache_spec.block_size * kv_cache_spec.head_size, kv_cache_spec.head_size, 1),
+            size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
+            stride=(page_el, 2 * kv_cache_spec.head_size, 1),
         )
     ]
 
 
-def _view_compressed_indexer_cache(
+def view_compressed_indexer_cache(
     layer_name: str,
     kv_cache_spec: AscendMLAAttentionSpec,
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     attn_backend: AttentionBackend,
     kernel_block_size: int,
-) -> tuple[torch.Tensor]:
+) -> tuple[torch.Tensor, ...]:
     if isinstance(raw_cache, tuple):
         if len(raw_cache) != 1:
             raise ValueError(f"Compressed indexer cache for {layer_name} must be a single tensor.")
@@ -77,6 +77,33 @@ def _view_compressed_indexer_cache(
     )
     strides = _row_major_strides(shape)
     typed_slot = raw_single.view(kv_cache_spec.dtype)
+    if kv_cache_spec.scale_dim:
+        # Each kernel block holds a contiguous K region followed by scales.
+        # Interleave these regions when one scheduler page contains multiple
+        # kernel blocks, so both tensors have a uniform physical block stride.
+        page_bytes = kv_cache_spec.page_size_bytes // num_blocks_per_kv_block
+        key_bytes = strides[0] * get_dtype_size(kv_cache_spec.dtype)
+        scale_shape = (*shape[:-1], kv_cache_spec.scale_dim)
+        scale_strides = _row_major_strides(scale_shape)
+        scale_bytes = scale_strides[0] * get_dtype_size(kv_cache_spec.scale_dtype)
+        if (
+            kv_cache_spec.page_size_bytes % num_blocks_per_kv_block
+            or page_bytes < key_bytes + scale_bytes
+            or page_bytes % get_dtype_size(kv_cache_spec.scale_dtype)
+        ):
+            raise ValueError(f"Compressed indexer key and scale for {layer_name} do not fit aligned kernel pages.")
+        strides[0] = page_bytes // get_dtype_size(kv_cache_spec.dtype)
+        scale_strides[0] = page_bytes // get_dtype_size(kv_cache_spec.scale_dtype)
+        scale_slot = raw_single.view(kv_cache_spec.scale_dtype)
+        return (
+            torch.as_strided(typed_slot, size=shape, stride=tuple(strides)),
+            torch.as_strided(
+                scale_slot,
+                size=scale_shape,
+                stride=tuple(scale_strides),
+                storage_offset=scale_slot.storage_offset() + key_bytes // get_dtype_size(kv_cache_spec.scale_dtype),
+            ),
+        )
     if strides[0] * shape[0] != typed_slot.numel():
         raise ValueError(
             f"Compressed indexer cache for {layer_name} does not exactly fill the small slot: "
@@ -129,12 +156,12 @@ def view_glm5_next_cache(
     falls through to its generic reshape paths.
     """
     if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-        return _view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
+        return view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(
         kv_cache_spec, "indexes_kv_by_block_stride", False
     ):
         if get_kv_cache_compression_ratio(kv_cache_spec) > 1:
-            return _view_compressed_indexer_cache(layer_name, kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
+            return view_compressed_indexer_cache(layer_name, kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
         _k_dim, v_dim = get_kv_cache_dims(layer_name, kv_cache_spec)
         if v_dim == 0:
             return _view_nope_main_mla_cache(kv_cache_spec, raw_cache, attn_backend, kernel_block_size)

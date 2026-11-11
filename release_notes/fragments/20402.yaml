@@ -1,0 +1,5 @@
+pr: 20402
+entries:
+  - category: bugfix
+    text: Enabled A5 MegaMoE for Qwen4Exp models with a 2560 hidden size while preserving capacity-based MC2/AllGather routing for unquantized MTP drafts.
+    hardware: [A5]

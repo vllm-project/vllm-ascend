@@ -242,6 +242,8 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
@@ -286,6 +288,8 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
@@ -311,6 +315,62 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
     ]
     assert canonical.tensors[0].tensor.data_ptr() == first_state.data_ptr()
     assert canonical.tensors[1].tensor.data_ptr() == second_state.data_ptr()
+
+
+def test_ascend_connector_worker_skips_non_offload_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only offloadable groups may contribute canonical refs.
+
+    The scheduler emits ``group_sizes`` / ``block_indices`` for
+    ``get_offloading_group_ids()`` only, and the handler zips both sequences
+    positionally. A non-offloadable group (e.g. a CircularBufferSpec state
+    group) must therefore not register refs: its layers are left out of
+    ``kv_caches`` here, so registering it anyway raises instead of silently
+    shifting every later group.
+    """
+    layer_names = [f"model.layers.{idx}.self_attn" for idx in range(3)]
+    skipped_layer = layer_names[1]
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=3,
+        dtype=torch.bfloat16,
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec) for layer_name in layer_names],
+        kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        # Group 1 is not offloadable, groups 0 and 2 are.
+        prefix_cacheable_group_ids=(0, 2),
+    )
+    worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.kv_cache_config = kv_cache_config
+    worker.vllm_config = object()
+    captured: list[CanonicalKVCaches] = []
+    worker._init_worker = captured.append
+    monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
+
+    worker.register_kv_caches(
+        {
+            layer_name: (
+                torch.empty((4, 2, 1, 3), dtype=torch.bfloat16),
+                torch.empty((4, 2, 1, 3), dtype=torch.bfloat16),
+            )
+            for layer_name in layer_names
+            if layer_name != skipped_layer
+        }
+    )
+
+    assert len(captured) == 1
+    canonical = captured[0]
+    group_refs = canonical.group_data_refs
+    # One split K/V pair per offloadable group, and no ref for the skipped group.
+    assert [len(refs) for refs in group_refs] == [2, 2]
+    assert {ref.tensor_idx for refs in group_refs for ref in refs} == {0, 1, 2, 3}
+    # Group order follows prefix_cacheable_group_ids: layer 0 registers before layer 2.
+    assert max(ref.tensor_idx for ref in group_refs[0]) < min(ref.tensor_idx for ref in group_refs[1])
 
 
 def test_offloading_connector_is_registered_with_ascend_adapter(

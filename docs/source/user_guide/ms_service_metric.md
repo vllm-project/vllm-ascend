@@ -47,17 +47,17 @@ Run `ms-service-metric restart` after changing YAML configuration. Restart the v
 
 ## Adding a Metric Point
 
-vLLM Ascend-owned metric configurations are stored as YAML files in `vllm_ascend/observability/config/`. All YAML files in this directory are loaded automatically.
+vLLM Ascend-owned metric configurations are stored as YAML files in `vllm_ascend/observability/ms_metrics/config/`, one YAML file per feature. All YAML files in this directory are loaded automatically.
 
 1. Identify the target function and add its fully qualified `module:Class.method` name as `symbol`.
 2. Reuse a stable handler from `ms_service_metric.provider_handlers` when it provides the required data processing.
-3. For Ascend-specific processing, add a handler to `vllm_ascend/observability/handlers.py` and reference it as `vllm_ascend.observability.handlers:function_name`.
+3. For Ascend-specific processing, add a handler module `vllm_ascend/observability/ms_metrics/handlers/<feature>.py`, re-export the handler in `handlers/__init__.py`, and reference it as `vllm_ascend.observability.ms_metrics.handlers:function_name`. Reuse the shared helpers in `handlers/common.py` instead of re-implementing them: declare each metric as a `MetricSpec` (name, type, label names) and pass the specs to `register_metrics`; wrap recording code in `safe_recording` for failure isolation. `common.py` is the only module that imports `ms_service_metric`, so feature handlers take `MetricType` and the helpers from there.
 4. Add the metric name and Prometheus type under `metrics`, then update `tests/ut/observability/test_ms_metrics_provider.py`.
 
 Example:
 
 ```yaml
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:model_runner_execute_model:duration

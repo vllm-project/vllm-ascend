@@ -14,7 +14,7 @@ from vllm_ascend.attention.cache_layout import (
     resolve_dsa_main_cache_tensors,
     stable_model_fingerprint,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann.config_data import (
     KeyMetadata,
     PoolKey,
     build_layerwise_store_key,
@@ -51,20 +51,14 @@ def test_a3_non_c8_descriptor_and_views():
         CacheComponentRole.MAIN_K_ROPE,
         CacheComponentRole.INDEXER_K,
     ]
-    assert all(
-        item.prefill_memory_kind is MemoryKind.DEVICE
-        for item in descriptor.components
-    )
+    assert all(item.prefill_memory_kind is MemoryKind.DEVICE for item in descriptor.components)
     assert [item.decode_memory_kind for item in descriptor.components] == [
         MemoryKind.HOST_DEVICE_VISIBLE,
         MemoryKind.HOST_DEVICE_VISIBLE,
         MemoryKind.DEVICE,
     ]
 
-    tensors = [
-        torch.empty((3, *item.shape_per_block), dtype=item.dtype)
-        for item in descriptor.components
-    ]
+    tensors = [torch.empty((3, *item.shape_per_block), dtype=item.dtype) for item in descriptor.components]
     views = bind_layer_cache_views(descriptor, tensors)
     assert views[CacheComponentRole.MAIN_KV] is tensors[0]
     assert views[CacheComponentRole.INDEXER_K] is tensors[2]
@@ -93,10 +87,7 @@ def test_dsa_main_cache_resolution_uses_merged_a5_c8_tensor():
         cache_family_id="default",
         kv_cache_spec=spec,
     )
-    tensors = [
-        torch.empty((3, *item.shape_per_block), dtype=item.dtype)
-        for item in descriptor.components
-    ]
+    tensors = [torch.empty((3, *item.shape_per_block), dtype=item.dtype) for item in descriptor.components]
 
     full_kv_cache, full_k_rope = resolve_dsa_main_cache_tensors(
         descriptor,
@@ -110,10 +101,7 @@ def test_dsa_main_cache_resolution_uses_merged_a5_c8_tensor():
 
 def test_bind_rejects_wrong_dtype_and_shape():
     descriptor = _descriptor()
-    tensors = [
-        torch.empty((2, *item.shape_per_block), dtype=item.dtype)
-        for item in descriptor.components
-    ]
+    tensors = [torch.empty((2, *item.shape_per_block), dtype=item.dtype) for item in descriptor.components]
     tensors[0] = tensors[0].float()
     with pytest.raises(TypeError, match="dtype"):
         bind_layer_cache_views(descriptor, tensors)
@@ -123,8 +111,7 @@ def test_layerwise_key_extends_but_does_not_change_ordinary_key():
     metadata = KeyMetadata("glm", 1, 2, 3, 4, 0, "kv", "default")
     ordinary = PoolKey(metadata, "abc")
     assert ordinary.to_string() == (
-        "glm@pcp2@dcp3@head_or_tp_rank:1@pp_rank:4@group:0"
-        "@cache_role:kv@cache_family:default@abc"
+        "glm@pcp2@dcp3@head_or_tp_rank:1@pp_rank:4@group:0@cache_role:kv@cache_family:default@abc"
     )
     old_hash_input = hash(("glm", 1, 2, 3, 4, 0, "kv", "default", "abc"))
     assert hash(ordinary) == old_hash_input

@@ -1,7 +1,6 @@
-import torch
 import torch.distributed as dist
-from vllm.logger import logger
 from omni_placement.omni_planner import OmniPlanner
+from vllm.logger import logger
 
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.eplb_updator import EplbUpdator

@@ -82,6 +82,109 @@ class TestAscendGateLinear(TestBase):
         self.assertEqual(output.shape, (2, 4))
         self.assertIsNone(output_bias)
 
+    def test_forward_bf16_router_gemm_fast_path(self):
+        """bf16 weight + bf16 x + fp32 out -> tier 4 torch.mm(out_dtype=fp32)."""
+        gate = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix="test.gate",
+        )
+        gate.weight.data = gate.weight.data.to(torch.bfloat16)
+        hidden_states = torch.randn(2, 16, dtype=torch.bfloat16)
+
+        with patch("vllm_ascend.ops.fused_moe.gate_linear.torch.mm") as mm:
+            mm.return_value = torch.randn(2, 4, dtype=torch.float32)
+            output, output_bias = gate(hidden_states)
+
+        self.assertIs(output, mm.return_value)
+        self.assertIsNone(output_bias)
+        mm.assert_called_once()
+        args, kwargs = mm.call_args
+        self.assertIs(args[0], hidden_states)
+        self.assertEqual(args[1].data_ptr(), gate.weight.data_ptr())
+        self.assertEqual(kwargs["out_dtype"], torch.float32)
+
+    def test_none_out_dtype_defaults_to_fp32(self):
+        """out_dtype=None (upstream dsv2/glm5next wiring) defaults to fp32:
+        bf16 weights take tier 4 directly; fp32 weights cast x instead of
+        raising a dtype mismatch."""
+        gate = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            out_dtype=None,
+            prefix="test.gate",
+        )
+        self.assertEqual(gate.out_dtype, torch.float32)
+        gate.weight.data = gate.weight.data.to(torch.bfloat16)
+        hidden_states = torch.randn(2, 16, dtype=torch.bfloat16)
+
+        with patch("vllm_ascend.ops.fused_moe.gate_linear.torch.mm") as mm:
+            mm.return_value = torch.randn(2, 4, dtype=torch.float32)
+            output, output_bias = gate(hidden_states)
+        mm.assert_called_once()
+        self.assertIs(output, mm.return_value)
+        self.assertIsNone(output_bias)
+
+        # fp32 weight + bf16 x: tier 5 casts x to the weight dtype.
+        gate2 = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            out_dtype=None,
+            prefix="test.gate2",
+        )
+        with patch.object(gate2.quant_method, "apply", side_effect=_cpu_unquantized_apply):
+            output2, _ = gate2(hidden_states)
+        self.assertEqual(output2.dtype, torch.float32)
+
+    def test_params_follow_model_dtype_unless_forced_fp32(self):
+        """Without force_fp32_compute, params follow the model (default)
+        dtype, mirroring upstream; with it, the weight is stored fp32."""
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            gate = AscendGateLinear(
+                input_size=16,
+                output_size=4,
+                bias=False,
+                out_dtype=torch.float32,
+                prefix="test.gate",
+            )
+            self.assertEqual(gate.weight.dtype, torch.bfloat16)
+
+            forced = AscendGateLinear(
+                input_size=16,
+                output_size=4,
+                bias=False,
+                out_dtype=torch.float32,
+                force_fp32_compute=True,
+                prefix="test.gate.forced",
+            )
+            self.assertEqual(forced.weight.dtype, torch.float32)
+        finally:
+            torch.set_default_dtype(default_dtype)
+
+    def test_forward_fallback_casts_output_to_out_dtype(self):
+        """Tier 5: x is cast to the weight dtype and the output to out_dtype."""
+        gate = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            out_dtype=torch.bfloat16,
+            prefix="test.gate",
+        )
+        # Weight stays fp32 (test default dtype); bf16 x -> fp32 compute,
+        # then the output is cast to the requested bf16 out_dtype.
+        hidden_states = torch.randn(2, 16, dtype=torch.bfloat16)
+        with patch.object(gate.quant_method, "apply", side_effect=_cpu_unquantized_apply):
+            output, output_bias = gate(hidden_states)
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertEqual(output.shape, (2, 4))
+        self.assertIsNone(output_bias)
+
 
 if __name__ == "__main__":
     unittest.main()

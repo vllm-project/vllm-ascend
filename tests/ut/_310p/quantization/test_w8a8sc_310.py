@@ -106,3 +106,33 @@ class TestAscendW8A8SCLinearMethod310(TestBase):
         mock_quantize.assert_not_called()
         mock_matmul_compress_dequant.assert_called_with(x, layer.weight, layer.index, layer.quant_bias, layer.deq_scale)
         self.assertTrue(torch.equal(output, expected_y_output))
+
+    @patch("torch.ops.vllm.quantize")
+    @patch("torch_npu.npu_matmul_compress_dequant", create=True)
+    def test_apply_reshapes_nd_activation_310(self, mock_matmul_compress_dequant, mock_quantize):
+        layer = MagicMock()
+        layer.aclnn_input_scale = torch.randn(256)
+        layer.aclnn_input_scale_reciprocal = 1.0 / layer.aclnn_input_scale
+        layer.aclnn_input_offset = torch.randint(-128, 127, (256,), dtype=torch.int8)
+        layer.weight = torch.randint(-128, 127, (256 * 128,), dtype=torch.int8)
+        layer.index = torch.randint(-128, 127, (8,), dtype=torch.int8)
+        layer.deq_scale = torch.randn(128)
+        layer.quant_bias = torch.randint(-128, 127, (256,))
+        layer.params_dtype = torch.float16
+
+        batch_size, seq_len, hidden_size, out_size = 2, 4, 128, 256
+        x = torch.randn(batch_size, seq_len, hidden_size)
+        quantized_x = torch.randint(-128, 127, (batch_size * seq_len, hidden_size), dtype=torch.int8)
+        mock_quantize.return_value = quantized_x
+        flat_output = torch.randn(batch_size * seq_len, out_size)
+        mock_matmul_compress_dequant.return_value = flat_output
+
+        output = self.method.apply(layer, x, tp_rank=0)
+
+        quant_input = mock_quantize.call_args.args[0]
+        self.assertEqual(tuple(quant_input.shape), (batch_size * seq_len, hidden_size))
+        mock_matmul_compress_dequant.assert_called_once_with(
+            quantized_x, layer.weight, layer.index, layer.quant_bias, layer.deq_scale
+        )
+        self.assertEqual(tuple(output.shape), (batch_size, seq_len, out_size))
+        self.assertTrue(torch.equal(output, flat_output.reshape(batch_size, seq_len, out_size)))

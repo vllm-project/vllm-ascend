@@ -71,25 +71,19 @@ with pd.ExcelWriter(dst, engine="openpyxl") as writer:
     result_ta["request p_node"] = df_ta["P_NODE"]
     result_ta["request d_node"] = df_ta["D_NODE"]
     result_ta["tokenizer排队耗时(ms)"] = (
-        df_ta["Get prefill engine request and start pickle"]
-        - df_ta["PD api server get request"]
+        df_ta["Get prefill engine request and start pickle"] - df_ta["PD api server get request"]
     ) * 1000
     result_ta["tokenizer耗时(ms)"] = (
-        df_ta["Finish process request in prefill engine"]
-        - df_ta["Get prefill engine request and start pickle"]
+        df_ta["Finish process request in prefill engine"] - df_ta["Get prefill engine request and start pickle"]
     ) * 1000
     result_ta["waiting队列耗时(ms)"] = (
-        df_ta["Prefill add waiting queue"]
-        - df_ta["Start process request in prefill engine"]
+        df_ta["Prefill add waiting queue"] - df_ta["Start process request in prefill engine"]
     ) * 1000
     result_ta["schedule耗时(ms)"] = (
-        df_ta["success add to seq groups"]
-        - df_ta["try to schedule in waiting queue"]
+        df_ta["success add to seq groups"] - df_ta["try to schedule in waiting queue"]
     ) * 1000
     result_ta["pull kv耗时(ms)"] = (df_ta["Finish pull kv"] - df_ta["Start pull kv"]) * 1000
-    result_ta["pull kv排队耗时(ms)"] = (
-        df_ta["Start pull kv"] - df_ta["Add need pulling sequence"]
-    ) * 1000
+    result_ta["pull kv排队耗时(ms)"] = (df_ta["Start pull kv"] - df_ta["Add need pulling sequence"]) * 1000
 
     avg_row_ta = {"来源": "time_analysis"}
     for col in result_ta.columns:

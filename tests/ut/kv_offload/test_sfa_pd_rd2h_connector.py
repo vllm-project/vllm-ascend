@@ -1766,3 +1766,47 @@ def test_copy_sfa_dense_d2d_skips_chunk_outside_prompt_blocks():
     assert local == []
     assert peer == []
     assert lengths == []
+
+
+def test_consumer_scheduler_reports_every_pulled_group_as_loaded():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler.main_group_idx = 1
+    scheduler.indexer_group_idx = 0
+    scheduler._dspark_context_groups = (2,)
+    pulling = SimpleNamespace(kv_transfer_params={"do_remote_prefill": True})
+
+    assert scheduler.get_loaded_kv_cache_group_ids(pulling) == (0, 1, 2)
+    # The rendezvous clears the flag once the pull is registered, and a request
+    # without it restores no remote blocks.
+    for params in ({"do_remote_prefill": False}, {}):
+        assert scheduler.get_loaded_kv_cache_group_ids(SimpleNamespace(kv_transfer_params=params)) == ()
+
+
+def test_consumer_scheduler_without_dspark_reports_only_main_and_indexer():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler.main_group_idx = 0
+    scheduler.indexer_group_idx = 0
+    scheduler._dspark_context_groups = ()
+
+    request = SimpleNamespace(kv_transfer_params={"do_remote_prefill": True})
+
+    assert scheduler.get_loaded_kv_cache_group_ids(request) == (0,)
+
+
+def test_producer_scheduler_reports_no_loaded_group():
+    scheduler = SFAPDRD2HProducerScheduler.__new__(SFAPDRD2HProducerScheduler)
+    request = SimpleNamespace(kv_transfer_params={"do_remote_decode": True})
+
+    assert scheduler.get_loaded_kv_cache_group_ids(request) == ()
+
+
+def test_loaded_group_ids_hook_is_version_gated():
+    assert "get_loaded_kv_cache_group_ids" in SfaRemoteD2HConnector.__dict__
+
+
+def test_connector_reports_the_groups_its_scheduler_restores():
+    connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
+    connector.connector_scheduler = MagicMock()
+    connector.connector_scheduler.get_loaded_kv_cache_group_ids.return_value = (0, 1)
+
+    assert connector.get_loaded_kv_cache_group_ids(MagicMock()) == (0, 1)

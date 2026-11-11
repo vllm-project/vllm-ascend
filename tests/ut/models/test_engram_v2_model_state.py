@@ -69,6 +69,7 @@ def make_model():
     model._engram_graph_events = {}
     model._engram_max_tokens = 8
     model._mtp_hidden_buffer = None
+    model.decoder_replay_layers = None
     model.engram_rotation = torch.eye(32)
     model.config = SimpleNamespace(engram_layer_ids=(1, 2), image_token_id=999)
     model.layers = [

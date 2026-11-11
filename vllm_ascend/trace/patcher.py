@@ -7,8 +7,9 @@
 import importlib
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from vllm_ascend.trace.prof_wrapper import marker_prof_wrapper, timer_prof_wrapper
 
@@ -55,9 +56,8 @@ def _module_allowed_for_scope(module_name: str, scope: str) -> bool:
             or module_name.startswith("vllm_ascend.core.")
         )
     if scope == "worker":
-        return (
-            module_name.startswith("vllm_ascend.worker.")
-            or module_name.startswith("vllm_ascend.distributed.kv_transfer.")
+        return module_name.startswith("vllm_ascend.worker.") or module_name.startswith(
+            "vllm_ascend.distributed.kv_transfer."
         )
     return True
 
@@ -110,9 +110,7 @@ def apply_trace_patches(scope: str) -> None:
 
     paths = iter_namelist_paths()
     if not paths:
-        logger.warning(
-            "VLLM_ASCEND_TRACE is enabled but no trace namelist is available."
-        )
+        logger.warning("VLLM_ASCEND_TRACE is enabled but no trace namelist is available.")
         _APPLIED_SCOPES.add(scope)
         return
 

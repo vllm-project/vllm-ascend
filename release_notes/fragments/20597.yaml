@@ -1,0 +1,4 @@
+pr: 20597
+entries:
+  - category: bugfix
+    text: Fixed Qwen3.8 Flash Next MTP draft QSA projection selection under pipeline parallelism, restoring the intended speculative decoding path.

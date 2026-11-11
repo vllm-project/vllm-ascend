@@ -1,0 +1,6 @@
+pr: 20445
+entries:
+  - category: bugfix
+    text: Fixed MiniMax-M3 ViT mRoPE setup UB capacity compilation failures on Ascend A5 with the legacy vLLM function interface by using 16-token blocks.
+    model: minimax-m3
+    hardware: [A5]

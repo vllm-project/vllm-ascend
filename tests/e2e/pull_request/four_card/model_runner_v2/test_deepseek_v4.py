@@ -84,7 +84,6 @@ def test_deepseek_v4_mtp_full_decode_only():
             "method": "mtp",
         },
         attention_config={"indexer_kv_dtype": "int8"},
-        additional_config={"enable_dsa_cp": False},
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()

@@ -161,10 +161,12 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
         if quantized:
             self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
+            assert self._scales_uva.tensor is not None
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
         # checkpoint load fills them.
+        assert self._codes_uva.tensor is not None
         self._codes_uva.tensor.zero_()
         return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
 
@@ -340,7 +342,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         # The kernel walks ids as [token, columns] with a unit inner stride, and
         # `gathered` is a slice of a [tokens, layers, columns] buffer.
         gathered = gathered.contiguous()
-        out = torch.zeros(
+        # lookup writes every allocated head, including zeroes for invalid IDs.
+        out = torch.empty(
             (gathered.shape[0], self.part_n_hash_cols, self.dim),
             dtype=torch.bfloat16,
             device=gathered.device,

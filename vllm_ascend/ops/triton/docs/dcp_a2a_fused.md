@@ -20,6 +20,13 @@ stages:
 The individual kernels are described in [pack_dcp_output_lse](pack_dcp_output_lse.md)
 and [fused_dcp_lse_combine](fused_dcp_lse_combine.md).
 
+The small native BF16/D512 head-scatter route uses the bit-preserving
+[SFA DCP exchange](sfa_dcp_exchange.md) and [local merge](sfa_dcp_merge.md).
+It derives the payload from the input and actual group rather than assuming
+DCP8/H64. Query layout preparation is described in [SFA DCP query](sfa_dcp_query.md).
+The public operator has no scheduler-budget parameter; the backend owns
+scheduling and each layout route owns its kernel-specific selection policy.
+
 ## Inputs and output
 
 | Argument | Shape or type | Description |

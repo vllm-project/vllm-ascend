@@ -7,7 +7,6 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import enable_custom_op
@@ -28,9 +27,7 @@ def test_native_main_c8_cache_preserves_packing_and_padding(tokens):
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
     impl.sfa_qsfa_packed_kv_head_dim = 656
-    impl._store_parallel_kv(
-        k_pe, k_nope, scale, None, [], (cache,), slots, SimpleNamespace(num_actual_tokens=tokens), False
-    )
+    impl._store_parallel_kv(k_pe, k_nope, scale, (cache,), slots, SimpleNamespace(num_actual_tokens=tokens))
     torch.npu.synchronize()
     reference = torch.full_like(cache, -7, device="cpu")
     reference.view(-1, 656)[slots[:tokens].cpu().long()] = packed[:tokens].cpu()
@@ -79,14 +76,9 @@ def test_missing_fast_operator_preserves_fallback_with_negative_slots():
     key = torch.ones(2048, 128, dtype=torch.float32, device="npu")
     cache = torch.zeros(32, 128, 1, 128, dtype=torch.float32, device="npu")
     slots = torch.arange(2048, dtype=torch.int32, device="npu")
-    meta = SimpleNamespace(num_actual_tokens=2048)
     slots[-3:] = -1
-    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-    impl.enable_sparse_sfa_c8 = True
-    impl.enable_sparse_sfa_turboquant = False
-    impl.is_kv_producer, impl.is_kv_consumer = True, False
     with patch.object(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None):
-        impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
+        DeviceOperator.scatter_cache(cache.view(-1, 128), slots.view(-1, 1), key)
     torch.npu.synchronize()
     reference = torch.zeros_like(cache, device="cpu").view(-1, 128)
     reference[:2045] = 1

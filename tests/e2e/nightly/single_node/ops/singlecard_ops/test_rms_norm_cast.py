@@ -5,6 +5,9 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
 
 def _tolerances(dtype: torch.dtype) -> tuple[float, float]:
     # Independent FP32 reductions can land on adjacent BF16 values.
@@ -12,6 +15,10 @@ def _tolerances(dtype: torch.dtype) -> tuple[float, float]:
     return tolerance, tolerance
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="RmsNormCast is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_tokens", [1, 16, 128])
 def test_rms_norm_cast(dtype: torch.dtype, num_tokens: int):
@@ -30,6 +37,10 @@ def test_rms_norm_cast(dtype: torch.dtype, num_tokens: int):
     torch.testing.assert_close(actual_fp32, actual.float(), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="RmsNormCast is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_rms_norm_cast_npu_graph(dtype: torch.dtype):
     torch.manual_seed(11)

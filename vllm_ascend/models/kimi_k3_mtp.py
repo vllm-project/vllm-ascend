@@ -3,13 +3,19 @@
 """Kimi K3 MTP draft model for Ascend."""
 
 import copy
+from collections.abc import Iterable
 
+import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 from vllm.models.kimi_k3.amd.mtp import (
     KimiK3MTP as UpstreamKimiK3MTP,
 )
@@ -21,7 +27,12 @@ from vllm.models.kimi_k3.amd.mtp import (
 )
 from vllm.models.kimi_k3.amd.mtp import SharedHead
 
-from vllm_ascend.models.kimi_k3 import AscendKimiDecoderLayer
+from vllm_ascend.models.kimi_k3 import (
+    AscendKimiDecoderLayer,
+    AscendKimiMoE,
+    KimiMixtureOfExperts,
+    load_eplb_expert_weights,
+)
 
 
 class AscendKimiK3MultiTokenPredictorLayer(
@@ -82,7 +93,7 @@ class AscendKimiK3MultiTokenPredictor(UpstreamKimiK3MultiTokenPredictor):
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
 
-class AscendKimiK3MTP(UpstreamKimiK3MTP):
+class AscendKimiK3MTP(UpstreamKimiK3MTP, KimiMixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         self.config = vllm_config.model_config.hf_text_config
@@ -90,4 +101,29 @@ class AscendKimiK3MTP(UpstreamKimiK3MTP):
         self.model = AscendKimiK3MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
+        )
+        # Set MoE hyperparameters for the EPLB registration.
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.moe_mlp_layers = []
+        for layer in self.model.layers.values():
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, AscendKimiK3MultiTokenPredictorLayer)
+            mlp = layer.mtp_block.mlp
+            if isinstance(mlp, AscendKimiMoE):
+                self.moe_mlp_layers.append(mlp)
+        self.extract_moe_parameters()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Reuse upstream MTP loading, filling EPLB replica slots as well."""
+
+        def map_weight_name(name: str) -> str | None:
+            name = name.removeprefix("language_model.")
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            return self._rewrite_spec_layer_name(spec_layer, name) if spec_layer is not None else None
+
+        return super().load_weights(
+            load_eplb_expert_weights(self, weights, self.num_redundant_experts, map_weight_name)
         )

@@ -16,7 +16,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_packet_size_bytes,
     mxfp_paged_cache_views,
 )
-from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 
 def _spec(ratio=1, heads=1, v_dim=256, padding=0):

@@ -36,11 +36,16 @@ prompts = [
     "The future of AI is",
 ]
 
-# After #15299, routing weights are preserved without intermediate dtype
-# casts, which deterministically changes greedy decoding for the DP2+PP2
-# path of DeepSeek-V2-Lite-Chat. The TP1+PP2 baseline lives in
-# tests/e2e/pull_request/two_card/test_pipeline_parallel.py.
-DP_GOLDEN = [
+# After #15299, routing weights were preserved without intermediate dtype
+# casts, which deterministically changed greedy decoding for the DP2+PP2
+# path of DeepSeek-V2-Lite-Chat, so a separate DP baseline was kept (#15875).
+# After #17068, the router GEMM runs bf16 x bf16 with fp32 accumulation on
+# every path (gate weights follow the model dtype), and the DP2+PP2 greedy
+# decoding re-converges with TP2+PP2 — the separate baseline is no longer
+# needed. The TP1+PP2 case moved to
+# tests/e2e/pull_request/two_card/test_pipeline_parallel.py (#17684) and
+# keeps its own copy of this shared baseline.
+GOLDEN = [
     (
         [
             17464,
@@ -59,13 +64,13 @@ DP_GOLDEN = [
             29,
             285,
             304,
-            608,
+            6,
+            76,
             245,
             459,
             6946,
-            29,
         ],
-        "Hello, my name is <strong>Alessandro</strong> and I am a <strong>",
+        "Hello, my name is <strong>Alessandro</strong> and I'm a <strong",
     ),
     (
         [
@@ -116,7 +121,7 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
         outputs = vllm_model.generate_greedy(prompts, 16)
         check_outputs_equal(
             outputs_0_lst=outputs,
-            outputs_1_lst=DP_GOLDEN,
+            outputs_1_lst=GOLDEN,
             name_0=f"{model}-dp{dp_size}pp{pp_size}",
             name_1="GOLDEN",
         )

@@ -1,0 +1,320 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 04:24+0000\n"
+"PO-Revision-Date: 2026-10-16 04:24+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Step-5-Preview (Experimental)"
+msgstr "# Step-5-Preview（实验性）"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"**Step-5-Preview** is a next-generation flagship Mixture-of-Experts (MoE) "
+"model developed by StepFun. The model has **600B** total parameters, with "
+"**27B** active per token, and supports a 1M-token context window and vision "
+"input."
+msgstr ""
+"**Step-5-Preview** 是阶跃星辰（StepFun）研发的下一代旗舰级混合专家（MoE）模型。该模型总参数量为 **600B**，每个 "
+"token 激活 **27B** 参数，支持 1M token 上下文窗口以及视觉输入。"
+
+msgid ""
+"This document describes how to quickly get started with `Step-5-Preview` "
+"model inference deployment on Ascend NPU using vLLM-Ascend, based on W8A8 "
+"quantized weights."
+msgstr ""
+"本文档介绍如何基于 W8A8 量化权重，使用 vLLM-Ascend 在昇腾 NPU 上快速完成 `Step-5-Preview` 模型的推理部署。"
+
+msgid "**Current status and constraints**"
+msgstr "**当前状态与约束**"
+
+msgid ""
+"- `Step-5-Preview` is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:step5-a5-openeuler`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.\n"
+"    - Only **950DT products** is supported now. Other Ascend hardware (e.g., Atlas A3 Products) is not supported for `Step-5-Preview`.\n"
+"    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `Step-5-Preview`. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration))."
+msgstr ""
+"- `Step-5-Preview` 通过官方 Docker 镜像 `quay.io/ascend/vllm-ascend:step5-a5-openeuler` **开箱即用**。配套代码**尚未合入** vLLM-Ascend 仓库，因此该模型暂**不支持**源码安装（`pip install` 或源码编译）。\n"
+"    - 当前仅支持 **Ascend 950DT系列产品**。其他昇腾硬件（例如 Atlas A3系列产品）不支持 `Step-5-Preview`。\n"
+"    - [支持的特性](#2-supported-features) 中列出的特性仅为本文件中已验证的部署命令所启用的特性，**并不**意味着 `Step-5-Preview` 支持所有特性。这是早期体验版本，性能优化与可靠性验证仍在进行中（参见 [声明](#9-declaration)）。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参考 [支持的特性列表](../../user_guide/support_matrix/supported_models.md) "
+"获取该模型支持的特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考 [特性指南](../../user_guide/feature_guide/index.md) 获取特性的配置方法。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前置条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "| Model | Weight |"
+msgstr "| 模型 | 权重 |"
+
+msgid ""
+"| Step-5-Preview-w8a8-mxfp8 | "
+"[ModelScope](https://www.modelscope.cn/models/Eco-"
+"Tech/Step-5-Preview-w8a8-mxfp8) |"
+msgstr ""
+"| Step-5-Preview-w8a8-mxfp8 | "
+"[ModelScope](https://www.modelscope.cn/models/Eco-"
+"Tech/Step-5-Preview-w8a8-mxfp8) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。请确保后续部署命令中的模型路径与该目录一致。"
+
+msgid "### 3.2 Hardware and Software Preparation"
+msgstr "### 3.2 软硬件准备"
+
+msgid ""
+"| Hardware | Ascend HDK | CANN version | torch_npu version | vLLM | vLLM-"
+"Ascend version |"
+msgstr "| 硬件 | Ascend HDK | CANN 版本 | torch_npu 版本 | vLLM | vLLM-Ascend 版本 |"
+
+msgid ""
+"| 950DT products | 25.5.0 | CANN 9.2.0 | 2.10.0.post4 | Based on v0.27.0 | "
+"Based on v0.27.0 |"
+msgstr ""
+"| Ascend 950DT系列产品 | 25.5.0 | CANN 9.2.0 | 2.10.0.post4 | 基于 v0.27.0 | 基于 "
+"v0.27.0 |"
+
+msgid ""
+"Before getting started, confirm that the firmware/driver is installed "
+"correctly. The recommended HDK version is 25.5.0. Run the following command "
+"to confirm; the version shown in the output header is the HDK version."
+msgstr "开始之前，请确认固件/驱动已正确安装。推荐使用 HDK 25.5.0 版本。运行以下命令进行确认；输出头部显示的版本即为 HDK 版本。"
+
+msgid "### 3.3 Verify Multi-node Communication (Optional)"
+msgstr "### 3.3 验证多节点通信（可选）"
+
+msgid ""
+"If you want to deploy a multi-node environment, verify multi-node "
+"communication as described in [Verify inter-node "
+"connectivity](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您要部署多节点环境，请按照 "
+"[验证节点间连通性](../../getting_started/installation.md#installation-multi-node-"
+"interconnect) 中的说明验证多节点通信。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "#### Download Docker Image"
+msgstr "#### 下载 Docker 镜像"
+
+msgid "#### Create Docker Container"
+msgstr "#### 创建 Docker 容器"
+
+msgid "Use the following command to create the container."
+msgstr "使用以下命令创建容器。"
+
+msgid ""
+"The `-v` option maps directories. **You should map the weight directory into"
+" the container** so that the weights can be accessed inside the container. "
+"The local weight path is `/mnt/weight`; modify it according to the actual "
+"situation."
+msgstr ""
+"`-v` 选项用于映射目录。**您应将权重目录映射到容器中**，以便在容器内访问权重。本地权重路径为 `/mnt/weight`；请根据实际情况修改。"
+
+msgid "Enter the container interactive environment:"
+msgstr "进入容器交互环境："
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"`Step-5-Preview` is currently provided **out-of-the-box** via the "
+"`quay.io/ascend/vllm-ascend:step5-a5-openeuler` Docker image. Because the "
+"supporting code has **not yet been merged** into the vLLM-Ascend repository,"
+" source-code installation is **not supported** for this model yet; please "
+"use the Docker image as described in [4.1 Docker Image "
+"Installation](#41-docker-image-installation)."
+msgstr ""
+"`Step-5-Preview` 目前通过 `quay.io/ascend/vllm-ascend:step5-a5-openeuler` Docker"
+" 镜像**开箱即用**。由于配套代码**尚未合入** vLLM-Ascend 仓库，该模型暂**不支持**源码安装；请按照 [4.1 Docker "
+"镜像安装](#41-docker-image-installation) 中的说明使用 Docker 镜像。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "### 5.1 Multi-Node Co-Located Deployment"
+msgstr "### 5.1 多节点混布部署"
+
+msgid ""
+"DP=4 multi-node deployment with TP=4 per dp rank extends the context to 1M. "
+"Update `WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based"
+" on the actual environment."
+msgstr ""
+"DP=4 多节点部署，每个 dp rank 使用 TP=4，可将上下文扩展至 1M。请根据实际环境更新 "
+"`WEIGHT_PATH`、`LOG_PATH`、`local_ip`、`node0_ip` 和 `IFNAME`。"
+
+msgid "Run the following command on node 0:"
+msgstr "在节点 0 上运行以下命令："
+
+msgid "Run the following command on node 1:"
+msgstr "在节点 1 上运行以下命令："
+
+msgid ""
+"> Note: `--data-parallel-address` is set to the local IP (i.e., the "
+"coordinator) on Node 0, and to the head node IP on Node 1; `--data-parallel-"
+"start-rank` is only set on the headless node."
+msgstr ""
+"> 注意：在节点 0 上，`--data-parallel-address` 设置为本地 IP（即协调节点）；在节点 1 上，设置为头节点 "
+"IP；`--data-parallel-start-rank` 仅在无头节点上设置。"
+
+msgid ""
+"Because the weights are large, the load time is related to the disk read "
+"speed, and the first load usually takes about 10 minutes. The following logs"
+" indicate that the service has been started successfully:"
+msgstr "由于权重较大，加载时间与磁盘读取速度有关，首次加载通常需要约 10 分钟。以下日志表示服务已成功启动："
+
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+msgid "| Feature | Description | Configuration |"
+msgstr "| 特性 | 说明 | 配置 |"
+
+msgid ""
+"| Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. |"
+" `--tensor-parallel-size 4` |"
+msgstr "| 张量并行（TP） | 将模型切分到节点内的全部 4 个 NPU 上。 | `--tensor-parallel-size 4` |"
+
+msgid ""
+"| Expert Parallel (EP) | Distributes the MoE experts across NPUs. | "
+"`--enable-expert-parallel` |"
+msgstr "| 专家并行（EP） | 将 MoE 专家分布到各个 NPU 上。 | `--enable-expert-parallel` |"
+
+msgid ""
+"| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context "
+"to 1M. | `--data-parallel-size 4` |"
+msgstr "| 数据并行（DP） | 跨 2 个节点的多节点 DP，可将上下文扩展至 1M。 | `--data-parallel-size 4` |"
+
+msgid ""
+"| Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token "
+"Prediction. | `--speculative-config '{\"method\": \"mtp\", "
+"\"num_speculative_tokens\": 3}'` |"
+msgstr ""
+"| 投机推理（MTP） | 使用原生 MTP 层进行多 token 预测。 | `--speculative-config '{\"method\": "
+"\"mtp\", \"num_speculative_tokens\": 3}'` |"
+
+msgid ""
+"| Decode Graph Capture | Captures the decode phase into a graph to reduce "
+"kernel launch overhead. | `--compilation-config '{\"cudagraph_mode\": "
+"\"FULL_DECODE_ONLY\"}'` |"
+msgstr ""
+"| Decode 图捕获 | 将 decode 阶段捕获为图，以降低 kernel 启动开销。 | `--compilation-config "
+"'{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'` |"
+
+msgid ""
+"| Data parallelism for shared experts | Use data parallelism to deploy "
+"shared experts | `\"enable_shared_expert_dp\": true` |"
+msgstr "| 共享专家数据并行 | 使用数据并行部署共享专家 | `\"enable_shared_expert_dp\": true` |"
+
+msgid ""
+"| Shared-expert overlap | Overlaps shared-expert execution with other work |"
+" `multistream_overlap_shared_expert: true` |"
+msgstr ""
+"| 共享专家重叠 | 将共享专家的执行与其他工作重叠 | `multistream_overlap_shared_expert: true` |"
+
+msgid ""
+"> **Note:** The features listed above are the ones enabled in the verified "
+"deployment commands in this document. Other features, such as LoRA, Pipeline"
+" Parallel, and Prefill-Decode Disaggregation, are not verified in this "
+"document."
+msgstr ""
+"> **注意：** 上文列出的功能是在本文档已验证的部署命令中启用的功能。其他功能，如 LoRA、流水线并行（Pipeline Parallel）和 "
+"Prefill-Decode 分离部署，未在本文档中验证。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"Send an inference request to test the inference service, refer to the "
+"following command:"
+msgstr "发送推理请求以测试推理服务，请参考以下命令："
+
+msgid "The server prints the log of the received request, similar to:"
+msgstr "服务端会打印收到请求的日志，类似如下："
+
+msgid "The expected result is as follows:"
+msgstr "预期结果如下："
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"详情请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+msgid "The following table shows the results of `Step-5-Preview`."
+msgstr "下表展示了 `Step-5-Preview` 的结果。"
+
+msgid ""
+"| dataset | model | hardware | deployment | metric | mode | vllm-api-"
+"general-chat |"
+msgstr ""
+"| dataset | model | hardware | deployment | metric | mode | vllm-api-"
+"general-chat |"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详情请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "## 9 Declaration"
+msgstr "## 9 声明"
+
+msgid ""
+"- The current version is only for early experience, and performance optimization is still in progress.\n"
+"- The service reliability has not been fully validated, and it is not recommended for direct use in production environments."
+msgstr ""
+"- 当前版本仅供早期体验，性能优化仍在进行中。\n"
+"- 服务可靠性尚未经过充分验证，不建议直接用于生产环境。"

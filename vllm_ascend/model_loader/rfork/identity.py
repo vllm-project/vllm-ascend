@@ -279,7 +279,7 @@ def _resolve_sharded_dp_rank(vllm_config: VllmConfig) -> int | None:
         getattr(finegrained_tp_config, "mlp_tensor_parallel_size", 0),
     )
     finegrained_tp_enabled = any(
-        isinstance(size, int) and not isinstance(size, bool) and size > 0 for size in finegrained_tp_sizes
+        isinstance(size, int) and not isinstance(size, bool) and size > 1 for size in finegrained_tp_sizes
     )
     data_parallel_size = getattr(parallel_config, "data_parallel_size", None)
     content_sharded = finegrained_tp_enabled or (

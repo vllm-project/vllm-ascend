@@ -29,6 +29,17 @@ import pandas as pd
 import regex as re
 from modelscope import snapshot_download  # type: ignore
 
+from tools.profiling import safe_name
+from tools.profiling.capture import (
+    ProfileController,
+    ProfileSpec,
+    ServeManifest,
+    collect_raw_artifacts,
+    prepare_capture,
+    profile_root,
+)
+from tools.profiling.storage import ArtifactError
+
 BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
@@ -67,10 +78,40 @@ class AisbenchRunner:
         self.stdout_file = f"output_{self.task_type}.txt"
         aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
-        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True)
+        env = None
+        if self.profile_marker is not None:
+            env = os.environ.copy()
+            repo_root = str(Path(__file__).resolve().parents[1])
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, (repo_root, env.get("PYTHONPATH", ""))))
+            env["ASCEND_PROFILE_REQUEST_MARKER"] = str(self.profile_marker)
+            env["ASCEND_PROFILE_ENABLED"] = str(bool(self.profile_targets)).lower()
+        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True, env=env)
 
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
         self.model = model
+        self.port = port
+        self.host_ip = host_ip
+        self.proc = None
+        self.task_type = aisbench_config["case_type"]
+        self.exp_folder = None
+        self.result_line = None
+        if self.task_type == "curl_cmd":
+            cmds = aisbench_config.get("cmds", [])
+            print(f"[INFO] Running custom curl commands for task: {self.task_type}")
+            for cmd in cmds:
+                formatted_cmd = cmd.replace("${SERVER_PORT}", str(self.port)).replace("$SERVER_PORT", str(self.port))
+                print(f"Executing: {formatted_cmd}")
+                try:
+                    res = subprocess.run(formatted_cmd, shell=True, check=True, capture_output=True, text=True)
+                    if res.stdout:
+                        print(f"Response: {res.stdout.strip()}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Failed to execute cmd: {formatted_cmd}\nError: {e.stderr}")
+                    raise e
+            self.result = "SUCCESS"
+            return
+        self.benchmark_name = str(aisbench_config.get("benchmark_name", "unknown"))
+        self.benchmark_artifact_name = str(aisbench_config.get("benchmark_artifact_name", self.benchmark_name))
         self.dataset_path = aisbench_config.get("dataset_path_local")
         if not self.dataset_path:
             self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
@@ -80,9 +121,7 @@ class AisbenchRunner:
         assert self.dataset_path is not None and self.model_path is not None, (
             f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         )
-        self.port = port
-        self.host_ip = host_ip
-        self.task_type = aisbench_config["case_type"]
+        self._prepare_profiling()
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
         self.num_prompts = aisbench_config.get("num_prompts")
@@ -113,19 +152,78 @@ class AisbenchRunner:
 
             self.metrics_server = _MetricsServer(self.host_ip, self.port)
             self.metrics_baseline = capture_baseline(self.metrics_server, len(self.spec_decode_baseline))
-        self._run_aisbench_task()
-        self._wait_for_task()
+        controller = self._start_profiling()
+        try:
+            self._run_aisbench_task()
+            self._wait_for_task()
+        except BaseException:
+            try:
+                self._finish_profiling(controller)
+            except Exception as exc:
+                logging.error("Profiling cleanup also failed: %s", exc)
+            raise
+        else:
+            self._finish_profiling(controller)
         if verify:
             self.baseline = aisbench_config.get("baseline", 1)
+            self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
-                self._accuracy_verify()
+                self.verify_mode = aisbench_config.get("verify_mode", "range")
+                if self.verify_mode == "ge":
+                    self._accuracy_verify_ge()
+                else:
+                    self._accuracy_verify()
             if self.task_type == "performance":
-                self.threshold = aisbench_config.get("threshold", 0.97)
+                self.threshold = aisbench_config.get("threshold")
+                self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
                 self._performance_verify()
             if self.task_type == "spec_decode":
                 self.threshold = aisbench_config.get("threshold", 0.05)
                 self._spec_decode_verify()
+
+    def _prepare_profiling(self) -> None:
+        """Prepare capture and its time origin only for selected benchmarks."""
+        self.profile_spec = ProfileSpec.from_env()
+        self.profile_targets = ()
+        self.profile_marker: Path | None = None
+        if not self.profile_spec.includes_benchmark(self.benchmark_name, self.task_type):
+            return
+        self.profile_targets = ServeManifest.read(profile_root() / "serve_manifest.json").instances
+        if not self.profile_targets:
+            raise ArtifactError("Profiling is enabled but the serve manifest has no targets")
+        prepare_capture(profile_root(), self.benchmark_name, self.benchmark_artifact_name, self.profile_targets)
+        marker = profile_root() / "benchmarks" / safe_name(self.benchmark_artifact_name) / "first_request"
+        self.profile_marker = marker
+        if self.profile_spec.start_after_requests is not None:
+            progress = marker.parent / "completed_requests"
+            progress.mkdir()
+
+    def _start_profiling(self) -> ProfileController | None:
+        """Start the controller for a selected profiling case."""
+        if not self.profile_targets:
+            return None
+        target_names = ", ".join(target.name for target in self.profile_targets)
+        trigger = (
+            f"{self.profile_spec.start_after_requests} successful requests"
+            if self.profile_spec.start_after_requests is not None
+            else f"{self.profile_spec.start_after}s"
+        )
+        print(
+            f"Profiling benchmark {self.benchmark_artifact_name}: targets={target_names}, "
+            f"start-after={trigger}, duration={self.profile_spec.duration}s",
+            flush=True,
+        )
+        controller = ProfileController(self.profile_spec, self.profile_targets, self.profile_marker)
+        controller.start()
+        return controller
+
+    def _finish_profiling(self, controller: ProfileController | None) -> None:
+        """Stop profiling, save artifacts, and propagate capture/collection failures."""
+        if controller is None:
+            return
+        result = controller.finish()
+        collect_raw_artifacts(profile_root(), self.benchmark_artifact_name, self.profile_targets, result)
 
     def _init_dataset_conf(self):
         if self.task_type in ("accuracy", "spec_decode"):
@@ -141,6 +239,11 @@ class AisbenchRunner:
             with open(conf_path, encoding="utf-8") as f:
                 content = f.read()
             content = re.sub(r"path=.*", f'path="{self.dataset_path}",', content)
+            if self.profile_marker is not None:
+                content, replacements = re.subn(r"\btype\s*=\s*GenInferencer\b", "type=TimedGenInferencer", content)
+                if replacements == 0:
+                    raise ArtifactError("Unsupported AISBench inferencer type for profiling")
+                content = "from tools.profiling.aisbench_request_marker import TimedGenInferencer\n" + content
             conf_path_new = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py")
             with open(conf_path_new, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -202,12 +305,12 @@ class AisbenchRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        try:
-            self.proc.wait(8)
-        except subprocess.TimeoutExpired:
-            # force kill if needed
-            self.proc.kill()
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(8)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
 
     def _wait_for_exp_folder(self):
         while True:
@@ -264,17 +367,22 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
-        assert float(output_throughput) >= self.threshold * self.baseline, (
-            "Performance verification failed. "
-            f"The current Output Token Throughput is {output_throughput} token/s, "
-            f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
-        )
+        if self.threshold is not None:
+            output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
+            assert float(output_throughput) >= self.threshold * self.baseline, (
+                "Performance verification failed. "
+                f"The current Output Token Throughput is {output_throughput} token/s, "
+                f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+            )
         if self.input_throughput_threshold is not None:
-            input_throughput = str(self.result_json["Input Token Throughput"]["total"]).replace("token/s", "")
-            assert float(input_throughput) >= float(self.input_throughput_threshold), (
-                f"Input Token Throughput verification failed. The current value is {input_throughput} token/s, "
-                f"which is not greater than {self.input_throughput_threshold} token/s."
+            input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
+            assert float(input_throughput) >= float(self.input_throughput_threshold) * float(
+                self.input_throughput_baseline
+            ), (
+                "Input Token verification failed. "
+                f"The current Input Token Throughput is {input_throughput} token/s, "
+                f"which is not greater than or equal to "
+                f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
             )
         if self.tpot_threshold is not None:
             tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))
@@ -290,6 +398,15 @@ class AisbenchRunner:
             "Accuracy verification failed. "
             f"The accuracy of {self.dataset_path} is {acc_value}, "
             f"which is not within {self.threshold} relative to baseline {self.baseline}."
+        )
+
+    def _accuracy_verify_ge(self):
+        self._get_result_accuracy()
+        acc_value = self.result
+        assert acc_value >= self.baseline, (
+            "Accuracy verification failed. "
+            f"The accuracy of {self.dataset_path} is {acc_value}, "
+            f"which is not greater than or equal to baseline {self.baseline}."
         )
 
     def _spec_decode_verify(self):
@@ -327,19 +444,19 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
         if not aisbench_case:
             continue
         idx += 1
-        case_name = aisbench_case.get("case_name", "unknown")
+        benchmark_name = aisbench_case.get("benchmark_name", "unknown")
         case_type = aisbench_case.get("case_type", "unknown")
         logging.info("=" * 60)
-        logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, case_name, case_type)
+        logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, benchmark_name, case_type)
         logging.info("=" * 60)
         try:
             with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
-            logging.info("[%d/%d] Finished benchmark: %s", idx, total, case_name)
+            logging.info("[%d/%d] Finished benchmark: %s", idx, total, benchmark_name)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
-            logging.error("[%d/%d] Benchmark failed: %s, reason: %s", idx, total, case_name, e)
+            logging.error("[%d/%d] Benchmark failed: %s, reason: %s", idx, total, benchmark_name, e)
             print(e)
     for failed_case, error_info in aisbench_errors:
         error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"

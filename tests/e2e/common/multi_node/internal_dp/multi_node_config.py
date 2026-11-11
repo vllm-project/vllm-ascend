@@ -313,10 +313,14 @@ class MultiNodeConfigLoader:
 
     @staticmethod
     def _parse_benchmarks(cfg: dict) -> dict:
-        benchmarks = cfg.get("benchmarks") or {}
-        for name, case in benchmarks.items():
-            case["case_name"] = name
-        return benchmarks
+        return {
+            name: {
+                **case,
+                "benchmark_name": name,
+                "benchmark_artifact_name": f"{cfg.get('test_name', 'untitled_test')}__{name}",
+            }
+            for name, case in (cfg.get("benchmarks") or {}).items()
+        }
 
     @staticmethod
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:

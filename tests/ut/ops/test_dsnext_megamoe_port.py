@@ -74,7 +74,7 @@ class TensorDouble:
 class TestMegaMoEPort(unittest.TestCase):
     def setUp(self):
         self.config = SimpleNamespace(
-            parallel_config=SimpleNamespace(world_size_across_dp=8, tensor_parallel_size=1),
+            parallel_config=SimpleNamespace(world_size_across_dp=8, tensor_parallel_size=1, pipeline_parallel_size=1),
             scheduler_config=SimpleNamespace(max_num_batched_tokens=4096),
             compilation_config=SimpleNamespace(cudagraph_capture_sizes=[], max_cudagraph_capture_size=0),
             kv_transfer_config=None,
@@ -345,7 +345,9 @@ class TestMegaMoEPort(unittest.TestCase):
                     hf_text_config=SimpleNamespace(n_routed_experts=128, num_experts_per_tok=3)
                 )
             ),
-            parallel_config=SimpleNamespace(enable_expert_parallel=True, tensor_parallel_size=1),
+            parallel_config=SimpleNamespace(
+                enable_expert_parallel=True, tensor_parallel_size=1, pipeline_parallel_size=1
+            ),
         )
         probe = load_functions(
             "vllm_ascend/ascend_forward_context.py",
@@ -417,6 +419,7 @@ class TestMegaMoEPort(unittest.TestCase):
             "math": math,
             "CUDAGraphMode": SimpleNamespace(NONE=object()),
             "get_dynamic_mx_quant_scale_alg": lambda _: 0,
+            "sync_v2_extra_kwargs": lambda _: None,
             "get_mrv2_in_profile_run": lambda: True,
             "get_tensor_model_parallel_world_size": lambda: 1,
             "get_dp_group": lambda: SimpleNamespace(world_size=1),
@@ -768,32 +771,34 @@ class TestSharedWeightLifecycle(unittest.TestCase):
 
         validator = TestMegaMoEPort()
         validator.setUp()
-        for dtype, pack, weight_type in (("uint8", 2, 296), ("fp8", 1, 24)):
-            with self.subTest(dtype=dtype):
-                self.shared._mega_moe_weights = None
-                self.shared.layer.gate_up_proj = SimpleNamespace(
-                    weight=LayoutTensor((128 // pack, 128), dtype),
-                    weight_scale=LayoutTensor((2, 128, 2)),
-                )
-                self.shared.layer.down_proj = SimpleNamespace(
-                    weight=LayoutTensor((64 // pack, 128), dtype),
-                    weight_scale=LayoutTensor((1, 128, 2)),
-                )
-                weights = self.functions["get_mega_moe_weights"](self.shared)
-                self.assertIsNotNone(weights)
-                self.assertEqual(weights.w1[0].shape, (128, 128 // pack))
-                self.assertEqual(weights.w2[0].shape, (128, 64 // pack))
-                self.assertEqual(weights.w1_scale[0].shape, (128, 2, 2))
-                self.assertEqual(weights.w2_scale[0].shape, (128, 1, 2))
-                self.assertEqual(self.shared.layer.gate_up_proj.weight.shape, (128 // pack, 128))
-                self.assertIs(self.functions["get_mega_moe_weights"](self.shared), weights)
-                payload = validator.payload()
-                payload.shared_weights = weights
-                kwargs = validator.shared["build_mega_moe_shared_kwargs"](payload, 64, 296)
-                self.assertEqual(kwargs["shared_weight1_type"], weight_type)
-                self.assertEqual(kwargs["shared_weight2_type"], weight_type)
-                self.assertEqual(kwargs["shared_l1_weights_sf"][0].dtype, "e8m0")
-                self.assertEqual(kwargs["shared_l2_weights_sf"][0].dtype, "e8m0")
+        for activation_name in ("SiluAndMul", "AscendSiluAndMul"):
+            self.shared.layer.act_fn = type(activation_name, (), {})()
+            for dtype, pack, weight_type in (("uint8", 2, 296), ("fp8", 1, 24)):
+                with self.subTest(activation=activation_name, dtype=dtype):
+                    self.shared._mega_moe_weights = None
+                    self.shared.layer.gate_up_proj = SimpleNamespace(
+                        weight=LayoutTensor((128 // pack, 128), dtype),
+                        weight_scale=LayoutTensor((2, 128, 2)),
+                    )
+                    self.shared.layer.down_proj = SimpleNamespace(
+                        weight=LayoutTensor((64 // pack, 128), dtype),
+                        weight_scale=LayoutTensor((1, 128, 2)),
+                    )
+                    weights = self.functions["get_mega_moe_weights"](self.shared)
+                    self.assertIsNotNone(weights)
+                    self.assertEqual(weights.w1[0].shape, (128, 128 // pack))
+                    self.assertEqual(weights.w2[0].shape, (128, 64 // pack))
+                    self.assertEqual(weights.w1_scale[0].shape, (128, 2, 2))
+                    self.assertEqual(weights.w2_scale[0].shape, (128, 1, 2))
+                    self.assertEqual(self.shared.layer.gate_up_proj.weight.shape, (128 // pack, 128))
+                    self.assertIs(self.functions["get_mega_moe_weights"](self.shared), weights)
+                    payload = validator.payload()
+                    payload.shared_weights = weights
+                    kwargs = validator.shared["build_mega_moe_shared_kwargs"](payload, 64, 296)
+                    self.assertEqual(kwargs["shared_weight1_type"], weight_type)
+                    self.assertEqual(kwargs["shared_weight2_type"], weight_type)
+                    self.assertEqual(kwargs["shared_l1_weights_sf"][0].dtype, "e8m0")
+                    self.assertEqual(kwargs["shared_l2_weights_sf"][0].dtype, "e8m0")
 
 
 class TestMegaMoEConfigLifetime(unittest.TestCase):

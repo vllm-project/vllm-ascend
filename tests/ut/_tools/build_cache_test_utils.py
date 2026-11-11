@@ -49,20 +49,18 @@ def build_cache_command(
         "--environment-profile",
         environment_profile,
     ]
-    for path in prepared_inputs:
-        command.extend(["--prepared-input", str(path)])
-    for value in recipe_values:
-        command.extend(["--recipe-value", value])
-    for value in environment_values:
-        command.extend(["--environment-value", value])
-    for tool in environment_tools:
-        command.extend(["--environment-tool", tool])
-    for path in normalize_paths:
-        command.extend(["--normalize-path", str(path)])
-    for pattern in artifact_includes:
-        command.extend(["--artifact-include", pattern])
-    for value in set_env_values:
-        command.extend(["--set-env", value])
+    repeated_options: dict[str, Sequence[str] | Sequence[Path]] = {
+        "--prepared-input": prepared_inputs,
+        "--recipe-value": recipe_values,
+        "--environment-value": environment_values,
+        "--environment-tool": environment_tools,
+        "--normalize-path": normalize_paths,
+        "--artifact-include": artifact_includes,
+        "--set-env": set_env_values,
+    }
+    for option, values in repeated_options.items():
+        for value in values:
+            command.extend([option, str(value)])
 
     custom_values: dict[str, str | Path | None] = {
         "--soc": soc,

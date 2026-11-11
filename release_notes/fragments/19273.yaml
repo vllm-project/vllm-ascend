@@ -1,0 +1,4 @@
+pr: 19273
+entries:
+  - category: bugfix
+    text: Fixed partial bulk KV transfers restoring incorrect token ranges for segmented AscendStore cache layouts.

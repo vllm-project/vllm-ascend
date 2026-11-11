@@ -2048,13 +2048,30 @@ def main():
                     pr_data = json.loads(response.read().decode())
                     base_sha = pr_data.get("base", {}).get("sha")
 
-                # Download diff (use binary mode to avoid line ending conversion)
-                req = _github_request(pr_url, "application/vnd.github.v3.diff")
-                with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
-                    diff_bytes = response.read()
-                    with open(diff_file, "wb") as f:
-                        f.write(diff_bytes)
-                print("  Using GitHub API to get diff")
+                # Download diff (use binary mode to avoid line ending conversion).
+                # The API refuses to render diffs exceeding its limits (20k
+                # total lines / 1 MB raw data / 300 files) with HTTP 406.
+                # That is deterministic, so retrying cannot help; fall back to
+                # the github.com stream endpoint, which is not rate-limited by
+                # diff size.
+                try:
+                    req = _github_request(pr_url, "application/vnd.github.v3.diff")
+                    with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
+                        diff_bytes = response.read()
+                    print("  Using GitHub API to get diff")
+                except urllib.error.HTTPError as e:
+                    if e.code != 406:
+                        raise
+                    print(
+                        "  API returned 406 (diff exceeds GitHub diff limits), falling back to github.com diff endpoint"
+                    )
+                    fallback_url = f"https://github.com/{repo}/pull/{pr_num}.diff"
+                    req = _github_request(fallback_url, "text/plain")
+                    with urllib.request.urlopen(req, timeout=120, context=ssl_context) as response:
+                        diff_bytes = response.read()
+                    print("  Using github.com fallback to get diff")
+                with open(diff_file, "wb") as f:
+                    f.write(diff_bytes)
                 break
             except Exception as e:
                 print(f"  Attempt {attempt} failed: {e}")

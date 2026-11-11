@@ -79,18 +79,20 @@ class _FakeBlockPool:
 class _FakeFAManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
     if isinstance(spec, MambaSpec):
-        return _FakeMambaManager()
-    return _FakeFAManager()
+        return _FakeMambaManager(**kwargs)
+    return _FakeFAManager(**kwargs)
 
 
 def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:
@@ -214,8 +216,6 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    import vllm.v1.core.kv_cache_utils as kcu
-
     from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
 
     sentinel_config = SimpleNamespace()
@@ -228,7 +228,8 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
     result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
     # The builder replaces the upstream entry point, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
-    assert kcu.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
+    live_module = kcu_patch._kv_cache_planning
+    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
     assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 

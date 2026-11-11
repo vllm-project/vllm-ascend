@@ -146,7 +146,8 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         ).to(layer.aclnn_input_scale.dtype)
 
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
+        if not getattr(layer, "_fused_preprocess_managed", False):
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
         if self.quant_method == COMPRESSED_TENSORS_METHOD:

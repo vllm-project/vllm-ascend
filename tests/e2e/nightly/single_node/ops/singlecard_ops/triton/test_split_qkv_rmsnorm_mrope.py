@@ -3,11 +3,22 @@ import gc
 import pytest
 import torch
 
-NUM_TOKENS = [1, 4096]
-NUM_QKV_HEADS = [(2, 1), (16, 2)]
-HEAD_SIZES = [128, 256]
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
+STRUCTURAL_CASES = [
+    (1, 2, 1, 128, [24, 20, 20]),
+    (1, 2, 1, 256, [11, 11, 10]),
+    (1, 16, 2, 128, [11, 11, 10]),
+    (1, 16, 2, 128, [24, 20, 20]),
+    (1, 16, 2, 256, [24, 20, 20]),
+    (4096, 2, 1, 128, [11, 11, 10]),
+    (4096, 2, 1, 128, [24, 20, 20]),
+    (4096, 2, 1, 256, [24, 20, 20]),
+    (4096, 16, 2, 128, [24, 20, 20]),
+    (4096, 16, 2, 256, [11, 11, 10]),
+]
 EPS = [1e-6]
-MROPE_SECTION = [[11, 11, 10], [24, 20, 20]]
 IS_INTERLEAVED = [True, False]
 HAS_GATE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
@@ -209,11 +220,12 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
     return q, k, v
 
 
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads, num_kv_heads", NUM_QKV_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("num_tokens, num_q_heads, num_kv_heads, head_size, mrope_section", STRUCTURAL_CASES)
 @pytest.mark.parametrize("eps", EPS)
-@pytest.mark.parametrize("mrope_section", MROPE_SECTION)
 @pytest.mark.parametrize("is_interleaved", IS_INTERLEAVED)
 @pytest.mark.parametrize("has_gate", HAS_GATE)
 @pytest.mark.parametrize("dtype", DTYPES)

@@ -108,6 +108,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_config.weight_nz_mode = 1
         mock_get_config.return_value = mock_config
         layer = MagicMock()
+        layer._fused_preprocess_managed = False
 
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.input_scale.data = torch.tensor([0.1])
@@ -137,6 +138,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_config.weight_nz_mode = 2
         mock_get_config.return_value = mock_config
         layer = MagicMock()
+        layer._fused_preprocess_managed = False
 
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.input_scale.data = torch.tensor([0.1])

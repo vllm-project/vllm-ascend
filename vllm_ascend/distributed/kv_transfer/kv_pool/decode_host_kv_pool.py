@@ -33,9 +33,7 @@ def validate_decode_host_kv_caches(
             continue
         num_blocks = num_blocks_by_group.get(descriptor.group_id)
         if num_blocks is None or num_blocks <= 0:
-            raise ValueError(
-                f"Missing Host KV capacity for group {descriptor.group_id}"
-            )
+            raise ValueError(f"Missing Host KV capacity for group {descriptor.group_id}")
         if descriptor.layer_name not in layer_caches:
             raise KeyError(descriptor.layer_name)
         raw = layer_caches[descriptor.layer_name]
@@ -58,8 +56,7 @@ def validate_decode_host_kv_caches(
             or len(device_indexer) != len(descriptor.indexer_components)
         ):
             raise ValueError(
-                "Decode Host KV cache requires Host Main and Device Indexer "
-                f"components for {descriptor.layer_name}"
+                f"Decode Host KV cache requires Host Main and Device Indexer components for {descriptor.layer_name}"
             )
         for component in descriptor.components:
             tensor = views[component.component_role]

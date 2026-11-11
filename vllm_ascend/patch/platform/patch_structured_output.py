@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 from inspect import Signature, signature
 from typing import Any
 
@@ -15,6 +16,7 @@ _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
 _ORIGINAL_OUTLINES_ACCEPT_ATTR = "_vllm_ascend_original_outlines_accept_tokens"
+_ORIGINAL_XGRAMMAR_COMPILE_JSON_ATTR = "_vllm_ascend_original_xgrammar_compile_json_schema"
 
 
 def _request_backend(request: Any) -> str | None:
@@ -158,6 +160,43 @@ def _patch_outlines_accept_tokens() -> None:
     OutlinesGrammar.accept_tokens = accept_tokens
 
 
+def _patch_xgrammar_disable_any_whitespace() -> None:
+    """Ignore xgrammar's ``separators`` argument on both supported vLLM lanes.
+
+    vLLM #58067 (present in v0.32.0 and verified main) passes
+    ``separators=(",", ":")`` to ``GrammarCompiler.compile_json_schema`` when
+    ``disable_any_whitespace`` is set. The xgrammar releases shipped with
+    Ascend (0.2.7/0.2.8) mishandle it: the resulting grammar lets small models
+    loop on ``","`` until ``max_tokens`` and emit truncated, invalid JSON
+    (e.g. ``test_guided_decoding.py::test_guided_json_completion_xgrammar``).
+    Force the legacy grammar on both supported lanes until
+    xgrammar >= 0.2.9 is pinned.
+    """
+    try:
+        from xgrammar import GrammarCompiler
+    except ImportError:
+        return
+
+    if getattr(GrammarCompiler, _ORIGINAL_XGRAMMAR_COMPILE_JSON_ATTR, None) is not None:
+        return
+
+    original_compile_json_schema = GrammarCompiler.compile_json_schema
+    setattr(
+        GrammarCompiler,
+        _ORIGINAL_XGRAMMAR_COMPILE_JSON_ATTR,
+        original_compile_json_schema,
+    )
+
+    @functools.wraps(original_compile_json_schema)
+    def compile_json_schema(self: Any, schema: Any, *args: Any, **kwargs: Any) -> Any:
+        kwargs["separators"] = None
+        return original_compile_json_schema(self, schema, *args, **kwargs)
+
+    GrammarCompiler.compile_json_schema = compile_json_schema
+
+
 _patch_sampling_params_validation()
 _patch_structured_output_manager()
 _patch_outlines_accept_tokens()
+# vLLM #58067 is present in both v0.32.0 and verified main.
+_patch_xgrammar_disable_any_whitespace()

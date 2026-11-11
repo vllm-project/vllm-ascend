@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_session import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cann.layerwise_session import (
     ChunkStoreSession,
     PutBinding,
     PutState,
@@ -242,9 +242,7 @@ def test_chunk_start_can_revoke_put_when_history_initialization_fails():
     lease = RequestStoreLease(("request", 0), StoreReadLeaseRegistry(backend))
     claim = registry.claim_execution(1, [PutBinding("new", 128)])
     backend.get_start_result = [-1]
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
 
     with pytest.raises(StoreCommitError, match="batch_get_session_start failed"):
         session.start(["history"], claim)
@@ -258,9 +256,7 @@ def test_range_put_synchronizes_ready_event_before_reading_source():
     registry = StorePutRegistry(backend)
     lease = RequestStoreLease(("request", 0), StoreReadLeaseRegistry(backend))
     claim = registry.claim_execution(1, [PutBinding("new", 128)])
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
 
     call_order = []
@@ -292,9 +288,7 @@ def test_range_put_rejects_unexpected_positive_byte_count():
     registry = StorePutRegistry(backend)
     lease = RequestStoreLease(("request", 0), StoreReadLeaseRegistry(backend))
     claim = registry.claim_execution(1, [PutBinding("new", 128)])
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
     with pytest.raises(StoreCommitError, match="expected"):
         session.save_layer(["new"], [[1000]], [[64]], [[0]])
@@ -306,9 +300,7 @@ def test_put_end_failure_revokes_retained_native_session():
     registry = StorePutRegistry(backend)
     lease = RequestStoreLease(("request", 0), StoreReadLeaseRegistry(backend))
     claim = registry.claim_execution(1, [PutBinding("new", 128)])
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
     with pytest.raises(StoreCommitError):
         session.commit_owned()
@@ -326,9 +318,7 @@ def test_put_end_partial_failure_revokes_only_failed_key():
         1,
         [PutBinding("complete", 128), PutBinding("failed", 128)],
     )
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
 
     with pytest.raises(StoreCommitError, match="put_end failed"):
@@ -354,9 +344,7 @@ def test_put_end_exception_reconciles_complete_keys_before_revoke():
         1,
         [PutBinding("complete", 128), PutBinding("pending", 128)],
     )
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
 
     with pytest.raises(RuntimeError, match="end rpc failed"):
@@ -379,9 +367,7 @@ def test_put_end_invalid_result_length_reconciles_native_sessions():
         1,
         [PutBinding("complete", 128), PutBinding("pending", 128)],
     )
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
 
     with pytest.raises(StoreCommitError, match="invalid result length"):
@@ -398,9 +384,7 @@ def test_put_revoke_failure_blocks_restart_until_cleanup_succeeds():
     registry = StorePutRegistry(backend)
     lease = RequestStoreLease(("request", 0), StoreReadLeaseRegistry(backend))
     claim = registry.claim_execution(1, [PutBinding("new", 128)])
-    session = ChunkStoreSession(
-        RequestChunkKey("request", 0, 0), backend, lease, registry
-    )
+    session = ChunkStoreSession(RequestChunkKey("request", 0, 0), backend, lease, registry)
     session.start([], claim)
 
     with pytest.raises(StoreCommitError, match="cleanup failed"):

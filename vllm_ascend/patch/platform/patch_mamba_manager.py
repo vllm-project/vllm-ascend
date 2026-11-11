@@ -9,12 +9,14 @@ from collections.abc import Sequence
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
+    BlockHashWithGroupId,
     BlockPool,
     KVCacheBlock,
     KVCacheSpec,
     MambaManager,
     MambaSpec,
 )
+from vllm.v1.request import Request
 
 
 class AscendMambaManager(MambaManager):
@@ -50,6 +52,28 @@ class AscendMambaManager(MambaManager):
             drop_eagle_block=drop_eagle_block,
         )
 
+    def _cache_partial_tail_block(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None,
+    ) -> BlockHashWithGroupId | None:
+        # Compatibility with vLLM v0.32.0; newer upstream already skips this.
+        # Keep reserved-checkpoint validation and all new-state bookkeeping upstream.
+        if (
+            self.mamba_cache_mode == "align"
+            and request.request_id not in self._checkpoints
+            and num_tokens > 0
+            and num_tokens % self.block_pool.hash_block_size == 0
+        ):
+            block_idx = (num_tokens - 1) // self.block_size
+            blocks = self.req_to_blocks.get(request.request_id, ())
+            if block_idx < len(blocks):
+                block = blocks[block_idx]
+                if not block.is_null and block.block_hash_num_tokens == num_tokens:
+                    return None
+        return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -59,6 +83,7 @@ class AscendMambaManager(MambaManager):
         num_local_computed_tokens: int | None = None,
         num_tokens_main_model: int | None = None,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         if num_tokens_main_model is None:
             assert num_local_computed_tokens is not None
@@ -72,6 +97,7 @@ class AscendMambaManager(MambaManager):
             num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
+            prefill_end=prefill_end,
         )
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one

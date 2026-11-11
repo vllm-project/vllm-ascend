@@ -346,9 +346,7 @@ def test_position_match_does_not_scan_tokens_before_overlap(monkeypatch):
         global_end=overlap_start + right_token_count,
         token_ids=tuple(range(overlap_start, overlap_start + right_token_count)),
         local_offsets=tuple((index, index + 1) for index in range(right_token_count)),
-        global_offsets=tuple(
-            (index, index + 1) for index in range(overlap_start, overlap_start + right_token_count)
-        ),
+        global_offsets=tuple((index, index + 1) for index in range(overlap_start, overlap_start + right_token_count)),
     )
     original_record = lopt_tokenizer_module._record
     visited_left_indices: list[int] = []

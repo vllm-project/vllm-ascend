@@ -23,7 +23,7 @@ Cache and packed storage must not overlap. Concurrent writers are unsupported.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Protocol
 
 import torch
@@ -31,8 +31,17 @@ from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
 
+    class _CompiledKernelSource(Protocol):
+        """Source metadata needed to match a compiled launcher's arguments."""
+
+        @property
+        def signature(self) -> Mapping[str, str]: ...
+
     class _CompiledKernel(Protocol):
         """Structural launch interface for vendor Triton kernels without stubs."""
+
+        @property
+        def src(self) -> _CompiledKernelSource: ...
 
         def __getitem__(self, grid: tuple[int, int, int]) -> Callable[..., object]: ...
 

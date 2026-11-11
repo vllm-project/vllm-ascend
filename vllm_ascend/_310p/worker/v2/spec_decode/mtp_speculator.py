@@ -27,17 +27,20 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
 )
 
 
-class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
+class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
     """Ascend MTP speculator for 310P MRv2 (Triton-free draft loop)."""
 
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -227,11 +230,17 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     dcp_local_seq_lens=dcp_local_seq_lens,
                 )
         if attn_metadata is not None:
-            # Draft attention uses decode state even during graph capture.
+            # Align with draft ACLGraph capture: q_len>1 / step0 → SpecDecoding
+            # (splitfuse); single-token draft-decode → DecodeOnly (PA).
+            q_len = num_tokens_padded // max(num_reqs_padded, 1) if num_reqs_padded else 1
+            use_spec_decoding = step == 0 or num_query_per_req > 1 or q_len > 1
+            draft_attn_state = (
+                AscendAttentionState.SpecDecoding if use_spec_decoding else AscendAttentionState.DecodeOnly
+            )
             for metadata in attn_metadata.values():
                 if metadata is None:
                     continue
-                metadata.attn_state = AscendAttentionState.DecodeOnly
+                metadata.attn_state = draft_attn_state
 
             # Step 0 is draft prefill; only decode steps update CPU lengths.
             if step > 0:
@@ -260,15 +269,12 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        num_speculative_steps: int | None = None,
     ) -> None:
         """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
         # Call GPU AR generate_draft (sample + update_draft_inputs) without the
         # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
-        from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-            AutoRegressiveSpeculator,
-        )
-
-        AutoRegressiveSpeculator._generate_draft(
+        TargetDependentARSpeculator._generate_draft(
             self,
             num_reqs,
             num_tokens_padded,
@@ -276,6 +282,8 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
+            # vLLM #60335 added `num_speculative_steps` on main.
+            num_speculative_steps,
         )
         if attn_metadata is None or torch.npu.is_current_stream_capturing():
             return
@@ -292,6 +300,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+        num_speculative_steps: int | None = None,
     ) -> None:
         """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
         assert seq_lens_cpu_upper_bound is not None
@@ -307,7 +316,8 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
         attn_metadata = None
         slot_mappings_by_layer = None
-        for step in range(1, self.num_speculative_steps):
+        # vLLM #60335 passes the per-batch step count on main.
+        for step in range(1, num_speculative_steps):
             if not skip_attn and (self.advance_draft_positions or step == 1):
                 # Host slot_mapping + attn metadata must run outside capture.
                 slot_mappings_by_layer = self._compute_draft_slot_mappings(
@@ -347,4 +357,5 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     slot_mappings_by_layer,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    num_speculative_steps=num_speculative_steps,
                 )

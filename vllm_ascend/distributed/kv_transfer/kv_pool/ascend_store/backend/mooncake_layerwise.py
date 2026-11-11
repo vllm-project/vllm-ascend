@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -21,63 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 if TYPE_CHECKING:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-
-LAYERWISE_DATA_PLANE = "block_key"
-
-
-def bind_layerwise_keys(
-    *,
-    vllm_config: Any,
-    kv_cache_config: Any,
-    model_name: str,
-    use_hybrid: bool,
-    grouped_block_size: list[int],
-) -> LayerwiseKeyBuilder:
-    """Resolve Mooncake identity once, without retaining mutable configs."""
-    parallel = vllm_config.parallel_config
-    validate_pp_groups(kv_cache_config, parallel)
-    namespace = layerwise_topology_namespace(vllm_config, kv_cache_config)
-    pp_size = parallel.pipeline_parallel_size
-    if pp_size > 1:
-        logger.info(
-            "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
-            namespace,
-            parallel.rank,
-            pp_size,
-            vllm_config.cache_config.block_size,
-            [group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
-            if kv_cache_config is not None
-            else [],
-        )
-    if use_hybrid:
-        layout = hybrid_layout_id(kv_cache_config, parallel.tensor_parallel_size, namespace=namespace)
-        block_sizes = tuple(grouped_block_size)
-
-        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
-            return hybrid_block_key(
-                model_name,
-                layout,
-                group,
-                block_sizes[group],
-                block_hash,
-                head,
-                pp_rank=stage if pp_size > 1 else None,
-            )
-
-        return LayerwiseKeyBuilder(make_key, pp_size)
-
-    def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
-        return make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
-
-    return LayerwiseKeyBuilder(make_single_group_key, pp_size)
-
-
-def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
-    """Block-key transfer does not opt into GVA-backed physical reuse."""
-    del extra_config
-    return None
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
 def make_block_key(
@@ -117,8 +61,14 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     hash: the scheduler and every stage must derive the same namespace.
     """
     parallel = vllm_config.parallel_config
+    kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size if getattr(vllm_config, "additional_config", None) else 1
+    kvpp_namespace = (
+        f"kvpp-tp{parallel.tensor_parallel_size}-pcp{parallel.prefill_context_parallel_size}" if kvpp_size > 1 else ""
+    )
     if parallel.pipeline_parallel_size == 1:
-        return ""
+        # Owner-only objects have different sizes and layer offsets from the
+        # ordinary replicated layout, even with the same model and TP size.
+        return kvpp_namespace
     model = vllm_config.model_config
     partitions = []
     previous_end = 0
@@ -144,7 +94,7 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
             size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
         )
     speculative = vllm_config.speculative_config
-    identity = (
+    identity: tuple[Any, ...] = (
         parallel.tensor_parallel_size,
         partitions,
         model.compute_hash(),
@@ -153,6 +103,8 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
         cache.block_size,
         speculative.compute_hash() if speculative is not None else None,
     )
+    if kvpp_namespace:
+        identity += (kvpp_namespace,)
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return f"mooncake_pp_v3:{digest}"
 
@@ -172,30 +124,6 @@ def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
             f"Mooncake layerwise PP requires each stage to own layers in every KV cache group; empty groups: {empty}. "
             "Use a partition covering all groups, or disable layerwise pooling. Draft-only groups are not supported."
         )
-
-
-def validate_topology(parallel_config: Any) -> None:
-    """Reject parallel coordinates omitted from Mooncake's block key."""
-
-    def parallel_size(name: str) -> int:
-        value = getattr(parallel_config, name, 1)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 1
-
-    dimensions = (
-        ("prefill_context_parallel_size", parallel_size("prefill_context_parallel_size")),
-        ("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),
-    )
-    unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
-    if unsupported:
-        raise ValueError(
-            "Mooncake block-key layerwise supports TP/PP, but not context parallelism; unsupported "
-            + ", ".join(unsupported)
-        )
-
-
-def validate_runtime(*, use_hybrid: bool, has_recurrent_state: bool, tp_mismatch: bool) -> None:
-    if tp_mismatch:
-        raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
 
 
 def group_block_size_signature(group) -> tuple[int, ...]:
@@ -247,48 +175,11 @@ def hybrid_block_key(
     return f"{model}@mooncake_hybrid_v1:{layout}{stage}@group:{group}@block:{block_size}@{block_hash}@{head}"
 
 
-def fence_drains_recv() -> bool:
-    """Keep future-layer prefetch running across attention boundaries."""
-    return False
-
-
-def send_fence_backlog() -> int:
-    """How many queued layer saves may stay outstanding at an attention boundary.
-
-    The attention-window fence used to drain the SAVE queue to zero after every
-    layer. The send thread is single-threaded, so a zero backlog means the put
-    for layer L must be entirely on the wire before layer L+1's collectives may
-    launch: the transfer is serialized against compute instead of overlapping
-    it, which is the opposite of what layerwise exists to do. Measured on the
-    prefill node this pinned ~26 ms per layer (~1.2 s per 44-layer step).
-
-    Bounding the backlog instead lets the send thread work on layer L-N -- whose
-    ``sync_save_events`` have long since completed -- while the compute stream is
-    already several layers ahead. Ordering is unaffected because the thread still
-    consumes the queue strictly in submission order, and only one ranged put is
-    ever in flight. Complete publication is still guaranteed: ``save_kv_layer``
-    waits for the final layer's save event at the end of every step, which
-    implies every earlier layer has committed.
-
-    Eight layers of slack preserved the measured overlap without introducing a
-    public tuning surface. Full drains are still enforced on teardown.
-    """
-    return 8
-
-
 def selected(mask, index: int) -> bool:
     return mask is None or (0 <= index < len(mask) and bool(mask[index]))
 
 
-def prepare_layerwise_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
-    """Preserve partial single-group sessions and complete hybrid snapshots."""
-    if worker.block_key_hybrid:
-        return prepare_group_sessions(worker, requests)
-    worker._prepare_block_key_layerwise_sessions(requests)
-    return {}
-
-
-def prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
+def prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
     worker._layer_load_aborted.clear()
     with worker._put_started_keys_lock:
         previously_started = worker._put_started_keys.copy()
@@ -305,7 +196,7 @@ def prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dic
         raise
 
 
-def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
+def _prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
     """Views isolate per-group key slots while preserving real request ownership.
 
     Hybrid pooling publishes only complete blocks. Partial compressor/SWA state
@@ -321,10 +212,17 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
         cached_tokens = request.save_start_token
         if request.load_spec is not None and request.load_spec.can_load:
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not worker.use_eagle and request.load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not worker.use_eagle
+                and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups
+                and request.load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
         load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
-        for group, block_size in enumerate(worker.grouped_block_size):
+        for group in worker.cacheable_group_ids:
+            # Skip private rings before deriving token hashes: their physical
+            # capacity need not even be divisible by the hash block size.
+            block_size = worker.grouped_block_size[group]
             view = copy(request)
             # Keep the complete group block table: LayerBatchBuilder indexes it
             # using task.group_id. Only key/session metadata is group-local.
@@ -374,7 +272,7 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             view.save_end_token = end * block_size
             view.save_key_block_offset = start
             view.save_block_keys = [None] * max(0, end - start)
-            if not request.can_save or not worker._is_layerwise_save_owner():
+            if not request.can_save or not worker._is_layerwise_save_owner(group):
                 continue
             key_indices = [(key(index), index) for index in range(start, end) if selected(store_mask, index)]
             names = [name for name, _ in key_indices]

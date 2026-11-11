@@ -239,6 +239,19 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         return True
 
+    def get_cached_num_encoder_embeds(self, request: Request, input_id: int) -> int | None:
+        """Return the stored count for a cache hit in either tier.
+
+        CPU-only entries are also reusable, via promotion or temporary device
+        copies. Read the entry itself so eviction and reset need no separate
+        embedding-count bookkeeping.
+        """
+        mm_hash = request.mm_features[input_id].identifier
+        entry = self.cpu_cache.get(mm_hash)
+        if entry is None:
+            entry = self.npu_cache.get(mm_hash)
+        return entry.num_embeds if entry is not None else None
+
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """
         Check whether the multimodal embedding corresponding to the current input

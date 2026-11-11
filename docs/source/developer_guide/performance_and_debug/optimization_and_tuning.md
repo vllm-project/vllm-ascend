@@ -65,20 +65,7 @@ Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/l
 
 ### 1. Memory Allocator Optimization
 
-#### 1.1. jemalloc
-
-**jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock contention between threads and can hugely optimize performance.
-
-```bash
-# Install jemalloc
-sudo apt update
-sudo apt install libjemalloc2
-
-# Configure jemalloc
-export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-```
-
-#### 1.2. TCMalloc
+#### 1.1. TCMalloc
 
 **TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing lock contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 

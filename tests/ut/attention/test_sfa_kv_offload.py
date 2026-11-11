@@ -14,7 +14,7 @@ from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadMetadataBuilder,
     AscendSFAOffloadMetadata,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -436,3 +436,54 @@ def test_c8_quant_lim():
     assert index_key.dtype == torch.int8
     assert result.data_ptr() == impl.lim_topk_src.data_ptr()
     torch.testing.assert_close(result, impl.lim_topk_src[:tokens])
+
+
+@pytest.mark.parametrize("mode", ["copy_sfa", "overlap", "mixed_debug", "prefill_debug"])
+def test_offload_attention_dispatch_after_removing_unfused_mode(mode):
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    impl.layer_name = "model.layers.0.self_attn.attn"
+    impl.use_fused_overlap = mode == "overlap"
+    impl._copy_sfa_attention = MagicMock(return_value=torch.ones(2, 1, 4))
+    impl._execute_fused_overlap_offload_decode = MagicMock(return_value=torch.ones(2, 1, 4))
+    query = torch.zeros(2, 1, 4)
+    cache = (torch.zeros(1, 128, 1, 4), torch.zeros(1, 128, 1, 4))
+    table = torch.tensor([[0]], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        fused_copy_sfa_enabled=mode == "copy_sfa",
+        num_decodes=0 if mode == "prefill_debug" else 1,
+        num_decode_tokens=0 if mode == "prefill_debug" else (1 if mode == "mixed_debug" else 2),
+        num_prefills=1 if mode.endswith("debug") else 0,
+        req_ids_tensor=torch.tensor([0]),
+        token_to_req=torch.tensor([0, 0]),
+    )
+    paged_output = torch.full_like(query, 2)
+    with (
+        patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager"),
+        patch("vllm_ascend.attention.sfa_kv_offload._check_device_kv_cache_exist") as check_cache,
+        patch.object(
+            AscendSFAImpl,
+            "_execute_sparse_flash_attention_process",
+            return_value=paged_output,
+        ) as paged_attention,
+    ):
+        output = impl._execute_sparse_flash_attention_process(
+            query,
+            query,
+            cache,
+            torch.zeros(2, 1, dtype=torch.int32),
+            metadata,
+            torch.tensor([2]),
+            torch.tensor([2]),
+            block_table=table,
+        )
+    if mode.endswith("debug"):
+        check_cache.assert_called_once()
+        paged_attention.assert_called_once()
+        assert paged_attention.call_args.args[2] is cache
+        assert paged_attention.call_args.kwargs["block_table"] is table
+        assert output is paged_output
+    else:
+        check_cache.assert_not_called()
+        paged_attention.assert_not_called()
+    assert impl._copy_sfa_attention.call_count == (mode == "copy_sfa")
+    assert impl._execute_fused_overlap_offload_decode.call_count == (mode == "overlap")

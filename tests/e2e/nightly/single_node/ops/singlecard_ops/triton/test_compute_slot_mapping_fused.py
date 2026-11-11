@@ -6,6 +6,8 @@ import itertools
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_fused_groups_adaptive_kernel,
     _compute_slot_mapping_fused_groups_kernel,
@@ -77,6 +79,10 @@ def _make_fused_case(lengths, circular):
     return launch, outputs, references
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
     "lengths",
     [
@@ -112,6 +118,10 @@ def test_fused_slot_mapping(lengths, circular, graph):
         torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("tokens_per_request", [1, 17, 33, 65, 129, 257, 513, 4097])
 @pytest.mark.parametrize("circular", [False, True])
 def test_fused_request_count_reuses_compilation(tokens_per_request, circular, monkeypatch):

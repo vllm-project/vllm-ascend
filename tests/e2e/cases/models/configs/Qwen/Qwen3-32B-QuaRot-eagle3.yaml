@@ -9,8 +9,6 @@ test_cases:
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--enforce-eager"
-      - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"
       - "2"
       - "--port"
@@ -24,6 +22,10 @@ test_cases:
       - "0.9"
       - "--speculative-config"
       - '{"method": "eagle3", "model": "RedHatAI/Qwen3-32B-speculator.eagle3", "num_speculative_tokens": 3}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
     benchmarks:
       perf_warmup:
         case_type: performance
@@ -45,5 +47,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 20
         request_rate: 0
-        baseline: 371.4166
+        baseline: 730.8368
         threshold: 0.97

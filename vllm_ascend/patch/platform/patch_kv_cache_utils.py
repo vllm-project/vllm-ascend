@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+
 import math
 from collections import defaultdict
 from dataclasses import replace
+from typing import Any
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -23,23 +24,14 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.attention.cache_layout import LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT
+from vllm_ascend.attention.cache_layout import (
+    LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT,
+)
 from vllm_ascend.attention.dsa_offload_runtime import build_dsa_group_specs
 from vllm_ascend.attention.offload_capability import (
     get_dsa_offload_backends,
     is_speculative_cache_layer,
 )
-from vllm_ascend.ops.dsa_offload import (
-    DsaOffloadConfig,
-    get_dsa_config_value,
-    get_dsa_raw_seq,
-)
-from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.attention.cache_layout import (
-    CacheComponentRole,
-    build_mla_layer_cache_descriptor,
-)
-
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -56,19 +48,43 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    get_qwen4_exp_kv_cache_config,
+    get_qwen4_exp_kv_cache_groups,
+    get_qwen4_exp_max_memory_usage,
+    get_qwen4_exp_pool_bytes_per_block,
+)
+from vllm_ascend.ops.dsa_offload import (
+    DsaOffloadConfig,
+    get_dsa_config_value,
+    get_dsa_raw_seq,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved the KV-cache planning helpers out of
+# `vllm.v1.core.kv_cache_utils` into `vllm.v1.core.kv_cache_planning` on main.
+# The v0.32.0 lane still ships them in `kv_cache_utils`, so resolve the live
+# module by version and import/patch the planning symbols from there.
+if vllm_version_is("0.32.0"):
+    import vllm.v1.core.kv_cache_utils as _kv_cache_planning
+    from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+else:
+    import vllm.v1.core.kv_cache_planning as _kv_cache_planning
+    from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
-_orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
-_orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
-_orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
-_orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
-_orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
-_orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
-_orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
+_orig_get_kv_cache_groups_uniform_page_size = _kv_cache_planning._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_groups = _kv_cache_planning.get_kv_cache_groups
+_orig_get_packed_kv_cache_groups = _kv_cache_planning._get_packed_kv_cache_groups
+_orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_groups", None)
+_orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
+_orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
+_orig_pool_bytes_per_block = _kv_cache_planning._pool_bytes_per_block
+_orig_get_kv_cache_configs = _kv_cache_planning.get_kv_cache_configs
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -92,11 +108,11 @@ if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_
 def is_layerwise_host_offload_prefill(vllm_config: VllmConfig) -> bool:
     """Return whether this worker uses the Prefill shared-workspace plan."""
 
-    kv_transfer_config = vllm_config.kv_transfer_config
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
         return False
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
-    return bool(extra_config.get("layerwise_host_kv_offload", False))
+    return extra_config.get("layerwise_host_kv_offload") is True
 
 
 def _is_mtp_cache_layer(
@@ -130,13 +146,8 @@ def _get_group_layer_kv_cache_specs(
     if isinstance(group_spec, UniformTypeKVCacheSpecs):
         missing = set(group.layer_names) - set(group_spec.kv_cache_specs)
         if missing:
-            raise ValueError(
-                f"KV cache group is missing specs for layers: {sorted(missing)!r}"
-            )
-        return {
-            layer_name: group_spec.kv_cache_specs[layer_name]
-            for layer_name in group.layer_names
-        }
+            raise ValueError(f"KV cache group is missing specs for layers: {sorted(missing)!r}")
+        return {layer_name: group_spec.kv_cache_specs[layer_name] for layer_name in group.layer_names}
     if isinstance(group_spec, MLAAttentionSpec):
         return {layer_name: group_spec for layer_name in group.layer_names}
     raise NotImplementedError(
@@ -152,10 +163,7 @@ def _get_layerwise_prefill_cache_layout(
     """Resolve the physical Prefill cache layout shared by all planners."""
 
     if len(kv_cache_groups) != 1:
-        raise NotImplementedError(
-            "Layerwise Host Offload Prefill currently requires one uniform "
-            "KV cache group"
-        )
+        raise NotImplementedError("Layerwise Host Offload Prefill currently requires one uniform KV cache group")
     group = kv_cache_groups[0]
     per_layer_specs = _get_group_layer_kv_cache_specs(group)
     workspace_layers: list[str] = []
@@ -168,20 +176,14 @@ def _get_layerwise_prefill_cache_layout(
     if not workspace_layers:
         raise ValueError("Layerwise Host Offload Prefill found no base-model layers")
 
-    workspace_page_sizes = {
-        per_layer_specs[layer_name].page_size_bytes
-        for layer_name in workspace_layers
-    }
+    workspace_page_sizes = {per_layer_specs[layer_name].page_size_bytes for layer_name in workspace_layers}
     if len(workspace_page_sizes) != 1:
         raise NotImplementedError(
             "Layerwise Host Offload Prefill requires compatible base-layer "
             "cache page sizes; heterogeneous layers need separate arenas"
         )
     workspace_page_size = next(iter(workspace_page_sizes))
-    mtp_page_sizes = {
-        layer_name: per_layer_specs[layer_name].page_size_bytes
-        for layer_name in mtp_layers
-    }
+    mtp_page_sizes = {layer_name: per_layer_specs[layer_name].page_size_bytes for layer_name in mtp_layers}
     return (
         workspace_layers,
         workspace_page_size,
@@ -209,10 +211,7 @@ def _get_layerwise_prefill_max_memory_usage_bytes(
         )
         for spec in per_layer_specs.values()
     )
-    bytes_per_block = (
-        LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT * workspace_page_size
-        + sum(mtp_page_sizes.values())
-    )
+    bytes_per_block = LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT * workspace_page_size + sum(mtp_page_sizes.values())
     return num_blocks * bytes_per_block
 
 
@@ -222,13 +221,9 @@ def _ascend_max_memory_usage_bytes_from_groups(
 ) -> int:
     # PD-separated producer and consumer workers use distinct planners.
     if is_layerwise_host_offload_decode(vllm_config):
-        return _get_layerwise_decode_max_memory_usage_bytes(
-            vllm_config, kv_cache_groups
-        )
+        return _get_layerwise_decode_max_memory_usage_bytes(vllm_config, kv_cache_groups)
     if is_layerwise_host_offload_prefill(vllm_config):
-        return _get_layerwise_prefill_max_memory_usage_bytes(
-            vllm_config, kv_cache_groups
-        )
+        return _get_layerwise_prefill_max_memory_usage_bytes(vllm_config, kv_cache_groups)
     return _ascend_model_max_memory_usage_bytes(vllm_config, kv_cache_groups)
 
 
@@ -256,19 +251,14 @@ def _get_layerwise_prefill_kv_cache_config(
             "Layerwise Host Offload Prefill grouped prefetch requires at least "
             f"{LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT} base layers"
         )
-    bytes_per_block = (
-        LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT * workspace_page_size
-        + sum(mtp_page_sizes.values())
-    )
+    bytes_per_block = LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT * workspace_page_size + sum(mtp_page_sizes.values())
     if bytes_per_block <= 0:
         raise ValueError("Layerwise Host Offload Prefill has an invalid page budget")
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     if num_blocks <= 0:
-        raise ValueError(
-            "No KV cache block fits the Layerwise Host Offload Prefill budget"
-        )
+        raise ValueError("No KV cache block fits the Layerwise Host Offload Prefill budget")
 
     # v0.30 KVCacheTensor replaces `shared_by` with `layers` plus stride
     # metadata. A workspace arena is one physical buffer whose member layers
@@ -277,9 +267,7 @@ def _get_layerwise_prefill_kv_cache_config(
     kv_cache_tensors = [
         KVCacheTensor(
             size=workspace_page_size * num_blocks,
-            layers=workspace_layers[
-                arena_id::LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT
-            ],
+            layers=workspace_layers[arena_id::LAYERWISE_PREFILL_WORKSPACE_ARENA_COUNT],
             offset=0,
             layer_stride=0,
             block_stride=workspace_page_size,
@@ -304,18 +292,16 @@ def _get_layerwise_prefill_kv_cache_config(
 
 
 def is_layerwise_host_offload_decode(vllm_config: VllmConfig) -> bool:
-    kv_transfer_config = vllm_config.kv_transfer_config
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_consumer":
         return False
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
-    return bool(extra_config.get("layerwise_host_kv_offload", False))
+    return extra_config.get("layerwise_host_kv_offload") is True
 
 
 def _dsa_group_count(vllm_config: VllmConfig, num_hidden_layers: int) -> int:
     """Return the number of DSA metadata sets allocated by Model Runner."""
-    indexer_types = get_dsa_config_value(
-        vllm_config.model_config, "indexer_types"
-    )
+    indexer_types = get_dsa_config_value(vllm_config.model_config, "indexer_types")
     return len(build_dsa_group_specs(indexer_types, num_hidden_layers))
 
 
@@ -327,13 +313,7 @@ def _dsa_workspace_bytes(
     """Return the fixed Decode DSA workspace reservation."""
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
     default_pool_size = (
-        16384
-        if bool(
-            get_dsa_config_value(
-                vllm_config.model_config, "enlarge_pool_size", False
-            )
-        )
-        else 8192
+        16384 if bool(get_dsa_config_value(vllm_config.model_config, "enlarge_pool_size", False)) else 8192
     )
     pool_size = int(extra_config.get("dsa_pool_size", default_pool_size))
     id_range = max(
@@ -341,9 +321,7 @@ def _dsa_workspace_bytes(
         int(extra_config.get("dsa_id_range", 131072)),
     )
     batch_capacity = int(vllm_config.scheduler_config.max_num_seqs)
-    num_hidden_layers = int(
-        get_dsa_config_value(vllm_config.model_config, "num_hidden_layers", 0)
-    )
+    num_hidden_layers = int(get_dsa_config_value(vllm_config.model_config, "num_hidden_layers", 0))
     if num_hidden_layers <= 0:
         raise ValueError("DSA workspace accounting requires num_hidden_layers")
     metadata_groups = _dsa_group_count(vllm_config, num_hidden_layers)
@@ -364,11 +342,7 @@ def _dsa_workspace_bytes(
     selection_rows = dsa_config.selection_rows(batch_capacity)
     selection_blocks = dsa_config.selection_block_count(batch_capacity)
     total = 0
-    dsa_layers = [
-        name
-        for name in group.layer_names
-        if not _is_mtp_cache_layer(vllm_config, group, name)
-    ]
+    dsa_layers = [name for name in group.layer_names if not _is_mtp_cache_layer(vllm_config, group, name)]
     if not dsa_layers:
         raise ValueError("Decode Host offload found no base DSA layers")
     backends = get_dsa_offload_backends(vllm_config, dsa_layers)
@@ -389,9 +363,7 @@ def _dsa_workspace_bytes(
         total += selection_rows * dsa_config.selection_blocks_per_row * 4
     # DsaGroupMetadata is allocated once per full/shared indexer group.
     total += metadata_groups * (
-        batch_capacity * pool_size * 4
-        + batch_capacity * id_range * 4
-        + batch_capacity * (pool_size // 16) * 4
+        batch_capacity * pool_size * 4 + batch_capacity * id_range * 4 + batch_capacity * (pool_size // 16) * 4
     )
     return total
 
@@ -410,11 +382,7 @@ def _get_layerwise_decode_hbm_layout(
     group = kv_cache_groups[0]
     specs = _get_group_layer_kv_cache_specs(group)
     hbm_bytes_per_block = 0
-    dsa_layers = [
-        name
-        for name in group.layer_names
-        if not _is_mtp_cache_layer(vllm_config, group, name)
-    ]
+    dsa_layers = [name for name in group.layer_names if not _is_mtp_cache_layer(vllm_config, group, name)]
     if not dsa_layers:
         raise ValueError("Decode Layerwise Host offload has no base DSA layers")
     backends = get_dsa_offload_backends(vllm_config, dsa_layers)
@@ -452,14 +420,11 @@ def _get_layerwise_decode_max_memory_usage_bytes(
 ) -> int:
     """Return Indexer/MTP cache plus fixed DSA HBM for max_model_len."""
 
-    group, specs, hbm_bytes_per_block = _get_layerwise_decode_hbm_layout(
-        vllm_config, kv_cache_groups
+    group, specs, hbm_bytes_per_block = _get_layerwise_decode_hbm_layout(vllm_config, kv_cache_groups)
+    return (
+        _dsa_workspace_bytes(vllm_config, group, specs)
+        + _get_layerwise_decode_required_blocks(vllm_config, specs) * hbm_bytes_per_block
     )
-    return _dsa_workspace_bytes(
-        vllm_config, group, specs
-    ) + _get_layerwise_decode_required_blocks(
-        vllm_config, specs
-    ) * hbm_bytes_per_block
 
 
 def _get_layerwise_decode_kv_cache_config(
@@ -467,27 +432,19 @@ def _get_layerwise_decode_kv_cache_config(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    group, specs, hbm_bytes_per_block = _get_layerwise_decode_hbm_layout(
-        vllm_config, kv_cache_groups
-    )
+    group, specs, hbm_bytes_per_block = _get_layerwise_decode_hbm_layout(vllm_config, kv_cache_groups)
     dsa_bytes = _dsa_workspace_bytes(vllm_config, group, specs)
     # vLLM deliberately passes available_memory=0 while creating the minimal
     # KV cache used by CUDA/ACL graph profiling. In that call path
     # num_gpu_blocks_override is temporarily set to min_blocks, so zero is a
     # profiling sentinel rather than the real HBM budget. Do not subtract the
     # fixed DSA reservation from it or reject the request as an actual OOM.
-    is_minimal_profile = (
-        available_memory == 0
-        and vllm_config.cache_config.num_gpu_blocks_override is not None
-    )
+    is_minimal_profile = available_memory == 0 and vllm_config.cache_config.num_gpu_blocks_override is not None
     if is_minimal_profile:
         effective_memory = 0
         num_blocks = may_override_num_blocks(vllm_config, 0)
         if num_blocks <= 0:
-            raise ValueError(
-                "Minimal KV cache profiling requires a positive "
-                "num_gpu_blocks_override"
-            )
+            raise ValueError("Minimal KV cache profiling requires a positive num_gpu_blocks_override")
     else:
         effective_memory = available_memory - dsa_bytes
         if effective_memory <= 0:
@@ -495,9 +452,7 @@ def _get_layerwise_decode_kv_cache_config(
                 "Decode Layerwise Host offload cannot reserve fixed DSA workspace "
                 f"({dsa_bytes} bytes) from {available_memory} bytes"
             )
-        num_blocks = may_override_num_blocks(
-            vllm_config, effective_memory // hbm_bytes_per_block
-        )
+        num_blocks = may_override_num_blocks(vllm_config, effective_memory // hbm_bytes_per_block)
     if num_blocks <= 0:
         raise ValueError("No KV cache block fits Decode Indexer-only HBM budget")
     if not is_minimal_profile and num_blocks * hbm_bytes_per_block > effective_memory:
@@ -531,9 +486,7 @@ def _ascend_get_kv_cache_config_from_groups(
     available_memory: int,
 ) -> KVCacheConfig:
     if is_layerwise_host_offload_decode(vllm_config):
-        return _get_layerwise_decode_kv_cache_config(
-            vllm_config, kv_cache_groups, available_memory
-        )
+        return _get_layerwise_decode_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if is_layerwise_host_offload_prefill(vllm_config):
         return _get_layerwise_prefill_kv_cache_config(
             vllm_config,
@@ -564,12 +517,8 @@ def _apply_decode_num_blocks_override(
                 f"capacity={config.num_blocks}"
             )
         if config.kv_cache_groups:
-            _, specs, _ = _get_layerwise_decode_hbm_layout(
-                vllm_config, config.kv_cache_groups
-            )
-            required_blocks = _get_layerwise_decode_required_blocks(
-                vllm_config, specs
-            )
+            _, specs, _ = _get_layerwise_decode_hbm_layout(vllm_config, config.kv_cache_groups)
+            required_blocks = _get_layerwise_decode_required_blocks(vllm_config, specs)
             if override < required_blocks:
                 raise ValueError(
                     "Configured KV cache block override cannot serve "
@@ -581,9 +530,7 @@ def _apply_decode_num_blocks_override(
         old_blocks = config.num_blocks
         for tensor in config.kv_cache_tensors:
             if tensor.size % old_blocks != 0:
-                raise ValueError(
-                    "KV cache tensor size is not divisible by num_blocks"
-                )
+                raise ValueError("KV cache tensor size is not divisible by num_blocks")
             tensor.size = tensor.size // old_blocks * override
         config.num_blocks = override
 
@@ -603,19 +550,17 @@ def _ascend_get_kv_cache_configs(
 
     override = vllm_config.cache_config.num_gpu_blocks_override
     if not is_layerwise_host_offload_decode(vllm_config) or override is None:
-        return _orig_get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_memory
-        )
+        return _orig_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory)
 
     vllm_config.cache_config.num_gpu_blocks_override = None
     try:
-        configs = _orig_get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_memory
-        )
+        configs = _orig_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory)
     finally:
         vllm_config.cache_config.num_gpu_blocks_override = override
     _apply_decode_num_blocks_override(vllm_config, configs, override)
     return configs
+
+
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     """Distinct page sizes across a group's cache specs.
 
@@ -929,6 +874,82 @@ def _get_max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
     return spec.get_max_layers_per_page_size()
 
 
+def _uses_qwen4_exp_mtp(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return False
+    draft_model_config = getattr(
+        speculative_config,
+        "draft_model_config",
+        None,
+    )
+    architectures = tuple(getattr(draft_model_config, "architectures", ()) or ())
+    if "Qwen4ExpMTP" in architectures:
+        return True
+    text_config = getattr(draft_model_config, "hf_text_config", None)
+    text_architectures = tuple(getattr(text_config, "architectures", ()) or ())
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in text_architectures)
+
+
+def _ascend_annotate_eagle_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_groups: list[KVCacheGroupSpec],
+    use_trailing_layer_fallback: bool = False,
+) -> None:
+    """Annotate Qwen4Exp's actual MTP cache group, not every group.
+
+    Qwen4Exp's MTP attention spec is otherwise indistinguishable from the
+    target's spec. Its predictor is registered at the target layer count, so
+    use that model-scoped position to find only the group containing the real
+    draft layer. Leaving every group unannotated triggers vLLM's flag-all
+    fallback, which incorrectly treats target Mamba groups as draft state and
+    disables cross-request prefix reuse.
+    """
+    if _orig_annotate_eagle_groups is not None:
+        _orig_annotate_eagle_groups(
+            vllm_config,
+            kv_cache_spec,
+            kv_cache_groups,
+            use_trailing_layer_fallback=use_trailing_layer_fallback,
+        )
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is None
+        or not speculative_config.use_eagle_block_drop()
+        or not _uses_qwen4_exp_mtp(vllm_config)
+    ):
+        return
+
+    text_config = vllm_config.model_config.hf_text_config
+    first_draft_layer = int(text_config.num_hidden_layers)
+    num_draft_layers = int(
+        getattr(
+            getattr(
+                speculative_config.draft_model_config,
+                "hf_text_config",
+                None,
+            ),
+            "mtp_num_hidden_layers",
+            1,
+        )
+        or 1
+    )
+    draft_markers = tuple(
+        f".layers.{layer_idx}."
+        for layer_idx in range(
+            first_draft_layer,
+            first_draft_layer + num_draft_layers,
+        )
+    )
+    for group in kv_cache_groups:
+        if any(marker in f".{layer_name}." for marker in draft_markers for layer_name in group.layer_names):
+            group.is_eagle_group = True
+
+    if not any(group.is_eagle_group for group in kv_cache_groups):
+        raise ValueError(f"Qwen4Exp MTP is enabled, but no KV cache group contains its draft layer(s) {draft_markers}.")
+
+
 def _ascend_get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -943,16 +964,23 @@ def _ascend_get_packed_kv_cache_groups(
             assert _orig_get_packed_kv_cache_groups is not None
             return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
         groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-    vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
-        vllm_config,
-        kv_cache_spec,
-        groups,
-        use_deepseek_v4_fallback=True,
-    )
-    vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
-        vllm_config,
-        groups,
-    )
+    # The v0.32.0 lane annotates EAGLE groups on this packed hook, because
+    # ``get_kv_cache_groups`` returns packed groups before running its own
+    # annotation. vLLM #42309 drops ``_annotate_eagle_groups``/
+    # ``_uses_trailing_mtp_layers`` from main and inlines the annotation into
+    # ``get_kv_cache_configs`` keyed on ``spec.is_draft``, so only call the API
+    # on the release lane.
+    if vllm_version_is("0.32.0"):
+        _kv_cache_planning._annotate_eagle_groups(
+            vllm_config,
+            kv_cache_spec,
+            groups,
+            use_trailing_layer_fallback=_kv_cache_planning._uses_trailing_mtp_layers(vllm_config),
+        )
+        _kv_cache_planning._warn_if_unannotated_eagle_mamba(
+            vllm_config,
+            groups,
+        )
     return groups
 
 
@@ -1082,7 +1110,10 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
-def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _ascend_pool_bytes_per_block(  # type: ignore[misc]
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
     """Use the same DSV4 divisor as Ascend's shared-tuple planner.
 
     vLLM #51718 re-plans ranks with more KV memory using
@@ -1097,47 +1128,138 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+    if qwen_bytes is not None:
+        return qwen_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_pool_bytes_per_block(kv_cache_groups)
+        return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples
 
 
-def _ascend_model_max_memory_usage_bytes(
+def _has_ascend_multi_allocation_kv_cache_layout(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    """Whether Ascend materializes these groups as several device allocations."""
+    return (
+        tq_cache.uses_turboquant_groups(kv_cache_groups)
+        or is_deepseek_v41_cache(kv_cache_groups)
+        or _get_glm5_next_cache_layout(kv_cache_groups) is not None
+        or _is_deepseek_v4_groups(kv_cache_groups)
+    )
+
+
+def _ascend_builder_pool_bytes_per_block(
+    builder: Any,
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
-    if tq_cache.uses_turboquant_groups(kv_cache_groups):
-        return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
-    if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
-    if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+) -> int | None:
+    """Report aggregate bytes for layouts backed by several device tensors.
 
-    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
-    num_layer_tuples = max(
-        _get_max_layers_per_page_size(group.kv_cache_spec)
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    )
-    return sum(
-        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    )
+    Newer vLLM KV-cache planning probes the builder with one block and expects
+    all device tensors to have the same backing size. Ascend's packed layouts
+    use several backing tensors with different sizes, so their aggregate pool
+    size must be supplied directly through the builder hook.
+    """
+    if _has_ascend_multi_allocation_kv_cache_layout(kv_cache_groups):
+        return _ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
+    # Keep upstream's one-block placement probe for layouts that use the
+    # default single-allocation placement.
+    return _orig_builder_pool_bytes_per_block(builder, vllm_config, kv_cache_groups)
 
 
-def _get_glm5_next_kv_cache_groups(
+# vLLM #42309 threads the platform's ``KVCacheConfigBuilder`` through KV cache
+# admission on main, so ``_max_memory_usage_bytes_from_groups`` gained a leading
+# ``builder`` argument. The v0.32.0 lane keeps the pre-#42309 two-argument
+# signature.
+if vllm_version_is("0.32.0"):
+
+    def _ascend_model_max_memory_usage_bytes(
+        vllm_config: VllmConfig,
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> int:
+        """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+        if tq_cache.uses_turboquant_groups(kv_cache_groups):
+            return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
+        if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+            return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
+        qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups)
+        if qwen_bytes is not None:
+            return qwen_bytes
+        if not _is_deepseek_v4_groups(kv_cache_groups):
+            return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+
+        assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
+        full_mla_spec = kv_cache_groups[0].kv_cache_spec
+        assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+        layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
+        num_layer_tuples = max(
+            _get_max_layers_per_page_size(group.kv_cache_spec)
+            for group in kv_cache_groups
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        )
+        return sum(
+            num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+            for group in kv_cache_groups
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        )
+
+else:
+
+    def _ascend_model_max_memory_usage_bytes(*args: Any) -> int:  # type: ignore[misc]
+        """Keep the pre-#51718 DSV4 admission formula for its shared tuples.
+
+        vLLM #42309 threads a ``KVCacheConfigBuilder`` through KV cache
+        admission on main, so the call becomes
+        ``(builder, vllm_config, kv_cache_groups)``, while main checkouts
+        predating #42309 still call ``(vllm_config, kv_cache_groups)``.
+        ``vllm_version_is`` cannot separate two main dev builds, so dispatch on
+        the argument count.
+        """
+        if len(args) == 3:
+            builder, vllm_config, kv_cache_groups = args
+        else:
+            builder = None
+            vllm_config, kv_cache_groups = args
+        if tq_cache.uses_turboquant_groups(kv_cache_groups):
+            return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
+        if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+            return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
+        qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups)
+        if qwen_bytes is not None:
+            return qwen_bytes
+        if not _is_deepseek_v4_groups(kv_cache_groups):
+            if builder is None:
+                return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
+
+        assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
+        full_mla_spec = kv_cache_groups[0].kv_cache_spec
+        assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+        layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
+        num_layer_tuples = max(
+            _get_max_layers_per_page_size(group.kv_cache_spec)
+            for group in kv_cache_groups
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        )
+        return sum(
+            num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+            for group in kv_cache_groups
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        )
+
+
+def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
+    if groups is not None:
+        return groups
     return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
@@ -1146,7 +1268,7 @@ def _ascend_model_get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718.
+    """Restore Ascend-specific cache planners while retaining transfer metadata.
 
     Attach ``kv_transfer_config`` onto every built config: ``KVCacheConfig``
     has no native field, and the PD prefill-producer role read back by the
@@ -1156,7 +1278,14 @@ def _ascend_model_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    if is_deepseek_v41_cache(kv_cache_groups):
+    qwen_config = (
+        None
+        if vllm_version_is("0.28.0")
+        else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    )
+    if qwen_config is not None:
+        kv_cache_config = qwen_config
+    elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
@@ -1204,12 +1333,8 @@ def _ascend_model_get_kv_cache_config_from_groups(
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _ascend_get_kv_cache_configs
-vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = (
-    _ascend_get_kv_cache_config_from_groups
-)
-vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = (
-    _ascend_max_memory_usage_bytes_from_groups
-)
+vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 # vllm v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
@@ -1223,15 +1348,26 @@ if vllm_version_is("0.23.0"):
 else:
     vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
 assert _orig_get_packed_kv_cache_groups is not None
-vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
-vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+if _orig_annotate_eagle_groups is not None:
+    _kv_cache_planning._annotate_eagle_groups = _ascend_annotate_eagle_groups
+_kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
+_kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
+_kv_cache_planning.get_kv_cache_groups = _get_ascend_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
-vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
-vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
-vllm.v1.core.kv_cache_utils._pool_bytes_per_block = _ascend_pool_bytes_per_block
+_kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+_kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
+_kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
+
+# vLLM's builder-based planner derives the pool size by probing a one-block
+# placement unless the builder overrides this hook. Ascend's DSV4.1, DSV4, GLM5
+# and TurboQuant layouts can contain multiple device allocations, so install
+# the matching aggregate-size hook when this vLLM API is available.
+_default_kv_cache_builder = getattr(_kv_cache_planning, "DefaultKVCacheConfigBuilder", None)
+if _default_kv_cache_builder is not None:
+    _orig_builder_pool_bytes_per_block = _default_kv_cache_builder._get_pool_bytes_per_block
+    _default_kv_cache_builder._get_pool_bytes_per_block = _ascend_builder_pool_bytes_per_block
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402
