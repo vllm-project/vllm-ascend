@@ -1363,7 +1363,9 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
-            self._finegrained_tp_warmup_context(),
+            # Worker.execute_dummy_batch marks runtime idle with skip_ring;
+            # it must retain the same post-dispatch check as active peers.
+            self._finegrained_tp_warmup_context() if not skip_ring else nullcontext(),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
             skip_ring_state_update(skip_ring),
