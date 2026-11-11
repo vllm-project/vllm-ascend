@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
+from vllm_ascend.ops.triton.pcp_mrope import prepare_pcp_mrope_positions
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -386,7 +387,14 @@ class AscendModelState(DefaultModelState):
         return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
-        model_inputs = super().prepare_inputs(input_batch, req_states)
+        if self.rope_state is not None and self.pcp_manager is not None:
+            positions = prepare_pcp_mrope_positions(
+                self.rope_state, input_batch, req_states.prefill_len.gpu
+            )
+            model_inputs = {"positions": positions}
+        else:
+            model_inputs = super().prepare_inputs(input_batch, req_states)
+
         model_inputs.update(self.prepare_engram_inputs(input_batch, req_states))
         return model_inputs
 
