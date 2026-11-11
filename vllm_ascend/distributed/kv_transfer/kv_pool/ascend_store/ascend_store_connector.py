@@ -28,6 +28,7 @@ from vllm.logger import logger
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -72,6 +73,48 @@ def _core_store():
     except ImportError as exc:
         raise ImportError("AscendStore hash recovery requires vLLM Core's Mooncake Store boundary-state APIs") from exc
     return connector
+
+
+def _uses_partial_hash_hits(vllm_config, kv_cache_config) -> bool:
+    """Use Core's resolved recoverability decision, never the requested PMU."""
+    if kv_cache_config is None:
+        return False
+    alignment = getattr(kv_cache_config, "cache_hit_alignment_tokens", None)
+    if type(alignment) is not int:
+        return False
+    scheduler_size, hash_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    # Unresolved and whole-page plans must not load new boundary-state APIs.
+    # This is Core's factory gate, not a PMU/model capability heuristic.
+    if alignment >= scheduler_size:
+        return False
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import MooncakeStoreCoordinator
+
+    return MooncakeStoreCoordinator.from_kv_cache_config(
+        kv_cache_config, vllm_config, scheduler_size, hash_size
+    ).enable_partial_hash_hits
+
+
+def _has_core_operation_records(data) -> bool:
+    return bool(data) and any(
+        isinstance(records, list) and records and isinstance(records[0], dict) for records in data.values()
+    )
+
+
+class _AutomaticStorePromMetrics(AscendStorePromMetrics):
+    """Dispatch serialized stats without guessing a missing KVCacheConfig."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._core_args = args
+        self._core_metrics = None
+
+    def observe(self, transfer_stats_data, engine_idx=0):
+        if _has_core_operation_records(transfer_stats_data):
+            if self._core_metrics is None:
+                self._core_metrics = _core_store().MooncakeStoreConnector.build_prom_metrics(*self._core_args)
+            self._core_metrics.observe(transfer_stats_data, engine_idx)
+        else:
+            super().observe(transfer_stats_data or {}, engine_idx)
 
 
 def create_kv_pool_scheduler(
@@ -144,13 +187,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        prefix_mode = extra_config.get("pool_prefix_mode")
-        if prefix_mode not in (None, "block_only", "hash"):
-            raise ValueError(f"Unsupported AscendStore pool_prefix_mode={prefix_mode!r}")
-        self._hash_prefix = prefix_mode == "hash"
-        direct_only = extra_config.get("npu_shared_engine_direct_only", False)
-        if type(direct_only) is not bool or direct_only and not self._hash_prefix:
-            raise ValueError("npu_shared_engine_direct_only requires a boolean and hash pool mode")
+        removed = {"pool_prefix_mode", "npu_shared_engine_direct_only", "npu_store_setup_lock"} & extra_config.keys()
+        if removed:
+            raise ValueError(f"Removed AscendStore settings {sorted(removed)}; use --prefix-match-unit only")
+        self._hash_prefix = _uses_partial_hash_hits(vllm_config, kv_cache_config)
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
@@ -636,9 +676,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:
         # Core reconstructs stats from serialized data without passing config.
         # Its operation records are dictionaries, unlike legacy counters/samples.
-        if data and any(
-            isinstance(records, list) and records and isinstance(records[0], dict) for records in data.values()
-        ):
+        if _has_core_operation_records(data):
             return _core_store().MooncakeStoreConnector.build_kv_connector_stats(data)
         return AscendStoreKVConnectorStats(data=data or {})
 
@@ -650,11 +688,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
-        if vllm_config.kv_transfer_config.kv_connector_extra_config.get("pool_prefix_mode") == "hash":
-            return _core_store().MooncakeStoreConnector.build_prom_metrics(
-                vllm_config, metric_types, labelnames, per_engine_labelvalues
-            )
-        return AscendStorePromMetrics(
+        return _AutomaticStorePromMetrics(
             vllm_config,
             metric_types,
             labelnames,

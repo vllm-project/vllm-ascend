@@ -5,15 +5,12 @@ import importlib
 import threading
 import time
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
 from copy import copy
 from dataclasses import replace
 from functools import cache as cache_factory
-from pathlib import Path
 
 import torch
 import vllm.envs as envs
-from filelock import FileLock
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_pcp_group,
@@ -256,24 +253,15 @@ def get_hash_store_worker_class():
             self._ascend_store = value
 
         def __init__(self, vllm_config, kv_cache_config):
-            # Some FabricMem runtimes fail concurrent VA reservations. This opt-in
-            # host-local bootstrap lock does not serialize requests or transfers.
-            extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-            lock_path = extra.get("npu_store_setup_lock")
-            if lock_path is not None and not Path(lock_path).is_absolute():
-                raise ValueError("npu_store_setup_lock must be an absolute host-local path")
-            lock = FileLock(lock_path, timeout=60) if lock_path is not None else nullcontext()
-            self._shared_direct_only = extra.get("npu_shared_engine_direct_only", False)
-            if type(self._shared_direct_only) is not bool:
-                raise ValueError("npu_shared_engine_direct_only must be a boolean")
-            has_v2 = _shares_mooncake_v2_engine(_engine_transfer_config(vllm_config, kv_cache_config))
-            if self._shared_direct_only and not has_v2:
-                raise ValueError("Direct-only Store requires MooncakeConnectorV2 in MultiConnector")
-            self._shared_engine = self._shared_direct_only and has_v2
+            # This worker is selected only by Core's resolved partial-hit plan.
+            # A V2 sibling must share the registration owner, not re-export it
+            # through an independent Fabric engine. Native setup validates the
+            # supported direct-only protocol/provider contract before use.
+            self._shared_engine = _shares_mooncake_v2_engine(_engine_transfer_config(vllm_config, kv_cache_config))
+            self._shared_direct_only = self._shared_engine
             self._bootstrap_shared_engine = self._shared_engine
             try:
-                with lock:
-                    super().__init__(vllm_config, kv_cache_config)
+                super().__init__(vllm_config, kv_cache_config)
             finally:
                 self._bootstrap_shared_engine = False
             _align_store_eagle_policy(self.coord, _engine_transfer_config(vllm_config, kv_cache_config))

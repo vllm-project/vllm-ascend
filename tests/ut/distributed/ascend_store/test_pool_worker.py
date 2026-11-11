@@ -192,7 +192,7 @@ class TestPCPPoolWorker(unittest.TestCase):
             cache_block_size=640,
             prefix_match_unit=16,
             kv_cache_config=core_config,
-            extra_config={"pool_prefix_mode": "block_only"},
+            extra_config={},
         )
         self.assertEqual(worker.hash_block_size, 32)
         self.assertEqual(worker.grouped_block_size, [640])

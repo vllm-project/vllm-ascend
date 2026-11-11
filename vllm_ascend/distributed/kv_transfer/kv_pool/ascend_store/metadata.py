@@ -498,10 +498,7 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
             f"{tuple(block_sizes[i] for i in group_ids)}"
         )
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-    mode = extra.get("pool_prefix_mode")
-    if mode not in (None, "block_only"):
-        raise ValueError(f"Unsupported AscendStore pool_prefix_mode={mode!r}; use 'block_only'")
-    block_only = mode == "block_only" or (not use_layerwise and hit_alignment < page_alignment)
+    block_only = not use_layerwise and hit_alignment < page_alignment
     if block_only and (use_layerwise or extra.get("discard_partial_chunks", True) is not True):
         raise ValueError("AscendStore block_only requires bulk transfer and discard_partial_chunks=true")
     logger.info(

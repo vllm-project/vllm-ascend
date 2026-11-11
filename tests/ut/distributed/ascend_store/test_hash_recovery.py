@@ -9,7 +9,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from filelock import FileLock, Timeout
 
 pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data")
 
@@ -25,6 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import M
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
+    _AutomaticStorePromMetrics,
+    _uses_partial_hash_hits,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_hash_store_layout_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
@@ -89,19 +90,18 @@ def test_bootstrap_property_is_instance_local_and_not_reapplied():
     assert worker.store is None
 
 
-@pytest.mark.parametrize("flag", [None, False, True])
-def test_shared_direct_only_is_explicit_opt_in(flag):
-    extra = {} if flag is None else {"npu_shared_engine_direct_only": flag}
+@pytest.mark.parametrize("has_v2", [False, True])
+def test_shared_direct_only_is_automatic_for_v2(has_v2):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector="MultiConnector",
-            kv_connector_extra_config=extra,
+            kv_connector_extra_config={},
         )
     )
     parent = SimpleNamespace(
         kv_connector="MultiConnector",
         kv_connector_extra_config={
-            "connectors": [{"kv_connector": "MooncakeConnectorV2"}],
+            "connectors": [{"kv_connector": "MooncakeConnectorV2"}] if has_v2 else [],
         },
     )
 
@@ -117,47 +117,24 @@ def test_shared_direct_only_is_explicit_opt_in(flag):
         ),
     ):
         worker = AscendHashStoreWorker(config, None)
-    assert worker._shared_engine is (flag is True)
-    assert isinstance(worker.store, _SharedEngineStore) is (flag is True)
+    assert worker._shared_engine is has_v2
+    assert isinstance(worker.store, _SharedEngineStore) is has_v2
+    assert worker._shared_direct_only is has_v2
     assert not worker._bootstrap_shared_engine
 
 
-@pytest.mark.parametrize("flag", [1, 0, "true", None])
-def test_direct_only_rejects_non_boolean(flag):
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_connector_extra_config={"npu_shared_engine_direct_only": flag},
-        )
-    )
-    with pytest.raises(ValueError, match="boolean"):
-        AscendHashStoreWorker(config, None)
-
-
-def test_direct_only_rejects_independent_mixed():
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_connector="AscendStoreConnector",
-            kv_connector_extra_config={"npu_shared_engine_direct_only": True},
-        )
-    )
-    with pytest.raises(ValueError, match="MooncakeConnectorV2"):
-        AscendHashStoreWorker(config, None)
-
-
-@pytest.mark.parametrize("mode,flag", [("block_only", True), (None, True), ("hash", 1), ("hash", 0)])
-def test_connector_direct_only_requires_boolean_and_hash_mode(mode, flag):
+@pytest.mark.parametrize("key", ["pool_prefix_mode", "npu_shared_engine_direct_only", "npu_store_setup_lock"])
+@pytest.mark.parametrize("value", [None, False, True, 0, "hash"])
+def test_connector_rejects_removed_user_modes(key, value):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both",
-            kv_connector_extra_config={
-                "pool_prefix_mode": mode,
-                "npu_shared_engine_direct_only": flag,
-            },
+            kv_connector_extra_config={key: value},
         )
     )
     with (
         patch.object(AscendStoreConnector.__mro__[1], "__init__", return_value=None),
-        pytest.raises(ValueError, match="boolean and hash"),
+        pytest.raises(ValueError, match="use --prefix-match-unit only"),
     ):
         AscendStoreConnector(config, KVConnectorRole.WORKER, None)
 
@@ -350,44 +327,6 @@ def test_pd_tail_uses_same_attention_and_mamba_hash_boundary():
     assert _partial_tail_non_mamba_puts(coord, request, [1152, 1152]) == [BoundaryPut(0, 4, 1472)]
     _align_store_eagle_policy(coord, SimpleNamespace(is_kv_producer=True, is_kv_consumer=False))
     assert _partial_tail_non_mamba_puts(coord, request, [1152, 1152]) == [BoundaryPut(0, 4, 1536)]
-
-
-@pytest.mark.parametrize("fail", [False, True])
-def test_optional_store_bootstrap_lock_releases_on_success_and_failure(tmp_path, fail):
-    path = str(tmp_path / "store-setup.lock")
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"npu_store_setup_lock": path})
-    )
-
-    def initialize(worker, *args):
-        worker.coord = SimpleNamespace()
-        with pytest.raises(Timeout), FileLock(path, timeout=0):
-            pass
-        if fail:
-            raise RuntimeError("setup failed")
-
-    with patch.object(MooncakeStoreWorker, "__init__", autospec=True, side_effect=initialize):
-        if fail:
-            with pytest.raises(RuntimeError, match="setup failed"):
-                AscendHashStoreWorker(config, None)
-        else:
-            AscendHashStoreWorker(config, None)
-    with FileLock(path, timeout=0):
-        pass
-
-
-def test_store_bootstrap_default_has_no_lock_and_rejects_relative_path():
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}))
-
-    def initialize_worker(worker, *args):
-        worker.coord = SimpleNamespace()
-
-    with patch.object(MooncakeStoreWorker, "__init__", autospec=True, side_effect=initialize_worker) as initialize:
-        AscendHashStoreWorker(config, None)
-        assert initialize.call_args.args[1:] == (config, None)
-    config.kv_transfer_config.kv_connector_extra_config["npu_store_setup_lock"] = "relative.lock"
-    with pytest.raises(ValueError, match="absolute host-local"):
-        AscendHashStoreWorker(config, None)
 
 
 def payload(descriptor):
@@ -654,32 +593,96 @@ def test_hash_mode_rejects_unsupported_configuration(extra):
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={"pool_prefix_mode": "hash", **extra},
+            kv_connector_extra_config=extra,
         )
     )
-    with pytest.raises(ValueError, match="rank-local Mooncake"):
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector._uses_partial_hash_hits",
+            return_value=True,
+        ),
+        pytest.raises(ValueError, match="rank-local Mooncake"),
+    ):
         AscendStoreConnector(config, None)
 
 
-@pytest.mark.parametrize("mode", [None, "block_only", "hash"])
-def test_single_connector_selects_prefix_mode(mode):
+@pytest.mark.parametrize("partial", [False, True])
+def test_single_connector_uses_core_decision(partial):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={} if mode is None else {"pool_prefix_mode": mode},
+            kv_connector_extra_config={},
         )
     )
     with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector._uses_partial_hash_hits",
+            return_value=partial,
+        ),
         patch.object(AscendStoreConnector, "_init_hash_store") as hash_init,
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
         ) as legacy,
     ):
         connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, Mock())
-    assert connector._hash_prefix is (mode == "hash")
-    assert hash_init.call_count == int(mode == "hash")
-    assert legacy.call_count == int(mode != "hash")
+    assert connector._hash_prefix is partial
+    assert hash_init.call_count == int(partial)
+    assert legacy.call_count == int(not partial)
+
+
+@pytest.mark.parametrize("alignment", [None, False, True, 1152])
+def test_core_unresolved_or_whole_page_never_guesses_from_pmu(alignment):
+    config = SimpleNamespace(cache_config=SimpleNamespace(prefix_match_unit=64))
+    plan = SimpleNamespace(cache_hit_alignment_tokens=alignment)
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.resolve_kv_cache_block_sizes",
+        return_value=(1152, 64),
+    ):
+        assert not _uses_partial_hash_hits(config, plan)
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_partial_recovery_uses_actual_core_coordinator_result(allowed):
+    config, plan = Mock(), SimpleNamespace(cache_hit_alignment_tokens=64)
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.resolve_kv_cache_block_sizes",
+            return_value=(1152, 64),
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator.MooncakeStoreCoordinator.from_kv_cache_config",
+            return_value=SimpleNamespace(enable_partial_hash_hits=allowed),
+        ) as core,
+    ):
+        assert _uses_partial_hash_hits(config, plan) is allowed
+    core.assert_called_once_with(plan, config, 1152, 64)
+
+
+def test_metrics_dispatch_uses_records_not_configuration():
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.AscendStorePromMetrics.__init__",
+        return_value=None,
+    ):
+        metrics = _AutomaticStorePromMetrics()
+    records = {"load_get": [{"status": "ok"}]}
+    with (
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector._core_store") as core,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.AscendStorePromMetrics.observe"
+        ) as legacy,
+    ):
+        metrics.observe({}, 0)
+        metrics.observe(records, 1)
+        metrics.observe({"load_get_keys": 3}, 0)
+        metrics.observe({}, 0)
+    core.return_value.MooncakeStoreConnector.build_prom_metrics.assert_called_once_with()
+    metrics._core_metrics.observe.assert_called_once_with(records, 1)
+    assert legacy.call_count == 3
+
+
+def test_old_core_plan_without_alignment_stays_on_legacy_path():
+    assert not _uses_partial_hash_hits(Mock(), SimpleNamespace())
 
 
 def test_uncovered_registration_span_rejected():

@@ -1964,7 +1964,7 @@ def test_layerwise_retry_discards_stale_load_spec(second_hit):
     [(0, 672, 640), (640, 640, 0), (640, 1312, 640), (640, 1920, 640), (672, 1920, 0)],
 )
 def test_block_only_uses_core_hash_and_whole_page_load_range(local_start, pool_end, expected):
-    config = make_config(block_size=640, extra_config={"backend": "memcache", "pool_prefix_mode": "block_only"})
+    config = make_config(block_size=640, extra_config={"backend": "memcache"})
     config.cache_config.prefix_match_unit = 16
     group = KVCacheGroupSpec(
         ["attn"], FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=1, dtype=torch.float32)
