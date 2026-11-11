@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Expose attached PLE checkpoint names to vLLM's per-tensor loader filter."""
 
+from typing import cast
+
+from torch import nn
+
 
 class ExternalPLEWeightsMixin:
     """Filter only names belonging to PLE tables that have attached successfully."""
 
     @property
     def filter_unused_checkpoint_weights(self) -> bool:
-        names = set()
-        for module in self.modules():
+        names: set[str] = set()
+        for module in cast(nn.Module, self).modules():
             names.update(getattr(module, "ple_external_checkpoint_names", ()))
         self._ple_external_checkpoint_names = frozenset(names)
         if names:

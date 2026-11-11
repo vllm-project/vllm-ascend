@@ -27,7 +27,7 @@ MAX_ROWS = 65536
 MAX_CONTROL_BYTES = 65536
 
 # A failed transfer may still access its registered receive buffer.
-_held_readers = set()
+_held_readers: set[object] = set()
 _held_readers_lock = threading.Lock()
 
 

@@ -50,8 +50,8 @@ class MemfabricRuntime:
                     raise RuntimeError("A worker may attach to only one MemFabric Engram generation/device")
                 cls._active.references += 1
                 return cls._active
-            import memfabric_hybrid as mf
-            from memfabric_hybrid import bm
+            import memfabric_hybrid as mf  # type: ignore[import-untyped]
+            from memfabric_hybrid import bm  # type: ignore[import-untyped]
 
             runtime = cls()
             runtime.mf, runtime.bm, runtime.spec = mf, bm, spec

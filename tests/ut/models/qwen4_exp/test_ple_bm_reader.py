@@ -49,3 +49,19 @@ def test_failed_attachment_closes_client_and_does_not_expose_names(monkeypatch):
     with pytest.raises(ValueError, match="attach failed"):
         ple_bm_reader.PLEBMReader(client, checkpoint, "weight", 0, 10)
     assert client.calls == 1
+
+
+def test_cleanup_failure_preserves_original_error_without_add_note(monkeypatch):
+    class AttachError(RuntimeError):
+        add_note = None
+
+    def fail_attach(*args):
+        raise AttachError("attach failed")
+
+    monkeypatch.setattr(ple_bm_reader, "attach_table", fail_attach)
+    client = Client()
+    client.fail = True
+    checkpoint = SimpleNamespace(rows=10, width=160, weight_names=frozenset({"one.weight"}))
+    with pytest.raises(AttachError, match="attach failed"):
+        ple_bm_reader.PLEBMReader(client, checkpoint, "weight", 0, 10)
+    assert client.calls == 1

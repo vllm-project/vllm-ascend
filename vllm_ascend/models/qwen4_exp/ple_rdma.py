@@ -109,6 +109,7 @@ class PLERemoteReader(RemoteReader):
             raise ValueError("Shared PLE requires integer IDs and BF16 output")
         if output.shape != (*ids.shape, self.width) or not output.is_contiguous():
             raise ValueError("Shared PLE output does not match the IDs")
+        assert self.buffer is not None
         if output.device != self.buffer.device or ids.numel() > self.capacity:
             raise ValueError("Shared PLE output device or row capacity is invalid")
         selected = ids.to(device="cpu", dtype=torch.int64).contiguous().numpy().reshape(-1)

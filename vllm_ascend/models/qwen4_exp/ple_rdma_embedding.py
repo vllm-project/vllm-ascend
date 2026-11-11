@@ -25,7 +25,7 @@ class AscendRemotePLEEmbedding(Qwen4ExpPLEEmbedding):
         if self.etp_data_parallel_size != 1:
             raise ValueError("Remote PLE currently requires ETP=TP")
         checkpoint_config = config.model_config.hf_text_config
-        self._shared_pool_client = PLERemoteReader(
+        self._shared_pool_client: PLERemoteReader | None = PLERemoteReader(
             config.model_config.model,
             shared["checkpoint_prefix"],
             checkpoint_config.split_ngram_parts,
@@ -35,6 +35,7 @@ class AscendRemotePLEEmbedding(Qwen4ExpPLEEmbedding):
             library_path=shared.get("library_path"),
         )
         try:
+            assert self._shared_pool_client is not None
             self.register_buffer(
                 "prepared_rows",
                 torch.zeros((tokens, heads, self.embedding_dim), dtype=torch.bfloat16, device="npu"),
@@ -60,6 +61,8 @@ class AscendRemotePLEEmbedding(Qwen4ExpPLEEmbedding):
     def prepare_rows(self, ids: torch.Tensor) -> None:
         if not self._preparation_bound or self._closing:
             raise RuntimeError("Remote PLE preparation is unavailable")
+        if self._shared_pool_client is None:
+            raise RuntimeError("Remote PLE reader is closed")
         if ids.ndim != 2 or ids.shape[1] != self.prepared_rows.shape[1] or ids.shape[0] > self.prepared_rows.shape[0]:
             raise ValueError("Remote PLE IDs exceed the prepared graph buffer")
         # Previous graph replay may still read this buffer on another stream.

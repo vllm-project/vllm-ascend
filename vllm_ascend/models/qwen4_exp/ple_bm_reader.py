@@ -27,7 +27,9 @@ class PLEBMReader(torch.nn.Module):
             try:
                 client.close()
             except Exception as cleanup:
-                exc.add_note(f"Shared PLE client cleanup failed: {cleanup}")
+                add_note = getattr(exc, "add_note", None)
+                if add_note is not None:
+                    add_note(f"Shared PLE client cleanup failed: {cleanup}")
             raise
         # The model's loader may skip these names only after attachment succeeds.
         self.ple_external_checkpoint_names = checkpoint.weight_names
