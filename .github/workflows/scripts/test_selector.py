@@ -432,6 +432,34 @@ class CoverageSelector:
         source_path = self.source_dir / REPO_NAME / filename
         return source_path if source_path.exists() else None
 
+    def _add_covered_lines(self, file_lines_map: dict, filename: str, lines: set[int]) -> None:
+        """Keep executable covered lines for one source file."""
+        if not lines:
+            return
+        if self.source_dir:
+            source_file = self._resolve_source_file(filename)
+            if source_file and source_file.exists():
+                lines = self._filter_noise_lines(str(source_file), lines)
+        if lines:
+            file_lines_map[filename].update(lines)
+
+    def _read_triton_lines(self, covdata_dir: Path) -> dict[str, set[int]]:
+        """Read kernel lines recorded by ``vllm_ascend.triton_line_coverage``."""
+        path = covdata_dir / "triton_lines.json"
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return {}
+            lines_by_file: dict[str, set[int]] = {}
+            for filename, line_list in payload.items():
+                lines_by_file[str(filename)] = {int(line) for line in line_list}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(f"  Warning: Error reading {path}: {exc}")
+            return {}
+        return lines_by_file
+
     def build_test_case_map(self) -> dict:
         """Build test case -> covered files mapping (with line numbers)"""
         print("Scanning test cases...")
@@ -449,15 +477,13 @@ class CoverageSelector:
 
                 for filename in covered_files:
                     lines = self.get_covered_lines_from_file(str(cov_file), filename)
-                    if lines:
-                        # Filter noise lines if source_dir is available
-                        if self.source_dir:
-                            source_file = self._resolve_source_file(filename)
-                            if source_file and source_file.exists():
-                                lines = self._filter_noise_lines(str(source_file), lines)
-                        # Skip files with no coverage after filtering
-                        if lines:
-                            file_lines_map[filename].update(lines)
+                    self._add_covered_lines(file_lines_map, filename, lines)
+
+            triton_lines = self._read_triton_lines(covdata_dir)
+            if triton_lines:
+                print(f"    -> triton execution lines from {len(triton_lines)} files")
+            for filename, lines in triton_lines.items():
+                self._add_covered_lines(file_lines_map, filename, lines)
 
             normalized_name = self.normalize_test_name(test_case)
             self.test_case_map[normalized_name] = {

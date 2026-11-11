@@ -62,6 +62,8 @@ setup_coverage() {
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
+  # Rewrite launched Triton kernels so executed statements land in triton_lines.json.
+  export VLLM_ASCEND_TRITON_COVERAGE=1
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
 }
 
@@ -185,7 +187,7 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -p vllm_ascend.triton_line_coverage -sv --color=yes "${target}"
   else
     set +e
     run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
@@ -236,7 +238,7 @@ run_pytest_batch() {
     echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -p vllm_ascend.triton_line_coverage -sv --color=yes "${batch_targets[@]}"
   else
     set +e
     run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
