@@ -57,6 +57,17 @@ def scale_from_float_to_int64(scale):
     return scale
 
 
+def _dequant_scale(layer: torch.nn.Module) -> torch.Tensor:
+    """Return the dequant scale to hand to A8W8 per-token quant matmul.
+
+    The op rejects an fp16 scale together with fp16 activations (aclnn 161002),
+    while Qwen3.5/3.6 W8A8 checkpoints ship fp16 scales. ``process_weights_after_loading``
+    already builds an fp32 copy for the shared-expert path, so prefer it and fall
+    back to the original tensor for checkpoints that do not provide one.
+    """
+    return getattr(layer, "weight_scale_fp32", layer.weight_scale)
+
+
 @register_scheme("W8A8_DYNAMIC", "linear")
 class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A8_DYNAMIC.
@@ -121,10 +132,11 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             need_unsqz = True
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
+        weight_scale = _dequant_scale(layer)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
-            layer.weight_scale,
+            weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias if self.act_quant_type == torch.int8 else None,
             output_dtype=output_dtype,
@@ -241,7 +253,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 layer.w13_weight_list,
                 layer.w2_weight_list,
                 layer.w13_weight_scale_fp32_list,
-                layer.w2_weight_scale_list,
+                layer.w2_weight_scale_fp32_list,
             ]
             fused_w1_scale = getattr(layer, "fused_w1_scale_list", None)
             fused_w2_scale = getattr(layer, "fused_w2_scale_list", None)
@@ -286,6 +298,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
+        # A8W8 per-token quant rejects an fp16 scale (aclnn 161002) for w2 as well;
+        # keep the fp32 copy here so the decode path does not convert per call.
+        layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
@@ -302,7 +317,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w13_weight_scale_fp32_list = [
                 weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
             ]
-            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            layer.w2_weight_scale_fp32_list = [
+                weight.clone() for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
+            ]
             if get_ascend_config().enable_fused_mc2 == 1:
                 layer.fused_w1_scale_list = [
                     weight.clone()
@@ -347,13 +364,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 layer.w13_weight_list,
                 layer.w13_weight_scale_fp32_list,
                 layer.w2_weight_list,
-                layer.w2_weight_scale_list,
+                layer.w2_weight_scale_fp32_list,
             )
         return (
             [layer.w13_weight],
             [layer.w13_weight_scale_fp32],
             [layer.w2_weight],
-            [layer.w2_weight_scale],
+            [layer.w2_weight_scale_fp32],
         )
 
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
@@ -380,7 +397,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w1=layer.w13_weight_list,
                     w2=layer.w2_weight_list,
                     w1_scale=layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list,
-                    w2_scale=layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_list,
+                    w2_scale=layer.fused_w2_scale_list
+                    if fused_scale_flag
+                    else layer.w2_weight_scale_fp32_list,
                     w1_scale_bias=layer.fused_w1_scale_bias if fused_scale_flag else None,
                     w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
                 )
@@ -517,7 +536,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
         # then scales must be per-expert too — aclnn grouped_matmul requires
         # len(scale) == len(weight). The stacked path keeps a single-element list.
-        scale = [s.to(w2_scale_dtype) for s in w1_scale]
+        scale = w1_scale
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],
@@ -538,10 +557,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
         _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
+        scale = w2_scale
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,
-            scale=w2_scale,
+            scale=scale,
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
