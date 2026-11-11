@@ -65,7 +65,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -470,6 +469,25 @@ class NPUPlatform(Platform):
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
+        if vllm_config.model_config.use_mla and vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
+            from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
+
+            # Keep the upstream token/checkpoint block sizes. K3.1's packed
+            # main page includes RoPE and scale bytes that the generic MLA
+            # page calculation above does not account for.
+            # Recurrent states overlay this page; the indexer and draft keep
+            # their independently sized physical regions.
+            cache_config = vllm_config.cache_config
+            text_config = vllm_config.model_config.hf_text_config
+            if cache_config.cache_dtype in ("int8", "fp8"):
+                token_bytes = get_sfa_qsfa_packed_head_dim(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
+            elif cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE:
+                token_bytes = get_tq_fused_slot_bytes(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
+            else:
+                return
+            cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
@@ -573,9 +591,8 @@ class NPUPlatform(Platform):
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
         # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default.
-        # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision.
+        # make V2 the unconditional platform default. Feature validation is
+        # left to upstream.
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
         # override the default runner selection.
         apply_v2_model_runner_config_patch()
@@ -604,30 +621,27 @@ class NPUPlatform(Platform):
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
-        if not vllm_version_is("0.32.0"):
-            from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+        from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
-            seen: set[int] = set()
-            for config in (
-                getattr(vllm_config.model_config, "hf_config", None),
-                getattr(vllm_config.model_config, "hf_text_config", None),
-            ):
-                if config is None or id(config) in seen:
-                    continue
-                seen.add(id(config))
-                if getattr(config, "compress_ratios", None) is None:
-                    ratios = get_compress_ratios(config)
-                    if ratios:
-                        config.compress_ratios = list(ratios)
+        seen: set[int] = set()
+        for config in (
+            getattr(vllm_config.model_config, "hf_config", None),
+            getattr(vllm_config.model_config, "hf_text_config", None),
+        ):
+            if config is None or id(config) in seen:
+                continue
+            seen.add(id(config))
+            if getattr(config, "compress_ratios", None) is None:
+                ratios = get_compress_ratios(config)
+                if ratios:
+                    config.compress_ratios = list(ratios)
 
-        _validate_model_runner_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
-        _validate_aux_output_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1079,15 +1093,6 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             "seconds for execute_model RPC calls in multiprocessing must be "
             "greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000"
         )
-
-
-def _validate_model_runner_config(vllm_config: VllmConfig) -> None:
-    if (
-        vllm_config.model_config.architecture in ("DeepseekV41ForCausalLM", "DeepseekV41DSparkModel")
-        and get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
-        and not vllm_config.use_v2_model_runner
-    ):
-        raise ValueError("DeepSeek V4.1 on Ascend A5 requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:
@@ -1628,10 +1633,36 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
+    # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
+    # Mooncake pull path transfers kernel blocks and retains the DCP token
+    # interleave; changing that interleave after worker initialization would
+    # reinterpret the already allocated block tables.
+    interleave = parallel_config.cp_kv_cache_interleave_size
+    hybrid_kernel_interleave = (
+        getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
+        and vllm_config.use_v2_model_runner
+        and cache_config.cache_dtype == "fp8"
+        and vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+        and interleave > 0
+        and cache_config.block_size % interleave == 0
+    )
+    if use_dcp and hybrid_kernel_interleave:
+        from vllm.v1.worker.utils import select_common_block_size
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        kernel_block_size = select_common_block_size(cache_config.block_size, [AscendSFABackend])
+        if interleave % kernel_block_size:
+            raise ValueError(
+                "Mooncake local DCP interleave must be a positive multiple of the kernel block size: "
+                f"interleave={interleave}, kernel_block_size={kernel_block_size}"
+            )
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
         and use_dcp
+        and not hybrid_kernel_interleave
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -1639,7 +1670,12 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and use_dcp and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if (
+        use_sparse
+        and use_dcp
+        and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+        and not hybrid_kernel_interleave
+    ):
         logger.warning_once(
             "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
@@ -1969,30 +2005,23 @@ def _validate_model_pcp_dcp_config(
 def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
     """Validate GQA/MQA PCP+DCP sizes for the target model."""
     parallel_config = vllm_config.parallel_config
+    model_config = vllm_config.model_config
+    if (
+        parallel_config.decode_context_parallel_size > 1
+        and not getattr(model_config, "use_mla", False)
+        and not model_uses_sfa_sparse(model_config)
+    ):
+        logger.warning_once(
+            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
+            "and has entered the sunset process. It will be removed in a future release. "
+            "GQA draft models can maintain native TP sharding under target DCP. "
+            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        )
     _validate_model_pcp_dcp_config(
         vllm_config.model_config,
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
-
-
-def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
-    """Reject AuxOutput configurations the Ascend runner cannot service.
-
-    vLLM main moved routed-experts output to the AuxOutput connector and
-    requires Model Runner V2 for it. Ascend is an out-of-tree platform, so the
-    upstream check is skipped and only the V2 NPUModelRunner wires the worker
-    connector up. Without this guard a V1 run enables the scheduler-side
-    connector and crashes with "auxiliary output worker output is missing".
-    """
-    if getattr(vllm_config, "aux_output_config", None) is None:
-        return
-    if vllm_config.aux_output_config.enabled and not vllm_config.use_v2_model_runner:
-        raise ValueError(
-            "enable_return_routed_experts (AuxOutput Connector) is only "
-            "supported by Model Runner V2 on Ascend. Set "
-            "VLLM_USE_V2_MODEL_RUNNER=1."
-        )
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:

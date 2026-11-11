@@ -97,7 +97,7 @@ def _config(
             enable_prefix_caching=prefix_caching,
             mamba_block_size=None,
         ),
-        model_config=SimpleNamespace(max_model_len=4096),
+        model_config=SimpleNamespace(max_model_len=4096, hf_config=SimpleNamespace(model_type="dummy")),
     )
 
 
@@ -232,6 +232,54 @@ def test_backend_alignment_delegates_regular_cache_geometry(use_mla, cache_dtype
         NPUPlatform._align_hybrid_block_size(config, backend)
 
     upstream.assert_called_once_with(config, backend)
+
+
+@pytest.mark.parametrize("tp_size", [8, 16])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "int8", "fp8", "turboquant_4bit_nc"])
+def test_kimi_k31_platform_alignment_preserves_native_pages(tp_size, mamba_cache_mode, cache_dtype):
+    config = _config(prefix_caching=mamba_cache_mode == "align", mamba_cache_mode=mamba_cache_mode)
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=tp_size)
+    config.cache_config.cache_dtype = cache_dtype
+    config.cache_config.mamba_block_size = 131072
+    config.cache_config.mamba_page_size_padded = 66502656
+    config.model_config = SimpleNamespace(
+        architecture="KimiK3ForConditionalGeneration",
+        use_mla=True,
+        dtype=torch.bfloat16,
+        hf_config=SimpleNamespace(model_type="kimi_k31"),
+        hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64),
+        get_num_kv_heads=lambda _parallel: 1,
+        get_head_size=lambda: 576,
+    )
+    local_heads = 96 // tp_size
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _config: ((3, local_heads * 384), (local_heads, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
+    )
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128])
+    if cache_dtype in ("int8", "fp8"):
+        expected_block_size, token_bytes = 12288 // tp_size, 656
+    elif cache_dtype == "turboquant_4bit_nc":
+        # A large requested block covers the recurrent state even with TQ4.
+        expected_block_size, token_bytes = 4096, 386
+    else:
+        expected_block_size, token_bytes = 6144 // tp_size, 1152
+
+    with (
+        patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
+        patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
+        patch("vllm.model_executor.layers.mamba.abstract.get_mamba_prefill_checkpoint_alignment", return_value=128),
+        patch.object(NPUPlatform, "_find_non_ssm_backends", return_value=[backend]),
+    ):
+        for _ in range(2):
+            config.cache_config.block_size = 4096 if cache_dtype == "turboquant_4bit_nc" else 128
+            NPUPlatform._align_hybrid_block_size(config, backend)
+            assert config.cache_config.block_size == expected_block_size
+            assert config.cache_config.mamba_page_size_padded == expected_block_size * token_bytes
+            assert config.cache_config.mamba_block_size == (
+                expected_block_size if mamba_cache_mode == "align" else 131072
+            )
 
 
 @pytest.mark.parametrize(

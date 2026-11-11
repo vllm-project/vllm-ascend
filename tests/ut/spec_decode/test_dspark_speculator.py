@@ -18,7 +18,6 @@ from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -203,8 +202,6 @@ def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):
     )
     spec.attn_architecture, spec.use_dcp = "MLA", False
     spec.device = torch.device("cpu")
-    if vllm_version_is("0.32.0"):
-        spec.max_model_len = 16
     spec.speculative_config = object()
     spec.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(get_hidden_size=lambda: 4, max_model_len=16),
