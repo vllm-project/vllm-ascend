@@ -1,0 +1,4 @@
+pr: 17454
+entries:
+  - category: feature
+    text: Added Model Runner V2 graph execution for application-directed Mamba shared-prefix checkpoints on Ascend GDN models, including same-step producer/consumer execution and checkpoint state isolation.

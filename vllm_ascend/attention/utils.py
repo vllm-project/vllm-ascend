@@ -407,6 +407,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # the same as all zeros; dummy/profiling/capture batches do not fill it.
     replay_start: torch.Tensor | None = None
 
+    mamba_prefix_producer_indices: torch.Tensor | None = None
+    mamba_checkpoint_positions: torch.Tensor | None = None
+    mamba_checkpoint_source_block_ids: torch.Tensor | None = None
+
     # Global PCP view of the current target step and this cache group's index
     # into its per-group tensors. ``None`` when the step is not PCP-partitioned.
     pcp_context: "AscendPCPAttentionContext | None" = None
@@ -468,6 +472,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
             replay_start=_slice_reqs(self.replay_start),
+            mamba_prefix_producer_indices=_slice_reqs(self.mamba_prefix_producer_indices),
+            mamba_checkpoint_positions=_slice_reqs(self.mamba_checkpoint_positions),
+            mamba_checkpoint_source_block_ids=_slice_reqs(self.mamba_checkpoint_source_block_ids),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )
