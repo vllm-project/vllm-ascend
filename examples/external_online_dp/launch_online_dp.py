@@ -9,6 +9,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+    parser.add_argument(
+        "--pcp-size",
+        type=int,
+        default=1,
+        help="Prefill context parallel size. Each DP rank uses tp_size * pcp_size devices.",
+    )
     parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
     parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
     parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
@@ -20,6 +26,7 @@ def parse_args():
 args = parse_args()
 dp_size = args.dp_size
 tp_size = args.tp_size
+pcp_size = args.pcp_size
 dp_size_local = args.dp_size_local
 if dp_size_local == -1:
     dp_size_local = dp_size
@@ -28,6 +35,7 @@ dp_address = args.dp_address
 dp_rpc_port = args.dp_rpc_port
 vllm_start_port = args.vllm_start_port
 
+gpus_per_dp_rank = tp_size * pcp_size
 
 def run_command(visible_devices, dp_rank, vllm_engine_port):
     command = [
@@ -40,6 +48,7 @@ def run_command(visible_devices, dp_rank, vllm_engine_port):
         dp_address,
         dp_rpc_port,
         str(tp_size),
+        str(pcp_size),
     ]
     subprocess.run(command, check=True)
 
@@ -51,11 +60,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
     processes = []
-    num_cards = dp_size_local * tp_size
+    num_cards = dp_size_local * gpus_per_dp_rank
     for i in range(dp_size_local):
         dp_rank = dp_rank_start + i
         vllm_engine_port = vllm_start_port + i
-        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        visible_devices = ",".join(str(x) for x in range(i * gpus_per_dp_rank, (i + 1) * gpus_per_dp_rank))
         process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
         processes.append(process)
         process.start()
