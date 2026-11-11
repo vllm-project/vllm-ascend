@@ -255,7 +255,6 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         torch.testing.assert_close(metadata.block_tables[:num_reqs, 0], torch.tensor(order, dtype=torch.int32))
 
 
-@pytest.mark.parametrize("fail", [False, True])
 def test_patch_swaps_upstream_selector_walk_kernel():
     import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream
 
