@@ -123,6 +123,9 @@ class HardwareCapability(Enum):
     # Register the FX graph rewrite that fuses q/k RMSNorm, RoPE and the weight-less
     # v RMSNorm into the SIMD ``split_qkv_rmsnorm_rope_vnorm`` Triton kernel.
     GRAPH_QKV_NORM_ROPE_FUSION = auto()
+    # Register the FX graph rewrite that fuses the bare chunk->silu->mul SwiGLU
+    # pattern into a single torch_npu.npu_swiglu call.
+    GRAPH_SWIGLU_FUSION = auto()
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
@@ -287,6 +290,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
         HardwareCapability.GRAPH_QKV_NORM_ROPE_FUSION,
+        HardwareCapability.GRAPH_SWIGLU_FUSION,
         HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
