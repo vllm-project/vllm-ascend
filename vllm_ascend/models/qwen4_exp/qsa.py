@@ -49,7 +49,7 @@ from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .lightning_indexer import qsa_select_paged_tokens_lightning_v2
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -434,7 +434,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         logger.info_once("QSA is using the CANN Lightning Indexer v2 backend.")
-        return qsa_select_paged_tokens_lightning(
+        return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,
@@ -445,6 +445,17 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
+            num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
+            num_actual_tokens=getattr(
+                metadata,
+                "qsa_num_live_tokens",
+                metadata.num_actual_tokens,
+            ),
+            prepared_metadata=getattr(
+                metadata,
+                "qsa_lightning_v2_metadata",
+                None,
+            ),
         )
 
 
@@ -608,6 +619,11 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(
+                    attn_metadata,
+                    "qsa_gbsa_metadata",
+                    None,
+                ),
             )
         # main's ABI does not carry the freshly projected K/V; the dispatcher
         # then gathers them from the paged cache that `do_kv_cache_update`
@@ -780,15 +796,24 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if not self._main_fused_norm_rope_eligible(qkv, positions):
             raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
 
-        # Gather directly from the stable rotary cache using the current graph
-        # inputs; padded rows are clamped inside the kernel.
-        cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+        cos_sin = getattr(self, "_qsa_prepared_cos_sin", None)
+        expected_shape = (
+            *positions.shape,
+            self.rotary_emb.cos_sin_cache.shape[-1],
+        )
+        if cos_sin is None or tuple(cos_sin.shape) != expected_shape:
+            cache = self.rotary_emb.cos_sin_cache
+            safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+            cos_sin = cache[safe_positions]
+        if cos_sin.device != qkv.device:
+            cos_sin = cos_sin.to(qkv.device)
+        if cos_sin.dtype != qkv.dtype:
+            cos_sin = cos_sin.to(qkv.dtype)
         return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
-            q_weight=self.q_norm.weight,
-            k_weight=self.k_norm.weight,
-            cos_sin=cache,
-            positions=positions,
+            q_weight=1.0 + self.q_norm.weight,
+            k_weight=1.0 + self.k_norm.weight,
+            cos_sin=cos_sin,
             num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
