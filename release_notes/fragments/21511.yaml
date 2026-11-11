@@ -1,0 +1,9 @@
+pr: 21511
+entries:
+  - category: feature
+    text: >-
+      Added experimental PIECEWISE execution for DeepSeek-V4.1 on Model Runner V2,
+      including bounded decoder replay and Engram input preparation.
+      Cross-layer KV pool PIECEWISE remains disabled pending integration and
+      hardware validation.
+    model: deepseek-v4.1
