@@ -41,10 +41,12 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 
+import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
@@ -221,7 +223,13 @@ _PRE_SAMPLE_LOGITS_ATTR = "_rg_pre_sample_logits"
 
 
 def stash_pre_sample_logits(runner: Any, logits: Any) -> None:
-    """Keep a reference to this step's logits for ``rare_chars`` (cleared after use)."""
+    """Snapshot this step's logits for ``rare_chars`` (cleared after use).
+
+    Clone tensors so a later in-place grammar bitmask cannot zero out the
+    (top1, chosen) signal before collect runs.
+    """
+    if isinstance(logits, torch.Tensor):
+        logits = logits.detach().clone()
     setattr(runner, _PRE_SAMPLE_LOGITS_ATTR, logits)
 
 
@@ -291,14 +299,28 @@ def _safe_check_after_sample(runner: Any, output: Any) -> None:
         logger.exception("[runtime_guard soft-fail] async check_after_sample raised")
 
 
+def _trim_vocab_logits(runner: Any, logits: Any) -> Any:
+    """Match ``GPUModelRunner.sample`` truncating all-to-all width to ``vocab_size``."""
+    if not isinstance(logits, torch.Tensor):
+        return logits
+    vocab = getattr(runner, "vocab_size", None)
+    if vocab is None or logits.size(-1) <= int(vocab):
+        return logits
+    return logits[:, : int(vocab)]
+
+
 @contextmanager
 def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterator[None]:
-    """Wrap ``model.compute_logits`` so ``check_before_sample`` runs once before grammar.
+    """Run ``check_before_sample`` once on full pre-grammar logits.
 
-    Parent ``sample`` has no mid-hook between logits and grammar; wrapping the
-    bound method inserts the check without copying upstream ``sample()``.
-    Restored in ``finally``. Fires once per context (v2 calls ``compute_logits``
-    twice per step).
+    Covers both sample paths:
+    - Normal: wrap ``model.compute_logits`` (parent has no mid-hook before grammar).
+    - Batch-sharded: patch ``all_to_all_logits`` in ``GPUModelRunner.sample``'s
+      globals so we see request-mapped full-vocab logits (wrapping
+      ``compute_logits_local`` alone would stash a vocab shard).
+
+    Fires once per context (v2 may call ``compute_logits`` twice per step).
+    Restored in ``finally``.
     """
     model = runner.model
     # Prefer deleting the instance override so the class method is restored.
@@ -307,19 +329,38 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterato
     guard = runner.runtime_guard
     fired = False
 
-    def wrapped(hidden_states, *args, **kwargs):
+    # Patch the name ``GPUModelRunner.sample`` closes over (import-bound global).
+    sample_globals = getattr(GPUModelRunner.sample, "__globals__", None)
+    patch_all_to_all = isinstance(sample_globals, dict) and "all_to_all_logits" in sample_globals
+    orig_all_to_all = sample_globals["all_to_all_logits"] if patch_all_to_all else None
+
+    def _fire(logits: Any) -> None:
         nonlocal fired
+        if fired:
+            return
+        fired = True
+        batch = input_batch if input_batch is not None else getattr(runner, "input_batch", None)
+        check_before_sample_from_batch(guard, _trim_vocab_logits(runner, logits), batch)
+
+    def wrapped(hidden_states, *args, **kwargs):
         logits = orig(hidden_states, *args, **kwargs)
-        if not fired:
-            fired = True
-            batch = input_batch if input_batch is not None else getattr(runner, "input_batch", None)
-            check_before_sample_from_batch(guard, logits, batch)
+        _fire(logits)
+        return logits
+
+    def wrapped_all_to_all(logits_shard, metadata):
+        assert orig_all_to_all is not None
+        logits = orig_all_to_all(logits_shard, metadata)
+        _fire(logits)
         return logits
 
     model.compute_logits = wrapped
+    if patch_all_to_all:
+        sample_globals["all_to_all_logits"] = wrapped_all_to_all
     try:
         yield
     finally:
+        if patch_all_to_all:
+            sample_globals["all_to_all_logits"] = orig_all_to_all
         _restore_bound_override(model, "compute_logits", orig, had_instance_attr=had_instance_attr)
 
 
