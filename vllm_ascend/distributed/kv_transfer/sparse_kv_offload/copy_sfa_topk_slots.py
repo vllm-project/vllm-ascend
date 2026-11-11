@@ -187,6 +187,7 @@ class CopySfaTopkSlotAllocator:
         self.capacity = capacity
         self._free: list[int] = list(range(capacity))
         self._req_to_slot: dict[str, int] = {}
+        self._tail_positions: dict[str, int] = {}
 
     def bind(self, req_id: str) -> int:
         slot = self._req_to_slot.get(req_id)
@@ -198,6 +199,15 @@ class CopySfaTopkSlotAllocator:
         self._req_to_slot[req_id] = slot
         return slot
 
+    def tail_row(self, req_id: str, position: int, block_size: int) -> tuple[int, int]:
+        """Return the request's slot and first valid tail offset in this block."""
+        block = position // block_size
+        slot = self.bind(req_id)
+        first = self._tail_positions.get(req_id, position)
+        first = min(first, position) if first // block_size == block else position
+        self._tail_positions[req_id] = first
+        return slot, first % block_size
+
     def get(self, req_id: str) -> int | None:
         return self._req_to_slot.get(req_id)
 
@@ -207,6 +217,7 @@ class CopySfaTopkSlotAllocator:
 
     def release(self, req_id: str) -> int | None:
         slot = self._req_to_slot.pop(req_id, None)
+        self._tail_positions.pop(req_id, None)
         if slot is not None:
             self._free.append(slot)
         return slot

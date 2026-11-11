@@ -47,7 +47,9 @@
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
+#if defined(VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD) || defined(VLLM_ASCEND_ENABLE_SELECTIVE_LIM)
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
+#endif
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
@@ -69,14 +71,19 @@
 #endif
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -2210,6 +2217,67 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
+#if defined(VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD) || defined(VLLM_ASCEND_ENABLE_SELECTIVE_LIM)
+namespace {
+
+struct HostCallbackGraphPayloadRegistry {
+  aclmdlRI model_ri;
+  std::vector<std::shared_ptr<void>> payloads;
+};
+
+std::mutex& host_callback_graph_registry_mutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::unordered_map<aclmdlRI, std::unique_ptr<HostCallbackGraphPayloadRegistry>>&
+host_callback_graph_registries() {
+  static auto* registries = new std::unordered_map<aclmdlRI, std::unique_ptr<HostCallbackGraphPayloadRegistry>>();
+  return *registries;
+}
+
+void delete_host_callback_graph_payloads(void* args) noexcept {
+  auto* registry = static_cast<HostCallbackGraphPayloadRegistry*>(args);
+  std::unique_ptr<HostCallbackGraphPayloadRegistry> owned_registry;
+  {
+    std::lock_guard<std::mutex> lock(host_callback_graph_registry_mutex());
+    auto& registries = host_callback_graph_registries();
+    const auto it = registries.find(registry->model_ri);
+    if (it != registries.end() && it->second.get() == registry) {
+      owned_registry = std::move(it->second);
+      registries.erase(it);
+    }
+  }
+}
+
+template <typename Payload>
+Payload* retain_host_callback_graph_payload(
+    aclmdlRI model_ri, std::unique_ptr<Payload> payload) {
+  auto* raw_payload = payload.get();
+  std::lock_guard<std::mutex> lock(host_callback_graph_registry_mutex());
+  auto& registries = host_callback_graph_registries();
+  auto it = registries.find(model_ri);
+  if (it == registries.end()) {
+    auto registry = std::make_unique<HostCallbackGraphPayloadRegistry>();
+    registry->model_ri = model_ri;
+    auto* raw_registry = registry.get();
+    it = registries.emplace(model_ri, std::move(registry)).first;
+    const aclError register_ret =
+        aclmdlRIDestroyRegisterCallback(model_ri, delete_host_callback_graph_payloads, raw_registry);
+    if (register_ret != ACL_SUCCESS) {
+      registries.erase(it);
+    }
+    TORCH_CHECK(
+        register_ret == ACL_SUCCESS,
+        "failed to bind Host callback payload to graph lifetime, error code: ", register_ret);
+  }
+  it->second->payloads.emplace_back(std::move(payload));
+  return raw_payload;
+}
+
+}  // namespace
+#endif
+
 #ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
 #if defined(__GNUC__) || defined(__clang__)
   #define HOT_FUNCTION __attribute__((hot))
@@ -2591,60 +2659,6 @@ struct LruResidentCompactWithPlanPayload {
   bool delete_after_run;
 };
 
-struct LruResidentCompactGraphPayloadRegistry {
-  aclmdlRI model_ri;
-  std::vector<std::unique_ptr<LruResidentCompactWithPlanPayload>> payloads;
-};
-
-std::mutex& lru_resident_compact_graph_registry_mutex() {
-  static auto* mutex = new std::mutex();
-  return *mutex;
-}
-
-std::unordered_map<aclmdlRI, std::unique_ptr<LruResidentCompactGraphPayloadRegistry>>&
-lru_resident_compact_graph_registries() {
-  static auto* registries = new std::unordered_map<aclmdlRI, std::unique_ptr<LruResidentCompactGraphPayloadRegistry>>();
-  return *registries;
-}
-
-void delete_lru_resident_compact_graph_payloads(void* args) noexcept {
-  auto* registry = static_cast<LruResidentCompactGraphPayloadRegistry*>(args);
-  std::unique_ptr<LruResidentCompactGraphPayloadRegistry> owned_registry;
-  {
-    std::lock_guard<std::mutex> lock(lru_resident_compact_graph_registry_mutex());
-    auto& registries = lru_resident_compact_graph_registries();
-    const auto it = registries.find(registry->model_ri);
-    if (it != registries.end() && it->second.get() == registry) {
-      owned_registry = std::move(it->second);
-      registries.erase(it);
-    }
-  }
-}
-
-LruResidentCompactWithPlanPayload* retain_lru_resident_compact_graph_payload(
-    aclmdlRI model_ri, std::unique_ptr<LruResidentCompactWithPlanPayload> payload) {
-  auto* raw_payload = payload.get();
-  std::lock_guard<std::mutex> lock(lru_resident_compact_graph_registry_mutex());
-  auto& registries = lru_resident_compact_graph_registries();
-  auto it = registries.find(model_ri);
-  if (it == registries.end()) {
-    auto registry = std::make_unique<LruResidentCompactGraphPayloadRegistry>();
-    registry->model_ri = model_ri;
-    auto* raw_registry = registry.get();
-    it = registries.emplace(model_ri, std::move(registry)).first;
-    const aclError register_ret =
-        aclmdlRIDestroyRegisterCallback(model_ri, delete_lru_resident_compact_graph_payloads, raw_registry);
-    if (register_ret != ACL_SUCCESS) {
-      registries.erase(it);
-    }
-    TORCH_CHECK(
-        register_ret == ACL_SUCCESS,
-        "failed to bind stable-row external LRU payload registry to graph lifetime, error code: ", register_ret);
-  }
-  it->second->payloads.push_back(std::move(payload));
-  return raw_payload;
-}
-
 void lru_resident_compact_with_plan_callback(void* args) noexcept {
   auto* payload = static_cast<LruResidentCompactWithPlanPayload*>(args);
   lru_resident_compact_impl(
@@ -2721,7 +2735,7 @@ void enqueue_lru_resident_compact_with_plan_stable_rows(
           !graph_lifetime});
   auto* raw_payload = payload.get();
   if (graph_lifetime) {
-    raw_payload = retain_lru_resident_compact_graph_payload(model_ri, std::move(payload));
+    raw_payload = retain_host_callback_graph_payload(model_ri, std::move(payload));
   }
   const aclError ret = aclrtLaunchHostFunc(stream, lru_resident_compact_with_plan_callback, raw_payload);
   if (ret == ACL_SUCCESS && !graph_lifetime) {
@@ -2737,6 +2751,193 @@ at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
   }
   auto options = torch::TensorOptions().dtype(dtype).device(torch::kCPU);
   return torch::from_blob(reinterpret_cast<void*>(ptr_val), shape, options);
+}
+
+#endif
+
+#if defined(VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD) || defined(VLLM_ASCEND_ENABLE_SELECTIVE_LIM)
+namespace {
+
+void check_selective_cpu_tensor(const at::Tensor& tensor, at::ScalarType dtype, const char* name) {
+  TORCH_CHECK(tensor.device().is_cpu() && tensor.is_contiguous() && tensor.scalar_type() == dtype,
+              name, " must be a contiguous CPU tensor with the required dtype");
+}
+
+struct SelectiveHostGatherPayload {
+  std::array<at::Tensor, 8> owners;
+  const uint64_t* sources = nullptr;
+  const uint64_t* destinations = nullptr;
+  const uint32_t* lengths = nullptr;
+  uint8_t* packed_k = nullptr;
+  uint8_t* packed_v = nullptr;
+  uint64_t* control = nullptr;
+  uint64_t* epoch = nullptr;
+  std::size_t entries = 0, k_bytes = 0, v_bytes = 0;
+  int64_t rank = 0, world_size = 1;
+  bool to_device = false, complete_only = false, delete_after_run = false;
+};
+
+void wait_selective_epoch(const uint64_t* value, uint64_t epoch) noexcept {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (__atomic_load_n(value, __ATOMIC_ACQUIRE) < epoch) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      std::fputs("Selective Host gather peer synchronization timed out\n", stderr);
+      std::abort();
+    }
+    std::this_thread::yield();
+  }
+}
+
+void selective_copy_rows(const SelectiveHostGatherPayload& plan) noexcept {
+  for (std::size_t component = 0; component < 2; ++component) {
+    const auto row_bytes = component == 0 ? plan.k_bytes : plan.v_bytes;
+    auto* packed = component == 0 ? plan.packed_k : plan.packed_v;
+    for (std::size_t row = 0; row < plan.entries; ++row) {
+      const auto index = component * plan.entries + row;
+      const auto length = plan.lengths[index];
+      if (length == 0) continue;
+      const auto address = plan.to_device ? plan.sources[index] : plan.destinations[index];
+      if (length > row_bytes || address == 0) {
+        std::fputs("Selective Host gather has an invalid row descriptor\n", stderr);
+        std::abort();
+      }
+      if (plan.to_device) {
+        std::memcpy(packed + row * row_bytes, reinterpret_cast<const void*>(address), length);
+      } else {
+        std::memcpy(reinterpret_cast<void*>(address), packed + row * row_bytes, length);
+      }
+    }
+  }
+}
+
+void selective_host_gather_callback(void* data) noexcept {
+  auto& plan = *static_cast<SelectiveHostGatherPayload*>(data);
+  if (plan.complete_only) {
+    if (*plan.epoch == 0) {
+      std::fputs("Selective Host completion ran before its gather\n", stderr);
+      std::abort();
+    }
+    // The caller acknowledges only after every SDMA read of the shared payload has completed.
+    __atomic_store_n(plan.control + 6 + plan.rank, *plan.epoch, __ATOMIC_RELEASE);
+  } else if (!plan.to_device) {
+    selective_copy_rows(plan);
+  } else {
+    auto* control = plan.control;
+    const uint64_t epoch = ++*plan.epoch;
+    uint64_t fingerprint = 14695981039346656037ULL;
+    uint64_t skip = 1;
+    for (std::size_t i = 0; i < 2 * plan.entries; ++i) {
+      if (plan.lengths[i] != 0) {
+        skip = 0;
+        fingerprint = (fingerprint ^ plan.sources[i]) * 1099511628211ULL;
+        fingerprint = (fingerprint ^ i) * 1099511628211ULL;
+        fingerprint = (fingerprint ^ plan.lengths[i]) * 1099511628211ULL;
+      }
+    }
+    if (plan.rank == 0) {
+      for (int64_t rank = 1; rank < plan.world_size; ++rank) {
+        wait_selective_epoch(control + 6 + rank, epoch - 1);
+      }
+      selective_copy_rows(plan);
+      control[1] = fingerprint;
+      control[2] = plan.entries;
+      control[3] = plan.k_bytes;
+      control[4] = plan.v_bytes;
+      control[5] = skip;
+      __atomic_store_n(control, epoch, __ATOMIC_RELEASE);
+    } else {
+      wait_selective_epoch(control, epoch);
+      if (__atomic_load_n(control, __ATOMIC_ACQUIRE) != epoch || control[1] != fingerprint ||
+          control[2] != plan.entries || control[3] != plan.k_bytes || control[4] != plan.v_bytes ||
+          control[5] != skip) {
+        std::fputs("Selective Host gather TP plans disagree\n", stderr);
+        std::abort();
+      }
+    }
+  }
+  if (plan.delete_after_run) delete &plan;
+}
+
+void enqueue_selective_payload(std::unique_ptr<SelectiveHostGatherPayload> payload) {
+  const auto stream = c10_npu::getCurrentNPUStream().stream();
+  aclmdlRICaptureStatus status = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
+  aclmdlRI model = nullptr;
+  auto result = aclmdlRICaptureGetInfo(stream, &status, &model);
+  TORCH_CHECK(result == ACL_SUCCESS && status != ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED,
+              "Selective Host callback capture query failed, error code: ", result);
+  const bool captured = status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE;
+  TORCH_CHECK(!captured || model != nullptr, "Selective Host callback capture returned a null model");
+  payload->delete_after_run = !captured;
+  auto* raw = payload.get();
+  if (captured) raw = retain_host_callback_graph_payload(model, std::move(payload));
+  result = aclrtLaunchHostFunc(stream, selective_host_gather_callback, raw);
+  if (result == ACL_SUCCESS && !captured) payload.release();
+  TORCH_CHECK(result == ACL_SUCCESS, "Selective Host callback enqueue failed, error code: ", result);
+}
+
+}  // namespace
+
+void enqueue_selective_host_gather(
+    const at::Tensor& anchor, const at::Tensor& sources, const at::Tensor& destinations,
+    const at::Tensor& lengths, const at::Tensor& packed_k, const at::Tensor& packed_v,
+    const at::Tensor& control, const at::Tensor& epoch, int64_t entries,
+    int64_t k_bytes, int64_t v_bytes, int64_t rank, int64_t world_size, bool to_device) {
+  TORCH_CHECK(anchor.device().is_privateuseone(), "Selective Host gather requires an NPU anchor");
+  const c10_npu::NPUGuard guard(anchor.device());
+  check_selective_cpu_tensor(sources, at::kLong, "sources");
+  check_selective_cpu_tensor(destinations, at::kLong, "destinations");
+  check_selective_cpu_tensor(lengths, at::kInt, "lengths");
+  check_selective_cpu_tensor(packed_k, at::kByte, "packed_k");
+  check_selective_cpu_tensor(packed_v, at::kByte, "packed_v");
+  check_selective_cpu_tensor(control, at::kLong, "control");
+  check_selective_cpu_tensor(epoch, at::kLong, "epoch");
+  TORCH_CHECK(entries > 0 && entries <= std::numeric_limits<int64_t>::max() / 2 &&
+                  k_bytes > 0 && v_bytes > 0 && k_bytes <= UINT32_MAX && v_bytes <= UINT32_MAX,
+              "Selective Host gather requires positive, representable entries and row widths");
+  TORCH_CHECK(sources.numel() >= 2 * entries && destinations.numel() >= 2 * entries &&
+                  lengths.numel() >= 2 * entries && packed_k.numel() / k_bytes >= entries &&
+                  packed_v.numel() / v_bytes >= entries,
+              "Selective Host gather descriptors or packed buffers are too small");
+  TORCH_CHECK(world_size > 0 && world_size <= std::numeric_limits<int64_t>::max() - 6 &&
+                  rank >= 0 && rank < world_size,
+              "Selective Host gather has an invalid TP rank/world size");
+  TORCH_CHECK(!to_device || (control.numel() >= 6 + world_size && epoch.numel() == 1),
+              "Selective Host gather requires 6+world_size control words and one local epoch");
+  auto payload = std::make_unique<SelectiveHostGatherPayload>();
+  payload->owners = {anchor, sources, destinations, lengths, packed_k, packed_v, control, epoch};
+  payload->sources = reinterpret_cast<const uint64_t*>(sources.data_ptr<int64_t>());
+  payload->destinations = reinterpret_cast<const uint64_t*>(destinations.data_ptr<int64_t>());
+  payload->lengths = reinterpret_cast<const uint32_t*>(lengths.data_ptr<int32_t>());
+  payload->packed_k = packed_k.data_ptr<uint8_t>();
+  payload->packed_v = packed_v.data_ptr<uint8_t>();
+  payload->control = reinterpret_cast<uint64_t*>(control.data_ptr<int64_t>());
+  payload->epoch = reinterpret_cast<uint64_t*>(epoch.data_ptr<int64_t>());
+  payload->entries = entries;
+  payload->k_bytes = k_bytes;
+  payload->v_bytes = v_bytes;
+  payload->rank = rank;
+  payload->world_size = world_size;
+  payload->to_device = to_device;
+  enqueue_selective_payload(std::move(payload));
+}
+
+void enqueue_selective_host_gather_done(
+    const at::Tensor& anchor, const at::Tensor& control, const at::Tensor& epoch, int64_t rank) {
+  TORCH_CHECK(anchor.device().is_privateuseone(), "Selective Host completion requires an NPU anchor");
+  const c10_npu::NPUGuard guard(anchor.device());
+  check_selective_cpu_tensor(control, at::kLong, "control");
+  check_selective_cpu_tensor(epoch, at::kLong, "epoch");
+  TORCH_CHECK(rank >= 0 && control.numel() > 6 && rank < control.numel() - 6 && epoch.numel() == 1,
+              "Selective Host completion has an invalid control/epoch/rank");
+  auto payload = std::make_unique<SelectiveHostGatherPayload>();
+  payload->owners[0] = anchor;
+  payload->owners[6] = control;
+  payload->owners[7] = epoch;
+  payload->control = reinterpret_cast<uint64_t*>(control.data_ptr<int64_t>());
+  payload->epoch = reinterpret_cast<uint64_t*>(epoch.data_ptr<int64_t>());
+  payload->rank = rank;
+  payload->complete_only = true;
+  enqueue_selective_payload(std::move(payload));
 }
 
 #endif
@@ -3056,6 +3257,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // internally submits async memcpy on the current NPU stream.
     ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
+
+#if defined(VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD) || defined(VLLM_ASCEND_ENABLE_SELECTIVE_LIM)
+    ops.def("enqueue_selective_host_gather(Tensor anchor, Tensor sources, Tensor destinations, Tensor lengths, "
+            "Tensor(a!) packed_k, Tensor(b!) packed_v, Tensor(c!) control, Tensor(d!) epoch, "
+            "int entries, int k_bytes, int v_bytes, int rank, int world_size, bool to_device) -> ()");
+    ops.impl("enqueue_selective_host_gather", torch::kPrivateUse1, &vllm_ascend::enqueue_selective_host_gather);
+    ops.def("enqueue_selective_host_gather_done(Tensor anchor, Tensor(a!) control, Tensor epoch, int rank) -> ()");
+    ops.impl("enqueue_selective_host_gather_done", torch::kPrivateUse1,
+             &vllm_ascend::enqueue_selective_host_gather_done);
+
+#endif
 
 #ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
     ops.def("sparse_kv_warmup_lru_resident_threads(int requested_threads) -> int");
@@ -3726,6 +3938,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
 
+#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
     ops.def(
         "npu_fused_lightning_indexer_manage("
         "Tensor index_weights, Tensor query_dequant_scale, Tensor query, "
@@ -3740,6 +3953,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_lightning_indexer_manage);
+
+#endif
+
+#if defined(VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD) || defined(VLLM_ASCEND_ENABLE_SELECTIVE_LIM)
+    ops.def("npu_precomputed_topk_manage(Tensor topk, Tensor layer_descriptors, int host_blocks, "
+            "int block_size, int hot, int row_stride, int k_bytes, int v_bytes) -> ()");
+    ops.impl("npu_precomputed_topk_manage", torch::kPrivateUse1, &vllm_ascend::npu_precomputed_topk_manage);
+
+#endif
 
     ops.def(
         "npu_fused_scatter_copy_sparse_flash_attention("

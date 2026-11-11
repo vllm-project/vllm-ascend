@@ -1,6 +1,8 @@
 import contextlib
 import typing
+import weakref
 from dataclasses import dataclass
+from multiprocessing import shared_memory
 from zlib import adler32
 
 import numpy as np
@@ -34,11 +36,6 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_lim import get_selective_lim_library
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_sdma import (
-    HostGatherCoordinator,
-    SelectiveSDMATransfer,
-)
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -104,6 +101,170 @@ def _sparse_kv_ops():
         )
     _SPARSE_KV_OFFLOAD_OPS = torch.ops._C_ascend
     return _SPARSE_KV_OFFLOAD_OPS
+
+
+SELECTIVE_LIM_LAYER_FIELDS = 16
+
+
+class HostGatherCoordinator:
+    """Share only gathered rows; the complete KV pool remains owned by MemFabric."""
+
+    def __init__(self, group, rank: int, world_size: int, capacity_bytes: int):
+        header_bytes = ((6 + world_size) * 8 + 63) // 64 * 64
+        if rank == 0:
+            self.mapping = shared_memory.SharedMemory(create=True, size=header_bytes + capacity_bytes)
+            self.mapping.buf[:header_bytes] = bytes(header_bytes)
+            identity = self.mapping.name
+        else:
+            identity = None
+        name = group.broadcast_object(identity, src=0)
+        if rank != 0:
+            self.mapping = shared_memory.SharedMemory(name=name)
+        self.tensor = torch.frombuffer(self.mapping.buf, dtype=torch.uint8)
+        self.control = self.tensor[:header_bytes].view(torch.int64)
+        torch.ops._C_ascend.register_pinned_host_mmap(self.tensor)
+        self.registration = weakref.finalize(self, torch.ops._C_ascend.unregister_pinned_host_mmap, self.tensor)
+        self.payload = self.tensor[header_bytes:]
+        self.epoch = torch.zeros(1, dtype=torch.int64, pin_memory=True)
+        self.rank = rank
+        self.world_size = world_size
+        group.barrier()
+        if rank == 0:
+            self.mapping.unlink()
+
+
+class SelectiveSDMATransfer:
+    """Fixed-address Host gather, SDMA staging, and device scatter for graph replay."""
+
+    @staticmethod
+    def device_memory_bytes(entries: int, k_bytes: int, v_bytes: int) -> int:
+        # K/V payloads, two address vectors, and the combined gather/scatter address vector.
+        return entries * (k_bytes + v_bytes + 4 * torch.int64.itemsize)
+
+    def __init__(self, entries: int, k_bytes: int, v_bytes: int, device, coordinator=None):
+        self.coordinator = coordinator
+        self.enqueue = torch.ops._C_ascend.enqueue_selective_host_gather
+        self.complete = torch.ops._C_ascend.enqueue_selective_host_gather_done
+        self.empty_control = torch.empty(0, dtype=torch.int64)
+        self.sources = torch.empty(2 * entries, dtype=torch.int64, pin_memory=True)
+        self.destinations = torch.empty_like(self.sources, pin_memory=True)
+        self.lengths = torch.empty(2 * entries, dtype=torch.int32, pin_memory=True)
+        if coordinator is None:
+            self.host = [
+                torch.zeros((entries, size), dtype=torch.uint8, pin_memory=True) for size in (k_bytes, v_bytes)
+            ]
+        else:
+            self.host = [
+                coordinator.payload[: entries * k_bytes].view(entries, k_bytes),
+                coordinator.payload[entries * k_bytes : entries * (k_bytes + v_bytes)].view(entries, v_bytes),
+            ]
+        self.device = [torch.empty_like(tensor, device=device) for tensor in self.host]
+        offsets = torch.arange(entries, dtype=torch.int64, device=device)
+        self.addresses = [offsets * size + tensor.data_ptr() for tensor, size in zip(self.device, (k_bytes, v_bytes))]
+        self.packed_addresses = torch.empty(2 * entries, dtype=torch.int64, device=device)
+        self.payloads: dict[tuple[int, bool], tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def copy(self, destination, source, kind: int) -> None:
+        size = source.numel() * source.element_size()
+        self.copy_bytes(destination.data_ptr(), source.data_ptr(), size, kind)
+
+    def copy_bytes(self, destination: int, source: int, size: int, kind: int) -> None:
+        if size == 0:
+            return
+        torch.ops._C_ascend.swap_blocks_batch(
+            torch.tensor([source], dtype=torch.int64),
+            torch.tensor([destination], dtype=torch.int64),
+            torch.tensor([size], dtype=torch.int64),
+            kind - 1,
+        )
+
+    def transfer(self, manager, sources, destinations, lengths, count, *, to_device: bool) -> None:
+        entries = sources.numel() // 2
+        if sources.numel() != 2 * entries or entries > self.host[0].shape[0]:
+            raise ValueError("Selective SDMA descriptors exceed staging capacity")
+        if lengths.dtype != torch.int32 or lengths.numel() != sources.numel():
+            raise ValueError("Selective SDMA requires one int32 length per descriptor")
+        key = (entries, to_device)
+        if key not in self.payloads:
+            if self.coordinator is None:
+                self.payloads[key] = tuple(host[:entries] for host in self.host)
+            else:
+                shared = self.coordinator.payload
+                k_size, v_size = self.host[0].shape[1], self.host[1].shape[1]
+                self.payloads[key] = (
+                    shared[: entries * k_size].view(entries, k_size),
+                    shared[entries * k_size : entries * (k_size + v_size)].view(entries, v_size),
+                )
+        packed = self.packed_addresses[: 2 * entries]
+        packed[:entries].copy_(self.addresses[0][:entries])
+        packed[entries:].copy_(self.addresses[1][:entries])
+        self.copy(self.lengths[: 2 * entries], lengths, 2)
+        if to_device:
+            self.copy(self.sources[: 2 * entries], sources, 2)
+            self._launch(key)
+            payload = self.payloads[key]
+            for host, device in zip(payload, self.device):
+                self.copy_bytes(device.data_ptr(), host.data_ptr(), entries * device.shape[1], 1)
+            if self.coordinator is not None:
+                self.complete(self.device[0], self.coordinator.control, self.coordinator.epoch, self.coordinator.rank)
+            manager.copy_sfa_kv(packed, destinations, lengths, count)
+        else:
+            manager.copy_sfa_kv(sources, packed, lengths, count)
+            self.copy(self.destinations[: 2 * entries], destinations, 2)
+            for host, device in zip(self.host, self.device):
+                self.copy(host[:entries], device[:entries], 2)
+            self._launch(key)
+
+    def _launch(self, key) -> None:
+        entries, to_device = key
+        coordinator = self.coordinator
+        host_k, host_v = self.payloads[key]
+        self.enqueue(
+            self.device[0],
+            self.sources[: 2 * entries],
+            self.destinations[: 2 * entries],
+            self.lengths[: 2 * entries],
+            host_k,
+            host_v,
+            coordinator.control if coordinator is not None else self.empty_control,
+            coordinator.epoch if coordinator is not None else self.empty_control,
+            entries,
+            host_k.shape[1],
+            host_v.shape[1],
+            coordinator.rank if coordinator is not None else 0,
+            coordinator.world_size if coordinator is not None else 1,
+            to_device,
+        )
+
+    def restore(self, manager, sources, destinations, lengths) -> None:
+        """Expand rollback blocks into token rows and reuse the same Host gather/SDMA path."""
+        source_rows = sources.cpu().tolist()
+        target_rows = destinations.cpu().tolist()
+        sizes = lengths.cpu().tolist()
+        blocks = len(source_rows) // 2
+        k_bytes, v_bytes = self.host[0].shape[1], self.host[1].shape[1]
+        k_sources, v_sources, k_targets, v_targets = [], [], [], []
+        for block in range(blocks):
+            tokens, k_remainder = divmod(sizes[block], k_bytes)
+            v_tokens, v_remainder = divmod(sizes[blocks + block], v_bytes)
+            if k_remainder or v_remainder or tokens != v_tokens:
+                raise ValueError("Rollback K/V lengths must contain the same whole token rows")
+            for token in range(tokens):
+                k_sources.append(source_rows[block] + token * k_bytes)
+                v_sources.append(source_rows[blocks + block] + token * v_bytes)
+                k_targets.append(target_rows[block] + token * k_bytes)
+                v_targets.append(target_rows[blocks + block] + token * v_bytes)
+        capacity = self.host[0].shape[0]
+        for start in range(0, len(k_sources), capacity):
+            end = min(start + capacity, len(k_sources))
+            rows = end - start
+            src = torch.tensor(k_sources[start:end] + v_sources[start:end], dtype=torch.int64, device=sources.device)
+            dst = torch.tensor(k_targets[start:end] + v_targets[start:end], dtype=torch.int64, device=sources.device)
+            size = torch.tensor([k_bytes] * rows + [v_bytes] * rows, dtype=torch.int32, device=sources.device)
+            count = torch.tensor([2 * rows], dtype=torch.int32, device=sources.device)
+            self.transfer(manager, src, dst, size, count, to_device=True)
+            # Rollback runs outside capture; retain temporary descriptors until their copies finish.
+            torch_npu.npu.current_stream().synchronize()
 
 
 def allocate_kv_offload_topk_buffer_pair(
@@ -196,6 +357,9 @@ def get_selective_sdma_device_memory_bytes(
     k_bytes = model.kv_lora_rank * torch.bfloat16.itemsize
     v_bytes = model.qk_rope_head_dim * torch.bfloat16.itemsize
     memory_bytes = SelectiveSDMATransfer.device_memory_bytes(rows * sparse_kv_offload_config.topk, k_bytes, v_bytes)
+    sizes = getattr(getattr(vllm_config, "compilation_config", None), "cudagraph_capture_sizes", None) or ()
+    shared_layers = getattr(sparse_kv_offload_config, "indexer_types", ()).count("shared")
+    memory_bytes += shared_layers * SELECTIVE_LIM_LAYER_FIELDS * torch.int64.itemsize * len(sizes)
     if get_tensor_model_parallel_rank() == 0:
         block_size = vllm_config.cache_config.block_size
         memory_bytes += SelectiveSDMATransfer.device_memory_bytes(rows, block_size * k_bytes, block_size * v_bytes)
@@ -848,6 +1012,7 @@ class SparseKVOffloadManager:
         if selective:
             device = self.topk_buffers_k[0].device
             rows = self.topk_buffers_k[0].shape[0]
+            self.selective_lim_capture_buffers: list = []
             # MemFabric queues raw descriptor pointers, so keep their storage alive across replay.
             descriptor_shape = (self.num_layers, 2 * rows * self.topk)
             self.selective_copy_src = torch.empty(descriptor_shape, dtype=torch.int64, device=device)
@@ -975,7 +1140,6 @@ class SparseKVOffloadManager:
         self.selective_sdma_tail = None
         self.selective_sdma_prefill = None
         if selective:
-            library = get_selective_lim_library()
             rows = self.topk_buffers_k[0].shape[0]
             self.selective_host_gather = HostGatherCoordinator(
                 self.tp_group,
@@ -984,7 +1148,6 @@ class SparseKVOffloadManager:
                 rows * self.topk * (self.token_size_bytes_k + self.token_size_bytes_v),
             )
             self.selective_sdma_prefetch = SelectiveSDMATransfer(
-                library,
                 rows * self.topk,
                 self.token_size_bytes_k,
                 self.token_size_bytes_v,
@@ -993,14 +1156,13 @@ class SparseKVOffloadManager:
             )
             if self.tp_rank == 0:
                 self.selective_sdma_tail = SelectiveSDMATransfer(
-                    library,
                     rows,
                     self.block_size * self.token_size_bytes_k,
                     self.block_size * self.token_size_bytes_v,
                     device,
                 )
                 self.selective_sdma_prefill = SelectiveSDMATransfer(
-                    library, self.max_num_tokens, self.token_size_bytes_k, self.token_size_bytes_v, device
+                    self.max_num_tokens, self.token_size_bytes_k, self.token_size_bytes_v, device
                 )
             logger.info("Selective KV uses Host gather, SDMA H2D/D2H, and device-local gather/scatter")
 
@@ -1264,8 +1426,70 @@ class SparseKVOffloadManager:
             else:
                 self.copy_sfa_kv(self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths, count)
 
+    def prepare_selective_kv(self, layers, topk_indices) -> None:
+        topk = topk_indices.reshape(-1, self.topk).to(torch.int64).contiguous()
+        rows, width = topk.shape
+        if not 0 < width <= self.topk_buffer_size <= 2048:
+            raise ValueError("Precomputed-TopK LIM requires 0 < TopK <= hot capacity <= 2048")
+        entries = 2 * rows * width
+        descriptors = []
+        inputs = []
+        for layer_id, metadata, seq_lengths in layers:
+            if metadata.req_ids_tensor is None or metadata.selective_tail_rows is None:
+                raise RuntimeError("Precomputed-TopK LIM requires request identities and selective tail metadata")
+            table = metadata.block_table[:rows].to(torch.int32).contiguous()
+            tensors = (
+                table,
+                seq_lengths[:rows].to(torch.int32).contiguous(),
+                metadata.req_ids_tensor[:rows].to(torch.int64).contiguous(),
+                metadata.selective_tail_rows[:rows].to(torch.int32).contiguous(),
+                self.selective_hot_keys[layer_id],
+                self.selective_hot_requests[layer_id],
+                self.selective_physical[layer_id],
+                self.selective_copy_src[layer_id, :entries],
+                self.selective_copy_dst[layer_id, :entries],
+                self.selective_copy_lengths[layer_id, :entries],
+            )
+            inputs.append(tensors)
+            descriptors.append(
+                [tensor.data_ptr() for tensor in tensors]
+                + [
+                    self.gvas_k_bases[layer_id],
+                    self.gvas_v_bases[layer_id],
+                    self.topk_buffers_k[layer_id].data_ptr(),
+                    self.topk_buffers_v[layer_id].data_ptr(),
+                    table.shape[1],
+                    0,
+                ]
+            )
+        host = torch.tensor(descriptors, dtype=torch.int64, pin_memory=True)
+        device = host.to(topk.device, non_blocking=True)
+        if torch_npu.npu.is_current_stream_capturing():
+            # Captured H2D keeps the same Host table and its pointed-to tensors on every replay.
+            self.selective_lim_capture_buffers.append((host, device, inputs))
+        torch.ops._C_ascend.npu_precomputed_topk_manage(
+            topk,
+            device,
+            self.kv_cache_config.num_blocks,
+            self.block_size,
+            self.topk_buffer_size,
+            self.selective_row_stride,
+            self.token_size_bytes_k,
+            self.token_size_bytes_v,
+        )
+        logger.info_once("Selective KV offload launched the native precomputed-TopK LIM kernel (grouped).")
+        for layer_id, _, _ in layers:
+            self.prefetch_selective_kv(
+                rows,
+                self.selective_copy_src[layer_id, :entries],
+                self.selective_copy_dst[layer_id, :entries],
+                self.selective_copy_lengths[layer_id, :entries],
+            )
+            self.selective_prefetch_ready[layer_id].record()
+
     def prefetch_selective_kv(self, rows, sources, destinations, lengths) -> None:
         count = self.selective_copy_counts[rows - 1]
+        assert self.selective_sdma_prefetch is not None
         self.selective_sdma_prefetch.transfer(self, sources, destinations, lengths, count, to_device=True)
 
     def copy_sfa_kv(self, sources, destinations, lengths, count) -> None:
@@ -1493,6 +1717,7 @@ class SparseKVOffloadManager:
     def _submit_current_kv_writeback(self, device: torch.device, entries=None, *, tail=False) -> None:
         if self.selective_sdma_prefetch is not None:
             transfer = self.selective_sdma_tail if tail else self.selective_sdma_prefill
+            assert transfer is not None
             transfer.transfer(
                 self,
                 self.d2h_src_ptrs_npu[: 2 * entries],

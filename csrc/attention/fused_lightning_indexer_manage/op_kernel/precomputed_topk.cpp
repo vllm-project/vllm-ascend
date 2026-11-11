@@ -8,6 +8,7 @@ namespace {
 constexpr int kMaxHot = 2048;
 constexpr int kHashSize = 8192;
 constexpr int kTailWidth = 2;
+constexpr int kLayerFields = 16;
 
 template <HardEvent event>
 __aicore__ inline void SyncPipes()
@@ -31,13 +32,9 @@ __aicore__ inline int Lookup(const LocalTensor<int32_t>& tokens, int token)
 // The normal LIM entry couples replacement to score thresholds. Here the
 // completed TopK gives the exact set that must be retained, so unselected
 // resident slots and empty slots are sufficient eviction candidates.
-extern "C" __global__ __aicore__ void selective_lim_topk(
-    GM_ADDR topk, GM_ADDR table, GM_ADDR lengths, GM_ADDR requests,
-    GM_ADDR tails, GM_ADDR keys, GM_ADDR previous, GM_ADDR indices,
-    GM_ADDR src, GM_ADDR dst, GM_ADDR sizes,
-    int rows, int width, int columns, int hostBlocks, int blockSize, int hot,
-    int rowStride, int kBytes, int vBytes, uint64_t hostK, uint64_t hostV,
-    uint64_t hotK, uint64_t hotV)
+extern "C" __global__ __aicore__ void selective_lim_group_topk(
+    GM_ADDR topk, GM_ADDR layers, int layerCount, int rows, int width,
+    int hostBlocks, int blockSize, int hot, int rowStride, int kBytes, int vBytes)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     if (width > kMaxHot || hot > kMaxHot || width > hot) {
@@ -57,27 +54,45 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
     auto free = used[kMaxHot];
     auto sources = free[kMaxHot];
     auto logical = reinterpret_cast<__gm__ int64_t*>(topk);
-    auto cache = reinterpret_cast<__gm__ int64_t*>(keys);
-    auto cacheLocal = cacheBuf.Get<int64_t>();
-    auto selectedLocal = physicalBuf.Get<int32_t>();
-    auto addresses = buf.Get<int64_t>();
-    auto sizesLocal = cacheBuf.Get<int32_t>();
-    GlobalTensor<int64_t> cacheGm, sourceGm, destinationGm, previousGm;
-    GlobalTensor<int32_t> physicalGm, sizeGm;
-    cacheGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(keys));
-    sourceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(src));
-    destinationGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(dst));
-    previousGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(previous));
-    physicalGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(indices));
-    sizeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sizes));
-    auto blocks = reinterpret_cast<__gm__ int32_t*>(table);
-    auto seq = reinterpret_cast<__gm__ int32_t*>(lengths);
-    auto req = reinterpret_cast<__gm__ int64_t*>(requests);
-    auto tail = reinterpret_cast<__gm__ int32_t*>(tails);
-    auto old = reinterpret_cast<__gm__ int64_t*>(previous);
-    DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(physicalGm);
-    // Each owner publishes only its row through MTE3, including unaligned cache/request tails.
-    for (int row = GetBlockIdx(); row < rows; row += GetBlockNum()) {
+    auto descriptors = reinterpret_cast<__gm__ uint64_t*>(layers);
+    GlobalTensor<int32_t> anchor;
+    anchor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(topk));
+    DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(anchor);
+    // A layer/request owner retains the original per-row cache and duplicate-selection semantics.
+    for (int owner = GetBlockIdx(); owner < layerCount * rows; owner += GetBlockNum()) {
+        const int row = owner % rows;
+        const auto layer = descriptors + (owner / rows) * kLayerFields;
+        GM_ADDR table = reinterpret_cast<GM_ADDR>(layer[0]);
+        GM_ADDR lengths = reinterpret_cast<GM_ADDR>(layer[1]);
+        GM_ADDR requests = reinterpret_cast<GM_ADDR>(layer[2]);
+        GM_ADDR tails = reinterpret_cast<GM_ADDR>(layer[3]);
+        GM_ADDR keys = reinterpret_cast<GM_ADDR>(layer[4]);
+        GM_ADDR previous = reinterpret_cast<GM_ADDR>(layer[5]);
+        GM_ADDR indices = reinterpret_cast<GM_ADDR>(layer[6]);
+        GM_ADDR src = reinterpret_cast<GM_ADDR>(layer[7]);
+        GM_ADDR dst = reinterpret_cast<GM_ADDR>(layer[8]);
+        GM_ADDR sizes = reinterpret_cast<GM_ADDR>(layer[9]);
+        const uint64_t hostK = layer[10], hostV = layer[11];
+        const uint64_t hotK = layer[12], hotV = layer[13];
+        const int columns = static_cast<int>(layer[14]);
+        auto cache = reinterpret_cast<__gm__ int64_t*>(keys);
+        auto cacheLocal = cacheBuf.Get<int64_t>();
+        auto selectedLocal = physicalBuf.Get<int32_t>();
+        auto addresses = buf.Get<int64_t>();
+        auto sizesLocal = cacheBuf.Get<int32_t>();
+        GlobalTensor<int64_t> cacheGm, sourceGm, destinationGm, previousGm;
+        GlobalTensor<int32_t> physicalGm, sizeGm;
+        cacheGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(keys));
+        sourceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(src));
+        destinationGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(dst));
+        previousGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(previous));
+        physicalGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(indices));
+        sizeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sizes));
+        auto blocks = reinterpret_cast<__gm__ int32_t*>(table);
+        auto seq = reinterpret_cast<__gm__ int32_t*>(lengths);
+        auto req = reinterpret_cast<__gm__ int64_t*>(requests);
+        auto tail = reinterpret_cast<__gm__ int32_t*>(tails);
+        auto old = reinterpret_cast<__gm__ int64_t*>(previous);
         const int base = row * width;
         const int cacheBase = row * (hot + 1);
         const int length = seq[row];
@@ -190,3 +205,14 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
         SyncPipes<HardEvent::MTE3_S>();
     }
 }
+
+namespace vllm_ascend {
+void selective_lim_group_impl(void* stream, void* topk, void* layers,
+    int layerCount, int rows, int width, int hostBlocks, int blockSize,
+    int hot, int rowStride, int kBytes, int vBytes)
+{
+    selective_lim_group_topk<<<layerCount * rows, nullptr, stream>>>(
+        static_cast<GM_ADDR>(topk), static_cast<GM_ADDR>(layers), layerCount,
+        rows, width, hostBlocks, blockSize, hot, rowStride, kBytes, vBytes);
+}
+} // namespace vllm_ascend

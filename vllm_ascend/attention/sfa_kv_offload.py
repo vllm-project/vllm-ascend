@@ -54,10 +54,6 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     split_decodes_and_prefills,
 )
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_lim import (
-    get_selective_lim_launcher,
-    prepare_selective_lim,
-)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -1598,20 +1594,12 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         stream = manager.selective_prefetch_stream
         stream.wait_stream(torch_npu.npu.current_stream())
         with torch_npu.npu.stream(stream):
-            lim = get_selective_lim_launcher()
-            for name in followers:
-                layer_id = manager._get_offload_layer_id(name)
-                follower = context.attn_metadata[name]
-                prepare_selective_lim(
-                    lim,
-                    manager,
-                    layer_id,
-                    prefetch_topk,
-                    follower,
-                    follower.seq_lens,
-                )
-                manager.selective_prefetch_ready[layer_id].record()
-                ready_layers.add(layer_id)
+            layers = [
+                (manager._get_offload_layer_id(name), context.attn_metadata[name], context.attn_metadata[name].seq_lens)
+                for name in followers
+            ]
+            manager.prepare_selective_kv(layers, prefetch_topk)
+            ready_layers.update(layer_id for layer_id, _, _ in layers)
 
     def _execute_selective_host_attention(
         self,
@@ -1627,19 +1615,22 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager = get_sparse_kv_offload_manager()
         layer_id = manager._get_offload_layer_id(self._offload_layer_name())
         rows = query.shape[0]
-        ready_layers = (
-            getattr(get_forward_context(), "_selective_prefetched_layers", ()) if is_forward_context_available() else ()
+        ready_layers: set[int] = (
+            getattr(get_forward_context(), "_selective_prefetched_layers", set())
+            if is_forward_context_available()
+            else set()
         )
         if layer_id in ready_layers:
             torch_npu.npu.current_stream().wait_event(manager.selective_prefetch_ready[layer_id])
             ready_layers.remove(layer_id)
         else:
-            prepare_selective_lim(get_selective_lim_launcher(), manager, layer_id, topk_indices, metadata, seq_lengths)
+            manager.prepare_selective_kv([(layer_id, metadata, seq_lengths)], topk_indices)
         block_table = manager.selective_hot_block_table[:rows]
         context = get_forward_context()
         tables = getattr(context, "_selective_tail_block_tables", None)
         if tables is None:
             tables = context._selective_tail_block_tables = {}
+        assert metadata.selective_tail_rows is not None
         key = (id(metadata.selective_tail_rows), rows)
         if key not in tables:
             tail_blocks = (

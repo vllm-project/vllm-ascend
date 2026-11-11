@@ -5,6 +5,36 @@
 
 namespace vllm_ascend {
 
+#ifdef VLLM_ASCEND_ENABLE_SELECTIVE_LIM
+void selective_lim_group_impl(void* stream, void* topk, void* layers,
+    int layerCount, int rows, int width, int hostBlocks, int blockSize,
+    int hot, int rowStride, int kBytes, int vBytes);
+#endif
+
+inline void npu_precomputed_topk_manage(const at::Tensor& topk,
+    const at::Tensor& layers, int64_t hostBlocks, int64_t blockSize,
+    int64_t hot, int64_t rowStride, int64_t kBytes, int64_t vBytes)
+{
+#ifdef VLLM_ASCEND_ENABLE_SELECTIVE_LIM
+    TORCH_CHECK(topk.device().is_privateuseone() && layers.device() == topk.device(),
+                "Precomputed TopK and layer descriptors must be on the same NPU");
+    TORCH_CHECK(topk.scalar_type() == at::kLong && layers.scalar_type() == at::kLong &&
+                topk.is_contiguous() && layers.is_contiguous(),
+                "Precomputed TopK and layer descriptors must be contiguous int64");
+    TORCH_CHECK(topk.dim() == 2 && topk.size(0) > 0 && topk.size(1) > 0 &&
+                topk.size(1) <= hot && hot <= 2048 && layers.dim() == 2 &&
+                layers.size(0) > 0 && layers.size(1) == 16 && hostBlocks > 0 &&
+                blockSize > 0 && rowStride >= hot + blockSize && kBytes > 0 && vBytes > 0,
+                "Invalid precomputed TopK, layer descriptor, or hot-buffer geometry");
+    const c10_npu::OptionalNPUGuard guard(topk.device());
+    selective_lim_group_impl(c10_npu::getCurrentNPUStream().stream(),
+        topk.data_ptr(), layers.data_ptr(), layers.size(0), topk.size(0),
+        topk.size(1), hostBlocks, blockSize, hot, rowStride, kBytes, vBytes);
+#else
+    TORCH_CHECK(false, "Precomputed TopK LIM is unavailable in this build");
+#endif
+}
+
 inline void npu_fused_lightning_indexer_manage(
     const at::Tensor& index_weights, const at::Tensor& query_dequant_scale,
     const at::Tensor& query, const at::Tensor& index_key_dequant_scale,

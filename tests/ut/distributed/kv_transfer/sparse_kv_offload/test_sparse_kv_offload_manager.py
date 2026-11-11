@@ -65,8 +65,7 @@ def _make_memory_plan_inputs(max_num_seqs=2):
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
-    @patch.object(manager_module, "get_selective_lim_library", return_value=object())
-    def test_selective_sdma_reserves_rank_local_staging(self, _library):
+    def test_selective_sdma_reserves_rank_local_staging(self):
         config = SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=256),
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)),
@@ -80,6 +79,14 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank),
             ):
                 self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), expected)
+        sparse.indexer_types = ("full", "shared", "shared", "shared")
+        config.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[1, 2, 4])
+        for rank, expected in ((0, 10_592_384), (1, 9_699_328)):
+            with (
+                self.subTest(rank=rank, grouped_descriptors=True),
+                patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank),
+            ):
+                self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), expected + 1152)
         sparse.selective_offload = False
         self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), 0)
 
@@ -526,12 +533,6 @@ class TestHostKVRegistration(unittest.TestCase):
                 manager.max_num_tokens = 2
                 manager.use_fused_copy_sfa = True
                 manager.use_fused_overlap = False
-                manager._register_offload_layers = MagicMock()
-                manager._bind_copy_sfa_bases = MagicMock()
-                manager._init_fused_overlap_planner = MagicMock()
-                manager._restore_bfloat16_tensor = MagicMock(
-                    side_effect=lambda ptr, shape: torch.empty(shape, dtype=torch.bfloat16)
-                )
                 pending = iter(broadcasts)
 
                 def broadcast(tensor, src, rank=rank, pending=pending):
@@ -561,10 +562,18 @@ class TestHostKVRegistration(unittest.TestCase):
                 with (
                     patch.object(torch, "zeros", side_effect=cpu_zeros),
                     patch.object(torch, "tensor", side_effect=cpu_tensor),
+                    patch.object(manager, "_register_offload_layers"),
+                    patch.object(manager, "_bind_copy_sfa_bases") as bind_bases,
+                    patch.object(manager, "_init_fused_overlap_planner") as init_planner,
+                    patch.object(
+                        manager,
+                        "_restore_bfloat16_tensor",
+                        side_effect=lambda ptr, shape: torch.empty(shape, dtype=torch.bfloat16),
+                    ),
                 ):
                     manager.register_kv_caches({"layer.0": cache})
 
                 # SfaRemoteD2H consumes these strides on every TP rank.
                 self.assertEqual(manager.cpu_block_lens, [(1024, 512)])
-                manager._bind_copy_sfa_bases.assert_called_once()
-                manager._init_fused_overlap_planner.assert_not_called()
+                bind_bases.assert_called_once()
+                init_planner.assert_not_called()

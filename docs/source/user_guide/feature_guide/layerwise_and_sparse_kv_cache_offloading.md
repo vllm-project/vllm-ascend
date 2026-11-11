@@ -188,25 +188,19 @@ request changes. For example, to capture one- and two-request Decode graphs:
 #### Precomputed TopK LIM and SDMA staging
 
 The experimental native cache manager accepts the full layer's TopK and
-manages each shared layer's hot slots. Build its standalone library with
-CANN installed and its environment loaded. Set `SOC_VERSION` for the device
-used to build and run the kernel. For the validated A3 configuration:
+manages each shared layer's hot slots. Precomputed TopK management and Host
+callbacks are built into the standard vLLM-Ascend extension. Build and install
+it for the target device with the CANN environment loaded, following
+[Building and Testing](../../developer_guide/contribution/index.md#building-and-testing).
+The backend calls `torch.ops._C_ascend.npu_precomputed_topk_manage`.
 
-```bash
-cmake -S csrc/attention/fused_lightning_indexer_manage/precomputed_topk \
-    -B build/selective-lim -DCMAKE_BUILD_TYPE=Release -DSOC_VERSION=Ascend910_9391
-cmake --build build/selective-lim -j
-export VLLM_ASCEND_SELECTIVE_LIM_LIBRARY="$PWD/build/selective-lim/lib/libselective_lim.so"
-```
-
-Export the library path in every Decode worker's environment before startup.
-Selective offload requires this library; it does not fall back to tensor planning
-or AIV Host transfers when the library is missing.
-The current kernel supports `TopK <= hot capacity <= 2048`. It assigns each
-captured request row to an independent vector-core owner. The owner retains cached
-GM reads for TopK and cache state, and publishes indices, cache updates and
-copy descriptors through batched DMA. Slot assignment within each
-row preserves TopK order, including repeated selections. Select
+The current kernel supports `TopK <= hot capacity <= 2048`. One planning
+invocation handles a full layer's shared followers, assigning each
+layer/request pair to an independent vector-core owner. Cache state and
+hit/miss decisions remain separate for each shared layer. The owner retains
+cached GM reads for TopK and cache state, and publishes indices, cache updates
+and copy descriptors through batched DMA. Slot assignment within each row
+preserves TopK order, including repeated selections. Select
 `memfabric_transfer_protocol=sdma` in the P/D connector configuration on both nodes.
 
 The complete shared-layer KV pool is allocated by MemFabric. TP0 gathers
@@ -228,8 +222,7 @@ through the same shared gather and SDMA H2D path.
 
 The additional fixed device staging and descriptor buffers are deducted
 before automatic KV block planning. Shared Host staging scales with the
-captured batch capacity and TopK. The native library is built separately
-from the default extension. This path has been exercised on A3 with a
+captured batch capacity and TopK. This path has been exercised on A3 with a
 reduced-layer dummy-weight model. Full-model accuracy and performance,
 A5 execution, and standard image integration still need validation.
 

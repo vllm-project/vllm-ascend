@@ -69,7 +69,7 @@ def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
 
 def infer_selective_sfa_group_ids(kv_cache_config: Any) -> tuple[int, int, int]:
     """Return the shared Host, full device, and Indexer device groups."""
-    groups = {"shared Host": set(), "full device": set(), "Indexer": set()}
+    groups: dict[str, set[int]] = {"shared Host": set(), "full device": set(), "Indexer": set()}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         members = getattr(group.kv_cache_spec, "kv_cache_specs", None)
         for name in group.layer_names:

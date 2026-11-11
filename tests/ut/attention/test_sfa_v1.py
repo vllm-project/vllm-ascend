@@ -40,19 +40,6 @@ from vllm_ascend.quantization.methods import (
 )
 
 
-def test_selective_tail_slots_follow_request_across_batch_reordering():
-    from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_tail import SelectiveTailSlots
-
-    state = SelectiveTailSlots(capacity=2, block_size=128)
-    assert state.row("a", 2305) == (0, 1)
-    assert state.row("b", 140) == (1, 12)
-    assert state.row("b", 141) == (1, 12)
-    assert state.row("a", 2431) == (0, 1)
-    assert state.row("a", 2432) == (0, 0)
-    state.release(["b"])
-    assert state.row("c", 131) == (1, 3)
-
-
 class TestAscendSFABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
