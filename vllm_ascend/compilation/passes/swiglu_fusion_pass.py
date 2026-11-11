@@ -80,9 +80,7 @@ class SwigluFusionPass(VllmInductorPass):
 
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
-        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
-            pass_name="swiglu_fusion_pass"
-        )
+        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="swiglu_fusion_pass")
 
         # npu_swiglu is a CANN operator that supports fp16 / bf16.
         dtype = vllm_config.model_config.dtype
