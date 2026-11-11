@@ -132,6 +132,7 @@ def enable_batch_invariant_mode():
 
     # Register operators only implemented in triton.
     if HAS_TRITON:
+        logger.info("Triton is available, enabling batch-invariant ops.")
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "NPU")
@@ -139,6 +140,7 @@ def enable_batch_invariant_mode():
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
+        logger.info("AscendC batch-invariant ops is available, enabling batch-invariant ops.")
         _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
@@ -155,6 +157,7 @@ def enable_batch_invariant_mode():
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
+        logger.info("AscendC batch-invariant ops is not available, enabling triton batch-invariant ops.")
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
 
