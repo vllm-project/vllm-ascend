@@ -55,6 +55,7 @@ def descriptor():
         block_shapes=[[(2, 4, 2)]],
         block_size_scales=[[1]],
         indexer_replication_sizes=[0],
+        dcp_sharded=[True],
     )
 
 
@@ -81,6 +82,7 @@ def remote_metadata(pcp_size=1, tp_size=1, heads=2):
                 block_shapes=[[(heads, 4, 2)]],
                 block_size_scales=[[1]],
                 indexer_replication_sizes=[0],
+                dcp_sharded=[True],
                 metadata_by_pcp_rank={
                     pcp: MooncakePCPTransferMetadata(
                         {tp: MooncakeTPTransferMetadata(2, [0], [[10000]], "127.0.0.1", 9001) for tp in range(tp_size)}
@@ -182,6 +184,8 @@ def worker(monkeypatch, request):
                 block_shapes=[[(2, 4, 2)]] * 3,
                 block_size_scales=[[1], [1], [1]],
                 indexer_replication_sizes=[0, 0, 0],
+                dcp_sharded=[True] * 3,
+                block_inner_strides=None,
             )
         self.kv_cache_specs = [spec]
         self.layer_name_to_spec_index = {name: 0 for name in self.transfer_metadata.layer_names}
@@ -638,6 +642,7 @@ def multi_cache_remote(worker):
         block_shapes=[[(2, 4, 2)]] * 3,
         block_size_scales=[[1], [1], [1]],
         indexer_replication_sizes=[0, 0, 0],
+        dcp_sharded=[True] * 3,
         metadata_by_pcp_rank={
             0: MooncakePCPTransferMetadata(
                 {0: MooncakeTPTransferMetadata(2, [0, 1, 2], [[10000], [20000], [30000]], "127.0.0.1", 9001)}
@@ -1061,3 +1066,34 @@ def test_busy_engine_does_not_block_another_engine(worker, monkeypatch):
         release.set()
     worker.wait_for_save()
     assert worker._send_done.call_count == 2
+
+
+@pytest.mark.parametrize("local_layout", ["HND", "NHD"])
+@pytest.mark.parametrize("remote_layout", ["HND", "NHD"])
+def test_push_attention_head_slice_preserves_layout(worker, local_layout, remote_layout):
+    local_strides = (16, 4, 2) if local_layout == "HND" else (4, 8, 2)
+    worker.transfer_metadata = replace(worker.transfer_metadata, block_inner_strides=[[local_strides]])
+    remote = remote_metadata(tp_size=2, heads=1)
+    remote_strides = (16, 4, 2) if remote_layout == "HND" else (4, 4, 2)
+    remote.metadata_by_pp_rank[0] = replace(remote.metadata_by_pp_rank[0], block_inner_strides=[[remote_strides]])
+    event = Event()
+    event.record()
+    batch = push_worker.LayerTransferBatch(
+        "model.layers.0.attn",
+        (0, 0, 1),
+        remote,
+        (push_worker.LayerTransferRequest("request", (1,), (2,), 0, 4),),
+        event,
+    )
+    assert worker._execute_layer_transfer(batch) is None
+    _, src, dst, lengths = worker.engine.batch_transfer_sync_write.call_args.args
+    copied = {(s + offset, d + offset) for s, d, size in zip(src, dst, lengths) for offset in range(size)}
+    expected = {
+        (
+            1000 + 32 + local_strides[0] + token * local_strides[1] + offset,
+            10000 + 32 + token * remote_strides[1] + offset,
+        )
+        for token in range(4)
+        for offset in range(4)
+    }
+    assert copied == expected

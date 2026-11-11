@@ -587,19 +587,41 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         remote_len //= pp.block_shapes[remote_index][cache_index][0]
                     if local_len != remote_len:
                         raise ValueError("P/D cache slice lengths differ")
+                    slices = [(0, 0, local_len)]
+                    if not whole:
+                        local_shape = local.block_shapes[local_index][cache_index]
+                        remote_shape = pp.block_shapes[remote_index][cache_index]
+                        local_item_size = local_len // (local_shape[1] * local_shape[2])
+                        remote_item_size = remote_len // (remote_shape[1] * remote_shape[2])
+                        local_strides = (
+                            local.block_inner_strides[local_index][cache_index]
+                            if local.block_inner_strides is not None
+                            else (local_len, local_shape[2] * local_item_size, local_item_size)
+                        )
+                        remote_strides = (
+                            pp.block_inner_strides[remote_index][cache_index]
+                            if pp.block_inner_strides is not None
+                            else (remote_len, remote_shape[2] * remote_item_size, remote_item_size)
+                        )
+                        if local_strides[-1] != local_item_size or remote_strides[-1] != remote_item_size:
+                            raise ValueError("Mooncake attention head dimensions must be contiguous")
+                        slices = self._attention_transfer_slices(
+                            local_shape, remote_shape, local_strides, remote_strides, local_offset, remote_offset, heads
+                        )
                     for req in batch.requests:
                         for local_block, remote_block in zip(req.local_block_ids, req.remote_block_ids, strict=True):
-                            src_list.append(
-                                local_addr
-                                + local_block * local.block_strides[local_index][cache_index]
-                                + local_offset * local_len
-                            )
-                            dst_list.append(
-                                remote_addr
-                                + remote_block * pp.block_strides[remote_index][cache_index]
-                                + remote_offset * remote_len
-                            )
-                            length_list.append(local_len * heads)
+                            for local_inner, remote_inner, length in slices:
+                                src_list.append(
+                                    local_addr
+                                    + local_block * local.block_strides[local_index][cache_index]
+                                    + local_inner
+                                )
+                                dst_list.append(
+                                    remote_addr
+                                    + remote_block * pp.block_strides[remote_index][cache_index]
+                                    + remote_inner
+                                )
+                                length_list.append(length)
             batch.event.synchronize()
             if src_list:
                 session = f"{worker.local_ip}:{worker.te_rpc_port}"

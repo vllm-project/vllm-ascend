@@ -118,6 +118,58 @@ class MooncakeTransferAddressMixin:
     block_strides: list[list[int]]
     block_lens: list[list[int]]
 
+    @staticmethod
+    def _attention_transfer_slices(
+        local_shape: tuple[int, ...],
+        remote_shape: tuple[int, ...],
+        local_strides: tuple[int, ...],
+        remote_strides: tuple[int, ...],
+        local_head_offset: int,
+        remote_head_offset: int,
+        num_heads: int,
+    ) -> list[tuple[int, int, int]]:
+        """Map overlapping heads using logical HND shapes and physical byte strides."""
+        if len(local_shape) != 3 or len(remote_shape) != 3 or local_shape[1:] != remote_shape[1:]:
+            raise ValueError("Mooncake P/D attention token/head dimensions differ")
+        if len(local_strides) != 3 or len(remote_strides) != 3 or local_strides[2] != remote_strides[2]:
+            raise ValueError("Mooncake P/D attention element strides differ")
+        tokens, dim = local_shape[1:]
+        width = dim * local_strides[2]
+        if min(*local_strides, *remote_strides) <= 0:
+            raise ValueError("Mooncake attention strides must be positive")
+        if local_strides[:2] == remote_strides[:2] == (tokens * width, width):
+            return [
+                (local_head_offset * tokens * width, remote_head_offset * tokens * width, num_heads * tokens * width)
+            ]
+        if (
+            local_head_offset == remote_head_offset == 0
+            and num_heads == local_shape[0] == remote_shape[0]
+            and local_strides[:2] == remote_strides[:2] == (width, num_heads * width)
+        ):
+            return [(0, 0, num_heads * tokens * width)]
+        slices: list[tuple[int, int, int]] = []
+        # Iterate in the destination's physical order and coalesce only when
+        # both endpoints are contiguous. This also supports NHD/HND conversion.
+        head_major = local_strides[0] >= local_strides[1]
+        indices = (
+            ((head, token) for head in range(num_heads) for token in range(tokens))
+            if head_major
+            else ((head, token) for token in range(tokens) for head in range(num_heads))
+        )
+        for head, token in indices:
+            local_offset = (local_head_offset + head) * local_strides[0] + token * local_strides[1]
+            remote_offset = (remote_head_offset + head) * remote_strides[0] + token * remote_strides[1]
+            if (
+                slices
+                and slices[-1][0] + slices[-1][2] == local_offset
+                and slices[-1][1] + slices[-1][2] == remote_offset
+            ):
+                previous_local, previous_remote, previous_length = slices[-1]
+                slices[-1] = (previous_local, previous_remote, previous_length + width)
+            else:
+                slices.append((local_offset, remote_offset, width))
+        return slices
+
     def _append_mamba_transfer_addresses(
         self,
         spec: MambaSpec,

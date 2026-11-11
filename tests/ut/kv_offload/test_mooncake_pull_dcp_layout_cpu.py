@@ -67,9 +67,7 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
             "MooncakeTPTransferMetadata",
         )
     }
-    cls = load_class(
-        "base_scheduler.py", "MooncakeMetadataThread", {"_merge_metadata_by_pp_rank"}, metadata_types
-    )
+    cls = load_class("base_scheduler.py", "MooncakeMetadataThread", {"_merge_metadata_by_pp_rank"}, metadata_types)
     scheduler = cls()
     scheduler.engine_id = "p"
     scheduler.pp_size = scheduler.pcp_size = 1
@@ -248,7 +246,7 @@ def test_indexer_replication_uses_explicit_metadata(worker, local_replicas, remo
 def test_attention_transfer_copies_logical_heads(
     local_layout, remote_layout, local_heads, remote_heads, local_offset, remote_offset, count
 ):
-    cls = load_class("pull_worker.py", "MooncakePullRecvingThread", {"_attention_transfer_slices"})
+    cls = load_class("base_worker.py", "MooncakeTransferAddressMixin", {"_attention_transfer_slices"})
     tokens, dim, item_size = 7, 3, 2
 
     def strides(layout, heads):
