@@ -49,6 +49,11 @@ on:
         required: false
         default: 'false'
         type: string
+      skip_base:
+        description: 'If false, rebuild the runtime base image from the CANN base image before building the nightly layer (used by /presmoke). Default true reuses the existing base image.'
+        required: false
+        default: 'true'
+        type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
         required: false
@@ -257,15 +262,26 @@ jobs:
       matrix:
         vllm_ascend_branch: >-
           ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
-    uses: ./.github/workflows/_nightly_image_build.yaml
+    uses: ./.github/workflows/_schedule_nightly_pair_image_build.yaml
     with:
       target: a2
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      os: ubuntu
       soc: '910b'
+      dockerfile: Dockerfile
+      suffix: ''
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      # The nightly layer always keeps the release shape (ubuntu arm64). The
+      # /presmoke command additionally rebuilds the runtime base image from CANN
+      # by passing skip_base=false.
+      build_type: 'release'
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      skip_base: ${{ inputs.skip_base != 'false' }}
+      # presmoke images are for issue localization only and must not be mirrored to quay.io.
+      skip_sync: true
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   multi-node-tests:
     name: multi-node
