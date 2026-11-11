@@ -6,13 +6,12 @@ import operator
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-logger = init_logger(__name__)
 _BLOCK_BUCKET = 8
 _TILE = 256
 _INT32_MAX = 2**31 - 1

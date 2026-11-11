@@ -238,7 +238,7 @@ def overlap_target_host_mirror(runner):
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
     from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-    from vllm.logger import init_logger
+    from vllm.logger import logger
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
@@ -270,7 +270,6 @@ def overlap_target_host_mirror(runner):
         or output_stream == compute_stream
     ):
         return connector
-    logger = init_logger(__name__)
     rank = get_tensor_model_parallel_rank()
     logger.info("HiSparse direct Target Host mirror overlap enabled: rank=%d", rank)
     return HostMirrorConnector(connector, worker, output_stream, sources, logger, rank)
