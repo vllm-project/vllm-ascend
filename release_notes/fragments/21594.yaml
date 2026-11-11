@@ -1,0 +1,4 @@
+pr: 21594
+entries:
+  - category: feature
+    text: Added opt-in anchor-union activation routing for supported Qwen DFlash and DeepSeek DSpark MoE workloads, with graph-safe fallback and native fused paths.

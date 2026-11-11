@@ -9,81 +9,104 @@ FIXED_GRAPH_ROWS = (8, 16, 24, 32, 48, 64)
 
 @triton.jit
 def _anchor_fill(
-    Top,
-    Roles,
-    Mask,
-    N: tl.constexpr,
+    top_ids_ptr,
+    roles_ptr,
+    mask_ptr,
+    NUM_ROWS: tl.constexpr,
     TOP_K: tl.constexpr,
     SUFFIX_TOP_K: tl.constexpr,
 ):
-    p = tl.program_id(0)
-    for row in tl.range(p, N, tl.num_programs(0)):
-        role = tl.load(Roles + row)
+    program_id = tl.program_id(0)
+    for row in tl.range(program_id, NUM_ROWS, tl.num_programs(0)):
+        role = tl.load(roles_ptr + row)
         limit = tl.where(role == 1, TOP_K, tl.where(role == 2, SUFFIX_TOP_K, 0))
         for rank in range(TOP_K):
-            eid = tl.load(Top + row * TOP_K + rank, rank < limit, 0)
-            tl.store(Mask + eid, True, rank < limit)
+            expert_id = tl.load(top_ids_ptr + row * TOP_K + rank, rank < limit, 0)
+            tl.store(mask_ptr + expert_id, True, rank < limit)
 
 
 @triton.jit
 def _anchor_apply(
-    X,
-    Roles,
-    Mask,
-    N: tl.constexpr,
-    S0: tl.constexpr,
-    S1: tl.constexpr,
-    NEG: tl.constexpr,
+    logits_ptr,
+    roles_ptr,
+    mask_ptr,
+    NUM_ROWS: tl.constexpr,
+    stride_row,
+    stride_expert,
+    negative_value,
     NUM_EXPERTS: tl.constexpr,
 ):
-    p = tl.program_id(0)
-    e = tl.arange(0, NUM_EXPERTS)
-    allowed = tl.load(Mask + e)
-    for row in tl.range(p, N, tl.num_programs(0)):
-        role = tl.load(Roles + row)
-        if role == 2:
-            x = tl.load(X + row * S0 + e * S1)
-            tl.store(X + row * S0 + e * S1, tl.where(allowed, x, NEG))
+    program_id = tl.program_id(0)
+    expert_ids = tl.arange(0, NUM_EXPERTS)
+    allowed = tl.load(mask_ptr + expert_ids)
+    for row in tl.range(program_id, NUM_ROWS, tl.num_programs(0)):
+        role = tl.load(roles_ptr + row)
+        suffix_row = role == 2
+        logits_ptrs = logits_ptr + row * stride_row + expert_ids * stride_expert
+        scores = tl.load(logits_ptrs, suffix_row, 0)
+        masked_scores = tl.where(allowed, scores, negative_value)
+        tl.store(logits_ptrs, masked_scores, suffix_row)
 
 
-@triton.jit(do_not_specialize=["N"])
+@triton.jit(do_not_specialize=["num_rows"])
 def _anchor_fill_dynamic(
-    Top,
-    Roles,
-    Mask,
-    N,
+    top_ids_ptr,
+    roles_ptr,
+    mask_ptr,
+    num_rows,
     TOP_K: tl.constexpr,
     SUFFIX_TOP_K: tl.constexpr,
 ):
     """Variable mixed-prefill rows must not create a kernel per row count."""
-    p = tl.program_id(0)
-    for row in tl.range(p, N, tl.num_programs(0)):
-        role = tl.load(Roles + row)
+    program_id = tl.program_id(0)
+    for row in tl.range(program_id, num_rows, tl.num_programs(0)):
+        role = tl.load(roles_ptr + row)
         limit = tl.where(role == 1, TOP_K, tl.where(role == 2, SUFFIX_TOP_K, 0))
         for rank in range(TOP_K):
-            eid = tl.load(Top + row * TOP_K + rank, rank < limit, 0)
-            tl.store(Mask + eid, True, rank < limit)
+            expert_id = tl.load(top_ids_ptr + row * TOP_K + rank, rank < limit, 0)
+            tl.store(mask_ptr + expert_id, True, rank < limit)
 
 
-@triton.jit(do_not_specialize=["N"])
+@triton.jit(do_not_specialize=["num_rows"])
 def _anchor_apply_dynamic(
-    X,
-    Roles,
-    Mask,
-    N,
-    S0: tl.constexpr,
-    S1: tl.constexpr,
-    NEG: tl.constexpr,
+    logits_ptr,
+    roles_ptr,
+    mask_ptr,
+    num_rows,
+    stride_row,
+    stride_expert,
+    negative_value,
     NUM_EXPERTS: tl.constexpr,
 ):
-    p = tl.program_id(0)
-    e = tl.arange(0, NUM_EXPERTS)
-    allowed = tl.load(Mask + e) != 0
-    for row in tl.range(p, N, tl.num_programs(0)):
-        role = tl.load(Roles + row)
-        if role == 2:
-            x = tl.load(X + row * S0 + e * S1)
-            tl.store(X + row * S0 + e * S1, tl.where(allowed, x, NEG))
+    program_id = tl.program_id(0)
+    expert_ids = tl.arange(0, NUM_EXPERTS)
+    allowed = tl.load(mask_ptr + expert_ids) != 0
+    for row in tl.range(program_id, num_rows, tl.num_programs(0)):
+        role = tl.load(roles_ptr + row)
+        suffix_row = role == 2
+        logits_ptrs = logits_ptr + row * stride_row + expert_ids * stride_expert
+        scores = tl.load(logits_ptrs, suffix_row, 0)
+        masked_scores = tl.where(allowed, scores, negative_value)
+        tl.store(logits_ptrs, masked_scores, suffix_row)
+
+
+def _validate_anchor_inputs(logits, roles, mask):
+    if logits.ndim != 2:
+        raise ValueError("Router logits must be a 2D tensor")
+    if roles.ndim != 1 or roles.numel() != logits.shape[0]:
+        raise ValueError("Router roles must be a 1D tensor matching logits rows")
+    if roles.device != logits.device:
+        raise ValueError("Router roles and logits must be on the same device")
+    if roles.dtype not in (torch.int32, torch.int64):
+        raise ValueError("Router roles must use int32 or int64")
+    if mask.ndim != 1 or mask.numel() != logits.shape[1]:
+        raise ValueError("Router mask must match the logits expert dimension")
+    if mask.device != logits.device or mask.dtype != torch.bool:
+        raise ValueError("Router mask must be a bool tensor on the logits device")
+    if not roles.is_contiguous():
+        raise ValueError("Router roles must be contiguous")
+    if not mask.is_contiguous():
+        raise ValueError("Router mask must be contiguous")
 
 
 def _apply_anchor_reference_torch(scores, roles, top_k, suffix_pool_top_k):
@@ -105,6 +128,11 @@ def _apply_anchor_reference_torch(scores, roles, top_k, suffix_pool_top_k):
 
 
 def apply_anchor_reference(logits, roles, mask, top_k=8, suffix_pool_top_k=2):
+    _validate_anchor_inputs(logits, roles, mask)
+    if not 1 <= top_k <= logits.shape[1]:
+        raise ValueError("top_k must be within the logits expert dimension")
+    if not 1 <= suffix_pool_top_k <= top_k:
+        raise ValueError("suffix_pool_top_k must be in [1, top_k]")
     if logits.device.type == "cpu":
         return _apply_anchor_reference_torch(logits, roles, top_k, suffix_pool_top_k)
 

@@ -14,47 +14,51 @@ from vllm_ascend.device.device_op import DeviceOperator
 
 USES_TOPM = False
 
+BF16_NEG = -3.3895313892515355e38
+FP32_NEG = -3.4028234663852886e38
+BLOCK_EXPERTS = 32
+
 
 @triton.jit
 def _pool_candidates_bf16(
-    X,
-    Flags,
-    Roles,
-    S0: tl.constexpr,
-    S1: tl.constexpr,
+    logits_ptr,
+    flags_ptr,
+    roles_ptr,
+    stride_row,
+    stride_expert,
     NUM_EXPERTS: tl.constexpr,
     SUFFIX_TOP_K: tl.constexpr,
 ):
     """Published BF16 Top8/Top2 path with a stable lower-ID tie break."""
     with ascend.scope(core_mode="vector"):
         row = tl.program_id(0)
-        e = tl.arange(0, NUM_EXPERTS)
-        x = tl.load(X + row * S0 + e * S1)
+        expert_ids = tl.arange(0, NUM_EXPERTS)
+        x = tl.load(logits_ptr + row * stride_row + expert_ids * stride_expert)
         bits = (x.to(tl.float32).to(tl.int32, bitcast=True) >> 16) & 65535
         bits = tl.where(x == 0, 0, bits)
         ordered = tl.where(bits >= 32768, 65535 - bits, bits + 32768)
         # NUM_EXPERTS <= 256 keeps the largest integer key exactly
         # representable in float32 (65535 * 256 + 255 == 2**24 - 1).
-        keys = (ordered * NUM_EXPERTS + NUM_EXPERTS - 1 - e).to(tl.float32)
+        keys = (ordered * NUM_EXPERTS + NUM_EXPERTS - 1 - expert_ids).to(tl.float32)
         sorted_keys = ascend.sort(keys, descending=True)
-        role = tl.load(Roles + row)
+        role = tl.load(roles_ptr + row)
         rank = tl.where(role == 1, 7, SUFFIX_TOP_K - 1)
-        threshold = tl.sum(tl.where(e == rank, sorted_keys, 0), 0)
+        threshold = tl.sum(tl.where(expert_ids == rank, sorted_keys, 0), 0)
         tl.store(
-            Flags + row * NUM_EXPERTS + e,
+            flags_ptr + row * NUM_EXPERTS + expert_ids,
             (keys >= threshold) & (role != 0),
         )
 
 
 @triton.jit
 def _pool_candidates_dspark(
-    X,
-    Bias,
-    Flags,
-    RawScores,
-    Roles,
-    S0: tl.constexpr,
-    S1: tl.constexpr,
+    logits_ptr,
+    bias_ptr,
+    flags_ptr,
+    raw_scores_ptr,
+    roles_ptr,
+    stride_row,
+    stride_expert,
     NUM_EXPERTS: tl.constexpr,
     ROUTE_TOP_K: tl.constexpr,
     SUFFIX_TOP_K: tl.constexpr,
@@ -62,24 +66,24 @@ def _pool_candidates_dspark(
     """K1: sqrt-softplus + bias + stable Top6/Top2 candidate flags."""
     with ascend.scope(core_mode="vector"):
         row = tl.program_id(0)
-        e = tl.arange(0, NUM_EXPERTS)
-        x = tl.load(X + row * S0 + e * S1).to(tl.float32)
+        expert_ids = tl.arange(0, NUM_EXPERTS)
+        x = tl.load(logits_ptr + row * stride_row + expert_ids * stride_expert).to(tl.float32)
         # Match moe_gating_top_k_hash's AscendC operation order exactly:
         # Exp -> Adds(1) -> Ln -> Sqrt. RawScores excludes correction bias.
         softplus = tl.log(tl.exp(x) + 1.0)
         raw = tl.sqrt(softplus)
-        score = raw + tl.load(Bias + e).to(tl.float32)
-        tl.store(RawScores + row * NUM_EXPERTS + e, raw)
+        score = raw + tl.load(bias_ptr + expert_ids).to(tl.float32)
+        tl.store(raw_scores_ptr + row * NUM_EXPERTS + expert_ids, raw)
 
         sorted_scores = ascend.sort(score, descending=True)
-        role = tl.load(Roles + row)
+        role = tl.load(roles_ptr + row)
         limit = tl.where(
             role == 1,
             ROUTE_TOP_K,
             tl.where(role == 2, SUFFIX_TOP_K, 0),
         )
         rank = tl.maximum(limit - 1, 0)
-        threshold = tl.sum(tl.where(e == rank, sorted_scores, 0.0), 0)
+        threshold = tl.sum(tl.where(expert_ids == rank, sorted_scores, 0.0), 0)
         greater = score > threshold
         equal = score == threshold
         num_greater = tl.sum(greater.to(tl.int32), 0)
@@ -89,85 +93,89 @@ def _pool_candidates_dspark(
         tie_rank = tl.cumsum(equal.to(tl.int32), axis=0)
         selected = greater | (equal & (tie_rank <= ties_needed))
         tl.store(
-            Flags + row * NUM_EXPERTS + e,
+            flags_ptr + row * NUM_EXPERTS + expert_ids,
             selected & (role != 0),
         )
 
 
 @triton.jit
 def _batch_union_apply_bf16(
-    X,
-    Flags,
-    Roles,
-    Y,
-    N: tl.constexpr,
-    NR: tl.constexpr,
-    S0: tl.constexpr,
-    S1: tl.constexpr,
+    logits_ptr,
+    flags_ptr,
+    roles_ptr,
+    masked_logits_ptr,
+    NUM_ROWS: tl.constexpr,
+    ROW_BLOCK: tl.constexpr,
+    stride_row,
+    stride_expert,
     NUM_EXPERTS: tl.constexpr,
 ):
     with ascend.scope(core_mode="vector"):
-        r = tl.arange(0, NR)
-        e = tl.arange(0, NUM_EXPERTS)
+        row_ids = tl.arange(0, ROW_BLOCK)
+        expert_ids = tl.arange(0, NUM_EXPERTS)
         flags = tl.load(
-            Flags + r[:, None] * NUM_EXPERTS + e[None, :],
-            r[:, None] < N,
+            flags_ptr + row_ids[:, None] * NUM_EXPERTS + expert_ids[None, :],
+            row_ids[:, None] < NUM_ROWS,
             0,
         )
         pool = tl.max(flags, 0) != 0
-        roles = tl.load(Roles + r, r < N, 0)
-        raw = tl.load(X + r[:, None] * S0 + e[None, :] * S1, r[:, None] < N, 0)
+        row_roles = tl.load(roles_ptr + row_ids, row_ids < NUM_ROWS, 0)
+        raw = tl.load(
+            logits_ptr + row_ids[:, None] * stride_row + expert_ids[None, :] * stride_expert,
+            row_ids[:, None] < NUM_ROWS,
+            0,
+        )
         masked = tl.where(
-            (roles[:, None] == 2) & ~pool[None, :],
-            -3.3895313892515355e38,
+            (row_roles[:, None] == 2) & ~pool[None, :],
+            BF16_NEG,
             raw.to(tl.float32),
         )
         tl.store(
-            Y + r[:, None] * NUM_EXPERTS + e[None, :],
+            masked_logits_ptr + row_ids[:, None] * NUM_EXPERTS + expert_ids[None, :],
             masked,
-            r[:, None] < N,
+            row_ids[:, None] < NUM_ROWS,
         )
 
 
 @triton.jit
 def _batch_union_apply_dspark(
-    RawScores,
-    Bias,
-    Flags,
-    Roles,
-    MaskedScores,
-    N: tl.constexpr,
-    NR: tl.constexpr,
+    raw_scores_ptr,
+    bias_ptr,
+    flags_ptr,
+    roles_ptr,
+    masked_scores_ptr,
+    NUM_ROWS: tl.constexpr,
+    ROW_BLOCK: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
-    BLOCK_E: tl.constexpr,
+    BLOCK_EXPERTS: tl.constexpr,
 ):
     """K2: reduce the full padded batch union and mask suffix scores."""
     with ascend.scope(core_mode="vector"):
-        e = tl.program_id(0) * BLOCK_E + tl.arange(0, BLOCK_E)
-        r = tl.arange(0, NR)
-        expert_mask = e < NUM_EXPERTS
-        row_mask = r < N
+        expert_ids = tl.program_id(0) * BLOCK_EXPERTS + tl.arange(0, BLOCK_EXPERTS)
+        row_ids = tl.arange(0, ROW_BLOCK)
+        expert_mask = expert_ids < NUM_EXPERTS
+        row_mask = row_ids < NUM_ROWS
         flags = tl.load(
-            Flags + r[:, None] * NUM_EXPERTS + e[None, :],
+            flags_ptr + row_ids[:, None] * NUM_EXPERTS + expert_ids[None, :],
             row_mask[:, None] & expert_mask[None, :],
             0,
         )
         pool = tl.max(flags, 0) != 0
-        roles = tl.load(Roles + r, row_mask, 0)
+        row_roles = tl.load(roles_ptr + row_ids, row_mask, 0)
         raw = tl.load(
-            RawScores + r[:, None] * NUM_EXPERTS + e[None, :],
+            raw_scores_ptr + row_ids[:, None] * NUM_EXPERTS + expert_ids[None, :],
             row_mask[:, None] & expert_mask[None, :],
             0.0,
         )
-        bias = tl.load(Bias + e, expert_mask, 0.0)
+        bias = tl.load(bias_ptr + expert_ids, expert_mask, 0.0)
         selection = raw + bias[None, :]
         masked = tl.where(
-            (roles[:, None] == 2) & ~pool[None, :],
-            -3.4028234663852886e38,
+            (row_roles[:, None] == 2) & ~pool[None, :],
+            FP32_NEG,
             selection,
         )
         tl.store(
-            MaskedScores + r[:, None] * NUM_EXPERTS + e[None, :],
+            masked_scores_ptr + row_ids[:, None] * NUM_EXPERTS + expert_ids[None, :],
             masked,
             row_mask[:, None] & expert_mask[None, :],
         )
@@ -195,6 +203,32 @@ def allocate_dspark_workspace(logits):
     )
 
 
+def _validate_fused_route_roles(logits, roles):
+    if roles.ndim != 1 or roles.numel() != logits.shape[0]:
+        raise ValueError("Router roles must be a 1D tensor matching logits rows")
+    if roles.device != logits.device:
+        raise ValueError("Router roles and logits must be on the same device")
+    if roles.dtype not in (torch.int32, torch.int64):
+        raise ValueError("Router roles must use int32 or int64")
+    if not roles.is_contiguous():
+        raise ValueError("Router roles must be contiguous")
+
+
+def _validate_workspace(workspace, expected, logits, name):
+    if not isinstance(workspace, (tuple, list)) or len(workspace) != len(expected):
+        raise ValueError(f"{name} workspace must contain {len(expected)} tensors")
+    for index, (tensor, shape, dtype) in enumerate(zip(workspace, expected)):
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"{name} workspace entry {index} must be a tensor")
+        if tensor.shape != shape or tensor.dtype != dtype or tensor.device != logits.device:
+            raise ValueError(
+                f"{name} workspace entry {index} must have shape={shape}, "
+                f"dtype={dtype}, device={logits.device}"
+            )
+        if not tensor.is_contiguous():
+            raise ValueError(f"{name} workspace entry {index} must be contiguous")
+
+
 def topm_route(
     logits,
     roles,
@@ -207,13 +241,23 @@ def topm_route(
         raise ValueError("Fused pool requires BF16 [N,128] or [N,256]")
     if not 1 <= suffix_pool_top_k <= 8:
         raise ValueError("suffix_pool_top_k must be in [1, 8]")
+    _validate_fused_route_roles(logits, roles)
     # the fused kernel does not consume non-unit strides correctly
     # (validated on A3). Production router logits are always contiguous;
     # guard here so strided inputs are copied once instead of mis-read.
     if not logits.is_contiguous():
         logits = logits.contiguous()
     n, num_experts = logits.shape
-    flags, masked = workspace or allocate_workspace(logits)
+    if workspace is None:
+        workspace = allocate_workspace(logits)
+    else:
+        _validate_workspace(
+            workspace,
+            ((logits.shape[0], num_experts), (logits.shape[0], num_experts)),
+            logits,
+            "BF16",
+        )
+    flags, masked = workspace
     _pool_candidates_bf16[(n,)](
         logits,
         flags,
@@ -267,17 +311,37 @@ def dspark_route(
         raise ValueError("DSpark fused pool requires FP32 [N,256]")
     if e_score_correction_bias is None or e_score_correction_bias.shape != (256,):
         raise ValueError("DSpark fused pool requires a [256] correction bias")
+    if e_score_correction_bias.device != logits.device:
+        raise ValueError("DSpark correction bias must be on the logits device")
+    if e_score_correction_bias.dtype != torch.float32:
+        raise ValueError("DSpark correction bias must use float32")
     if route_top_k != 6 or suffix_pool_top_k != 2:
         raise ValueError("DSpark fused pool requires route_top_k=6 and suffix_pool_top_k=2")
     if not renormalize:
         raise ValueError("DSpark fused pool requires renormalize=True")
+    _validate_fused_route_roles(logits, roles)
     # the fused kernel does not consume non-unit strides correctly
     # (validated on A3). Production router logits are always contiguous;
     # guard here so strided inputs are copied once instead of mis-read.
     if not logits.is_contiguous():
         logits = logits.contiguous()
     n, num_experts = logits.shape
-    flags, raw_scores, masked_scores = workspace or allocate_dspark_workspace(logits)
+    if not e_score_correction_bias.is_contiguous():
+        e_score_correction_bias = e_score_correction_bias.contiguous()
+    if workspace is None:
+        workspace = allocate_dspark_workspace(logits)
+    else:
+        _validate_workspace(
+            workspace,
+            (
+                (logits.shape[0], num_experts),
+                (logits.shape[0], num_experts),
+                (logits.shape[0], num_experts),
+            ),
+            logits,
+            "DSpark",
+        )
+    flags, raw_scores, masked_scores = workspace
     _pool_candidates_dspark[(n,)](
         logits,
         e_score_correction_bias,
@@ -291,8 +355,7 @@ def dspark_route(
         SUFFIX_TOP_K=suffix_pool_top_k,
         multibuffer=False,
     )
-    block_e = 32
-    _batch_union_apply_dspark[(triton.cdiv(num_experts, block_e),)](
+    _batch_union_apply_dspark[(triton.cdiv(num_experts, BLOCK_EXPERTS),)](
         raw_scores,
         e_score_correction_bias,
         flags,
@@ -301,7 +364,7 @@ def dspark_route(
         n,
         triton.next_power_of_2(n),
         NUM_EXPERTS=num_experts,
-        BLOCK_E=block_e,
+        BLOCK_EXPERTS=BLOCK_EXPERTS,
         multibuffer=False,
     )
     _, ids = torch.topk(masked_scores, route_top_k, dim=-1)

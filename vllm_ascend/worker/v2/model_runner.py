@@ -1126,7 +1126,11 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.dflash_topm_state is not None:
             verify_rows, segments = (), []
-            if self.pcp_manager is None and not adaptive_verification_active:
+            if (
+                self.pcp_manager is None
+                and not adaptive_verification_active
+                and batch_req_state is not None
+            ):
                 verify_rows, segments = build_verify_segments_v2(
                     scheduler_output,
                     req_ids,

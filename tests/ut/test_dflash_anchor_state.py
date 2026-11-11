@@ -24,6 +24,7 @@ import pytest
 import torch
 
 from vllm_ascend.dflash_topm_state import DFlashTopMState
+from vllm_ascend.ops.triton.dflash_anchor_reference import apply_anchor_reference
 
 TOKENS_PER_REQUEST = 8
 EXPERT_COUNT = 256
@@ -106,6 +107,14 @@ def test_roles_and_pointer_reuse(cpu_role_state, batch):
 def test_invalid_segment_rejected(cpu_role_state, segment):
     with pytest.raises(ValueError, match="outside padded token buffer"):
         cpu_role_state.prepare(TOKENS_PER_REQUEST, [segment], "cpu")
+
+
+def test_reference_rejects_invalid_role_layout():
+    logits = torch.zeros(4, EXPERT_COUNT)
+    roles = torch.zeros(3, dtype=torch.int32)
+    mask = torch.zeros(EXPERT_COUNT, dtype=torch.bool)
+    with pytest.raises(ValueError, match="matching logits rows"):
+        apply_anchor_reference(logits, roles, mask)
 
 
 def test_reference_requires_matching_roles(cpu_role_state):

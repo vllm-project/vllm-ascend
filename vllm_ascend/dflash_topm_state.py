@@ -79,7 +79,6 @@ class DFlashTopMState:
         if self.backend not in {
             "baseline",
             "anchor_union_reference",
-            "anchor_union_topm",
             "anchor_union_fused_native",
         }:
             raise ValueError(f"Unknown Top-M backend: {self.backend}")
