@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.ops.gdn import _flatten_recurrent_state_indices
+from vllm_ascend.attention.gdn import _flatten_recurrent_state_indices
 
 
 @pytest.mark.parametrize("num_rows, total_tokens", [(30, 30), (32, 30), (33, 30), (1, 1)])
