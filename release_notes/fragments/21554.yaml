@@ -1,0 +1,5 @@
+pr: 21554
+entries:
+  - category: bugfix
+    text: Fixed Kimi K3.1 Pro KDA layers producing NaN logits after a level-2 sleep wake-up followed by a checkpoint reload by re-deriving the packed convolution weight.
+    model: kimi-k3.1-pro
