@@ -64,7 +64,14 @@ class AscendMambaManager(MambaManager):
         if num_tokens_main_model is None:
             assert num_local_computed_tokens is not None
             num_tokens_main_model = num_local_computed_tokens
-        local_hit_tokens = len(new_computed_blocks) * self.block_size
+        # Include tokens this request already computed locally. New hit blocks
+        # alone omit running-request state and round partial hits up to a full
+        # block, either inventing an external load or hiding a real one.
+        local_hit_tokens = (
+            num_local_computed_tokens
+            if num_local_computed_tokens is not None
+            else len(new_computed_blocks) * self.block_size
+        )
         num_new_blocks = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,

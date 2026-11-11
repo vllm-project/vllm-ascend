@@ -26,7 +26,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -131,6 +131,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
+            # Weight loading runs after construction, so the shared expert
+            # hands out a live payload that it fills in once both shared
+            # linears are rebuilt. Install it explicitly here: the routed
+            # layer is the only module the quant methods
+            # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
+            self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
@@ -149,6 +155,124 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
+        through the OOT PluggableLayer dispatch of ``MoERunner``).
+
+        Upstream inlines the shared+routed output combine, which is not
+        exposed as an overridable hook. On NPU the combine goes through the
+        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
+        launch count is independent of the tensor-list length and which is
+        the NPU-validated fast path for the MoE combine. Every other step,
+        including the runtime-aware reduction hooks (#16550), is inherited
+        unchanged.
+
+        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
+        the superkernel integration, upstream's plain add becomes the fast
+        path and this override can be dropped.
+        """
+        # Apply transform for routed experts (e.g., latent projection for
+        # latent MoE). When the caller pre-applies the routed input transform
+        # outside the runner (e.g. to overlap it on a separate stream), it
+        # passes the already-transformed routed input as ``hidden_states`` and
+        # the original hidden states as ``shared_experts_input``; skip the
+        # transform in that case so shared experts still see the original input.
+        if shared_experts_input is None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+
+        if self._megamoe_shared_expert_fused:
+            # The runner owns the effective routed_scaling_factor (with
+            # apply_routed_scale_to_output=True the router and the
+            # routed-experts layer both hold 1.0). MegaMoe combines routed +
+            # shared inside the operator, so the factor must be folded into
+            # the topk weights by the comm implementation; plumb it down
+            # through the routed-experts layer, which is the only module the
+            # comm implementation sees.
+            self.routed_experts.ascend_megamoe_fold_scale = self.routed_scaling_factor
+
+        # Record before `_maybe_pad_hidden_states` pads activations to match
+        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # so routed output can be trimmed before
+        # shared+routed add / latent up proj if needed.
+        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
+            shared_experts_input,
+            hidden_states,
+        )
+
+        result = self._forward_entry(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+            self._encode_layer_name(),
+            self.moe_config.hidden_dim_unpadded if self._quant_method.has_unpadded_output else 0,
+        )
+
+        #
+        # Note: there are two all-reduce points below. They are mutually
+        # exclusive, controlled by _fused_output_is_reduced
+        #  - When True: the combine kernel already reduced fused_output,
+        #    so we reduce shared_output here to match, then skip the
+        #    all-reduce in _maybe_reduce_final_output.
+        #  - When False: neither output is reduced yet, so we combine
+        #    them first and all-reduce the sum in _maybe_reduce_final_output.
+
+        # Extract outputs from result
+        shared_output, fused_output = _unpack(result)
+
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe already combined the shared contribution into
+            # fused_output, and the forward_impl returned shared_out=None.
+            # Force None here too so Dynamo specializes the skip-branch:
+            # the _forward_entry custom op's fake impl declares a tensor
+            # output, so without this the compiled graph bakes in the
+            # combine add, which then receives None at replay time and
+            # fails the aten schema check (List[Tensor]).
+            shared_output = None
+
+        if og_hidden_dim_pre_xform is not None:
+            fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
+        fused_output_is_reduced = self._fused_output_is_reduced
+
+        # Latent routed output has to be reduced before output transform,
+        # because the transform may include non-linear normalization.
+        fused_output, fused_output_is_reduced = self._maybe_reduce_routed_output_before_transform(
+            fused_output,
+            fused_output_is_reduced,
+        )
+
+        # If routed output is already reduced, reduce shared to match.
+        # See note above re: the two all-reduce points.
+        shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
+
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe folded routed_scaling_factor into the topk weights for
+            # the fused shared-expert call (see FusedMC2CommImpl), so its
+            # output already is the final MoE result. Scaling here would
+            # wrongly scale the shared-expert contribution too.
+            pass
+        else:
+            shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+
+        # Apply output transform (e.g. latent -> full dim)
+        fused_output = self.apply_routed_output_transform(fused_output)
+
+        if shared_output is not None:
+            result = torch._foreach_add([shared_output], [fused_output])[0]
+        else:
+            result = fused_output
+
+        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
+
+        return self._maybe_add_zero_expert_output(result)
 
     @property
     def is_internal_router(self) -> bool:
@@ -197,6 +321,21 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
             return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
+
+    @property
+    def _megamoe_shared_expert_fused(self) -> bool:
+        """True when this step's routed experts run the shared expert inside MegaMoe."""
+        # Every sub-attribute is read via getattr with a default: an
+        # AttributeError raised inside a property getter is swallowed by
+        # CPython and falls back to nn.Module.__getattr__, which reports a
+        # misleading "no attribute '_megamoe_shared_expert_fused'" error.
+        shared_experts = getattr(self, "ascend_shared_experts", None)
+        return (
+            shared_experts is not None
+            and getattr(shared_experts, "megamoe_shared_weights_ready", False)
+            and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
+            and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -441,7 +580,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if prepared_shared_input.is_gathered:
                 milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
-            if submitted_gate_up is None:
+            if self._megamoe_shared_expert_fused:
+                # The shared expert GMM1 + activation + GMM2 runs inside the
+                # MegaMoe operator on the routed stream, so its contribution
+                # is already contained in routed_out. Skip the standalone
+                # forward to avoid computing it twice.
+                shared_out = None
+            elif submitted_gate_up is None:
                 shared_out = self.ascend_shared_experts.forward(
                     prepared_shared_input,
                     milestones,

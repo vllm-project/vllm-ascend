@@ -593,8 +593,8 @@ enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
 to use vLLM's model-state implementation and the compacted device query boundaries.
 
 Ascend reuses vLLM's confidence estimates, cost profiling, budget allocator, and
-rejection sampler. Newer vLLM Triton budget allocators are used directly; the
-Ascend `index_fill_` workaround applies only to the older torch allocator.
+rejection sampler. Newer vLLM Triton budget allocators are used directly;
+legacy torch budget allocators run eagerly on Ascend.
 No change to sampling probabilities or model weights is required.
 
 Validate each target/draft pair on the intended NPU and CANN version. Compare

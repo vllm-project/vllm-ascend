@@ -383,9 +383,7 @@ class Glm5NextDecoderLayer(nn.Module):
         self._mlp_is_moe = isinstance(self.mlp, Glm5NextMoE)
         # In SP, the attention output projection leaves a partial sum; the
         # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
-        # MTP layers use the non-mHC path which has no sp_reduce_scatter, so
-        # their o_proj must still reduce normally.
-        if self.is_sequence_parallel and not is_mtp_layer:
+        if self.is_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -428,16 +426,34 @@ class Glm5NextDecoderLayer(nn.Module):
     ]:
         # 70B or MTP layers: KDA + MoE without HC.
         if not self.mhc or self.is_mtp_layer:
+            mtp_sequence_parallel = self.is_mtp_layer and self.is_sequence_parallel
+            if mtp_sequence_parallel:
+                hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+
+            if mtp_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
             attn_output = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
             )
+            if mtp_sequence_parallel:
+                attn_output = sp_reduce_scatter(pad_sequence_parallel_tokens(attn_output))
             hidden_states, residual = self.post_attention_layernorm(attn_output, residual=residual)
-            hidden_states = self.mlp(hidden_states)
+            if self._mlp_is_moe:
+                hidden_states = self.mlp(hidden_states, already_sequence_parallel=mtp_sequence_parallel)
+            else:
+                hidden_states = self.mlp(hidden_states)
             if self.is_mtp_layer:
+                if mtp_sequence_parallel:
+                    # Restore MTP's full-token output contract, gathering both
+                    # inputs to shared_head's fused add + RMSNorm together.
+                    combined_states = torch.cat([hidden_states, residual], dim=-1)
+                    combined_states = sp_all_gather(combined_states)[: positions.shape[0]]
+                    hidden_states, residual = combined_states.split(self.hidden_size, dim=-1)
+                    residual = residual.contiguous()
                 # Return the unsummed pair: the MTP caller feeds it straight
                 # into shared_head's fused_add_rms_norm (one kernel instead of
                 # a separate residual-add + norm). The sum itself is unchanged

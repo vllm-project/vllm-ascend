@@ -114,6 +114,57 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
     return registered
 
 
+def _register_dcp_warmup(worker: NPUWorker) -> None:
+    """Bind target and draft attention owners after their group/layout setup."""
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+    from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+    from vllm_ascend.ops.triton.dcp.dcp_warmup import register_dcp_warmup
+
+    # Draft layers are also published in the runner's static forward context.
+    # Read each implementation's own config, including its draft dtype/capacity.
+    seen = set()
+    with worker.model_runner.jit_warmup_registry.activate():
+        for layer in worker.vllm_config.compilation_config.static_forward_context.values():
+            impl = getattr(layer, "impl", None)
+            if not isinstance(impl, (AscendSFADCPImpl, AscendMlaDCPImpl)) or impl.dcp_size <= 1:
+                continue
+            mla = isinstance(impl, AscendMlaDCPImpl)
+            # Physical PCP groups remain present for replicated MTP drafts,
+            # even when that draft's logical PCP config is disabled.
+            pcp_size = impl.pcp_group.world_size
+            scatter_size = impl.dcp_size
+            if pcp_size > 1:
+                scatter_size = impl.tp_group.world_size if impl.dcp_size > pcp_size else 1
+            config = impl.vllm_config
+            scheduler = config.scheduler_config
+            speculative = config.speculative_config
+            query_len = 1 + (speculative.num_speculative_tokens or 0) if speculative is not None else 1
+            layout = (
+                config.model_config.dtype,
+                impl.num_heads if mla else impl.local_num_heads,
+                impl.kv_lora_rank,
+                scatter_size,
+                pcp_size,
+                max(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * query_len),
+                False if mla else not impl.enable_sparse_sfa_turboquant,
+                mla,
+            )
+            if layout in seen:
+                continue
+            seen.add(layout)
+            dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla = layout
+            register_dcp_warmup(
+                dtype=dtype,
+                local_heads=local_heads,
+                head_dim=head_dim,
+                scatter_size=scatter_size,
+                pcp_size=pcp_size,
+                max_tokens=max_tokens,
+                from_stats=from_stats,
+                mla=mla,
+            )
+
+
 def _prune_unlaunchable_registrations(registry) -> int:
     """Drop registrations whose kernels cannot compile on NPU.
 
@@ -145,6 +196,17 @@ def kernel_warmup(worker: NPUWorker) -> None:
     start = time.perf_counter()
     registry = worker.model_runner.jit_warmup_registry
 
+    # Cache-dependent keys are unavailable during model construction. Bindings
+    # are final here, before registry compilation and graph capture.
+    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+
+    with registry.activate():
+        for layer in worker.vllm_config.compilation_config.static_forward_context.values():
+            indexer = getattr(getattr(layer, "impl", None), "indexer", None)
+            if isinstance(indexer, AscendSFAIndexerBackend):
+                indexer.register_k_cache_warmup()
+
+    _register_dcp_warmup(worker)
     dspark_registered = _register_dspark_swa_indices_warmup(worker)
     pruned = _prune_unlaunchable_registrations(registry)
     if dspark_registered or pruned:

@@ -150,6 +150,7 @@ def _unpack_nope_int8(cache):
 
 
 def _reference_quantized_sparse_attention(**kwargs):
+    assert kwargs["return_softmax_lse"] is True
     assert kwargs["rope_head_dim"] == 0
     assert kwargs["key"].dtype == torch.int8
     assert kwargs["key"].shape[-1] == 528
@@ -158,7 +159,11 @@ def _reference_quantized_sparse_attention(**kwargs):
     assert kwargs["tile_size"] == 128
     assert kwargs["key"] is kwargs["value"]
     cache = _unpack_nope_int8(kwargs["key"])
-    return _reference_sparse_attention(**dict(kwargs, key=cache, value=cache, query_rope=None, key_rope=None))
+    # The forward consumes only the output; emulate the Kimi LSE-capable
+    # operator's output using the same dense reference.
+    return _reference_sparse_attention(
+        **dict(kwargs, key=cache, value=cache, query_rope=None, key_rope=None, return_softmax_lse=False)
+    )
 
 
 def _reference_sparse_attention(**kwargs):
@@ -275,7 +280,11 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         ),
         kv_transfer_config=None,
         weight_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=SimpleNamespace(
+            dtype=hidden_states.dtype,
+            hf_config=SimpleNamespace(model_type="kimi_k31"),
+            hf_text_config=SimpleNamespace(mla_use_nope=True),
+        ),
         # Since #17448 the packed SFA C8 dtype comes from the cache_dtype CLI
         # field; indexer_kv_dtype now only drives the LI C8 indexer cache.
         # "int8" is what this test packs and what
@@ -361,6 +370,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             create=True,
         ) as quantized_sparse_attention,
         patch.object(sparse_mla, "attention_transfer_window"),
+        patch.object(sparse_mla, "flash_attention_gate", side_effect=lambda x, gate: x.mul_(torch.sigmoid(gate))),
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
@@ -466,6 +476,9 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     """Run the real forward entry; PCP peers need the same padded row count."""
     impl_cls = AscendSFADCPImpl if dcp_enabled else AscendSFAImpl
     impl = impl_cls.__new__(impl_cls)
+    impl._sharded_indexer = False
+    impl._local_topk = False
+    impl.use_rope = False
     impl.pcp_enabled = True
     impl._parallel_o_proj = SimpleNamespace(
         batch=lambda **kwargs: nullcontext(), uses_full_weight=False, all_gather_weights=MagicMock()
