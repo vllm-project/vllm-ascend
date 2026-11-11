@@ -284,7 +284,15 @@ def update_full_graph_params(
     vllm_config,
     speculative_config=None,
     draft_attn_metadatas=None,
+    token_cut_phase="after_launch",
 ):
+    # Token-cut lengths become available layer by layer during replay. Its
+    # adapter uses the same runner update entry, but must service ready/gate
+    # events instead of the ordinary batch-wide Attention parameter list.
+    token_cut = vars(forward_context).get("moe_token_cut_graph_manager")
+    if token_cut is not None:
+        token_cut.update_graph_params(token_cut_phase)
+        return
     if vllm_version_is("0.27.1"):
         impl_cls = attn_backend.get_impl_cls()
         impl_cls.update_graph_params(

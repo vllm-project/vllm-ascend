@@ -38,6 +38,7 @@ class HardwareCapability(Enum):
     MLAPO_NATIVE_WEIGHTS = auto()
     MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
+    MOE_TOKEN_CUT = auto()
     NPUGRAPH_EX = auto()
     PAGED_ATTENTION = auto()
     RC_DEVICE_DISCOVERY = auto()
@@ -131,7 +132,10 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
-_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
+_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MC2_FULLMESH_V2_COMM,
+    HardwareCapability.MOE_TOKEN_CUT,
+}
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {

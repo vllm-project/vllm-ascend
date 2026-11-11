@@ -297,6 +297,25 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_experts.wait_for_output()
         return fused_output
 
+    def _token_cut_router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Reuse saved routes and evaluate the gate only for fresh rows."""
+        state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
+        fresh_rows = (
+            state.fresh_router_row_indices(hidden_states.shape[0], hidden_states.device)
+            if state is not None else None
+        )
+        gate = self.gate
+        weight = gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.float()
+        if fresh_rows is None:
+            return F.linear(hidden_states.float(), weight)
+        output = torch.zeros(
+            (hidden_states.shape[0], weight.shape[0]), dtype=weight.dtype, device=hidden_states.device
+        )
+        if fresh_rows.numel():
+            logits = F.linear(hidden_states.index_select(0, fresh_rows).float(), weight)
+            output.index_copy_(0, fresh_rows, logits)
+        return output
+
     if vllm_version_is("0.27.1"):
 
         def _forward_impl(
@@ -309,6 +328,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             with self._sequence_parallel_context():
                 shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
                 if self.ascend_shared_experts is None:
+                    if self.is_internal_router:
+                        router_logits = self._token_cut_router_logits(hidden_states)
                     return self.routed_experts.forward_impl(
                         hidden_states=hidden_states,
                         router_logits=router_logits,
@@ -328,10 +349,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     # increase with extra hidden states. We also assume that all gate
                     # linear is unquantized so that we the weight is pre-casted in
                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = shared_hidden_states.float()
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
-                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                    router_logits = self._token_cut_router_logits(shared_hidden_states)
                     after_routed_experts = torch.npu.current_stream().record_event()
                 else:
                     before_routed_experts = torch.npu.current_stream().record_event()

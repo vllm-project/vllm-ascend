@@ -189,6 +189,78 @@ class RejectionSamplerConfig:
 
 
 @config
+class MoETokenCutRuntimeConfig:
+    """Experimental Qwen3-MoE token-cut runtime configuration.
+
+    ``shadow``, ``capture``, and ``handoff`` keep the original dispatch input.
+    Capture additionally snapshots per-layer restore state. Handoff discards
+    selected sampled outputs to exercise the Worker-to-Scheduler retry protocol
+    without reducing MoE work. ``apply`` sends compacted rows through unfused
+    MC2 and parks deferred rows after attention. The Scheduler retry re-enters
+    those requests at the same layer's MoE instead of recomputing from layer 0.
+    """
+
+    enabled: bool = False
+    mode: Literal["shadow", "capture", "handoff", "apply"] = "shadow"
+    # Independent defaults, overridable for each SchedulerOutput/forward.
+    allow_cut: bool = True
+    allow_restore: bool = True
+    # Inclusive rank-local eligible-decode windows. Per-forward bool overrides
+    # take precedence; None at the end means no upper bound.
+    cut_step_start: int = 1
+    cut_step_end: int | None = None
+    restore_step_start: int = 1
+    restore_step_end: int | None = None
+    # Native uses the supplied BF16 rebatch_and_update; no silent fallback.
+    rebatch_backend: Literal["python", "native"] = "python"
+    native_combined: bool = True
+    rebatch_overlap: bool = False
+    # Fixed-capacity decode graph owned by the native ACLGraphWrapper.
+    graph_mode: Literal["none", "full_decode"] = "none"
+    level_limit: int = 9
+    # Kernel step/parity selector, not the batch-size no-delete threshold.
+    local_cut_count: int = 0
+    cut_count_threshold: int = 4
+    small_expert_token_threshold: int = 4
+    send_aiv_num: int = 8
+    recv_aiv_num: int = 8
+
+    @model_validator(mode="after")
+    def _validate_values(self):
+        if self.graph_mode == "full_decode" and (
+            not self.enabled or self.mode != "apply" or self.rebatch_backend != "native"
+            or not self.native_combined or self.rebatch_overlap
+        ):
+            raise ValueError("full_decode graph requires enabled native combined apply mode with rebatch_overlap=False")
+        if self.rebatch_backend == "native" and self.mode != "apply":
+            raise ValueError("native rebatch_backend requires moe_token_cut_config.mode='apply'")
+        if self.rebatch_overlap and (self.rebatch_backend != "native" or not self.native_combined):
+            raise ValueError("rebatch_overlap requires native combined token-cut")
+        for operation in ("cut", "restore"):
+            start = getattr(self, f"{operation}_step_start")
+            end = getattr(self, f"{operation}_step_end")
+            if start < 1 or (end is not None and end < start):
+                raise ValueError(
+                    f"moe_token_cut_config.{operation}_step window requires 1 <= start <= end (or end=None)"
+                )
+        non_negative_fields = (
+            "level_limit",
+            "local_cut_count",
+            "cut_count_threshold",
+            "small_expert_token_threshold",
+        )
+        for field_name in non_negative_fields:
+            value = getattr(self, field_name)
+            if value < 0:
+                raise ValueError(f"moe_token_cut_config.{field_name} must be non-negative")
+        for field_name in ("send_aiv_num", "recv_aiv_num"):
+            value = getattr(self, field_name)
+            if value <= 0:
+                raise ValueError(f"moe_token_cut_config.{field_name} must be positive")
+        return self
+
+
+@config
 class RlConfig:
     """Unified defaults for reinforcement-learning workloads.
 
@@ -298,6 +370,18 @@ class AscendConfig:
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4
+            },
+            "moe_token_cut_config": {
+                "enabled": false,
+                "mode": "shadow",
+                "allow_cut": true,
+                "allow_restore": true,
+                "level_limit": 9,
+                "local_cut_count": 0,
+                "cut_count_threshold": 4,
+                "small_expert_token_threshold": 4,
+                "send_aiv_num": 8,
+                "recv_aiv_num": 8
             },
             "rl_config": {
                 "enabled": false,
@@ -427,6 +511,7 @@ class AscendConfig:
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
+    moe_token_cut_config: MoETokenCutRuntimeConfig = dataclasses.field(default_factory=MoETokenCutRuntimeConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
 
     # ---- sub-configs declared later in this module ----
@@ -479,6 +564,68 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.moe_token_cut_config.enabled:
+            from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+            pc = vc.parallel_config
+            mode = self.moe_token_cut_config.mode
+            if not get_current_hardware_profile().supports(HardwareCapability.MOE_TOKEN_CUT):
+                raise ValueError("moe_token_cut_config is supported only on A3 hardware.")
+            if getattr(vc.model_config.hf_text_config, "model_type", None) != "qwen3_moe":
+                raise ValueError("moe_token_cut_config currently supports only Qwen3-MoE models.")
+            if self.moe_token_cut_config.graph_mode == "full_decode":
+                from vllm.config.compilation import CompilationMode, CUDAGraphMode
+
+                if vc.model_config.enforce_eager:
+                    raise ValueError("full_decode token-cut graph requires enforce_eager=False")
+                if (
+                    vc.compilation_config.mode != CompilationMode.NONE
+                    or vc.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+                ):
+                    raise ValueError(
+                        "token-cut uses ACLGraphWrapper; set compilation_config mode=0, "
+                        "cudagraph_mode='FULL_DECODE_ONLY'"
+                    )
+                if vc.cache_config.cache_dtype not in ("auto", "bfloat16"):
+                    raise ValueError("full_decode token-cut graph requires unquantized BF16 KV cache")
+                if getattr(vc.parallel_config, "enable_dbo", False):
+                    raise ValueError("full_decode token-cut graph does not support DBO")
+            elif not vc.model_config.enforce_eager:
+                raise ValueError("moe_token_cut_config currently requires eager execution; set --enforce-eager.")
+            if vc.speculative_config is not None:
+                raise ValueError("moe_token_cut_config is not compatible with speculative decoding yet.")
+            if not pc.enable_expert_parallel or pc.world_size_across_dp <= 1:
+                raise ValueError("moe_token_cut_config requires expert parallelism with more than one EP rank.")
+            if vc.lora_config is not None:
+                raise ValueError("moe_token_cut_config is not compatible with LoRA yet.")
+            if vc.use_v2_model_runner:
+                raise ValueError("moe_token_cut_config requires model runner v1; set VLLM_USE_V2_MODEL_RUNNER=0.")
+            if vc.kv_transfer_config is not None or vc.ec_transfer_config is not None:
+                raise ValueError("moe_token_cut_config does not support KV or EC connectors yet.")
+            if pc.data_parallel_size > 1 and pc.tensor_parallel_size != 1:
+                raise ValueError(
+                    "moe_token_cut_config with data parallelism currently requires tensor_parallel_size=1."
+                )
+            if pc.pipeline_parallel_size != 1:
+                raise ValueError("moe_token_cut_config does not support pipeline parallelism yet.")
+            if pc.prefill_context_parallel_size != 1 or pc.decode_context_parallel_size != 1:
+                raise ValueError("moe_token_cut_config does not support context parallelism yet.")
+            if vc.scheduler_config.max_num_seqs > 64:
+                raise ValueError("moe_token_cut_config supports at most 64 decode requests.")
+            if mode in ("handoff", "apply") and vc.scheduler_config.async_scheduling:
+                raise ValueError("moe_token_cut_config handoff/apply modes do not support async scheduling.")
+            if mode == "apply" and self.enable_fused_mc2 != 0:
+                raise ValueError("moe_token_cut_config apply mode requires enable_fused_mc2=0.")
+            if mode == "apply" and self.eplb_config.dynamic_eplb:
+                raise ValueError("moe_token_cut_config apply mode requires stable expert routing.")
+            if self.moe_token_cut_config.rebatch_backend == "native":
+                if pc.tensor_parallel_size != 1:
+                    raise ValueError("native rebatch_backend currently requires tensor_parallel_size=1")
+                if str(vc.model_config.dtype) != "torch.bfloat16":
+                    raise ValueError("native rebatch_backend requires BF16 model activations")
+                if vc.model_config.hf_text_config.hidden_size > 4096:
+                    raise ValueError("native rebatch_backend kernel supports hidden_size <= 4096")
+            logger.warning_once("Experimental MoE token cut enabled in %s mode.", mode)
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
