@@ -20,7 +20,13 @@ def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_tok
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count
-    return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
+    result = _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
+    # The final mode is DP-agreed here, before real/idle input paths diverge.
+    # Remove this callback when upstream exposes a post-dispatch runner hook.
+    checker = getattr(cudagraph_manager, "_ascend_finegrained_tp_check", None)
+    if checker is not None and result[0].num_tokens > 0:
+        checker(result[0].cg_mode)
+    return result
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.

@@ -630,3 +630,125 @@ def test_real_compiler_partitions_kda_host_hooks_per_step(monkeypatch):
         assert calls == [("wait", 0), ("save", 0), ("wait", 1), ("save", 1)]
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("rows", [0, 1, 3])
+def test_actual_lmhead_processor_restores_rows_outside_config_scope(monkeypatch, rows):
+    from vllm.config.vllm import set_current_vllm_config
+
+    from vllm_ascend.ops import vocab_parallel_embedding as vocab
+
+    groups, local = runtime(monkeypatch, 2)
+    monkeypatch.setattr(vocab, "get_lmhead_tp_group", lambda: local.group)
+
+    def embedding_init(self, *args, **kwargs):
+        nn.Module.__init__(self)
+        self.parallel_mode = vocab.VocabParallelMode.FINE_GRAINED
+
+    monkeypatch.setattr(vocab.AscendVocabParallelEmbedding, "__init__", embedding_init)
+    weight = matrix(8, 4, 7)
+    heads = []
+    config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear")))
+    with set_current_vllm_config(config):
+        for rank in range(2):
+            local.group = groups(2, rank)
+            head = vocab.AscendParallelLMHead(8, 4)
+            head.weight = nn.Parameter(weight.chunk(2)[rank], requires_grad=False)
+            heads.append(head)
+
+    def no_config():
+        raise AssertionError("Sampling has no current VllmConfig scope")
+
+    monkeypatch.setattr(vocab, "get_current_vllm_config", no_config)
+
+    def owner(rank):
+        processor = vocab.AscendLogitsProcessor.__new__(vocab.AscendLogitsProcessor)
+        processor.org_vocab_size = 7
+        processor._apply_head = lambda head, hidden, bias: F.linear(hidden, head.weight, bias)
+        hidden = matrix(rows, 4, rank)
+        actual = processor._get_logits_lmheadtp(hidden, heads[rank], None)
+        torch.testing.assert_close(actual, F.linear(hidden, weight)[:, :7])
+        assert actual.shape == (rows, 7)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(owner, range(2)))
+
+
+@pytest.mark.parametrize("live_rows", [(1, 2), (0, 2)])
+@pytest.mark.parametrize("gate_enabled", [False, True])
+def test_nope_piecewise_real_sfa_and_o_keep_uniform_collectives(monkeypatch, live_rows, gate_enabled):
+    from vllm_ascend.attention import sfa_v1
+
+    groups, local = runtime(monkeypatch, 2)
+    monkeypatch.setattr(sfa_v1, "projection_capacity", lambda hidden: 5)
+    monkeypatch.setattr(
+        sfa_v1, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE)
+    )
+    for name in ("wait_for_kv_layer_from_connector", "notify_kv_cache_written", "maybe_save_kv_layer_to_connector"):
+        monkeypatch.setattr(sfa_v1, name, lambda *args: None)
+    monkeypatch.setattr(sfa_v1, "attention_transfer_window", nullcontext)
+    monkeypatch.setattr(sfa_v1, "flash_attention_gate", lambda output, gate: output.mul_(gate.sigmoid()))
+    weight, gate_weight = matrix(4, 4, 1), matrix(4, 4, 2)
+
+    def owner(rank):
+        rows = live_rows[rank]
+        local.output_group = groups(2, rank)
+        layer = SimpleNamespace(
+            weight=weight.chunk(2, dim=1)[rank],
+            bias=None,
+            input_is_parallel=True,
+            input_size_per_partition=2,
+            output_size=4,
+            reduce_results=True,
+            return_bias=True,
+            skip_bias_add=False,
+            prefix="self_attn.o_proj",
+        )
+        layer.quant_method = SimpleNamespace(apply=lambda layer, x, bias=None: F.linear(x, layer.weight, bias))
+        op = linear_op.OProjRowParallelOp(layer)
+        op.update_attrs()
+        impl = sfa_v1.AscendSFAImpl.__new__(sfa_v1.AscendSFAImpl)
+        impl.enable_sparse_sfa_turboquant = False
+        impl.qk_rope_head_dim = 0
+        impl.local_num_heads, impl.v_head_dim = 2, 2
+        impl.pcp_enabled = False
+        impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+        impl._parallel_o_proj = None
+        impl.finegrained_o_tp = True
+        impl.o_proj = op.apply_impl
+        impl.g_proj = Linear(gate_weight.chunk(2)[rank]) if gate_enabled else None
+        impl.gproj_tp = fine.FullRankGateTP(groups(2, rank), 2, 2) if gate_enabled else None
+        impl.layerwise_kv_cache_hook = None
+        impl.layer_name = "layer"
+        impl._get_indexer_attn_metadata = lambda: None
+        impl.preprocess_type = sfa_v1.PreprocessType.PROLOG_V3
+        impl.has_indexer = False
+        impl.indexer, impl.skip_topk = None, True
+        impl._sfa_preprocess_prolog_v3 = lambda hidden_states, **kwargs: (hidden_states,) * 4
+        impl._get_indexcache_topk_indices = lambda count: torch.zeros(count, 1, dtype=torch.int32)
+        attention = matrix(rows, 4, rank + 3)
+        impl._execute_sparse_flash_attention_process = lambda *args: attention.clone()
+        impl._v_up_proj = lambda value: value
+        hidden, output = matrix(3, 4, rank + 4), torch.zeros(3, 4)
+        metadata = SimpleNamespace(
+            num_actual_tokens=rows,
+            num_input_tokens=3,
+            slot_mapping=torch.arange(3),
+            cum_query_lens=[rows],
+            seq_lens=[rows],
+            cos=None,
+            sin=None,
+        )
+        impl._forward_impl("layer", hidden, (torch.zeros(1, 4),), metadata, output)
+        expected = attention
+        if gate_enabled:
+            expected = expected * F.linear(hidden[:rows], gate_weight).sigmoid()
+        torch.testing.assert_close(output[:rows], F.linear(expected, weight))
+        if rows == 0:
+            assert not output.any()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(owner, range(2)))
+    calls = groups(2, 0).device_group.hub.calls
+    # All collectives compare every peer's shape; O must include the idle owner.
+    assert len(calls) == (4 if gate_enabled else 2)

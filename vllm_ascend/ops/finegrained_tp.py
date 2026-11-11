@@ -246,5 +246,8 @@ class ChunkedLMHeadTP:
             source = logits.contiguous().view(self.group.world_size, -1, logits.shape[-1])
             outputs.append(self.communication.exchange(source, self.group))
         # Each chunk independently restores owner rows and the full vocabulary.
-        result = [p.wait().permute(1, 0, 2).reshape(p.tensor.shape[1], -1) for p in outputs]
+        result = [
+            p.wait().permute(1, 0, 2).reshape(p.tensor.shape[1], self.group.world_size * p.tensor.shape[2])
+            for p in outputs
+        ]
         return torch.cat(result, dim=0)[..., : processor.org_vocab_size]
