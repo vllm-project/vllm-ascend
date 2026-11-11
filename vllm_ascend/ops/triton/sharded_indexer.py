@@ -692,9 +692,9 @@ def merge_packed_candidates(
         block = MAX_FUSED_TOPK  # The supported fused shape already is a power of two.
         if presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk:
             tile = min(block, triton.next_power_of_2(max(1, 2 * block // world_size)))
-            # Parallel peer counts amortize their setup with at least four peers.
-            # Small worlds and other architecture policies keep the original kernel.
-            if get_current_hardware_profile().prefer_parallel_owner_prefix and world_size > 4:
+            # Parallel setup amortizes across several peers and multiple rows/core.
+            # Small worlds, single-wave batches and other policies keep the original.
+            if get_current_hardware_profile().prefer_parallel_owner_prefix and world_size > 4 and rows > cores:
                 owner_kernel = _merge_owner_prefix_adaptive
                 tile = min(block, triton.next_power_of_2(max(1, block // world_size)))
             else:
