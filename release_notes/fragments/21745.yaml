@@ -1,0 +1,4 @@
+pr: 21745
+entries:
+  - category: bugfix
+    text: Fixed Qwen3.5/Qwen3.6 W8A8 checkpoints failing at startup with error 161002 by passing the fp32 dequant scale on the A8W8 paths and routing the fp32 mamba state to the FLA recurrent kernel.

@@ -58,6 +58,22 @@ def scale_from_float_to_int64(scale):
 
 
 @register_scheme("W8A8_DYNAMIC", "linear")
+def _dequant_scale(layer: torch.nn.Module) -> torch.Tensor:
+    """Return the dequant scale to hand to A8W8 per-token quant matmul.
+
+    The op rejects an fp16 scale together with fp16 activations (aclnn 161002),
+    while Qwen3.5/3.6 W8A8 checkpoints ship fp16 scales. ``process_weights_after_loading``
+    already builds an fp32 copy for the shared-expert path, so prefer it and fall
+    back to the original tensor for checkpoints that do not provide one.
+    """
+    return getattr(layer, "weight_scale_fp32", layer.weight_scale)
+
+
+def _fused_scale_list(scales: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Convert per-expert grouped-matmul scales to fp32, as aclnn requires."""
+    return [scale.to(torch.float32) for scale in scales]
+
+
 class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A8_DYNAMIC.
 
@@ -121,10 +137,11 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             need_unsqz = True
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
+        weight_scale = _dequant_scale(layer)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
-            layer.weight_scale,
+            weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias if self.act_quant_type == torch.int8 else None,
             output_dtype=output_dtype,
@@ -517,7 +534,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
         # then scales must be per-expert too — aclnn grouped_matmul requires
         # len(scale) == len(weight). The stacked path keeps a single-element list.
-        scale = [s.to(w2_scale_dtype) for s in w1_scale]
+        scale = _fused_scale_list(w1_scale)
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],
@@ -538,10 +555,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
         _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
+        scale = _fused_scale_list(w2_scale)
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,
-            scale=w2_scale,
+            scale=scale,
             bias=None,
             per_token_scale=[act_out_scale],
             split_item=2,
