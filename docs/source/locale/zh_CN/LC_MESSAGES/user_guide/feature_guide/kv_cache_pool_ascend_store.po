@@ -171,9 +171,6 @@ msgid ""
 "see Software Dependencies in Constraints and Limitations):"
 msgstr "1. 检查 Mooncake wheel 依赖（glibc 版本要求请参见约束与限制中的软件依赖）："
 
-msgid "2. Install Mooncake:"
-msgstr "2. 安装 Mooncake："
-
 msgid "#### Step 2: Configure mooncake.json and Start mooncake_master"
 msgstr "#### 步骤 2：配置 mooncake.json 并启动 mooncake_master"
 
@@ -2223,3 +2220,7 @@ msgstr ""
 "1. 确定错误来源。如果是 Mooncake 报告的 `put` 失败，请确保驱逐策略的剩余空间（例如 `--eviction_ratio`）能够容纳一次批量 put，或者增加容量、增加驱逐余量，或减小批量大小。\n"
 "2. 如果是 `get` 失败，请增大 `mooncake_master` 的 `--default_kv_lease_ttl`，并使其大于 `ASCEND_CONNECT_TIMEOUT` 和 `ASCEND_TRANSFER_TIMEOUT`。\n"
 "3. 如果不是 Mooncake 报告的，则很可能是 HIXL（ascend_direct）传输层问题。请收集 `/root/ascend/log/debug/plog` 下的 plog 文件以进行调查。"
+
+msgid ""
+"2. The vllm-ascend Docker images install Mooncake. Verify the installation:"
+msgstr "2. vllm-ascend Docker 镜像已安装 Mooncake。请验证安装："

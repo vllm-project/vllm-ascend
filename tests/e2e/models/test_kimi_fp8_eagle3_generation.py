@@ -6,7 +6,7 @@
 Run explicitly with the existing full-model configuration::
 
     pytest -sv tests/e2e/models/test_kimi_fp8_eagle3_generation.py \
-        --config tests/e2e/cases/models/configs/Kimi/KimiK26_w4a4c8_A5.yaml
+        --config tests/SIT/cases/models/configs/Kimi/KimiK26_w4a4c8_A5.yaml
 
 This loads the full checkpoint twice, sequentially. It needs eight free A5
 devices and the checkpoint paths declared in that configuration. Other model

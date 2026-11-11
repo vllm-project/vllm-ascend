@@ -1116,6 +1116,7 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
     layer = SimpleNamespace(
         kv_sharing_target_layer_name=None,
         align_kv_cache_with_mamba=True,
+        is_draft_layer=False,
         get_kv_cache_spec=lambda _config: source_spec,
     )
     model_config = SimpleNamespace(
@@ -1159,8 +1160,6 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
         head_size=128,
         dtype=torch.bfloat16,
     )
-    if not hasattr(source_spec, "is_draft"):
-        pytest.skip("vLLM release lane has no KVCacheSpec.is_draft")
     layer = SimpleNamespace(
         kv_sharing_target_layer_name=None,
         align_kv_cache_with_mamba=True,
@@ -1197,12 +1196,18 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     ("model_type", "expected_num_heads"),
     [("kimi_linear", 1), ("deepseek_v3", 12)],
 )
-def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type, expected_num_heads):
+@pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
+@pytest.mark.parametrize("non_causal", [False, True])
+def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
+    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal
+):
     source_spec = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
+        is_draft=source_is_draft,
+        non_causal_multi_token_decode=non_causal,
     )
     layer = MLAAttention.__new__(MLAAttention)
     layer.impl = SimpleNamespace(
@@ -1213,6 +1218,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
     layer.num_heads = 12
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
+    layer.is_draft_layer = is_draft_layer
     layer.get_kv_cache_spec = lambda _config: source_spec
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -1231,7 +1237,12 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
         "get_layers_from_vllm_config",
         lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": layer},
     )
-    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: True)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True)),
+    )
     monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
 
     spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
@@ -1239,6 +1250,9 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.num_heads == expected_num_heads
     assert spec.page_size_bytes == source_spec.page_size_bytes
+    assert spec.is_draft is (source_is_draft or is_draft_layer)
+    assert spec.store_on_host is not spec.is_draft
+    assert spec.non_causal_multi_token_decode is non_causal
 
 
 @pytest.mark.parametrize(
@@ -1257,7 +1271,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     monkeypatch.setattr(
         indexer_module,
         "get_kv_cache_spec",
-        lambda _config: object(),
+        lambda _config: MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16),
     )
     layers = {layer_name: indexer_module}
     if owner != "unpaired":
@@ -2332,6 +2346,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         dtype=torch.bfloat16,
         cache_dtype_str="auto",
         model_version=None,
+        is_draft=False,
         non_causal_multi_token_decode=False,
         tokens_per_state=1,
     )
@@ -2401,16 +2416,29 @@ def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
     assert not attn_utils.get_kv_cache_spec(vllm_config)[layer_name].store_on_host
 
 
-def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
+@pytest.mark.parametrize("hybrid_backing", [False, True])
+@pytest.mark.parametrize(
+    "dtype,scale_dim,scale_dtype,dcp_size",
+    [
+        (torch.int8, 1, torch.float16, 1),
+        (torch.bfloat16, 0, torch.float16, 1),
+        (torch.float8_e4m3fn, 1, torch.float32, 1),
+        (torch.float8_e4m3fn, 1, torch.float32, 8),
+    ],
+)
+@pytest.mark.parametrize("kernel_parts", [1, 2])
+def test_sfa_indexer_allocates_and_reshapes_scale_views(
+    monkeypatch, hybrid_backing, dtype, scale_dim, scale_dtype, dcp_size, kernel_parts
+):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     spec = AscendSFAIndexerCacheSpec(
-        block_size=2,
+        block_size=256,
         num_kv_heads=1,
         head_size=4,
-        dtype=torch.int8,
-        scale_dim=1,
-        scale_dtype=torch.float16,
-        sfa_dcp_replicated_indexer_size=1,
+        dtype=dtype,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
+        sfa_dcp_replicated_indexer_size=dcp_size,
     )
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
@@ -2435,9 +2463,14 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
 
     raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
-    raw_k, raw_scale = raw[layer_name]
+    raw_parts = raw[layer_name]
+    raw_k = raw_parts[0]
+    raw_scale = raw_parts[1] if scale_dim else None
     assert raw_k.dtype == torch.int8
-    assert raw_scale.dtype == torch.int8
+    if raw_scale is not None:
+        assert raw_scale.dtype == torch.int8
+    if hybrid_backing:
+        raw[layer_name] = torch.cat(raw_parts)
 
     backend = SimpleNamespace(
         get_kv_cache_shape=lambda num_blocks_, block_size, num_kv_heads, head_size: (
@@ -2459,14 +2492,86 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
         ],
         kv_cache_raw_tensors=raw,
         cache_dtype="auto",
-        kernel_block_sizes=[spec.block_size],
+        kernel_block_sizes=[spec.block_size // kernel_parts],
         shared_kv_cache_layers={"alias": layer_name},
         kv_cache_config=kv_cache_config,
     )
-    indexer_k, indexer_scale = caches[layer_name]
-    assert indexer_k.shape == (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
-    assert indexer_scale.shape == (num_blocks, spec.block_size, spec.num_kv_heads, spec.scale_dim)
+    parts = caches[layer_name]
+    indexer_k = parts[0]
+    assert indexer_k.shape == (
+        num_blocks * kernel_parts * dcp_size,
+        spec.block_size // kernel_parts,
+        spec.num_kv_heads,
+        spec.head_size,
+    )
+    assert indexer_k.dtype == dtype
+    assert len(parts) == (2 if scale_dim else 1)
+    if scale_dim:
+        indexer_scale = parts[1]
+        assert indexer_scale.shape == (
+            num_blocks * kernel_parts * dcp_size,
+            spec.block_size // kernel_parts,
+            spec.num_kv_heads,
+            spec.scale_dim,
+        )
     assert caches["alias"] is caches[layer_name]
+    if hybrid_backing:
+        assert indexer_k.data_ptr() == raw[layer_name].data_ptr()
+        if scale_dim:
+            key_page_bytes = raw_k.numel() // (num_blocks * kernel_parts * dcp_size)
+            assert parts[1].data_ptr() == raw[layer_name].data_ptr() + key_page_bytes
+            assert parts[1].dtype == scale_dtype
+            row_bytes = spec.page_size_bytes // (spec.block_size * dcp_size)
+            main = raw[layer_name].view(num_blocks, spec.block_size * dcp_size, 1, row_bytes)
+            main_spec = AscendMLAAttentionSpec(
+                block_size=spec.block_size * dcp_size, num_kv_heads=1, head_size=row_bytes, dtype=torch.int8
+            )
+            zeroer = AscendV2KVBlockZeroer(
+                torch.device("cpu"),
+                attn_groups_iter=[
+                    AttentionGroup(backend, [layer_name], spec, 0),
+                    AttentionGroup(backend, ["main"], main_spec, 1),
+                ],
+                kernel_block_sizes=[spec.block_size // kernel_parts, main_spec.block_size],
+                static_forward_context={
+                    layer_name: SimpleNamespace(kv_cache=parts),
+                    "main": SimpleNamespace(kv_cache=(main,)),
+                },
+                num_blocks=num_blocks,
+            )
+            # Use the real zeroer's address table and verify that recycling
+            # scheduler block 1 never clears the neighboring live block 0.
+            backing = raw[layer_name]
+            backing.fill_(23)
+            for component in zeroer._zeroers:
+                addresses, strides, spans, *_ = component._meta
+                for address, stride, span in zip(addresses.tolist(), strides.tolist(), spans.tolist()):
+                    offset = address - backing.data_ptr() + stride * 4
+                    backing[offset : offset + span * 4].zero_()
+            assert torch.all(backing[: spec.page_size_bytes] == 23)
+            assert torch.all(backing[spec.page_size_bytes :] == 0)
+
+
+@pytest.mark.parametrize("indexer_dtype,indexer_scale_dim", [(torch.bfloat16, 0), (torch.int8, 1)])
+def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_dtype, indexer_scale_dim):
+    specs = {
+        "main": AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16),
+        "indexer": AscendSFAIndexerCacheSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=indexer_dtype,
+            scale_dim=indexer_scale_dim,
+            scale_dtype=torch.float16,
+        ),
+    }
+    original = dict(specs)
+    attn_utils._align_hybrid_attention_page_sizes(specs, minimum_page_size=800000)
+    # PR4's paired planner aligns recurrent states to main pages separately.
+    # Enlarging token blocks to equalize MLA/indexer bytes changes ownership.
+    assert specs == original
+    assert specs["main"].page_size_bytes == 147456
+    assert specs["indexer"].page_size_bytes == (32768 if indexer_scale_dim == 0 else 16640)
 
 
 def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
@@ -2794,6 +2899,7 @@ def _plain_full_attention_spec(head_size_v: int = 64) -> FullAttentionSpec:
 
 def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
     attn_module = SimpleNamespace(
+        is_draft_layer=False,
         get_kv_cache_spec=lambda _cfg: spec,
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
