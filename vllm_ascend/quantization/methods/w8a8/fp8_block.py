@@ -26,10 +26,14 @@ result is handed to a layout the hardware does support:
   32 elements along the reduction dim). The native ``npu_quant_matmul`` path then
   runs and weights stay at one byte per element, which is what makes a 27B FP8
   checkpoint fit on a single card.
-* On every other Ascend generation the resolved matrix is kept in the model dtype
-  and served by the ordinary unquantized GEMM. Correct, but the footprint doubles.
+* Other Ascend generations have no FP8 execution path for this checkpoint
+  format. Reject them when the method is created rather than silently resolving
+  every weight to the model dtype and increasing the model's memory footprint.
 
-Both paths read the same checkpoint, so no per-model patch or offline
+The dense resolution helper is still used on Ascend 950 for projections absorbed
+by the attention backend and for shapes that cannot be regrouped as MXFP8.
+
+The supported path reads the checkpoint directly, so no per-model patch or offline
 re-quantization step is needed.
 """
 
@@ -63,6 +67,16 @@ BLOCK_FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 # Output rows resolved per step. Bounds the float32 staging buffer to
 # ``_ROWS_PER_DEQUANT_STEP * in_features * 4`` bytes regardless of layer size.
 _ROWS_PER_DEQUANT_STEP = 1024
+
+
+def _require_native_block_fp8_support() -> None:
+    if not is_950():
+        raise NotImplementedError(
+            "Native block-wise FP8 checkpoints require Ascend 950 for FP8 execution. "
+            "Loading this checkpoint on the current device would dequantize its weights to the model dtype and "
+            "increase the memory footprint. Use a BF16 checkpoint or a supported ModelSlim/LLM-Compressor "
+            "quantized checkpoint instead."
+        )
 
 
 def resolve_block_scales(
@@ -147,8 +161,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
 
     Weights arrive as ``float8_e4m3fn`` plus a float32 ``weight_scale_inv`` with
     one entry per ``block_n x block_k`` tile. ``process_weights_after_loading``
-    resolves those tiles and then either re-quantizes to MXFP8 (Ascend 950) or
-    keeps the model dtype (everything else).
+    resolves those tiles and re-quantizes to MXFP8 on Ascend 950.
     """
 
     supports_weight_switch = True
@@ -182,9 +195,10 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         )
 
     def __init__(self, weight_block_size: tuple[int, int]):
+        _require_native_block_fp8_support()
         self.block_n, self.block_k = weight_block_size
         self.model_dtype = get_current_vllm_config().model_config.dtype
-        self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod() if is_950() else None
+        self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod()
 
     def validate_weight_shapes(
         self,
@@ -312,6 +326,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.NONE
 
     def __init__(self, weight_block_size: tuple[int, int], moe_config):
+        _require_native_block_fp8_support()
         self.block_n, self.block_k = weight_block_size
         # AscendFusedMoEMethod tags a scale as group-wise when the scheme reports
         # a group size, which is how the upstream loader learns to narrow
@@ -319,12 +334,10 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         self.group_size = self.block_k
         self.model_dtype = get_current_vllm_config().model_config.dtype
         self.moe_config = moe_config
-        self.mxfp8_method = AscendW8A8MXFP8DynamicFusedMoEMethod() if is_950() else None
+        self.mxfp8_method = AscendW8A8MXFP8DynamicFusedMoEMethod()
         # MoE MXFP8 has group_size only. Snapshot the Linear helper here so
         # requantize does not call get_current_vllm_config() at load time.
-        self._mx_scale_alg = (
-            get_dynamic_mx_quant_scale_alg(get_current_vllm_config()) if self.mxfp8_method is not None else 0
-        )
+        self._mx_scale_alg = get_dynamic_mx_quant_scale_alg(get_current_vllm_config())
         self._bf16_method: Any = None
 
     def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
@@ -468,3 +481,4 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
+
