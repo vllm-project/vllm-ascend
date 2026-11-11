@@ -349,4 +349,3 @@ def test_prefill_chunk_offsets_exclude_ordinary_decode(monkeypatch):
     args, kwargs = prepare_chunk.call_args
     assert args[0] is builder and args[1].tolist() == [0, 4, 10] and args[2] == starts.device
     assert kwargs == {"build_device_metadata": False}
-
