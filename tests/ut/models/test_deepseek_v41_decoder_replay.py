@@ -14,9 +14,7 @@ from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
 @pytest.mark.parametrize("dp_size", [1, 2])
-@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.PIECEWISE])
-@pytest.mark.parametrize("dspark", [False, True])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size, graph_mode, dspark):
+def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -37,15 +35,8 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
             decode_context_parallel_size=1,
             use_ubatching=False,
         ),
-        compilation_config=SimpleNamespace(cudagraph_mode=graph_mode),
-        speculative_config=SimpleNamespace(
-            use_dspark=lambda: True,
-            draft_model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(sliding_window=2, layer_types=["sliding_attention"])
-            ),
-        )
-        if dspark
-        else None,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        speculative_config=None,
         lora_config=None,
     )
     replay = replay_mod.make_decoder_replay(model, config)
@@ -233,8 +224,7 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-@pytest.mark.parametrize("use_piecewise", [False, True])
-def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_piecewise):
+def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     seen = []
 
     class Layer:
@@ -268,7 +258,6 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_piecewise):
     model.decoder_replay_start = 1
     model.aux_hidden_state_layers = (1, 3)
     model.decoder_replay_layer_name = "decoder_replay"
-    model.decoder_replay_uses_piecewise = use_piecewise
     replay = replay_mod.AscendDecoderReplayLayers(
         2, model._run_replay_layers, [], write_batch_kv=model.layers[1].write_kv
     )
@@ -283,15 +272,6 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_piecewise):
         return list(model.decoder_replay_layers(hidden, mix, positions, input_ids))
 
     monkeypatch.setattr(torch.ops.vllm, "dsv41_decoder_replay_forward", run_replay, raising=False)
-
-    def run_replay_with_output(hidden, mix, positions, input_ids, outputs, layer_name):
-        values = run_replay(hidden, mix, positions, input_ids, len(outputs) - 2, layer_name)
-        for output, value in zip(outputs, values, strict=True):
-            output.copy_(value)
-
-    monkeypatch.setattr(
-        torch.ops.vllm, "dsv41_decoder_replay_forward_with_output", run_replay_with_output, raising=False
-    )
     output, aux = DeepseekV41Model.forward(
         model,
         torch.arange(4),

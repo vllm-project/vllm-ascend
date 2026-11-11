@@ -5,19 +5,14 @@ entries:
       The existing use_layerwise option now automatically selects experimental
       cross-layer KV prefetch for compatible shared-source models such as
       DeepSeek-V4.1 on Model Runner V2, while DS4 retains the physical-layer path.
-      Explicit V1 configurations are rejected for cross-layer KV.
+      Explicit V1 and PIECEWISE configurations are rejected for cross-layer KV;
+      use --enforce-eager.
     model: deepseek-v4.1
   - category: feature
     text: >-
       Experimental cross-layer target KV loads can run with DeepSeek-V4.1
       DSpark on the V2 model runner. Draft cache groups restore synchronously,
       and speculative saves use final-step GVA publication after draft preparation.
-    model: deepseek-v4.1
-  - category: other
-    text: >-
-      Experimental cross-layer target loads support PIECEWISE as well as eager
-      execution, reusing ordinary layerwise graph boundaries. V2 Engram inputs
-      refresh before replay, and bounded replay uses stable output buffers.
     model: deepseek-v4.1
   - category: other
     text: >-

@@ -19,12 +19,21 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
                     make_cross_worker(self, method=method, use_v2=False)
             initialize_gva.assert_not_called()
 
-    def test_eager_and_piecewise_keep_target_pipeline(self):
-        for mode in ("NONE", "PIECEWISE"):
-            for method in (None, "dspark"):
-                with self.subTest(mode=mode, method=method):
-                    worker, _, _ = make_cross_worker(self, mode=mode, method=method)
-                    self.assertTrue(worker._pipeline_enabled)
+    def test_piecewise_is_rejected_before_gva_initialization(self):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.LayerwiseKVPoolWorker.__init__"
+        ) as initialize_gva:
+            for mode in ("PIECEWISE", "FULL_AND_PIECEWISE"):
+                for method in (None, "dspark"):
+                    with self.subTest(mode=mode, method=method), self.assertRaisesRegex(ValueError, "--enforce-eager"):
+                        make_cross_worker(self, mode=mode, method=method)
+            initialize_gva.assert_not_called()
+
+    def test_eager_keeps_target_pipeline(self):
+        for method in (None, "dspark"):
+            with self.subTest(method=method):
+                worker, _, _ = make_cross_worker(self, method=method)
+                self.assertTrue(worker._pipeline_enabled)
 
     def test_unnegotiated_modes_restore_synchronously_with_gva(self):
         for mode in ("FULL", "FULL_DECODE_ONLY", "UNKNOWN"):

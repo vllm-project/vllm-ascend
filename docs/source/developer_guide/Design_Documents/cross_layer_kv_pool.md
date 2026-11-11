@@ -140,22 +140,16 @@ writers still require integration validation.
 
 The initial worker requires Model Runner V2 and supports Memcache TP
 deployments. Explicit V1 configurations are rejected before GVA initialization;
-the V1 runner is unchanged. PP, PCP, DCP and KVPP are also rejected. Eager and PIECEWISE
-support target prefetch; the V2 `DeepseekV41DSparkModel` drafter is supported.
+the V1 runner is unchanged. PP, PCP, DCP and KVPP are also rejected. Eager
+supports target prefetch; the V2 `DeepseekV41DSparkModel` drafter is supported.
 Other speculative configurations, unsupported graph modes, SP, microbatching,
 missing hooks and unknown layouts retain synchronous GVA restoration. No
 fallback switches to bulk keys.
 
-PIECEWISE reuses ordinary layerwise graph negotiation and platform splitting
-operations. DS4.1 attention, cache-only writes and bounded decoder replay run
-between graph segments, so host gates execute on every replay. Bounded replay
-uses caller-owned output buffers. V2 refreshes Engram lookup buffers before
-PIECEWISE dispatch and retires device metadata after its consumers.
-
-Use `--enforce-eager` for eager execution. For PIECEWISE, omit that flag and
-select `compilation_config.cudagraph_mode=PIECEWISE`. V2 requires a compiled
-model or the existing `VLLM_USE_BREAKABLE_CUDAGRAPH=1` option. This does not
-imply FULL graph support.
+Use `--enforce-eager`. PIECEWISE and combined graph modes containing
+PIECEWISE fail before GVA initialization. DS4.1 PIECEWISE runtime adaptation
+is maintained separately; this change does not modify graph splitting,
+bounded-replay operators, Engram preparation or metadata graph lifetimes.
 
 A fatal load error drains or stops the receiver before lease release. The
 error survives collection of request failure notifications and prevents later
@@ -170,7 +164,7 @@ positions, early-consumer overlap, replay-cut publication order, missing or
 wrong-sized objects, failed copies, lease cleanup and DSpark final contents.
 Existing Memcache GVA and Mooncake block-key regressions are also required.
 
-Before readiness, validate Ascend NPU capture/replay and precision, bounded
+Before readiness, validate Ascend NPU eager execution and precision, bounded
 replay ON/OFF, DSpark ordering, concurrent writers, worker failure/restart,
 TTFT/throughput/HBM/network measurements. CPU simulations do not establish
 device correctness or performance.

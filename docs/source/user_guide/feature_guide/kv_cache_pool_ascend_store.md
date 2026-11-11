@@ -966,20 +966,18 @@ Expected output: MetaService starts successfully with no errors.
     or a model-name allowlist. Model implementations that reuse the same
     cache and hook contract adapt to topology changes automatically.
 
-    With Memcache, full cache blocks, and eager or PIECEWISE execution, dependency loads
+    With Memcache, full cache blocks, and eager execution, dependency loads
     are submitted before forward and copied in first-consumer order. Each
     layer waits only for the data it needs. The scheduler and worker use
     synchronous admission (`load_async` is internally set to false), while
     later copies overlap earlier computation. Physical-layer buffer reuse,
     offload snapshots, and KVPP layer hooks are not enabled for shared sources.
 
-    PIECEWISE reuses ordinary layerwise graph negotiation and split boundaries.
-    To select it, omit `--enforce-eager` and set
-    `compilation_config.cudagraph_mode` to `PIECEWISE`. With the V2 runner,
-    use a torch-compiled model or the existing
-    `VLLM_USE_BREAKABLE_CUDAGRAPH=1` option. DS4.1 attention, cache-only writes
-    and bounded replay callbacks stay outside graph segments; eager remains
-    supported. In PD separation, enable layerwise on P only; D keeps it disabled.
+    Use `--enforce-eager` for cross-layer deployments. PIECEWISE and combined
+    graph modes containing PIECEWISE are temporarily unsupported and fail
+    before GVA initialization. Their DS4.1 model-runtime adaptation is being
+    developed separately. In PD separation, enable layerwise on P only;
+    D keeps it disabled.
 
     PD separation also supports `MultiConnector` with the existing
     `AscendStoreConnector` store child alongside the PD transport child.

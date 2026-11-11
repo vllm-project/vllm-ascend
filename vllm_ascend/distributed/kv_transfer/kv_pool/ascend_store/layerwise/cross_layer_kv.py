@@ -36,6 +36,10 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
     def __init__(self, vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None):
         if not vllm_config.use_v2_model_runner:
             raise ValueError("cross_layer_kv requires Model Runner V2")
+        mode = vllm_config.compilation_config.cudagraph_mode
+        mode_name = getattr(mode, "name", str(mode))
+        if "PIECEWISE" in mode_name:
+            raise ValueError("cross_layer_kv does not support PIECEWISE yet; use --enforce-eager")
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         if self.pp_size != 1 or self.pcp_size != 1 or self.dcp_size != 1 or self.use_kvpp:
             raise ValueError("cross_layer_kv currently supports Memcache TP deployments without PP/PCP/DCP/KVPP")
@@ -44,8 +48,6 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
         self._pending_layers: set[int] = set()
         self._step_error: Exception | None = None
         self._pipeline_groups: set[int] = set()
-        mode = vllm_config.compilation_config.cudagraph_mode
-        mode_name = getattr(mode, "name", str(mode))
         speculative = vllm_config.speculative_config
         dspark = (
             speculative is not None
@@ -53,7 +55,7 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
             and getattr(speculative.draft_model_config, "architectures", []) == ["DeepseekV41DSparkModel"]
         )
         self._pipeline_enabled = (
-            (vllm_config.model_config.enforce_eager or mode_name in ("NONE", "PIECEWISE"))
+            (vllm_config.model_config.enforce_eager or mode_name == "NONE")
             and not getattr(vllm_config.parallel_config, "use_ubatching", False)
             and not getattr(vllm_config.parallel_config, "use_sequence_parallel_moe", False)
             and (speculative is None or dspark)
