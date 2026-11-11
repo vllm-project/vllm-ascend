@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 import sys
-from contextlib import nullcontext
-from types import SimpleNamespace
+from contextlib import contextmanager, nullcontext
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,10 +17,22 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
-    flash_attn_capture_context,
 )
+from vllm_ascend.compilation import updatable_graph
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
+
+
+@contextmanager
+def capture_resources():
+    # Exercise the real resource lookup/cache; only the NPU capture is omitted.
+    graph = SimpleNamespace(capture_resources={})
+    graph.get_capture_resource = MethodType(updatable_graph.UpdatableGraph.get_capture_resource, graph)
+    token = updatable_graph._ACTIVE_GRAPH.set(graph)
+    try:
+        yield graph
+    finally:
+        updatable_graph._ACTIVE_GRAPH.reset(token)
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
@@ -347,7 +359,7 @@ def test_flash_attn_reuses_plans_within_each_draft_step(monkeypatch, window, cau
     )
     for step, lengths in enumerate(([256, 254, 0], [253, 251, 0]), start=1):
         metadata = AscendFlashAttentionMetadata(seq_lens_gpu=torch.tensor(lengths, dtype=torch.int32), **metadata_args)
-        with flash_attn_capture_context({"draft": metadata}):
+        with capture_resources():
             for _ in range(6):
                 impl.forward_impl(query, None, None, None, metadata, output)
         assert ops.flash_attn_metadata.call_count == step
@@ -435,8 +447,8 @@ def test_metadata_builder_slices_request_extent():
 
 
 @pytest.mark.parametrize("warmup", [False, True])
-@pytest.mark.parametrize("scoped", [False, True])
-def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkeypatch, warmup, scoped):
+@pytest.mark.parametrize("managed_graph", [False, True])
+def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkeypatch, warmup, managed_graph):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
     query = torch.zeros(12, 8, 128, dtype=torch.bfloat16)
@@ -477,20 +489,19 @@ def test_capture_records_fresh_lengths_and_tiling_even_with_warmup_caches(monkey
         with monkeypatch.context() as patches:
             for operation in ("tolist", "item", "cpu"):
                 patches.setattr(torch.Tensor, operation, forbid_host_read)
-            scope = flash_attn_capture_context({"draft.0": metadata, "draft.1": metadata}) if scoped else nullcontext()
+            scope = capture_resources() if managed_graph else nullcontext()
             with scope:
                 for _ in range(6):
                     impl.forward_impl(query, None, None, None, metadata, output)
         calls = ops.flash_attn_metadata.call_args_list[tiling_start:]
-        assert len(calls) == (1 if scoped else 6)
-        assert metadata.flash_attn_capture_cache is None
+        assert len(calls) == (1 if managed_graph else 6)
         expected_boundaries = torch.tensor(boundaries, dtype=torch.int32).clamp(min=0).cummax(dim=0).values
         expected_lengths = torch.tensor(lengths, dtype=torch.int32).clamp(min=1)
         for call in calls:
             torch.testing.assert_close(call.kwargs["cu_seqlens_q"], expected_boundaries)
             torch.testing.assert_close(call.kwargs["seqused_kv"], expected_lengths)
         captured_plans = {id(call.kwargs["metadata"]) for call in ops.flash_attn.call_args_list[-6:]}
-        assert len(captured_plans) == (1 if scoped else 6)
+        assert len(captured_plans) == (1 if managed_graph else 6)
         assert captured_plans.isdisjoint(previous_plans)
         previous_plans.update(captured_plans)
     assert ops.flash_attn.call_count == 12
@@ -524,7 +535,7 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch, capturing
         (8, 1, 128, 2048, "PA_BBND"),
         (8, 1, 128, None, "PA_BNBD"),
     ]
-    with flash_attn_capture_context({"draft": metadata}):
+    with capture_resources():
         for _ in range(2):
             for heads, kv_heads, dim, window, layout in geometries:
                 query = torch.empty(6, heads, dim)
@@ -534,21 +545,38 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch, capturing
     assert ops.flash_attn.call_count == 2 * len(geometries)
 
 
-def test_capture_cache_isolates_groups_and_restores_after_failure(monkeypatch):
+def test_capture_resources_isolate_attention_groups(monkeypatch):
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata
 
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: True)
-    first, second = AscendFlashAttentionMetadata(), AscendFlashAttentionMetadata()
-    with flash_attn_capture_context({"first": first, "first_alias": first, "second": second, "other": object()}):
-        outer = first.flash_attn_capture_cache
-        assert outer is not None
-        assert second.flash_attn_capture_cache is not outer
-        with pytest.raises(RuntimeError, match="capture failed"), flash_attn_capture_context({"first": first}):
-            assert first.flash_attn_capture_cache is not outer
-            raise RuntimeError("capture failed")
-        assert first.flash_attn_capture_cache is outer
-    assert first.flash_attn_capture_cache is None
-    assert second.flash_attn_capture_cache is None
+    query = torch.zeros(6, 8, 128)
+    ops = SimpleNamespace(
+        flash_attn_metadata=Mock(side_effect=lambda *args, **kwargs: torch.empty(16)),
+        flash_attn=Mock(return_value=(query, None)),
+    )
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    groups = [
+        AscendFlashAttentionMetadata(
+            query_start_loc_gpu=torch.tensor([0, 6], dtype=torch.int32),
+            seq_lens_gpu=torch.tensor([length], dtype=torch.int32),
+            block_tables=torch.zeros(1, 2, dtype=torch.int32),
+            max_query_len=6,
+            causal=False,
+        )
+        for length in (128, 256)
+    ]
+    impl = make_impl(query)
+    with capture_resources():
+        for _ in range(2):
+            for metadata in groups:
+                impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
+    assert ops.flash_attn_metadata.call_count == 2
+    plans = [call.kwargs["metadata"] for call in ops.flash_attn.call_args_list]
+    assert plans[0] is plans[2]
+    assert plans[1] is plans[3]
+    assert plans[0] is not plans[1]
+    for call, length in zip(ops.flash_attn_metadata.call_args_list, (128, 256)):
+        torch.testing.assert_close(call.kwargs["seqused_kv"], torch.tensor([length], dtype=torch.int32))
 
 
 @pytest.mark.parametrize("backend", [AscendFlashAttentionBackend, AscendAttentionBackend], ids=["flash", "fia"])

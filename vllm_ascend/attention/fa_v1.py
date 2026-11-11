@@ -3,7 +3,6 @@
 
 """Device-length CANN FlashAttn for A5 V2 drafts."""
 
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
 import torch
@@ -15,13 +14,8 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendMetadata,
 )
+from vllm_ascend.compilation.updatable_graph import get_capture_resource
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
-
-
-@dataclass
-class _FlashAttentionPlanCache:
-    flash_attn_plans: dict = field(default_factory=dict)
-    flash_attn_lengths: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -30,29 +24,6 @@ class AscendFlashAttentionMetadata(AscendMetadata):
     # Eager plans belong to one attention group and draft step.
     flash_attn_plans: dict = field(default_factory=dict)
     flash_attn_lengths: tuple[torch.Tensor, torch.Tensor] | None = None
-    flash_attn_capture_cache: _FlashAttentionPlanCache | None = field(default=None, repr=False)
-
-
-@contextmanager
-def flash_attn_capture_context(attn_metadata):
-    """Share producers within one captured forward, never across captures."""
-    if attn_metadata is None or not torch.npu.is_current_stream_capturing():
-        yield
-        return
-    # Every layer in an attention group can reference the same metadata.
-    metadata_by_id = {
-        id(metadata): metadata
-        for metadata in attn_metadata.values()
-        if isinstance(metadata, AscendFlashAttentionMetadata)
-    }
-    previous = [(metadata, metadata.flash_attn_capture_cache) for metadata in metadata_by_id.values()]
-    try:
-        for metadata, _ in previous:
-            metadata.flash_attn_capture_cache = _FlashAttentionPlanCache()
-        yield
-    finally:
-        for metadata, cache in previous:
-            metadata.flash_attn_capture_cache = cache
 
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -136,6 +107,25 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
     def do_kv_cache_update(self, layer, key, value, kv_cache, slot_mapping):
         return super().do_kv_cache_update(layer, self._pad_head(key), self._pad_head(value), kv_cache, slot_mapping)
 
+    @staticmethod
+    def _get_lengths(metadata, num_tokens):
+        def build():
+            num_reqs = metadata.block_tables.shape[0]
+            boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
+            # Dummy requests may have repeated or negative query boundaries.
+            boundaries = boundaries.clamp(min=0, max=num_tokens).cummax(dim=0).values
+            lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
+            return boundaries, lengths
+
+        if torch.npu.is_current_stream_capturing():
+            # DFlash captures one query forward per graph. Graph-owned resources
+            # share producers across layers without reusing warmup/other graphs.
+            # Without an active UpdatableGraph, the factory runs for each layer.
+            return get_capture_resource(("flash_attn.lengths", id(metadata), num_tokens), build)
+        if metadata.flash_attn_lengths is None:
+            metadata.flash_attn_lengths = build()
+        return metadata.flash_attn_lengths
+
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         """Share device lengths and tiling within a draft step or capture."""
         # Load CANN only in workers using this backend.
@@ -145,23 +135,7 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         output_head_size = query.shape[-1]
         query = self._pad_head(query)
         metadata = attn_metadata
-        # Warmup can populate the Python caches before capture. Reusing those
-        # tensors would omit length preparation and tiling from the graph,
-        # freezing rejection-corrected lengths at their warmup values. A scoped
-        # capture cache shares fresh producers across compatible layers only.
-        # Unscoped captures retain the safe, uncached behavior.
-        capturing = torch.npu.is_current_stream_capturing()
-        cache = metadata.flash_attn_capture_cache if capturing else metadata
-        flash_attn_lengths = cache.flash_attn_lengths if cache is not None else None
-        if flash_attn_lengths is None:
-            num_reqs = metadata.block_tables.shape[0]
-            boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
-            # Dummy requests may have repeated or negative query boundaries.
-            boundaries = boundaries.clamp(min=0, max=query.shape[0]).cummax(dim=0).values
-            lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
-            flash_attn_lengths = boundaries, lengths
-            if cache is not None:
-                cache.flash_attn_lengths = flash_attn_lengths
+        flash_attn_lengths = self._get_lengths(metadata, query.shape[0])
 
         layout_kv = "PA_BNBD" if self.use_bnsd_kv_cache else "PA_BBND"
         plan_key = (
@@ -173,8 +147,8 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             metadata.max_query_len,
             metadata.causal,
         )
-        cached = cache.flash_attn_plans.get(plan_key) if cache is not None else None
-        if cached is None:
+
+        def build_plan():
             window = self.sliding_window - 1 if self.sliding_window is not None else -1
             # Both CANN operators require the same lengths, mask and layout.
             # Mask modes: 0 = unmasked, 3 = causal, 4 = sliding window.
@@ -190,10 +164,16 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
                 layout_kv=layout_kv,
                 layout_out="TND",
             )
-            cached = flash_attn_metadata(self.num_heads, self.num_kv_heads, query.shape[-1], **attrs), attrs
-            if cache is not None:
-                cache.flash_attn_plans[plan_key] = cached
-        plan, attrs = cached
+            return flash_attn_metadata(self.num_heads, self.num_kv_heads, query.shape[-1], **attrs), attrs
+
+        if torch.npu.is_current_stream_capturing():
+            # Record tiling in the graph so every replay reads current device
+            # lengths. Only compatible layers in the same group share a plan.
+            plan, attrs = get_capture_resource(("flash_attn.plan", id(metadata), query.shape[0], plan_key), build_plan)
+        else:
+            if plan_key not in metadata.flash_attn_plans:
+                metadata.flash_attn_plans[plan_key] = build_plan()
+            plan, attrs = metadata.flash_attn_plans[plan_key]
 
         with attention_transfer_window():
             result, _ = flash_attn(
