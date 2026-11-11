@@ -101,7 +101,7 @@ set_directory_properties(PROPERTIES
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 set(VLLM_ASCEND_CANN_COMPAT_HEADER "${OPS_TRANSFORMER_DIR}/common/include/cann_compat.h")
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
-list(APPEND OPS_COMPILE_OPTIONS -includecann_compat.h)
+list(APPEND OPS_COMPILE_OPTIONS -include cann_compat.h)
 add_compile_options(
     $<$<COMPILE_LANGUAGE:CXX>:-include${VLLM_ASCEND_CANN_COMPAT_HEADER}>
 )
