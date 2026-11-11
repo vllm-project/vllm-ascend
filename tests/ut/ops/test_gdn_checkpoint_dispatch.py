@@ -115,7 +115,7 @@ def test_boundary_policy(transfer, drop, lookahead, expected):
 
 
 def test_workspace_sharing_and_fallback():
-    context = {}
+    context: dict[str, SimpleNamespace] = {}
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=2),
         compilation_config=SimpleNamespace(static_forward_context=context),
