@@ -12,9 +12,12 @@ variants:
     vram_minimum_gb: 282
     supported_hardware:
       - ascend_910c
-    tp: 4
+    # TP4 leaves each die with a quarter of the experts and OOMs on this 235B
+    # checkpoint (measured), so the variant uses the whole node: TP16 with EP,
+    # which is what single_node_tp / single_node_tep render. DP16 also fits.
+    tp: 16
     min_vllm_version: 0.23.0
-    description: ModelSlim W8A8-QuaRot checkpoint for one Atlas 800 A3 node (16x Ascend 910C) with DP4+TP4+EP. Requires --quantization ascend.
+    description: ModelSlim W8A8-QuaRot checkpoint for one Atlas 800 A3 node (16x Ascend 910C) with TP16+EP. Requires --quantization ascend.
     extra_args:
       - '--enable-expert-parallel'
       - '--seed'
