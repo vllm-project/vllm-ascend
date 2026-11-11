@@ -8,7 +8,8 @@ entries:
       wait queue so get_output only submits.
   - category: feature
     text: >-
-      rare_chars builds its per-tokenizer table at model warmup (table=auto)
-      instead of shipping qwen3/glm/dsv4 npz blobs; the shared rc4_gb model
-      remains packaged. rare_feed_native is always a setuptools Extension so
-      wheels include it for both COMPILE_CUSTOM_KERNELS=0 and =1.
+      rare_chars builds its per-tokenizer table at model warmup from the
+      served tokenizer; think_end/alert_monitor live in packaged rc4.json
+      (runtime_config only has enabled). rare_feed_native is always a
+      setuptools Extension so wheels include it for both
+      COMPILE_CUSTOM_KERNELS=0 and =1.

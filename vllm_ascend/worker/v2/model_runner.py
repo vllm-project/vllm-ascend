@@ -337,7 +337,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
-        # rare_chars builds its per-tokenizer table here (table=auto).
+        # rare_chars builds its per-tokenizer table here from the served tokenizer.
         guard = getattr(self, "runtime_guard", None)
         if guard is not None:
             guard.warmup_detectors()

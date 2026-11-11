@@ -5,6 +5,8 @@
  "gb": "rc4_gb.npz",
  "gate": "fs",
  "ref": "cats",
+ "think_end": "auto",
+ "alert_monitor": false,
  "rules": [
   {"and": [{"f": "lpc", "lt": -4.0}, {"f": "fs", "lt": 0.002}, {"f": "caseless_after_latin"}]},
   {"and": [{"f": "bad_utf8"}]},
