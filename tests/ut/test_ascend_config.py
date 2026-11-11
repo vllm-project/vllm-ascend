@@ -446,6 +446,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.enable_small_decode_attention)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         # 0 = let the MegaMoe operator auto-compute the receive capacity.
         self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
