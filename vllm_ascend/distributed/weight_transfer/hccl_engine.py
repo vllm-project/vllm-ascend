@@ -295,7 +295,7 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 self._release_group()
             raise
 
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
 
         def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
             with torch.npu.device(self.device):
