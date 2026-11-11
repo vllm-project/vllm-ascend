@@ -556,7 +556,7 @@ def test_bounded_trainer_passes_metadata_and_reuses_session_streams():
         patch(f"{namespace}.packed_broadcast_producer") as legacy,
     ):
         for _ in range(2):
-            if vllm_version_is("0.32.0"):
+            if vllm_version_is("0.33.0"):
                 engine._broadcast(engine.source, metadata)
             else:
                 engine._broadcast(metadata, 0)
