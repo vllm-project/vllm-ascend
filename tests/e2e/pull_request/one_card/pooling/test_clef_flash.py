@@ -3,11 +3,11 @@
 import base64
 import importlib.util
 import io
+from typing import Any
 
 import huggingface_hub
 import pytest
 import requests
-from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
@@ -23,6 +23,8 @@ MODEL = "Cloudflare/clef-flash"
 
 @pytest.fixture(scope="module")
 def clef_server():
+    from modelscope import snapshot_download  # type: ignore[import-untyped]
+
     host = "127.0.0.1"
     port = get_open_port()
     checkpoint = snapshot_download(MODEL, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE)
@@ -33,7 +35,7 @@ def clef_server():
 
 @pytest.mark.parametrize("image_color", [None, "red", "blue"], ids=["text", "red-image", "blue-image"])
 def test_clef_flash_joint_schema(clef_server, image_color):
-    request = {
+    request: dict[str, Any] = {
         "model": MODEL,
         "state": "A customer reports a damaged delivery and requests a replacement.",
         "questions": {
