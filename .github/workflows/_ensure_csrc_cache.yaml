@@ -139,7 +139,7 @@ jobs:
           fi
           git fetch "$BASE_REMOTE" "$BASE_REF"
           git cat-file -e "${BASE_SHA}^{commit}"
-          git rebase "$BASE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD || git rebase "$BASE_SHA"
 
       - name: Calculate csrc hash
         id: hash
