@@ -907,10 +907,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
+        from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
@@ -941,7 +941,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
     else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
