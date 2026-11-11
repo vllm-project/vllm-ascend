@@ -10,7 +10,7 @@ meta:
   performance_headline: "Single-card pooling serving on Ascend 910C with vLLM Ascend"
   default_hardware: ascend_910c
   hardware:
-    ascend_910c: supported
+    ascend_910c: verified
 
 model:
   model_id: "Qwen/Qwen3-Embedding-0.6B"
@@ -59,11 +59,11 @@ guide: |
 
   The main tutorial marks this model discontinued since vLLM Ascend v0.30.0 and points at the
   v0.23.0 documentation, so this recipe is pinned to the `v0.23.0.post1-a3` image and only covers the
-  single-node pooling scenario that document describes. Atlas 800 A3 is declared `supported`
-  rather than `verified`: the health, model-list and 100-request checks below were recorded on
-  a pre-release nightly build (vLLM Ascend 0.19.1rc2.dev3230+g469c6c260), and have not been
-  repeated on the pinned `v0.23.0.post1-a3` image. Full MTEB accuracy, long-context, and other
-  hardware scenarios remain unverified.
+  single-node pooling scenario that document describes. Atlas 800 A3 is `verified` on that image:
+  one Atlas 800T A3 node served this model with the rendered command, `/v1/models` and
+  `/v1/embeddings` returned 1024-dimensional vectors, and MTEB BeIR/SciFact retrieval scored
+  **nDCG@10 0.6661** over 5,183 documents and 300 scored queries. Full MTEB coverage,
+  long-context, and other hardware scenarios remain unverified.
 
   ## Client Usage
 
