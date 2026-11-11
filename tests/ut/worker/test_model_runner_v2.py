@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pytest
 import torch
+from vllm import envs
 from vllm.config import CompilationMode, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -1593,6 +1594,7 @@ def _run_prepare_inputs(
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
         prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
+        batch.is_padding = make_batch.call_args.kwargs["is_padding"]
         assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
         assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
         assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
@@ -1607,6 +1609,27 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_prepare_inputs_refreshes_captured_padding_storage(monkeypatch, enabled):
+    monkeypatch.setattr(envs, "VLLM_MOE_SKIP_PADDING", enabled)
+    runner, scheduler_output, state, desc = _prepare_inputs_runner()
+    buffers = AscendInputBuffers(4, 13, runner.device)
+    runner.input_buffers = buffers
+    captured = buffers.is_padding[:]
+    assert captured.shape == (13,)
+    captured.fill_(True)  # Graph capture marks all dummy rows as padding.
+
+    for valid, padded in ((13, 13), (6, 8), (4, 7), (8, 8)):
+        scheduler_output.num_scheduled_tokens = {"r0": valid - 1, "r1": 1}
+        state.num_scheduled_tokens = np.array([valid - 1, 1], dtype=np.int32)
+        state.num_tokens = valid
+        desc.num_tokens = padded
+        batch, _ = _run_prepare_inputs(runner, scheduler_output, state, desc)
+        assert batch.is_padding.shape == (padded,)
+        assert batch.is_padding.data_ptr() == captured.data_ptr()
+        torch.testing.assert_close(captured[:padded], torch.arange(padded) >= valid)
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
