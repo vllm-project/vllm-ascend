@@ -1,0 +1,4 @@
+pr: 21622
+entries:
+  - category: feature
+    text: Added independent prefill and decode DCP support for MLA KV transfer in MooncakePushConnector, including different DCP sizes on the two peers. Both peers must use PCP=1.
