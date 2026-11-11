@@ -28,7 +28,11 @@ import torch
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import C8_FIA_PSEUDO_QUANT_MODE, AscendC8AttentionBackendImpl
+from vllm_ascend.attention.attention_v1 import (
+    C8_FIA_PSEUDO_QUANT_MODE,
+    AscendC8AttentionBackendImpl,
+    FIAParamProvider,
+)
 
 NUM_HEADS = 8
 NUM_KV_HEADS = 4
@@ -225,3 +229,100 @@ class TestC8Quant5MultiTokenDecode(TestBase):
         self.impl._forward_c8_decode(query, self.metadata, output, self.layer)
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(kw.get("quant_mode") != C8_FIA_PSEUDO_QUANT_MODE for kw in calls[2:]))
+
+    def _capture_ready_layer(self):
+        layer = MagicMock()
+        layer.layer_name = "test_layer"
+        layer.k_cache_scale = torch.nn.Parameter(torch.ones(1))
+        layer.k_cache_offset = torch.nn.Parameter(torch.zeros(1))
+        layer.v_cache_scale = torch.nn.Parameter(torch.ones(1))
+        layer.v_cache_offset = torch.nn.Parameter(torch.zeros(1))
+        layer._c8_k_aq_scale_nz_bnsd = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_v_aq_scale_nz_bnsd = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_k_scale = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_v_scale = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_k_offset = torch.zeros(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_v_offset = torch.zeros(1, NUM_KV_HEADS, HEAD_SIZE)
+        return layer
+
+    @patch(
+        "vllm_ascend.ascend_forward_context.get_forward_context",
+        return_value=MagicMock(capturing=True),
+    )
+    def test_graph_capture_multi_token_decode_is_rejected(self, _mock_ctx):
+        # Through the public forward(): under graph capture the C8 branch of
+        # full_graph_fia would use the one-query-row BNSD call, so MTP-shaped
+        # capture must be rejected with an actionable error instead.
+        self.mock_vllm_config.kv_transfer_config = None
+        layer = self._capture_ready_layer()
+        query = torch.randn(9, NUM_HEADS, HEAD_SIZE)
+        key = torch.randn(9, NUM_KV_HEADS, HEAD_SIZE)
+        value = torch.randn(9, NUM_KV_HEADS, HEAD_SIZE)
+        output = torch.empty_like(query)
+        self.metadata.num_actual_tokens = 9
+        self.metadata.num_decodes = 2
+        self.metadata.num_decode_tokens = 6
+        self.metadata.model_runner_type = "generate"
+        self.metadata.attn_state = attn_module.AscendAttentionState.PrefillNoCache
+
+        with self.assertRaises(NotImplementedError) as ctx:
+            self.impl.forward(layer, query, key, value, (), self.metadata, output)
+        self.assertIn("ACL graph", str(ctx.exception))
+
+    @patch(
+        "vllm_ascend.ascend_forward_context.get_forward_context",
+        return_value=MagicMock(capturing=True),
+    )
+    @patch("torch_npu.npu_fused_infer_attention_score.out", create=True)
+    def test_graph_capture_single_token_decode_keeps_c8_bnsd(self, mock_out, _mock_ctx):
+        # Non-MTP capture keeps the historical BNSD call unchanged (no
+        # quant_mode kwarg, output unsqueezed to 4D).
+        self.mock_vllm_config.kv_transfer_config = None
+        layer = self._capture_ready_layer()
+        self.impl._use_max_workspace_for_fia_graph = False
+        query = torch.randn(2, NUM_HEADS, HEAD_SIZE)
+        key = torch.randn(2, NUM_KV_HEADS, HEAD_SIZE)
+        value = torch.randn(2, NUM_KV_HEADS, HEAD_SIZE)
+        output = torch.empty_like(query)
+        self.metadata.num_actual_tokens = 2
+        self.metadata.num_decodes = 2
+        self.metadata.num_decode_tokens = 2
+        self.metadata.actual_seq_lengths_q = [1, 2]
+        self.metadata.attn_mask = None
+        self.metadata.causal = True
+        self.metadata.model_runner_type = "generate"
+        self.metadata.attn_state = attn_module.AscendAttentionState.PrefillNoCache
+
+        returned = self.impl.forward(layer, query, key, value, (), self.metadata, output)
+
+        self.assertIs(returned, output)
+        mock_out.assert_called_once()
+        kw = mock_out.call_args.kwargs
+        self.assertEqual(kw["input_layout"], "BNSD")
+        self.assertNotIn("quant_mode", kw)
+        self.assertIsNone(kw["atten_mask"])
+        self.assertEqual(kw["out"][0].dim(), 4)
+
+    def test_fia_param_provider_rejects_multi_token_replay_for_c8_bnsd(self):
+        provider = FIAParamProvider(layer_name="test_layer", sliding_window=None, is_c8_bnsd=True)
+        multi_token = MagicMock()
+        multi_token.num_decode_tokens = 6
+        multi_token.num_decodes = 2
+        with self.assertRaises(NotImplementedError) as ctx:
+            provider.resolve({"test_layer": multi_token})
+        self.assertIn("ACL graph", str(ctx.exception))
+
+        # Single-token replay resolves normally.
+        single_token = MagicMock()
+        single_token.num_decode_tokens = 2
+        single_token.num_decodes = 2
+        single_token.actual_seq_lengths_q = [1, 2]
+        single_token.seq_lens_list = [10, 12]
+        single_token.block_tables = torch.zeros(2, 4)
+        resolved = provider.resolve({"test_layer": single_token})
+        self.assertEqual(resolved["actual_seq_lengths"], [1, 2])
+
+        # The base TND tasks (is_c8_bnsd=False) are unaffected by MTP replays.
+        base_provider = FIAParamProvider(layer_name="test_layer", sliding_window=None)
+        resolved = base_provider.resolve({"test_layer": multi_token})
+        self.assertIn("block_table", resolved)

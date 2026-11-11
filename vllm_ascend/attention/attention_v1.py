@@ -77,6 +77,14 @@ _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 # for the multi-token-query decode segment of MTP / speculative decoding.
 C8_FIA_PSEUDO_QUANT_MODE = 5
 
+C8_GRAPH_MTP_UNSUPPORTED_MESSAGE = (
+    "C8 INT8 KV cache does not support multi-token-query decode (MTP / speculative "
+    "decoding) under ACL graph capture: the captured path uses the one-query-row BNSD "
+    "FIA branch, which would slice query rows against mismatched KV batch rows. Run "
+    "C8+MTP with ACL graph disabled (eager mode) until the FIA quant_mode=5 path "
+    "supports graph capture."
+)
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
@@ -523,9 +531,17 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    # Set for tasks captured by the C8 BNSD branch of full_graph_fia: the
+    # captured operator call bakes one-query-row-per-request BNSD, so a replay
+    # that arrives with multi-token-query metadata (MTP) must be rejected
+    # instead of silently rebinding mismatched lengths.
+    is_c8_bnsd: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
+
+        if self.is_c8_bnsd and metadata.num_decode_tokens != metadata.num_decodes:
+            raise NotImplementedError(C8_GRAPH_MTP_UNSUPPORTED_MESSAGE)
 
         if self.is_draft_model or not self.sliding_window:
             return {
@@ -705,6 +721,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:
+            if attn_metadata.num_decode_tokens != attn_metadata.num_decodes:
+                raise NotImplementedError(C8_GRAPH_MTP_UNSUPPORTED_MESSAGE)
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale_nz_bnsd,
                 "value_antiquant_scale": layer._c8_v_aq_scale_nz_bnsd,
@@ -779,6 +797,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                is_c8_bnsd=bool(extra_args),
             ),
         )
         return output, num_tokens
