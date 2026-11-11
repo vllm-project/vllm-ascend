@@ -46,6 +46,10 @@ variants:
     default_modes:
       spec_decoding: mtp
     extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
       - '--quantization'
       - ascend
       - '--max-num-seqs'
@@ -94,6 +98,10 @@ variants:
     default_modes:
       spec_decoding: mtp
     extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
       - '--quantization'
       - ascend
       - '--max-model-len'
