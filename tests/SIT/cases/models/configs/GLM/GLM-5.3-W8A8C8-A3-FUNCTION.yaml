@@ -1,6 +1,6 @@
 # GLM-5.3 W8A8C8 RP3 PD coverage.
 # 16 physical A3 cards (32 logical NPUs); combined RP3 feature smoke with a nonempty completion.
-# Bound prefill/decode batches to 256/16 tokens and concurrent sequences to 8/1.
+# Bound prefill/decode batches to 256/2 tokens and concurrent sequences to 8/1.
 # Full-weight services retain a 0.92 memory budget, MTP and 16K context.
 test_name: GLM-5.3-W8A8C8-A3-FUNCTION
 model: Eco-Tech/GLM-5.3-w8a8c8
@@ -99,7 +99,7 @@ env_decode:
   TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_BUFFSIZE: '64'
+  HCCL_BUFFSIZE: '16'
   TASK_QUEUE_ENABLE: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -270,7 +270,7 @@ templates:
     TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '64'
+    HCCL_BUFFSIZE: '16'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -303,7 +303,7 @@ templates:
   - --max-model-len
   - '16384'
   - --max-num-batched-tokens
-  - '16'
+  - '2'
   - --trust-remote-code
   - --max-num-seqs
   - '1'
@@ -341,7 +341,7 @@ templates:
     TORCH_EXTENSIONS_DIR: /tmp/glm53_function_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '64'
+    HCCL_BUFFSIZE: '16'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -374,7 +374,7 @@ templates:
   - --max-model-len
   - '16384'
   - --max-num-batched-tokens
-  - '16'
+  - '2'
   - --trust-remote-code
   - --max-num-seqs
   - '1'
