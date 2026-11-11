@@ -2862,8 +2862,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int attention_block_stride, int union_rows, int attention_capacity=0) -> ()");
     ops.impl("hisparse_resolve_residency", torch::kPrivateUse1, &vllm_ascend::hisparse::resolve_residency);
     ops.impl("hisparse_resolve_residency", torch::kMeta, &vllm_ascend::hisparse::resolve_residency_meta);
-    ops.def("hisparse_resolver_scratch_capacity() -> int",
-            []() -> int64_t { return hisparse_resolver_scratch_capacity(); });
+    ops.def("hisparse_resolver_validate_scratch(int hot, int union_rows) -> ()",
+            [](int64_t hot, int64_t union_rows) {
+                vllm_ascend::hisparse::resolver_hash_size(hot, union_rows);
+            });
 #endif
     ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
     ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,

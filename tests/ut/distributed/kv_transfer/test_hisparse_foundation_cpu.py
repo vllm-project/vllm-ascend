@@ -178,7 +178,7 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
 
     # Loading a device extension is the only mocked boundary; the group-owned
     # tensors below are real CPU storage, not a replacement resolver algorithm.
-    native = NS(hisparse_resolver_scratch_capacity=lambda: 175616)
+    native = NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
     monkeypatch.setattr(resolver, "_load_resolver", lambda: native)
     backend = AscendHiSparseBackend()
 
@@ -231,31 +231,6 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
 def test_resolver_scratch_rejects_topk_outside_hot_capacity(topk):
     with pytest.raises(ValueError, match="TopK capacity"):
         hisparse_ops.ResolverWorkspace(4, 16, 8, torch.device("cpu"), max_topk=topk)
-
-
-def test_native_resolver_uses_available_ub_without_truncating_the_union():
-    from vllm_ascend.hisparse.resolver import scratch_layout
-
-    hot, union, capacity = 12288, 8192, 175616
-    buckets, size = scratch_layout(hot, union, capacity)
-    assert buckets > union
-    assert 0 < size <= capacity and size % 64 == 0
-    # Find the actual supported boundary without pinning a particular hash
-    # bucket count or the precise UB layout/error-message arithmetic.
-    too_small, fits = 0, capacity
-    while fits - too_small > 1:
-        candidate = (too_small + fits) // 2
-        try:
-            scratch_layout(hot, union, candidate)
-        except RuntimeError:
-            too_small = candidate
-        else:
-            fits = candidate
-    minimum_buckets, minimum_size = scratch_layout(hot, union, fits)
-    assert minimum_buckets > union and minimum_size <= fits
-    assert minimum_size % 64 == 0
-    with pytest.raises(RuntimeError, match="UB bytes"):
-        scratch_layout(hot, union, fits - 1)
 
 
 def test_missing_native_resolver_raises_instead_of_falling_back(monkeypatch):
@@ -392,7 +367,9 @@ def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
 ):
     from vllm_ascend.hisparse import resolver
 
-    monkeypatch.setattr(resolver, "_load_resolver", lambda: NS(hisparse_resolver_scratch_capacity=lambda: 175616))
+    monkeypatch.setattr(
+        resolver, "_load_resolver", lambda: NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
+    )
     backend = AscendHiSparseBackend()
     group = NS(copy_stream=NS(device=torch.device("cpu")))
     runtime = NS(

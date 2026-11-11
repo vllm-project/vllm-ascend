@@ -4,31 +4,10 @@
 import torch
 
 
-def scratch_layout(hot, max_union_rows, capacity=None):
-    """Size hash/LRU scratch from the request capacity, not a model shape."""
-    if not 0 < max_union_rows <= hot <= 32768:
-        raise ValueError("HiSparse union must fit the hot cache and int16 LRU slot representation")
-    hash_size = 1 << max_union_rows.bit_length()
-    tiles = (hot + 31) // 32
-    fixed_words = hot + 2 * tiles + 64
-    if capacity is not None:
-        available_words = max(0, (capacity - 512) // 64) * 16
-        max_hash_size = (available_words - fixed_words) // 2
-        if max_hash_size <= max_union_rows:
-            minimum_bytes = ((2 * (max_union_rows + 1) + fixed_words + 15) // 16) * 64 + 512
-            raise RuntimeError(
-                f"HiSparse hot_size={hot}, max_union_rows={max_union_rows} needs at least {minimum_bytes} UB bytes; "
-                f"the compiled target allows {capacity}. Lower device_buffer_size or speculative tokens."
-            )
-        hash_size = min(hash_size, max_hash_size)
-    scratch_ints = ((2 * hash_size + hot + 2 * tiles + 64 + 15) // 16) * 16
-    return hash_size, scratch_ints * 4 + 512
-
-
 def _load_resolver():
     namespace = torch.ops._C_ascend
     if not all(
-        hasattr(namespace, name) for name in ("hisparse_resolver_scratch_capacity", "hisparse_resolve_residency")
+        hasattr(namespace, name) for name in ("hisparse_resolver_validate_scratch", "hisparse_resolve_residency")
     ):
         raise RuntimeError("HiSparse requires its compiled AscendC resolver. Rebuild vllm-ascend for this target.")
     return namespace

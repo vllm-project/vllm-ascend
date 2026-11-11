@@ -26,6 +26,16 @@ def _require_mapped_host_device():
     AscendHiSparseBackend().check_available()
 
 
+def test_native_resolver_validates_ub_before_allocating_workspace():
+    # This is the same validator called by workspace construction and launch.
+    validate = torch.ops._C_ascend.hisparse_resolver_validate_scratch
+    validate(10240, 2048)
+    with pytest.raises(RuntimeError, match="UB bytes"):
+        validate(32768, 32768)
+    with pytest.raises(RuntimeError, match="int16 LRU slots"):
+        validate(16, 17)
+
+
 @pytest.mark.parametrize("descriptor_count", [0, 1, 16, 17, 312])
 @pytest.mark.parametrize("graph_producer", [False, True])
 def test_private_host_pool_retains_pinned_storage_for_dma_writeback(descriptor_count, graph_producer):

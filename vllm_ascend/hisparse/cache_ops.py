@@ -43,10 +43,10 @@ class ResolverWorkspace:
         self.max_topk = hot_size if max_topk is None else max_topk
         if not 0 < self.max_topk <= hot_size:
             raise ValueError("HiSparse resolver TopK capacity must be positive and fit the Hot cache")
-        from vllm_ascend.hisparse.resolver import _load_resolver, scratch_layout
+        from vllm_ascend.hisparse.resolver import _load_resolver
 
         self.native = _load_resolver()
-        scratch_layout(hot_size, max_union_rows, self.native.hisparse_resolver_scratch_capacity())
+        self.native.hisparse_resolver_validate_scratch(hot_size, max_union_rows)
         # One resolved Host row per selected token, not per Hot-cache slot.
         self.first_refs = torch.empty(max_rows * self.max_topk, dtype=torch.int32, device=device)
         self.errors = torch.zeros((max_rows, 8), dtype=torch.int32, device=device)

@@ -22,6 +22,23 @@ at::Tensor tensor_or_undefined(const std::optional<at::Tensor>& tensor) {
     return tensor.value_or(at::Tensor());
 }
 
+inline int64_t resolver_hash_size(int64_t hot, int64_t union_rows) {
+    TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
+                "HiSparse union must fit the hot cache and int16 LRU slots");
+    int64_t hash_size = 1;
+    while (hash_size <= union_rows) hash_size <<= 1;
+    const uint64_t tiles = (hot + 31) / 32;
+    const uint64_t budget = hisparse_resolver_scratch_capacity();
+    const uint64_t fixed_words = hot + 2 * tiles + 64;
+    const uint64_t minimum_bytes = (2 * (union_rows + 1) + fixed_words + 15) / 16 * 64 + 512;
+    TORCH_CHECK(minimum_bytes <= budget,
+                "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
+                " needs at least ", minimum_bytes, " UB bytes; the compiled target allows ", budget,
+                ". Lower device_buffer_size or speculative tokens.");
+    const uint64_t available_words = (budget - 512) / 64 * 16;
+    return std::min(hash_size, int64_t((available_words - fixed_words) / 2));
+}
+
 void resolve_residency(
     const at::Tensor& logical,
     const std::optional<at::Tensor>& requests,
@@ -50,8 +67,7 @@ void resolve_residency(
     const auto rows = logical.size(0), topk = logical.size(1), hot = dgi.size(1);
     TORCH_CHECK(rows > 0 && topk > 0 && rows <= ((int64_t(1) << 30) - 1) / topk,
                 "HiSparse first-reference positions exceed the int32 tag representation");
-    TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768 && topk <= hot,
-                "HiSparse union must fit the hot cache and int16 LRU slots");
+    TORCH_CHECK(topk <= hot, "HiSparse TopK must fit the hot cache");
     TORCH_CHECK(host_rows > 0 && host_rows < (int64_t(1) << 31), "Invalid HiSparse host row capacity");
     TORCH_CHECK(hot_block_size > 0 && attention_block_stride >= hot_block_size,
                 "Invalid hot/attention block strides");
@@ -67,18 +83,7 @@ void resolve_residency(
     TORCH_CHECK(!source || source->dim() == 2, "HiSparse source table must be a matrix");
     TORCH_CHECK(!resident || resident->dim() == 2, "HiSparse resident table must be a matrix");
     TORCH_CHECK(lru.sizes() == dgi.sizes(), "HiSparse LRU/tag geometry mismatch");
-    int64_t hash_size = 1;
-    while (hash_size <= union_rows) hash_size <<= 1;
-    const uint64_t tiles = (hot + 31) / 32;
-    const uint64_t budget = hisparse_resolver_scratch_capacity();
-    const uint64_t available_words = (budget - 512) / 64 * 16;
-    const uint64_t fixed_words = hot + 2 * tiles + 64;
-    const uint64_t minimum_bytes = (2 * (union_rows + 1) + fixed_words + 15) / 16 * 64 + 512;
-    TORCH_CHECK(minimum_bytes <= budget,
-                "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
-                " needs at least ", minimum_bytes, " UB bytes; the compiled target allows ", budget,
-                ". Lower device_buffer_size or speculative tokens.");
-    hash_size = std::min(hash_size, int64_t((available_words - fixed_words) / 2));
+    const int64_t hash_size = resolver_hash_size(hot, union_rows);
 
     const std::array<at::Tensor, 19> tensors = {
         logical, tensor_or_undefined(requests), tensor_or_undefined(states),
