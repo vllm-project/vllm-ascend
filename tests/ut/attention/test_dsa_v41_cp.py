@@ -1114,12 +1114,16 @@ class TestPCPBatchLifecycle:
         indexer.owns_k, indexer.width, indexer.rope_width = True, 2, 2
         indexer.packed_cache_ops = None
         indexer.wk, indexer.k_norm = _linear(2, 2).to(torch.bfloat16), torch.nn.Identity()
+        indexer.k_norm.weight = torch.nn.Parameter(torch.ones(2))
+        indexer.k_norm.variance_epsilon = 1e-6
         indexer.k_cache = SimpleNamespace(kv_cache=[(k_cache, scale_cache)])
         attn.indexer = indexer
         compressor = DeepseekV41Compressor.__new__(DeepseekV41Compressor)
         torch.nn.Module.__init__(compressor)
         compressor.width = 2
         compressor.wkv, compressor.wgate, compressor.norm = _linear(4, 2), _linear(4, 2), torch.nn.Identity()
+        compressor.norm.weight = torch.nn.Parameter(torch.ones(2))
+        compressor.norm.variance_epsilon = 1e-6
         monkeypatch.setattr(
             compressor, "state_cache", SimpleNamespace(kv_cache=[torch.zeros(256, 32, 1, 4)]), raising=False
         )
@@ -1129,6 +1133,8 @@ class TestPCPBatchLifecycle:
         ring_steps, stores = [], []
 
         def pool(kv, scores, cache, metadata, output, **kwargs):
+            assert kwargs["norm_w"] is compressor.norm.weight
+            assert kwargs["rms_eps"] == compressor.norm.variance_epsilon
             ring_steps.append(int(metadata[1].sum()))
             output.copy_(kv)
             return output
@@ -1173,6 +1179,13 @@ class TestPCPBatchLifecycle:
             indexer.k_cache_folded = None
             attn.window_size = 4
 
+        def fused_store(key, weight, eps, cos, sin, slots, key_cache, scales):
+            assert weight is indexer.k_norm.weight
+            assert eps == indexer.k_norm.variance_epsilon
+            scatter(key_cache, slots, key)
+            scatter(scales, slots, torch.ones(key.shape[0], 1))
+
+        monkeypatch.setattr("vllm_ascend.ops.triton.indexer_k_fusion.indexer_k_norm_rope_int8_store", fused_store)
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", pool)
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.write_pcp_ring_rows", write_ring_rows)
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter)
