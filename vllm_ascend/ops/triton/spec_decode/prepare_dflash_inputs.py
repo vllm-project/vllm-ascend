@@ -362,11 +362,16 @@ def prepare_dflash_inputs_triton(
         workers_for_sample,
     )
 
-    max_ctx_per_worker = triton.cdiv(max_target_query_len, workers_per_req)
-    block_size_kernel = min(
-        _MAX_CONTEXT_BLOCK_SIZE,
-        triton.next_power_of_2(max(2, max_ctx_per_worker)),
-    )
+    # ``BLOCK_SIZE`` is a ``tl.constexpr``: deriving it from the per-step batch
+    # shape (previous behaviour) turned every tile width into its own JIT
+    # specialization, so a width first seen mid-service cost a full compile
+    # (~2.3-3.4 s host stall per specialization, see issue #20334). The context
+    # path is a single masked tile per worker, and ``workers_for_context`` above
+    # already guarantees each worker's partition is at most
+    # ``_MAX_CONTEXT_BLOCK_SIZE`` elements, so the widest tile always covers it.
+    # Using the constant therefore keeps the kernel correct while leaving exactly
+    # one specialization for this launch, which startup warmup has compiled.
+    block_size_kernel = _MAX_CONTEXT_BLOCK_SIZE
 
     if kv_cache_block_size % block_size != 0:
         raise ValueError("The physical KV block size must be divisible by the kernel block size.")
