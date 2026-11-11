@@ -25,7 +25,8 @@ from vllm_ascend.ops.triton.hisparse import (
     scatter_packed_kv_kernel,
 )
 
-_SORTED_WRITTEN_SLOT_COUNT = 8192
+_SORT_MIN_DIRECT_TILES = 64 * 1024
+_SORT_BUFFER_LIMIT_BYTES = 768 * 1024
 
 
 class ResolverWorkspace:
@@ -343,13 +344,25 @@ class HiSparseNPUOps:
             return
         if region_stride == 0 or num_state_rows == 0 or groups == 0:
             return
-        # The 8192-row Prefill chunk is the measured large shape. Keep scratch
-        # bounded and preserve the existing path for capture and other shapes.
-        if num_tokens == _SORTED_WRITTEN_SLOT_COUNT and is_950() and not torch.npu.is_current_stream_capturing():
+        tile = 256
+        hot_tiles = triton.cdiv(region_stride, tile)
+        table_tiles = groups * hot_tiles
+        search_steps = num_tokens.bit_length()
+        # Direct invalidation scans the Hot tiles for each write. Sorting
+        # instead searches once per state and Hot tile. Keep a margin for
+        # sorting and cap the three int64 buffers before launching it.
+        direct_tiles = num_tokens * table_tiles
+        search_probes = num_state_rows * table_tiles * search_steps
+        sort_buffer_bytes = 3 * num_tokens * torch.int64.itemsize
+        if (
+            direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES
+            and sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES
+            and is_950()
+        ):
             keys = torch.empty((num_tokens,), dtype=torch.int64, device=device)
             sorted_keys = torch.empty_like(keys)
             order = torch.empty_like(keys)
-            pack_written_slot_keys[(triton.cdiv(num_tokens, 256),)](
+            pack_written_slot_keys[(triton.cdiv(num_tokens, tile),)](
                 request_state_indices,
                 req_id_per_token,
                 written_slots,
@@ -357,21 +370,21 @@ class HiSparseNPUOps:
                 ROWS=num_tokens,
                 REQUESTS=request_state_indices.numel(),
                 STATES=num_state_rows,
-                TILE=256,
+                TILE=tile,
                 multibuffer=False,
             )
             torch.sort(keys, out=(sorted_keys, order))
-            invalidate_written_slots_sorted[(groups, num_state_rows, triton.cdiv(region_stride, 256))](
+            invalidate_written_slots_sorted[(groups, num_state_rows, hot_tiles)](
                 group_table,
                 sorted_keys,
                 ROWS=num_tokens,
                 HOT=region_stride,
-                TILE=256,
-                STEPS=num_tokens.bit_length(),
+                TILE=tile,
+                STEPS=search_steps,
                 multibuffer=False,
             )
             return
-        invalidate_kernel[(num_tokens, triton.cdiv(region_stride, 256), groups)](
+        invalidate_kernel[(num_tokens, hot_tiles, groups)](
             group_table,
             request_state_indices,
             req_id_per_token,
@@ -379,7 +392,7 @@ class HiSparseNPUOps:
             REQUESTS=request_state_indices.numel(),
             STATE_ROWS=num_state_rows,
             REGION=region_stride,
-            BLOCK=256,
+            BLOCK=tile,
             multibuffer=False,
         )
 

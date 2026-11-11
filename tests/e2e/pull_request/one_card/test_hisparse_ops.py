@@ -751,46 +751,81 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
         graph.reset()
 
 
-def test_common_group_invalidation_changed_graph_replay():
-    """Exercise the current common pointer-table caller with changing writes."""
+@pytest.mark.parametrize(
+    "rows,hot_capacity,cross_stream,expect_sorted",
+    [(4, 16, False, False), (1537, 8193, False, True), (1537, 8193, True, True)],
+)
+def test_common_group_invalidation_changed_graph_replay(rows, hot_capacity, cross_stream, expect_sorted, monkeypatch):
+    """Exercise both invalidation routes with changing writes in eager and Graph."""
     from types import SimpleNamespace
 
     from vllm.v1.hisparse.runtime import HiSparseSlotInvalidator
 
     groups = 3
-    initial = torch.arange(48, dtype=torch.int32).view(3, 16)
+    initial = torch.arange(3 * hot_capacity, dtype=torch.int32).view(3, hot_capacity)
     tables = [(initial + group * 7).npu() for group in range(groups)]
     states = torch.tensor([2, 0, 1], dtype=torch.int32, device="npu")
-    requests = torch.tensor([0, 1, 2, -1], dtype=torch.int32, device="npu")
-    written = torch.tensor([35, 4, 19, 1], dtype=torch.int64, device="npu")
+    requests = torch.full((rows,), -1, dtype=torch.int32, device="npu")
+    requests[:3] = torch.arange(3, dtype=requests.dtype, device=requests.device)
+    written = torch.zeros(rows, dtype=torch.int64, device="npu")
     leaders = [
         SimpleNamespace(index_group=SimpleNamespace(device_global_indices=table), cache_ops=HiSparseNPUOps)
         for table in tables
     ]
     invalidator = HiSparseSlotInvalidator(states)
+    consumer = torch.Stream(device="npu") if cross_stream else None
+    ready = torch.Event() if cross_stream else None
 
     def forward():
-        invalidator(leaders, written, requests)
+        if consumer is None:
+            invalidator(leaders, written, requests)
+            return
+        current = torch.accelerator.current_stream()
+        consumer.wait_stream(current)
+        with consumer:
+            invalidator(leaders, written, requests)
+            ready.record(consumer)
+        current.wait_event(ready)
 
-    forward()
-    torch.npu.synchronize()
+    def check_writes(run):
+        for values in (
+            [2 * hot_capacity + 3, 4, hot_capacity + 3],
+            [3 * hot_capacity - 1, 8, hot_capacity + 7],
+            [-1] * 3,
+        ):
+            written[:3].copy_(torch.tensor(values, dtype=written.dtype))
+            for group, table in enumerate(tables):
+                table.copy_(initial + group * 7)
+            run()
+            torch.npu.synchronize()
+            for group, table in enumerate(tables):
+                expected = initial + group * 7
+                for row, value in zip([2, 0, 1], values):
+                    expected[row][expected[row] == value] = -1
+                torch.testing.assert_close(table.cpu(), expected)
+
+    check_writes(forward)
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        forward()
+    torch.npu.synchronize()
+
+    sort = torch.sort
+    sort_calls = 0
+
+    def count_sort(*args, **kwargs):
+        nonlocal sort_calls
+        sort_calls += 1
+        return sort(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "sort", count_sort)
     graph = torch.npu.NPUGraph()
     try:
         with torch.npu.graph(graph, stream=stream):
             forward()
-        for values in [[35, 4, 19, 1], [47, 8, 23, 1], [-1, -1, -1, 1]]:
-            written.copy_(torch.tensor(values, dtype=torch.int64))
-            for group, table in enumerate(tables):
-                table.copy_(initial + group * 7)
-            graph.replay()
-            torch.npu.synchronize()
-            for group, table in enumerate(tables):
-                expected = initial + group * 7
-                for row, value in zip([2, 0, 1], values[:3]):
-                    expected[row][expected[row] == value] = -1
-                torch.testing.assert_close(table.cpu(), expected)
+        assert sort_calls == int(expect_sorted)
+        check_writes(graph.replay)
     finally:
         torch.npu.synchronize()
         graph.reset()

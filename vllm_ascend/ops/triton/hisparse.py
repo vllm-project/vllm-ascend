@@ -101,15 +101,15 @@ def invalidate_kernel(
     tl.store(ptr, -1, mask=valid & (cached == value))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "STATES"])
 def pack_written_slot_keys(
     states,
     requests,
     written,
     keys,
-    ROWS: tl.constexpr,
-    REQUESTS: tl.constexpr,
-    STATES: tl.constexpr,
+    ROWS,
+    REQUESTS,
+    STATES,
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0) * TILE + tl.arange(0, TILE)
@@ -124,11 +124,11 @@ def pack_written_slot_keys(
     tl.store(keys + row, tl.where(valid, key, 9223372036854775807), mask=row < ROWS)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def invalidate_written_slots_sorted(
     tables,
     keys,
-    ROWS: tl.constexpr,
+    ROWS,
     HOT: tl.constexpr,
     TILE: tl.constexpr,
     STEPS: tl.constexpr,
