@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Reference tables of the rare_chars detector rc3 (runs/explore/rc3_report.md): how normal a token is, alone and next to the
-character before / after it, in ordinary model output. Static per vocabulary; online the detector only indexes them.
-  fcat, lcat   int8 [V]       category (CATS) of the token's first / last character (the token decoded on its own)
+"""Optional frequency reference tables for rare_chars (u / jp / jn / cp / cn).
+
+Static per-vocabulary counts of how normal a token is alone and next to its
+neighbours. Online the detector only indexes them. The packaged Guard config
+uses ``ref: cats`` (character categories only) and does **not** ship or load
+``*_rcref.npz`` files; this module remains for research configs that opt into
+frequency features.
+
+  fcat, lcat   int8 [V]       category (CATS) of the token's first / last character
   n            int64 [V]      occurrences of the token in the reference stream
-  npv, nnx     int64 [V, K]   occurrences right after a character of category k (the previous token's last character; 'none'
-                              at the start) / right before one (the next token's first character; 'none' at the end)
+  npv, nnx     int64 [V, K]   occurrences after / before neighbour category k
   N            int            reference tokens
-Derived per (token, category), log10, add-0.5 / add-one smoothed (rare.py features):
-  u  = (n + 0.5) / N                    the token's frequency
+Derived (log10, add-0.5 / add-one smoothed):
+  u  = (n + 0.5) / N
   jp = (npv + 0.5) / N, jn = (nnx + 0.5) / N
-  cp = (npv + 1) / (n + K), cn = (nnx + 1) / (n + K)     how unusual the context is for this token
-Shipped tables: tables/{qwen3,glm}_rcref.npz (byte copies of the evaluated ones, MANIFEST.json), built in the research repo
-(detector/rare_ref.py build_from_cache) from the negative records of dev (rare_chars whole-scope target 'negative', every arm
-and fold). They need labelled model output, so this package only loads them. DeepSeek has no dev records, so no table: the
-reference features are neutral there.
+  cp = (npv + 1) / (n + K), cn = (nnx + 1) / (n + K)
+If a corpus has no ``{corpus}_rcref.npz`` under ``tables/``, reference features
+stay neutral and frequency-gated scores never fire.
 """
 import os
 import unicodedata as U

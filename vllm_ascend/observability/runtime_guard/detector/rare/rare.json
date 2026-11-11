@@ -1,7 +1,7 @@
 {
  "name": "rare",
  "label": "rare_chars",
- "note": "rare_chars, two tiers in one pass (runs/explore/rc4_report.md, dev only, labels of 2026-10-22: core = foreign-script / U+FFFD / non-ASCII symbol garbage): rules without \"tier\" form the strict tier (per-corpus FPR target 0.1%); \"tier\": \"monitor\" rules are added on top for the monitoring tier (0.5%). Fixed rules + one learned-score rule per tier, the thresholds chosen on dev negatives by explore/rc4_frontier.py (SCORE='runs/explore/rc4_gb_dev_mech.npz' BASE='lpc<-4 & fs<0.002 & caseless_after_latin;bad_utf8;lp1<-2 & fs<0.01' MBASE='fs<0.01 & fsw<0.05 & caseless_after_latin' MARGIN='0.5' SHADOW_D='1.0'). gb: learned token score (explore/rc4_gb.py NAME=mech POS=na GATE=fs, detector/rare_gb.py) over per-token inputs only (logprobs, token / neighbour classes, character categories, shares; no reference counts, no token frequencies), evaluated where fs < 0.05 or bad_utf8 (\"gate\": \"fs\"); it looks one token ahead, so every alert of this config is raised one token after the triggering token. lp1 / lpc: log10 of the top-1 / generated token's probability; gap = lp1 - lpc.",
+ "note": "rare_chars: two tiers in one pass. Rules without \"tier\" form the strict tier (per-corpus FPR target ~0.1%); \"tier\": \"monitor\" rules are added for the monitoring tier (~0.5%). Fixed rules + one learned-score (gb) rule per tier. gb scores gated tokens only (fs < 0.05 or bad_utf8); look-ahead by one token so alerts fire on the token after the trigger. lp1/lpc are log10 of top-1 / chosen probability; gap = lp1 - lpc. Uses ref=cats (no frequency reference tables).",
  "gb": "rare_gb.npz",
  "gate": "fs",
  "ref": "cats",
