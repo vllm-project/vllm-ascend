@@ -65,7 +65,6 @@ a2:
         model_list:
           - Qwen3-VL-8B-Instruct-W8A8
           - Qwen3-8B
-          - Qwen2-Audio-7B-Instruct
           - Qwen3-8B-W8A8
           - Qwen3-VL-8B-Instruct
           - Minitron-8B-Base
