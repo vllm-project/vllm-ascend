@@ -2,6 +2,7 @@
 """Real TCP lifecycle tests with a fake allocation backend; no NPU needed."""
 
 import ast
+import hashlib
 import importlib
 import importlib.util
 import socket
@@ -53,6 +54,52 @@ def free_endpoint():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return f"127.0.0.1:{sock.getsockname()[1]}"
+
+
+@pytest.mark.parametrize("index", ["quant_model_weights.safetensors.index.json", "model.safetensors.index.json"])
+def test_checkpoint_identity_binds_metadata_to_revision(pool_module, tmp_path, index):
+    first, second = tmp_path / "first", tmp_path / "second"
+    for root in (first, second):
+        root.mkdir()
+        (root / "config.json").write_text('{"hidden_size":64}')
+        (root / index).write_text('{"weight_map":{"engram.weight":"weights.safetensors"}}')
+        (root / "weights.safetensors").write_bytes(b"weights-a")
+    identity = pool_module.checkpoint_identity(first, revision="a" * 40)
+    # The release assertion is independent of deployment paths and hex case.
+    assert identity == pool_module.checkpoint_identity(second, revision="A" * 40)
+    (second / "weights.safetensors").write_bytes(b"weights-b")
+    assert identity != pool_module.checkpoint_identity(second, revision="b" * 40)
+    (second / "config.json").write_text('{"hidden_size":128}')
+    assert identity != pool_module.checkpoint_identity(second, revision="a" * 40)
+
+
+def test_checkpoint_identity_uses_resolved_commit_not_branch(pool_module, tmp_path):
+    class Revision(str):
+        resolved = "a" * 40
+
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text("{}")
+    assert pool_module.checkpoint_identity(tmp_path, revision=Revision("main")) == pool_module.checkpoint_identity(
+        tmp_path, revision="a" * 40
+    )
+    assert pool_module.checkpoint_identity(tmp_path, revision="a" * 64) != pool_module.checkpoint_identity(
+        tmp_path, revision="a" * 40
+    )
+
+
+@pytest.mark.parametrize("revision", ["", "main", "v1.0", "abc1234", "g" * 40, "a" * 41])
+def test_checkpoint_identity_rejects_mutable_or_missing_revision(pool_module, tmp_path, revision):
+    with pytest.raises(ValueError, match="immutable checkpoint revision"):
+        pool_module.checkpoint_identity(tmp_path, revision=revision)
+
+
+def test_legacy_checkpoint_identity_is_unchanged(pool_module, tmp_path):
+    expected = hashlib.sha256()
+    for name in ("config.json", "quant_model_weights.safetensors.index.json"):
+        (tmp_path / name).write_bytes(b"{}")
+        expected.update(name.encode())
+        expected.update(b"{}")
+    assert pool_module.checkpoint_identity(tmp_path) == expected.hexdigest()
 
 
 def lifecycle_decorator():
@@ -426,6 +473,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         engram_weight_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer, layer],
+        engram_offload_pool=None,
         local_engram_layer_ids=(0, 1),
     )
     config = types.SimpleNamespace(engram_layer_ids=[0, 1], engram_num_embeddings=[32, 32], engram_head_dim=256)
@@ -437,6 +485,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         vllm_config=vc,
         shared_pool_endpoint="pool",
         shared_pool_identity="model-a",
+        offload_config=None,
         cpu_offload=True,
         torch=torch,
         AscendParallelEngramEmbedding=Embedding,
@@ -455,7 +504,8 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
     assert owner.closed
 
 
-def test_merged_model_initializes_rotation_and_registers_replay():
+@pytest.mark.parametrize("dp_shared_memory", [False, True])
+def test_no_pool_model_uses_uva_and_initializes_replay(dp_shared_memory):
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/model.py"
     model = next(
         n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model"
@@ -477,8 +527,9 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         engram_layout=types.SimpleNamespace(primes=[[[32]]]),
         engram_weight_root="unused",
         engram_root="unused",
-        engram_dp_shared_memory=False,
+        engram_dp_shared_memory=dp_shared_memory,
         layers=[layer],
+        engram_offload_pool=None,
         local_engram_layer_ids=(0,),
         has_engram=True,
         device="cpu",
@@ -498,10 +549,11 @@ def test_merged_model_initializes_rotation_and_registers_replay():
     )
     rotation = torch.stack([torch.eye(32), -torch.eye(32)])
     replay = object()
+    embedding_options = []
 
     class Embedding:
         def __init__(self, *args, **kwargs):
-            pass
+            embedding_options.append(kwargs)
 
         def bind_checkpoint(self, *args):
             pass
@@ -513,13 +565,17 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         vllm_config=vc,
         shared_pool_endpoint=None,
         shared_pool_identity=None,
+        shared_config=None,
+        offload_config=None,
         cpu_offload=True,
         torch=torch,
         AscendParallelEngramEmbedding=Embedding,
         preflight_engram_checkpoint=lambda *args: None,
         engram_storage_dtype=lambda *args: torch.int8,
-        get_current_hardware_profile=lambda: types.SimpleNamespace(supports=lambda _: False),
-        HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8=object()),
+        get_current_hardware_profile=lambda: types.SimpleNamespace(
+            supports=lambda capability: capability == "host_vmm"
+        ),
+        HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8="mxfp8", ENGRAM_LOCAL_HOST_VMM="host_vmm"),
         remote_reader=None,
         get_ascend_config=lambda: types.SimpleNamespace(multistream_engram_overlap=False),
         EngramSharedInitError=type("EngramSharedInitError", (RuntimeError,), {}),
@@ -534,6 +590,13 @@ def test_merged_model_initializes_rotation_and_registers_replay():
     torch.testing.assert_close(model_obj.engram_rotation, rotation)
     assert model_obj.engram_hash == "hash" and model_obj.decoder_replay_layers is replay
     assert context == {"model.decoder_replay": replay}
+    assert len(embedding_options) == 1
+    options = embedding_options[0]
+    assert options.get("local_vmm", False) is False
+    assert options["dp_shared_memory"] is dp_shared_memory
+    assert options["offload_pool"] is None
+    assert options["remote_reader"] is None
+    assert options["shared_pool_endpoint"] is None
 
 
 def test_shutdown_retry_after_model_deletion_releases_tcp_lease(pool_module, owner):

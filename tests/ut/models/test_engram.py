@@ -61,6 +61,7 @@ def test_vmm_allocation_failure_disables_vmm_for_later_layers(monkeypatch):
         table.part_num_embeddings, table.dim, table.block_size = 8, 64, 32
         table.storage_dtype, table.scale_dtype = torch.int8, torch.float32
         table.cpu_offload, table.local_vmm = True, local_vmm
+        table._offload_pool = None
         table._shared_group, table._shared_pool_spec = group, (None, None, None)
         table._scales_uva = None
         return table
@@ -96,6 +97,7 @@ def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tok
     table.vocab_start_idx, table.vocab_end_idx = 5, 8
     table.tp_size, table.dp_size = tp, dp
     table._codes_uva = None
+    table._offload_pool = None
     codes = torch.arange(3 * 64).reshape(3, 64).remainder(31).sub(15)
     table.weight = torch.nn.Parameter(codes.to(torch.int8 if quantized else torch.bfloat16), requires_grad=False)
     table.weight_scale_inv = torch.nn.Parameter(torch.full((3, 2), 0.125), requires_grad=False) if quantized else None
@@ -226,6 +228,7 @@ def test_remote_embedding_accepts_quantized_rows_without_allocating_table(monkey
     )
     assert table.weight.device.type == table.weight_scale_inv.device.type == "meta"
     assert table.weight.dtype == dtype and table.weight_scale_inv.dtype == scale_dtype
+    assert table.dp_size == 1 and table._shared_group is group
 
     with pytest.raises(ValueError, match="Remote Engram requires"):
         embedding_mod.AscendParallelEngramEmbedding(
@@ -425,6 +428,8 @@ def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
     table._shared_group = None
     table.vocab_start_idx = 0
     table.vocab_end_idx = 19
+    table._offload_pool = None
+    table.storage_start_idx, table.storage_end_idx = 0, 19
     table.block_size = 32
     table.weight = torch.nn.Parameter(torch.empty((19, 64), dtype=torch.int8), requires_grad=False)
     table.weight_scale_inv = torch.nn.Parameter(torch.empty((19, 2), dtype=torch.float32), requires_grad=False)
@@ -497,6 +502,7 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
     setattr(table, "embed_gathered", lambda ids, count: ids[:count])  # noqa: B010 - instance stub
     table._shared_group = object()
+    table._offload_pool = None
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
@@ -572,6 +578,8 @@ def test_native_mxfp8_preserves_shard_bits_and_lookup(tmp_path, monkeypatch):
     torch.nn.Module.__init__(table)
     table._shared_group = None
     table.vocab_start_idx, table.vocab_end_idx = 5, 17
+    table._offload_pool = None
+    table.storage_start_idx, table.storage_end_idx = 5, 17
     table.block_size, table.dim = 32, 64
     table.head_start, table.part_n_hash_cols = 1, 2
     table.weight = torch.nn.Parameter(torch.empty((12, 64), dtype=torch.float8_e4m3fn), requires_grad=False)
@@ -618,6 +626,7 @@ def test_embed_gathered_walks_strided_hashes_without_a_copy(monkeypatch, quantiz
     table._shared_group = None
     table._codes_uva = None
     table._scales_uva = None
+    table._offload_pool = None
     table.vocab_start_idx, table.vocab_end_idx = 5, 17
     table.block_size, table.dim = 32, 64
     table.head_start, table.part_n_hash_cols = 1, 2

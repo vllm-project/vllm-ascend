@@ -109,6 +109,7 @@ def test_real_allocator_orders_startup_before_client_creation(monkeypatch, faile
         dim=256,
         block_size=32,
         storage_dtype=torch.int8,
+        _offload_pool=None,
         _shared_pool_spec=("pool", "identity", "table"),
     )
     if failed:

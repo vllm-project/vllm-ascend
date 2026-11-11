@@ -74,7 +74,9 @@ class AscendDeepseekV41ForCausalLM(
             return IMAGE_PLACEHOLDER
         return None
 
-    @close_engram_on_init_failure(("language_model", "model", "_engram_remote_reader"))
+    @close_engram_on_init_failure(
+        ("language_model", "model", "_engram_remote_reader"), ("language_model", "model", "engram_offload_pool")
+    )
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
         model_config = vllm_config.model_config

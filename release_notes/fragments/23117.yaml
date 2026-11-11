@@ -1,0 +1,34 @@
+pr: 23117
+entries:
+  - category: feature
+    text: >-
+      Added opt-in MemFabric-backed Engram offload for DeepSeek-V4.1 on A2, A3, and A5.
+      A2 and A5 use AICPU-driven RDMA and URMA, respectively.
+      Configure `engram_offload` in `--additional-config` to share Host DRAM
+      tables between contributor and consumer ranks, or keep a complete replica
+      on each node with independent per-host engines and pools.
+      Pool members must use the same immutable checkpoint revision;
+      for local checkpoints, declare it with `--revision`.
+      Real weights require lazy indexed safetensors loading. Sleep mode is not
+      supported. Initialization failures release attached pools.
+    model: DeepSeek-V4.1
+    hardware: [A2, A3, A5]
+  - category: performance
+    text: >-
+      On A3, DeepSeek-V4.1 with `engram_offload` uses fused lookup and
+      dequantization when mapped pool addresses are available, removing
+      intermediate row staging. With `multistream_engram_overlap` enabled,
+      supported configurations can capture the Engram producer for decode
+      graph replay.
+    model: DeepSeek-V4.1
+    hardware: [A3]
+  - category: breaking
+    text: >-
+      DeepSeek-V4.1 Engram CPU offload now uses HostRegister UVA when neither
+      `engram_offload` nor `shared_engram` is configured, including local DP/PCP
+      sharing. Eligible A3 INT8 runs previously selected local Host VMM
+      automatically. Configure a pool backend explicitly to use mapped pool
+      storage; existing no-pool configurations now use UVA without additional
+      settings.
+    model: DeepSeek-V4.1
+    hardware: [A3]

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import typing
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager
@@ -73,6 +74,7 @@ from vllm_ascend.attention.dsa_v41 import (
 from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.parallel_state import get_global_rank
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -128,8 +130,9 @@ from .engram.local_shared_vmm import (
     LocalSharedVmmBuffer,
     retain_failed_initialization,
 )
+from .engram.offload import EngramOffloadPool
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
-from .engram.shared_pool import rollback_shared_engram
+from .engram.shared_pool import checkpoint_identity, rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
 
@@ -1146,7 +1149,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
     decoder_layer_cls = DeepseekV41DecoderLayer
 
-    @close_engram_on_init_failure(("_engram_remote_reader",))
+    @close_engram_on_init_failure(("_engram_remote_reader",), ("engram_offload_pool",))
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__()
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
@@ -1264,6 +1267,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
+        self.engram_offload_pool = None
+        offload_config = get_ascend_config().engram_offload
         shared_config = get_ascend_config().shared_engram
         remote_engram = shared_config if shared_config is not None and shared_config.backend in ("a2", "a5") else None
         remote_reader = None
@@ -1300,8 +1305,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         shared_pool_identity = None
         if shared_pool_endpoint:
-            from .engram.shared_pool import checkpoint_identity
-
             shared_pool_identity = checkpoint_identity(self.engram_weight_root)
         with ExitStack() as rollback:
             if self.engram_layout is not None:
@@ -1316,10 +1319,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         self.engram_weight_root, self.local_engram_layer_ids, AscendParallelEngramEmbedding
                     )
                 native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
-                for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
-                    if layer_id not in self.local_engram_layer_ids:
-                        continue
-                    head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
+                storage_dtypes = {}
+                for layer_id in self.local_engram_layer_ids:
                     storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
                     if vllm_config.load_config.load_format != "dummy":
                         storage_dtype = engram_storage_dtype(self.engram_weight_root, layer_id)
@@ -1327,14 +1328,32 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                             storage_dtype = torch.int8
                     elif native_mxfp8 and vllm_config.quant_config is not None:
                         storage_dtype = torch.float8_e4m3fn
-                    local_vmm = (
-                        cpu_offload
-                        and self.engram_dp_shared_memory
-                        and shared_config is None
-                        and vllm_config.load_config.load_format != "dummy"
-                        and storage_dtype == torch.int8
-                        and get_current_hardware_profile().supports(HardwareCapability.ENGRAM_LOCAL_HOST_VMM)
+                    storage_dtypes[layer_id] = storage_dtype
+                if offload_config is not None:
+                    if len(set(storage_dtypes.values())) != 1:
+                        raise ValueError("Engram offload requires a uniform storage dtype across tables")
+                    offload_identity = (
+                        "dummy"
+                        if vllm_config.load_config.load_format == "dummy"
+                        else checkpoint_identity(
+                            self.engram_weight_root, revision=vllm_config.model_config.revision or ""
+                        )
                     )
+                    self.engram_offload_pool = EngramOffloadPool(
+                        offload_config,
+                        offload_config.rank_offset + get_global_rank(vllm_config.parallel_config),
+                        list(config.engram_num_embeddings),
+                        config.engram_head_dim,
+                        next(iter(storage_dtypes.values())),
+                        torch.device("npu", torch.npu.current_device()),
+                        json.dumps((offload_identity, config.engram_layer_ids, self.engram_layout.primes)),
+                    )
+                    self.engram_dp_shared_memory = True
+                for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
+                    if layer_id not in self.local_engram_layer_ids:
+                        continue
+                    head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
+                    storage_dtype = storage_dtypes[layer_id]
                     try:
                         embed = AscendParallelEngramEmbedding(
                             rows,
@@ -1344,7 +1363,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                             storage_dtype=storage_dtype,
                             cpu_offload=cpu_offload,
                             dp_shared_memory=self.engram_dp_shared_memory,
-                            local_vmm=local_vmm,
+                            # Mapped storage requires an explicit pool backend.
+                            local_vmm=False,
+                            offload_pool=self.engram_offload_pool,
                             remote_reader=remote_reader,
                             shared_pool_endpoint=shared_pool_endpoint,
                             shared_pool_identity=shared_pool_identity,
@@ -1352,10 +1373,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                         )
                     except EngramSharedInitError as init_error:
                         _rollback_local_engram_tables(self, init_error)
-                        raise
-                    except Exception:
-                        if local_vmm:
-                            _retain_local_engram_tables(self)
                         raise
                     if shared_pool_endpoint:
                         rollback.callback(rollback_shared_engram, embed.close_host_offload)
@@ -1650,7 +1667,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
 
     def can_capture_engram_producer(self) -> bool:
-        """MRV2 slotless, local/shared tables need no graph-side collectives."""
+        """MRV2 slotless lookup; MemFabric also permits TP-sharded producers."""
         return (
             self.has_engram
             and getattr(self, "_engram_remote_reader", None) is None
@@ -1661,7 +1678,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             and get_pp_group().world_size == 1
             and all(
                 self.layers[layer].engram.embed_tokens.dp_size == 1
-                and self.layers[layer].engram.embed_tokens.tp_size == 1
+                and (self.layers[layer].engram.embed_tokens.tp_size == 1 or self.engram_offload_pool is not None)
                 for layer in self.local_engram_layer_ids
             )
         )
@@ -2071,6 +2088,15 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         reader = getattr(self.model, "_engram_remote_reader", None)
         if reader is not None:
             reader.close()
+        pool = self.model.engram_offload_pool
+        if pool is not None:
+            pool.close()
+            for layer_id in self.model.local_engram_layer_ids:
+                table = self.model.layers[layer_id].engram.embed_tokens
+                table._offload_pool = None
+                table.weight = None
+                table.weight_scale_inv = None
+            self.model.engram_offload_pool = None
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         return self.filter_unused_checkpoint_weights and any(
@@ -2079,7 +2105,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             for suffix in ("weight", "scale")
         )
 
-    @close_engram_on_init_failure(("model", "_engram_remote_reader"))
+    @close_engram_on_init_failure(("model", "_engram_remote_reader"), ("model", "engram_offload_pool"))
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)

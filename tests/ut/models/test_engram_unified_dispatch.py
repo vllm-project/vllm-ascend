@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41"
 
 
 @pytest.mark.parametrize("backend", [None, "a2", "a3", "a5"])
-def test_model_selects_exactly_one_backend(monkeypatch, backend):
+@pytest.mark.parametrize("local_sharing", [False, True])
+def test_model_selects_exactly_one_backend(monkeypatch, backend, local_sharing):
     module = ast.parse((ROOT / "model.py").read_text())
     cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model")
     init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
@@ -66,7 +67,7 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend):
     model = types.SimpleNamespace(
         has_engram=True,
         engram_layout=types.SimpleNamespace(primes=[[[1]]]),
-        engram_dp_shared_memory=True,
+        engram_dp_shared_memory=local_sharing,
         engram_weight_root="model",
     )
     vc = types.SimpleNamespace(
@@ -81,14 +82,39 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend):
         cpu_offload=True,
         get_ascend_config=lambda: types.SimpleNamespace(shared_engram=config),
         get_tensor_model_parallel_world_size=lambda: 1,
+        checkpoint_identity=identity,
     )
+    if backend in ("a2", "a5") and not local_sharing:
+        with pytest.raises(ValueError, match="local DP sharing enabled"):
+            exec(compile(tree, str(ROOT / "model.py"), "exec"), ns)
+        assert not calls
+        return
     exec(compile(tree, str(ROOT / "model.py"), "exec"), ns)
     assert calls == ({None: [], "a2": ["hixl"], "a3": ["gva"], "a5": ["hixl"]}[backend])
     assert (model._engram_remote_reader is not None) == (backend in ("a2", "a5"))
+    if backend in ("a2", "a5"):
+        assert model.engram_dp_shared_memory
     assert (ns["shared_pool_endpoint"] is not None) == (backend == "a3")
 
 
-def test_embedding_rejects_simultaneous_backends():
+@pytest.mark.parametrize(
+    "options,message",
+    [
+        ({"remote_reader": object(), "shared_pool_endpoint": "owner:1"}, "mutually exclusive"),
+        ({"remote_reader": object(), "cpu_offload": True}, "dp_shared_memory"),
+        ({"remote_reader": object(), "dp_shared_memory": True}, "cpu_offload"),
+        (
+            {
+                "remote_reader": object(),
+                "cpu_offload": True,
+                "dp_shared_memory": True,
+                "storage_dtype": torch.bfloat16,
+            },
+            "INT8 or FP8",
+        ),
+    ],
+)
+def test_embedding_rejects_invalid_backend_options(options, message):
     module = ast.parse((ROOT / "engram/embedding.py").read_text())
     cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "AscendParallelEngramEmbedding")
     init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
@@ -97,10 +123,8 @@ def test_embedding_rejects_simultaneous_backends():
     )
     ns: dict[str, Any] = {"torch": torch}
     exec(compile(tree, str(ROOT / "engram/embedding.py"), "exec"), ns)
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        ns["__init__"](
-            types.SimpleNamespace(), 32, 256, (32,), 0, remote_reader=object(), shared_pool_endpoint="owner:1"
-        )
+    with pytest.raises(ValueError, match=message):
+        ns["__init__"](types.SimpleNamespace(), 32, 256, (32,), 0, **options)
 
 
 @pytest.mark.parametrize("backend", [None, "a2", "a3", "a5"])
@@ -115,6 +139,7 @@ def test_checkpoint_loading_routes_by_backend(backend):
     exec(compile(tree, str(ROOT / "engram/embedding.py"), "exec"), ns)
     calls = []
     embedding = types.SimpleNamespace(
+        _offload_pool=None,
         _remote_reader=object() if backend in ("a2", "a5") else None,
         _shared_pool_client=object() if backend == "a3" else None,
         _shared_pool_spec=(None, None, "layers.1.engram.embed"),

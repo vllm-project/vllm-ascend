@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from urllib.parse import urlparse
 
 from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
@@ -42,6 +43,38 @@ if TYPE_CHECKING:
 
 _KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "MooncakePushConnector", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
+
+
+@config(config=ConfigDict(frozen=True, extra="forbid"))
+class EngramOffloadConfig:
+    """A shared MemFabric pool spanning independent prefill/decode engines.
+
+    ``rank_offset`` precedes this engine's DP-major worker ranks. Owners
+    contribute DRAM; every other pool member is a zero-capacity reader.
+    The TCP port immediately after ``store_url`` is used for load readiness.
+    """
+
+    store_url: str
+    world_size: int
+    local_world_size: int
+    owner_ranks: tuple[int, ...]
+    rank_offset: int = 0
+    timeout_seconds: int = 1800
+
+    @model_validator(mode="after")
+    def validate_layout(self):
+        endpoint = urlparse(self.store_url)
+        if endpoint.scheme != "tcp" or not endpoint.hostname or not endpoint.port or endpoint.port >= 65535:
+            raise ValueError("engram_offload.store_url must be tcp://host:port, with port in [1, 65534]")
+        if self.local_world_size < 2 or self.world_size % self.local_world_size:
+            raise ValueError("engram_offload needs at least two readers per host and equal local world sizes")
+        if self.world_size <= 0 or not 0 <= self.rank_offset < self.world_size or self.timeout_seconds <= 0:
+            raise ValueError("engram_offload world size, rank offset or timeout is invalid")
+        if not self.owner_ranks or tuple(sorted(set(self.owner_ranks))) != self.owner_ranks:
+            raise ValueError("engram_offload.owner_ranks must be nonempty, sorted and unique")
+        if self.owner_ranks[0] < 0 or self.owner_ranks[-1] >= self.world_size:
+            raise ValueError("engram_offload owner ranks must belong to the pool")
+        return self
 
 
 def is_mega_moe_supported() -> bool:
@@ -781,6 +814,7 @@ class AscendConfig:
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
     expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
+    engram_offload: EngramOffloadConfig | None = None
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
@@ -844,6 +878,8 @@ class AscendConfig:
 
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
+        if self.engram_offload is not None and self.shared_engram is not None:
+            raise ValueError("engram_offload and shared_engram are mutually exclusive")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
@@ -854,6 +890,21 @@ class AscendConfig:
                 raise ValueError("shared_engram requires Engram cpu_offload")
             if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
                 raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
+        if self.engram_offload is not None:
+            if engram_config is None or not engram_config.cpu_offload:
+                raise ValueError("engram_offload requires Engram cpu_offload to be enabled")
+            if vc.model_config.enable_sleep_mode:
+                raise ValueError("engram_offload does not support sleep mode")
+            if vc.load_config.load_format != "dummy" and (
+                vc.load_config.load_format not in ("auto", "safetensors")
+                or vc.load_config.safetensors_load_strategy not in (None, "lazy")
+            ):
+                raise ValueError("engram_offload requires auto/safetensors loading with the lazy safetensors strategy")
+            if vc.parallel_config.pipeline_parallel_size != 1:
+                raise ValueError("engram_offload currently requires pipeline_parallel_size=1")
+            workers = vc.parallel_config.world_size * vc.parallel_config.data_parallel_size
+            if self.engram_offload.rank_offset + workers > self.engram_offload.world_size:
+                raise ValueError("engram_offload engine worker ranks exceed the pool world size")
         if (
             engram_config is not None
             and getattr(engram_config, "cpu_offload", False)
