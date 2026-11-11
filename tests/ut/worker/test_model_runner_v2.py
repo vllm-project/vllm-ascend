@@ -1929,6 +1929,60 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     assert runner.kv_block_zeroer is delegate
 
 
+def test_shutdown_retains_vmm_owner_until_parent_graph_teardown():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(engram_local_vmm=True)
+    events = []
+    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("close")))
+    runner.model = SimpleNamespace(modules=lambda: [table])
+
+    def shutdown_parent(_runner):
+        events.append("parent")
+        _runner.model = None
+
+    with patch.object(GPUModelRunner, "shutdown", shutdown_parent):
+        runner.shutdown()
+
+    assert events == ["parent", "close"]
+    assert runner._pending_engram_vmm == []
+
+
+def test_shutdown_retries_failed_vmm_close_and_keeps_default_untouched():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(engram_local_vmm=True)
+    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=[RuntimeError("peer lost"), None]))
+    runner.model = SimpleNamespace(modules=lambda: [table])
+    with patch.object(GPUModelRunner, "shutdown"):
+        with pytest.raises(RuntimeError, match="peer lost"):
+            runner.shutdown()
+        assert runner._pending_engram_vmm == [table]
+        runner.model = None
+        runner.shutdown()
+    assert runner._pending_engram_vmm == []
+    assert table.close_host_offload.call_count == 2
+
+    default_runner = NPUModelRunner.__new__(NPUModelRunner)
+    default_runner.ascend_config = SimpleNamespace(engram_local_vmm=False)
+    default_runner.model = SimpleNamespace(modules=Mock(side_effect=AssertionError("unexpected model walk")))
+    with patch.object(GPUModelRunner, "shutdown"):
+        default_runner.shutdown()
+    default_runner.model.modules.assert_not_called()
+
+
+def test_shutdown_does_not_release_vmm_when_parent_teardown_fails():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(engram_local_vmm=True)
+    table = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
+    runner.model = SimpleNamespace(modules=lambda: [table])
+    with (
+        patch.object(GPUModelRunner, "shutdown", side_effect=RuntimeError("graph teardown failed")),
+        pytest.raises(RuntimeError, match="graph teardown failed"),
+    ):
+        runner.shutdown()
+    table.close_host_offload.assert_not_called()
+    assert runner._pending_engram_vmm == [table]
+
+
 @pytest.mark.parametrize("model_type", ["deepseek_v41", "other_model"])
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("pp_sync", [False, True])

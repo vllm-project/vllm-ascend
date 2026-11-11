@@ -558,7 +558,19 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
+        if getattr(getattr(self, "ascend_config", None), "engram_local_vmm", False) and not hasattr(
+            self, "_pending_engram_vmm"
+        ):
+            model = getattr(self, "model", None)
+            self._pending_engram_vmm = (
+                [module for module in model.modules() if getattr(module, "local_vmm", False)]
+                if model is not None
+                else []
+            )
         super().shutdown()
+        while getattr(self, "_pending_engram_vmm", None):
+            self._pending_engram_vmm[-1].close_host_offload()
+            self._pending_engram_vmm.pop()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

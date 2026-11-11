@@ -205,3 +205,122 @@ class TestGlobalTE(unittest.TestCase):
 
         global_te.transfer_engine.register_memory.assert_not_called()
         self.assertTrue(global_te.is_register_buffer)
+
+    def test_exclusive_owner_rejects_other_or_untracked_users(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        owner, other = object(), object()
+        with patch("mooncake.engine.TransferEngine", return_value=engine):
+            self.assertIs(global_te.get_transfer_engine("localhost", None, owner=owner), engine)
+            self.assertIs(global_te.get_transfer_engine("localhost", None, owner=owner), engine)
+            with self.assertRaisesRegex(RuntimeError, "other users"):
+                global_te.get_transfer_engine("localhost", None, owner=other)
+            with self.assertRaisesRegex(RuntimeError, "exclusively owned"):
+                global_te.get_transfer_engine("localhost", None)
+
+    def test_existing_untracked_user_blocks_exclusive_claim(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        with patch("mooncake.engine.TransferEngine", return_value=engine):
+            global_te.get_transfer_engine("localhost", None)
+            with self.assertRaisesRegex(RuntimeError, "other users"):
+                global_te.get_transfer_engine("localhost", None, owner=object())
+        self.assertIs(global_te.transfer_engine, engine)
+
+    def test_exclusive_release_retries_partial_unregister_without_double_unregister(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        engine.register_memory.return_value = 0
+        engine.unregister_memory.side_effect = [0, -1, 0]
+        owner = object()
+        with patch("mooncake.engine.TransferEngine", return_value=engine):
+            global_te.get_transfer_engine("localhost", None, owner=owner)
+            global_te.register_buffer([0x1000, 0x2000], [128, 256])
+            with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+                global_te.release_exclusive_engine(owner, engine)
+            self.assertIs(global_te.transfer_engine, engine)
+            self.assertTrue(global_te.is_register_buffer)
+            global_te.release_exclusive_engine(owner, engine)
+            self.assertIsNone(global_te.transfer_engine)
+            self.assertFalse(global_te.is_register_buffer)
+            self.assertEqual(engine.unregister_memory.call_args_list, [call(0x1000), call(0x2000), call(0x2000)])
+            with self.assertRaisesRegex(RuntimeError, "Restart the process"):
+                global_te.get_transfer_engine("localhost", None, owner=owner)
+
+    def test_reregister_after_partial_unregister_restores_only_missing_region(self):
+        global_te = self.global_te_cls()
+        global_te._exclusive_owner = object()
+        engine = MagicMock()
+        engine.register_memory.return_value = 0
+        engine.unregister_memory.side_effect = [0, -1]
+        global_te.transfer_engine = engine
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        with self.assertRaises(RuntimeError):
+            global_te.unregister_buffer()
+        engine.register_memory.reset_mock()
+        global_te.reregister_buffer()
+        engine.register_memory.assert_called_once_with(0x1000, 128)
+        self.assertTrue(global_te.is_register_buffer)
+
+    def test_default_registration_preserves_existing_partial_failure_behavior(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.register_memory.side_effect = [0, -1]
+        global_te.transfer_engine = engine
+        with self.assertRaisesRegex(RuntimeError, "registration failed"):
+            global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        self.assertFalse(global_te.is_register_buffer)
+        self.assertEqual(global_te.registered_buffers, [])
+        self.assertFalse(global_te._registration_incomplete)
+
+    def test_exclusive_release_retains_unknown_registration(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        owner = object()
+        with patch("mooncake.engine.TransferEngine", return_value=engine):
+            global_te.get_transfer_engine("localhost", None, owner=owner)
+            global_te.is_register_buffer = True
+            global_te.registered_buffers = []
+            with self.assertRaisesRegex(RuntimeError, "unknown registered buffers"):
+                global_te.release_exclusive_engine(owner, engine)
+        self.assertIs(global_te.transfer_engine, engine)
+
+    def test_partial_register_is_retained_and_safely_released(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        engine.register_memory.side_effect = [0, -1]
+        engine.unregister_memory.return_value = 0
+        owner = object()
+        with patch("mooncake.engine.TransferEngine", return_value=engine):
+            global_te.get_transfer_engine("localhost", None, owner=owner)
+            with self.assertRaisesRegex(RuntimeError, "registration failed"):
+                global_te.register_buffer([0x1000, 0x2000], [128, 256])
+            self.assertEqual(global_te.registered_buffers, [(0x1000, 128)])
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                global_te.register_buffer([0x1000, 0x2000], [128, 256])
+            global_te.release_exclusive_engine(owner, engine)
+        engine.unregister_memory.assert_called_once_with(0x1000)
+        self.assertIsNone(global_te.transfer_engine)
+
+    def test_partial_reregister_is_tracked_and_unregistered_on_release(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        engine.register_memory.side_effect = [0, 0, 0, -1]
+        engine.unregister_memory.return_value = 0
+        owner = object()
+        with patch("mooncake.engine.TransferEngine", return_value=engine):
+            global_te.get_transfer_engine("localhost", None, owner=owner)
+            global_te.register_buffer([0x1000, 0x2000], [128, 256])
+            global_te.unregister_buffer()
+            engine.unregister_memory.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, "re-registration failed"):
+                global_te.reregister_buffer()
+            global_te.release_exclusive_engine(owner, engine)
+        engine.unregister_memory.assert_called_once_with(0x1000)
+        self.assertIsNone(global_te.transfer_engine)
