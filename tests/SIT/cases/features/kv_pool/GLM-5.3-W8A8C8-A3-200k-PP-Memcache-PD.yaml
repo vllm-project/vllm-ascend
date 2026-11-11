@@ -1,5 +1,5 @@
 test_name: "GLM-5.3-W8A8C8-A3-200k-PP-PD-Memcache"
-model: "vllm-ascend/GLM-5.3-W8A8C8"
+model: "Eco-Tech/GLM-5.3-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
