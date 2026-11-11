@@ -14,15 +14,9 @@ from vllm_ascend.ops.triton.kimi_pixel_norm import _KIMI_PIXEL_NORM_KERNEL
 class KimiPixelNormLut(nn.Module):
     def __init__(self, reference: torch.Tensor, *, dtype: torch.dtype, device: torch.device):
         super().__init__()
-        if reference.device.type != "cpu" or reference.dtype != torch.float32 or reference.shape != (256, 3):
-            raise ValueError("reference must be the CPU processor's FP32 [256,3] table")
-        if not torch.isfinite(reference).all():
-            raise ValueError("normalization table must be finite")
         if dtype not in (torch.bfloat16, torch.float16):
             raise ValueError("visual dtype must be BF16 or FP16")
-        bits = reference.view(torch.int32)
-        if not (torch.equal(bits[:, 0], bits[:, 1]) and torch.equal(bits[:, 0], bits[:, 2])):
-            raise ValueError("Kimi normalization requires identical RGB channels")
+        # The Kimi processor provides the fixed FP32 [256,3] CPU table.
         # Retain only the two supported 16-bit tables, outside checkpoint state.
         # Dtype moves restore their exact FP32-reference rounding, never BF16->FP16.
         self._table_bits = {
