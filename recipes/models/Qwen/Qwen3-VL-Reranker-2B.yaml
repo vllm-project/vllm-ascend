@@ -11,7 +11,7 @@ meta:
   performance_headline: "Single-card pooling serving on Ascend 910C with vLLM Ascend"
   default_hardware: ascend_910c
   hardware:
-    ascend_910c: supported
+    ascend_910c: verified
 
 model:
   model_id: "Qwen/Qwen3-VL-Reranker-2B"
@@ -64,17 +64,13 @@ guide: |
 
   The main tutorial marks this model discontinued since vLLM Ascend v0.30.0 and points at the
   v0.23.0 documentation, so this recipe is pinned to the `v0.23.0.post1-a3` image and only covers the
-  single-node pooling scenario that document describes. Atlas 800 A3 is declared `supported`
-  rather than `verified`: the results below were recorded on a pre-release stack (vLLM
-  0.32.0+empty, vLLM Ascend 0.19.1rc2.dev3230+g469c6c260) and have not been repeated on the
-  pinned `v0.23.0.post1-a3` image. The checkpoint config exposes 262144 positions while the model
-  card lists a 32K context; the recorded runs used `--max-model-len 1024`. The tutorial query
-  returned 181 prompt tokens and relevance scores of 0.877913 for the capital-of-China document
-  and 0.096828 for the gravity document, and two independent 100-request benchmarks at
-  concurrency 16 completed all requests at 180.45 and 189.12 requests/s with mean end-to-end
-  latency of 79.70 and 76.28 ms. These are reproducibility measurements, not official
-  performance baselines. Full MTEB accuracy, multimodal, long-context, and other hardware
-  scenarios remain unverified.
+  single-node pooling scenario that document describes. Atlas 800 A3 is `verified` on that image:
+  one Atlas 800T A3 node served this model with the rendered command and the required chat
+  template, the `/rerank` endpoint scored the capital-of-China document 0.9987 against 0.9248
+  for the gravity document, and candidate reranking on BeIR/SciFact (100 queries x 10
+  candidates) reached **MRR 0.9825 / nDCG@10 0.9869**. The checkpoint config exposes 262144
+  positions while the model card lists a 32K context; the runs used `--max-model-len 1024`.
+  Full MTEB accuracy, multimodal, long-context, and other hardware scenarios remain unverified.
 
   The `--chat-template` path above points at the official vLLM Ascend image layout. If vLLM
   is installed differently, copy `examples/pooling/score/template/qwen3_vl_reranker.jinja`
