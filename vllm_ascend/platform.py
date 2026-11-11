@@ -724,6 +724,7 @@ class NPUPlatform(Platform):
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+        from vllm_ascend.dflash_topm_state import get_activation_routing_batch
 
         # NOTE(Ronald1995): avoid circular import, cudagraph_runtime_mode is
         # CUDAGraphMode.NONE in vllm, but we can't set CUDAGraphMode.NONE in
@@ -797,6 +798,10 @@ class NPUPlatform(Platform):
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
+        activation_batch = get_activation_routing_batch()
+        dflash_topm_state = activation_batch[0] if activation_batch is not None else None
+        dflash_verify_rows = activation_batch[1] if activation_batch is not None else ()
+        dflash_topm_roles = dflash_topm_state.current_roles if dflash_topm_state is not None else None
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
@@ -815,6 +820,9 @@ class NPUPlatform(Platform):
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
+            "dflash_topm_state": dflash_topm_state,
+            "dflash_topm_roles": dflash_topm_roles,
+            "dflash_verify_rows": dflash_verify_rows,
         }
 
 

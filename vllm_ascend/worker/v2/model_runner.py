@@ -55,6 +55,13 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.dflash_topm_state import (
+    build_verify_segments_v2,
+    finish_activation_routing,
+    resolve_activation_routing_config,
+    set_activation_routing_batch,
+    validate_activation_routing,
+)
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
     get_mc2_tokens_capacity,
@@ -270,6 +277,20 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
         self.decode_query_len = self.num_speculative_steps + 1
+        self.dflash_topm_state = resolve_activation_routing_config(
+            self.ascend_config.activation_routing_config,
+            text_config=self.model_config.hf_text_config,
+            speculative_method=self.speculative_config.method if self.speculative_config else None,
+            uniform_decode_query_len=self.decode_query_len,
+        )
+        if self.dflash_topm_state is not None:
+            validate_activation_routing(
+                self.dflash_topm_state,
+                self.model_config,
+                self.speculative_config,
+                self.decode_query_len,
+                getattr(self, "use_async_scheduling", False),
+            )
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
@@ -644,6 +665,7 @@ class NPUModelRunner(GPUModelRunner):
         randomize_inputs: bool = False,
     ):
         self._cpp_execution_time_ms = None
+        set_activation_routing_batch(None, (), ())
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -698,6 +720,7 @@ class NPUModelRunner(GPUModelRunner):
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
+                finish_activation_routing()
         if not dummy_run and not is_profile:
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
@@ -1100,6 +1123,29 @@ class NPUModelRunner(GPUModelRunner):
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+
+        if self.dflash_topm_state is not None:
+            verify_rows, segments = (), []
+            if self.pcp_manager is None and not adaptive_verification_active:
+                verify_rows, segments = build_verify_segments_v2(
+                    scheduler_output,
+                    req_ids,
+                    num_scheduled_tokens_upper_bound,
+                    num_computed_tokens_np,
+                    batch_req_state.prefill_len_np,
+                    scheduler_output.total_num_scheduled_tokens,
+                )
+                if (
+                    not segments
+                    and not batch_req_state.has_prefill
+                    and batch_desc.uniform_token_count == self.dflash_topm_state.verify_block_size
+                ):
+                    block = self.dflash_topm_state.verify_block_size
+                    segments = [(offset, block) for offset in range(0, num_tokens_after_padding, block)]
+            self.dflash_topm_state.prepare(num_tokens_after_padding, segments, self.device)
+            set_activation_routing_batch(self.dflash_topm_state, verify_rows, segments)
+        else:
+            set_activation_routing_batch(None, (), ())
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

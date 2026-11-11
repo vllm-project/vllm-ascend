@@ -450,6 +450,63 @@ class QuantizedAllReduceConfig:
             )
 
 
+class ActivationRoutingConfig:
+    """Validated options for DFlash/DSpark activation routing."""
+
+    _defaults = {
+        "enabled": False,
+        "backend": "baseline",
+        "verify_block_size": 16,
+        "protected_rows": 3,
+        "suffix_pool_top_k": 2,
+        "fused_rows": [16, 32, 48, 64],
+        "expected_router_layers": None,
+        "trace_dir": None,
+        "trace_steps_per_bs": 32,
+        "msprof": False,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        if not isinstance(user_config, dict):
+            raise TypeError("activation_routing must be a dict of config options")
+        unknown = set(user_config) - self._defaults.keys()
+        if unknown:
+            raise ValueError(f"Unknown activation_routing keys: {sorted(unknown)}")
+        self.config = {**self._defaults, **user_config}
+        self.user_keys = frozenset(user_config)
+        def is_int(value):
+            return isinstance(value, int) and not isinstance(value, bool)
+        if not isinstance(self.enabled, bool):
+            raise TypeError("activation_routing.enabled must be a boolean")
+        if self.backend not in {"baseline", "anchor_union_reference", "anchor_union_topm", "anchor_union_fused_native"}:
+            raise ValueError(f"Unknown activation_routing backend: {self.backend}")
+        if not is_int(self.verify_block_size) or self.verify_block_size < 2:
+            raise ValueError("activation_routing.verify_block_size must be an int >= 2")
+        if not is_int(self.protected_rows) or not 1 <= self.protected_rows <= self.verify_block_size:
+            raise ValueError("activation_routing.protected_rows must be in [1, verify_block_size]")
+        if not is_int(self.suffix_pool_top_k) or self.suffix_pool_top_k < 1:
+            raise ValueError("activation_routing.suffix_pool_top_k must be an int >= 1")
+        if (
+            not isinstance(self.fused_rows, list)
+            or not self.fused_rows
+            or any(not is_int(v) or v <= 0 for v in self.fused_rows)
+        ):
+            raise ValueError("activation_routing.fused_rows must be a non-empty list of positive ints")
+        if not is_int(self.trace_steps_per_bs) or self.trace_steps_per_bs < 1:
+            raise ValueError("activation_routing.trace_steps_per_bs must be an int >= 1")
+
+    def __getattr__(self, key):
+        config = self.__dict__.get("config", {})
+        if key in config:
+            return config[key]
+        raise AttributeError(key)
+
+    def to_routing_config(self) -> dict:
+        return {key: self.config[key] for key in self._defaults if key != "enabled"}
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -688,6 +745,7 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    activation_routing_config: ActivationRoutingConfig = dataclasses.field(default_factory=ActivationRoutingConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -1973,6 +2031,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        "activation_routing",
         # Factory-injected: derived from additional_config.enable_kvpp + TP.
         "enable_kvpp",
         "kvpp_config",
@@ -2005,6 +2064,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
+    activation_routing_config = ActivationRoutingConfig(additional_config.get("activation_routing", {}))
     unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
     # vLLM-Omni shares this mapping with the platform plugin. Preserve its
     # extension keys on VllmConfig while excluding them from Ascend validation.
@@ -2025,6 +2085,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         runtime_config_path=runtime_boot.path,
         runtime_config_hot_reload=runtime_boot.hot_reload,
         runtime_config=runtime_boot.runtime_config,
+        activation_routing_config=activation_routing_config,
         **kwargs,
     )
     # Business validation (Plan B): pydantic did type/range/enum checks during
