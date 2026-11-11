@@ -1,0 +1,8 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22058
+entries:
+  - category: feature
+    text: >
+      Add the graph:replay:duration_ms histogram (detail level) timing V2
+      ModelAclGraphManager.run_fullgraph, so ACL graph replay cost is visible
+      per step. Capture-side metrics are not instrumented.

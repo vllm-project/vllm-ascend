@@ -1,0 +1,6 @@
+# ACL graph. The V2 path never goes through ACLGraphWrapper; graph replay is
+# ModelAclGraphManager.run_fullgraph. Capture-side metrics (dispatch, failures,
+# cache entries) are marked as deleted in the ModelRunnerV2 DFX sheet.
+
+- symbol: vllm_ascend.worker.v2.aclgraph_utils:ModelAclGraphManager.run_fullgraph
+  handler: vllm_ascend.observability.ms_metrics.handlers:graph_replay_handler
