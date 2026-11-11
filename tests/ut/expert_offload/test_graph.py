@@ -118,9 +118,12 @@ def test_partial_transfer_failure_cannot_publish_residency(
 
 def test_graph_callback_failure_exits_even_if_callback_exceptions_are_swallowed():
     program = textwrap.dedent("""
+        import sys
         from contextlib import nullcontext
         from types import SimpleNamespace
         import torch
+        sys.modules["vllm_ascend.ascend_config"] = SimpleNamespace(get_ascend_config=lambda: None)
+        sys.modules["vllm_ascend.ops.fused_moe.routed_experts"] = SimpleNamespace(AscendRoutedExperts=torch.nn.Module)
         from vllm_ascend.expert_offload.expert_offload_manager import LayerOffloadBinding
 
         binding = LayerOffloadBinding.__new__(LayerOffloadBinding)
