@@ -21,7 +21,6 @@ import inspect
 import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -705,21 +704,6 @@ class NPUModelRunner(GPUModelRunner):
             execution_start_time,
         )
 
-        # TODO: Remove this workaround once upstream vLLM restores idle DP ranks'
-        # logical request counts before draft DP synchronization.
-        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
-        # Restore their request counts before draft DP sync to avoid inflating all ranks.
-        if (
-            dummy_run
-            and not is_profile
-            and context_len == 0
-            and self.adaptive_verification is not None
-            and self.execute_model_state is not None
-        ):
-            state = self.execute_model_state
-            self.execute_model_state = state._replace(
-                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
-            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
