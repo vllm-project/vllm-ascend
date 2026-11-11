@@ -1,0 +1,5 @@
+# 调度与执行. These symbols already exist; the handlers only time them.
+# Per-step histograms are detail.
+
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.sample_tokens
+  handler: vllm_ascend.observability.ms_metrics.handlers:sample_tokens_handler
