@@ -1694,7 +1694,7 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
 def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
     # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
-    # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
+    # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#12-how-to-handle-the-out-of-memory-issue
     # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
     # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
     if vllm_config.model_config and not vllm_config.model_config.enable_sleep_mode:
