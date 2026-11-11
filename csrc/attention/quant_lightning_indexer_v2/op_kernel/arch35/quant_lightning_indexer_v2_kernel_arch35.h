@@ -366,6 +366,8 @@ __aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
     }
     uint32_t queryCount, keyCount, originalKeyCount;
     uint32_t groups = 0;
+    uint32_t uniformRows = 0;
+    uint32_t uniformKeyCount = 0;
     for (uint32_t batchIdx = 0; batchIdx < constInfo.batchSize; ++batchIdx) {
         GetS1S2ActualSeqLen(batchIdx, queryCount, keyCount, originalKeyCount);
         if constexpr (Q_LAYOUT_T != LI_LAYOUT::TND) {
@@ -379,6 +381,17 @@ __aicore__ inline bool QLIV2Preload<QLIV2T>::TrySplitQueryCore()
             if (queryCount != cuSeqlensQGm.GetValue(batchIdx + 1) - cuSeqlensQGm.GetValue(batchIdx)) {
                 return false;
             }
+        }
+        if (queryCount != 0) {
+            const uint32_t rows = Min(queryCount, constInfo.s1BaseSize);
+            // Equal core counts suit equal workloads. Keep the cost-balanced
+            // metadata schedule for tail groups and ragged request lengths.
+            if ((queryCount > constInfo.s1BaseSize && queryCount % constInfo.s1BaseSize != 0) ||
+                (uniformRows != 0 && (rows != uniformRows || keyCount != uniformKeyCount))) {
+                return false;
+            }
+            uniformRows = rows;
+            uniformKeyCount = keyCount;
         }
         groups += CeilDiv(queryCount, constInfo.s1BaseSize);
         if (groups >= cores || (queryCount != 0 && keyCount < MIN_SPLIT_KEY_LENGTH)) {

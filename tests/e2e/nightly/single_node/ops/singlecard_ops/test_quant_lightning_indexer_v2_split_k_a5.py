@@ -193,6 +193,7 @@ def _check_a5_result(actual, expected):
         ([1], [4096], "TND", 2048, 1),
         ([3], [8193], "TND", 2048, 1),
         ([6], [32769], "TND", 2048, 1),
+        ([8], [32768], "TND", 2048, 1),
         ([1, 5, 2], [8193, 32769, 4097], "TND", 513, 1),
         ([0, 3, 0, 1], [0, 8193, 0, 4097], "TND", 2048, 1),
         ([1] * 13, [8193] * 13, "TND", 2048, 1),
@@ -243,9 +244,10 @@ def test_a5_split_k_preserves_tnd_padding(quant_mode):
 
 
 @pytest.mark.parametrize("quant_mode", [1, 2])
+@pytest.mark.parametrize("queries,lengths", [([1, 5], [8193, 32769]), ([4, 4], [8193, 8193])])
 @torch.inference_mode()
-def test_a5_split_k_matches_cpu_topk(quant_mode):
-    run, active_rows, _ = _make_a5_case([1, 5], [8193, 32769], quant_mode=quant_mode, pattern="ramp")
+def test_a5_split_k_matches_cpu_topk(quant_mode, queries, lengths):
+    run, active_rows, _ = _make_a5_case(queries, lengths, quant_mode=quant_mode, pattern="ramp")
     active_rows(run())
 
 
