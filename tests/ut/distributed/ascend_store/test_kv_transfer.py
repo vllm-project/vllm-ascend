@@ -760,7 +760,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 store.exists = MagicMock(side_effect=AssertionError("unexpected exists lookup"))
                 thread._prepare_value = MagicMock(wraps=thread._prepare_value)
                 req = ReqMeta("r1", token_len_chunk=32, block_ids=block_ids, block_hashes=["h0", "h1"])
-                thread.add_stored_request("r1")
+                thread.add_stored_request(req)
                 thread.request_queue.put(req)
 
                 thread._handle_request(req)
