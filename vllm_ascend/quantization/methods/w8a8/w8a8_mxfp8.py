@@ -364,7 +364,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     model_dtype = None
     quant_type: QuantType = QuantType.W8A8MXFP
     act_quant_type: torch.dtype = torch.float8_e4m3fn
-    fused_activations = frozenset({"silu"})
+    fused_activations = frozenset({"silu", "swiglustep"})
     supports_eplb = True
 
     def __init__(self):
@@ -728,6 +728,27 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 clamp_limit=mlp_compute_input.swiglu_limit,
                 glu_alpha=mlp_compute_input.swiglu_alpha,
                 glu_bias=mlp_compute_input.swiglu_beta,
+                dst_type=self.act_quant_type,
+                scale_alg=self._dynamic_mx_quant_scale_alg,
+            )
+            return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
+
+        if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
+            # Mode 3 consumes [gate | up] and clamps gate after SiLU,
+            # matching SwigluStepAndMul without alpha/bias or interleaving.
+            hidden_states = self.apply_gmm1(mlp_compute_input)
+            # vLLM list type 1 and operator group_mode 0 both mean token counts.
+            group_index = cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1)
+            hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
+                hidden_states,
+                activate_left=True,
+                group_index=group_index,
+                group_mode=0,
+                swiglu_mode=3,
+                # Step3p5 currently requires a 7.0 limit but does not pass it
+                # into the MoE config, so mlp_compute_input.swiglu_limit may
+                # default to 0.0. Match the unfused SWIGLUSTEP path's 7.0.
+                clamp_limit=7.0,
                 dst_type=self.act_quant_type,
                 scale_alg=self._dynamic_mx_quant_scale_alg,
             )
