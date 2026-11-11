@@ -638,7 +638,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             self.head_v_dim,
                         )
                         mixed_qkv_non_spec = mixed_qkv_non_spec[num_decode_tokens:]
-                        query_start_loc_opt = attn_metadata.prefill_query_start_loc
+                        prefill_starts = attn_metadata.prefill_query_start_loc
+                        if prefill_starts.numel() != query_start_loc_opt.numel() - num_decodes:
+                            # Convolution retains rows omitted by the recurrence.
+                            query_start_loc_opt = query_start_loc_opt[num_decodes:] - num_decode_tokens
+                        else:
+                            query_start_loc_opt = prefill_starts
                         cache_indices_opt = cache_indices_opt[num_decodes:]
                         if initial_state_mode_opt is not None:
                             initial_state_mode_opt = initial_state_mode_opt[num_decodes:]

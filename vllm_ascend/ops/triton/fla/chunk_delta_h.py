@@ -96,12 +96,14 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         ptr_h0_bv2 = h0_ptr + offs_k * V + offs_v2 * 1
         b_h1_bv2 += tl.load(ptr_h0_bv2, mask=mask_kv2, other=0.0).to(tl.float32)
 
+    if HAS_CHECKPOINTS:
+        checkpoint_offset = tl.load(checkpoint_offsets + i_n)
+
     # main recurrence
     for i_t in range(NT):
         h_base = h + (boh + i_t) * H * K * V + i_h * K * V
 
         if HAS_CHECKPOINTS:
-            checkpoint_offset = tl.load(checkpoint_offsets + i_n)
             if checkpoint_offset > 0 and i_t * BT == checkpoint_offset:
                 # Continue from exactly the value a cache hit will restore.
                 # Otherwise BF16/FP16 export rounds only the warm request,

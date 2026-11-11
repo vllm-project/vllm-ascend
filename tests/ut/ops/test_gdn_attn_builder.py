@@ -536,7 +536,11 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
         builder_cls=AscendGDNHostMetadataBuilder,
     )
     builder._ascend_gdn_checkpoints = True
-    checkpoint = object() if creates_checkpoint else None
+    checkpoint = (
+        SimpleNamespace(checkpoint_offsets=torch.tensor([64]), state_indices=torch.tensor([NULL_BLOCK_ID]))
+        if creates_checkpoint
+        else None
+    )
     builder.checkpoint_builder = SimpleNamespace(build=Mock(return_value=checkpoint))
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=[130], query_lens=[130]),
@@ -553,6 +557,8 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
     ):
         assert getattr(chunk, field) is not None
     assert metadata.checkpoint is checkpoint
+    if checkpoint is not None:
+        assert checkpoint.checkpoint_offsets.tolist() == [0]
     builder.checkpoint_builder.build.assert_called_once_with(common, [0])
 
 

@@ -832,14 +832,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
-        checkpoint = None
-        if num_prefills and self._ascend_gdn_checkpoints:
-            if spec_sequence_masks_cpu is None:
-                non_spec_rows = list(range(m.num_reqs))
-            else:
-                non_spec_rows = [i for i, is_spec in enumerate(spec_sequence_masks_cpu.tolist()) if not is_spec]
-            # Kernel inputs contain only non-spec prefill rows, excluding decodes.
-            checkpoint = self.checkpoint_builder.build(m, non_spec_rows[num_decodes:])
         if runtime_batch and num_actual_reqs > 0 and not (self._ascend_gdn_checkpoints and num_prefills):
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
@@ -985,6 +977,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         prefill_query_start_loc_cpu: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        checkpoint = None
+        active_prefill_rows = None
         non_spec_chunked_prefill_metadata: GDNChunkedPrefillMetadata | None = None
         if num_prefills > 0:
             if spec_sequence_masks is None and num_decodes > 0:
@@ -1000,6 +994,29 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_state_indices = non_spec_state_indices_tensor
 
             assert prefill_query_start_loc_cpu is not None
+            if self._ascend_gdn_checkpoints:
+                assert prefill_state_indices is not None
+                if spec_sequence_masks_cpu is None:
+                    prefill_rows = list(range(num_decodes, m.num_reqs))
+                else:
+                    non_spec_rows = [i for i, is_spec in enumerate(spec_sequence_masks_cpu.tolist()) if not is_spec]
+                    prefill_rows = non_spec_rows[num_decodes:]
+                # Chunk indices use compact row numbers. Keep the planner and
+                # recurrence aligned when padded requests have no tokens.
+                live_rows = prefill_query_start_loc_cpu.diff() > 0
+                if not live_rows.all():
+                    active_rows_cpu = live_rows.nonzero(as_tuple=True)[0]
+                    active_prefill_rows = active_rows_cpu.to(query_start_loc.device, non_blocking=True)
+                    prefill_state_indices = prefill_state_indices.index_select(0, active_prefill_rows)
+                    prefill_rows = [prefill_rows[row] for row in active_rows_cpu.tolist()]
+                    prefill_query_start_loc_cpu = torch.cat(
+                        (prefill_query_start_loc_cpu[:1], prefill_query_start_loc_cpu[1:][live_rows])
+                    )
+                    prefill_query_start_loc = prefill_query_start_loc_cpu.to(query_start_loc.device, non_blocking=True)
+                checkpoint = self.checkpoint_builder.build(m, prefill_rows)
+                if checkpoint is not None:
+                    # Do not round at a boundary without a reserved cache page.
+                    checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
             if self._USE_COMMON_KERNEL_METADATA:
                 non_spec_chunked_prefill_metadata = _build_non_spec_chunked_prefill_metadata(
                     self,
@@ -1020,6 +1037,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            if active_prefill_rows is not None:
+                prefill_has_initial_state = prefill_has_initial_state.index_select(0, active_prefill_rows)
         else:
             has_initial_state = None
 

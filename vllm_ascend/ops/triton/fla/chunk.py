@@ -96,24 +96,10 @@ def chunk_gated_delta_rule_fwd(
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
-    chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
     if cu_seqlens_host is None and cu_seqlens is not None:
         cu_seqlens_host = tuple(cu_seqlens.tolist())
-    if chunk_indices_chunk64_host is None and chunk_indices is not None:
-        chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
-    # Compact zero-length segments for the AscendC kernels (see
-    # _compact_empty_segments).  chunk_indices_chunk64 is already compact-
-    # ranked and is reused as-is; only cu_seqlens / initial_state need
-    # compacting.
-    if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_meta"):
-        cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
-        keep_meta = prebuilt_meta.keep_meta
-        initial_state_kern = (
-            initial_state[keep_meta] if initial_state is not None and keep_meta is not None else initial_state
-        )
-    else:
-        cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
-        keep_meta = None
+    if chunk_indices_chunk64_host is None and chunk_indices_chunk64 is not None:
+        chunk_indices_chunk64_host = tuple(chunk_indices_chunk64.flatten().tolist())
     if checkpoint_output is not None or use_triton_recurrence:
         if get_pcp_group().world_size != 1:
             raise ValueError("GDN internal checkpoints require PCP=1")
@@ -136,6 +122,21 @@ def chunk_gated_delta_rule_fwd(
         h = h.transpose(1, 2).contiguous()
         v_new = v_new.transpose(1, 2).contiguous()
     else:
+        # Compact zero-length segments for the AscendC kernels (see
+        # _compact_empty_segments).  chunk_indices_chunk64 is already compact-
+        # ranked and is reused as-is; only cu_seqlens / initial_state need
+        # compacting.
+        if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_meta"):
+            cu_seqlens_kern = (
+                cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
+            )
+            keep_meta = prebuilt_meta.keep_meta
+            initial_state_kern = (
+                initial_state[keep_meta] if initial_state is not None and keep_meta is not None else initial_state
+            )
+        else:
+            cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
+            keep_meta = None
         w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
         u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
         h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
@@ -153,13 +154,13 @@ def chunk_gated_delta_rule_fwd(
             use_exp2=False,
             transpose_state_layout=False,
         )
-    if keep_meta is not None and checkpoint_output is None and not use_triton_recurrence:
-        # Scatter the compacted final_state back to the original [N, H, K, V]
-        # layout the PCP state recursion expects; empty segments keep their
-        # initial state.
-        _fs_full = initial_state.clone()
-        _fs_full[keep_meta] = final_state
-        final_state = _fs_full
+        if keep_meta is not None:
+            # Scatter the compacted final_state back to the original [N, H, K, V]
+            # layout the PCP state recursion expects; empty segments keep their
+            # initial state.
+            _fs_full = initial_state.clone()
+            _fs_full[keep_meta] = final_state
+            final_state = _fs_full
 
     if get_pcp_group().world_size > 1:
         # When integrating mtp, since `mix_qkv` has been split, `num_decode`
