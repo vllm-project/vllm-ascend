@@ -19,7 +19,7 @@ config:
     dp_rank_start: 0
     tp_size: 2
     pp_size: 2
-    pcp_size: 8
+    cp_size: 8
     nnodes: 2
     node_rank: 0
     master_addr: "${NODE_0_IP}"
@@ -35,7 +35,7 @@ config:
     dp_rank_start: 0
     tp_size: 2
     pp_size: 2
-    pcp_size: 8
+    cp_size: 8
     nnodes: 2
     node_rank: 1
     master_addr: "${NODE_0_IP}"
@@ -97,14 +97,14 @@ templates:
       - --port
       - $SERVER_PORT
       - --prefill-context-parallel-size
-      - ${PCP_SIZE}
+      - ${CP_SIZE}
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --headless
       - --nnodes
       - "2"
-      - "--node-rank"
-      - "${NODE_RANK}"
+      - --node-rank
+      - ${NODE_RANK}
       - --master-addr
       - ${MASTER_ADDR}
       - --master-port
@@ -162,14 +162,14 @@ templates:
       - --port
       - $SERVER_PORT
       - --prefill-context-parallel-size
-      - ${PCP_SIZE}
+      - ${CP_SIZE}
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --headless
       - --nnodes
       - "2"
-      - "--node-rank"
-      - "${NODE_RANK}"
+      - --node-rank
+      - ${NODE_RANK}
       - --master-addr
       - ${MASTER_ADDR}
       - --master-port
