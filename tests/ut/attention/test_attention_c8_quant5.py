@@ -239,10 +239,18 @@ class TestC8Quant5MultiTokenDecode(TestBase):
         layer.v_cache_offset = torch.nn.Parameter(torch.zeros(1))
         layer._c8_k_aq_scale_nz_bnsd = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
         layer._c8_v_aq_scale_nz_bnsd = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
-        layer._c8_k_scale = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
-        layer._c8_v_scale = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        # MagicMock auto-attributes make hasattr(layer, "_c8_scales_prepared")
+        # always True, so _prepare_c8_scales early-returns: precompute the
+        # full set of real scales it would have derived and mark it prepared.
+        k_scale = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        v_scale = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_k_scale = k_scale
+        layer._c8_v_scale = v_scale
         layer._c8_k_offset = torch.zeros(1, NUM_KV_HEADS, HEAD_SIZE)
         layer._c8_v_offset = torch.zeros(1, NUM_KV_HEADS, HEAD_SIZE)
+        layer._c8_k_inv_scale = 1.0 / k_scale
+        layer._c8_v_inv_scale = 1.0 / v_scale
+        layer._c8_scales_prepared = True
         return layer
 
     @patch(
