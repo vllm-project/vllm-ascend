@@ -527,6 +527,7 @@ jobs:
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
+            -f os_matrix='${{ needs.authorize.outputs.command == 'presmoke' && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
