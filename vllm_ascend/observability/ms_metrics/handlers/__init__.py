@@ -14,6 +14,12 @@ from vllm_ascend.observability.ms_metrics.handlers.eplb import (
     eplb_transfer_recv_handler,
     eplb_transfer_send_handler,
 )
+from vllm_ascend.observability.ms_metrics.handlers.kvpool import (
+    kv_pool_layerwise_gva_load_handler,
+    kv_pool_layerwise_range_load_handler,
+    kv_pool_load_error_handler,
+    kv_pool_put_failure_handler,
+)
 from vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle import (
     sleep_handler,
     wake_handler,
@@ -29,6 +35,10 @@ __all__ = [
     "eplb_transfer_execute_handler",
     "eplb_transfer_recv_handler",
     "eplb_transfer_send_handler",
+    "kv_pool_layerwise_gva_load_handler",
+    "kv_pool_layerwise_range_load_handler",
+    "kv_pool_load_error_handler",
+    "kv_pool_put_failure_handler",
     "runtime_guard_handle_alert_handler",
     "sample_tokens_handler",
     "sleep_handler",
