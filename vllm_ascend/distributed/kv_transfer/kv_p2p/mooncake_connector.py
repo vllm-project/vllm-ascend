@@ -1668,8 +1668,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
     def shutdown(self) -> None:
-        if self.connector_worker is not None and self.connector_worker.kv_send_thread is not None:
-            self.connector_worker.kv_send_thread.close()
+        sender = getattr(self.connector_worker, "kv_send_thread", None)
+        if sender is not None:
+            sender.close()
         super().shutdown()
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
@@ -3412,9 +3413,10 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings()
             if has_replicated_attention:
                 self._add_group_source_ports(req_id, meta, local_remote_block_port_mappings)
-            self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[
-                getattr(self, "logical_handshake_port", self.handshake_port)
-            ]
+            logical_port = self.side_channel_port + get_mooncake_handshake_logical_rank(
+                self.pp_rank, self.tp_size, self.tp_rank, self.pcp_rank, self.pcp_size
+            )
+            self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[logical_port]
             self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
                 local_remote_block_port_mappings
             )
