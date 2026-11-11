@@ -44,6 +44,7 @@ def load_class(filename, name, methods, dependencies=None):
     scope = dict(
         globals(),
         math=math,
+        prod=math.prod,
         dataclass=dataclass,
         is_circular_kv_cache_spec=lambda spec: False,
         cdiv=lambda a, b: -(-a // b),
@@ -67,7 +68,7 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
         )
     }
     cls = load_class(
-        "pull_scheduler.py", "MooncakeSchedulerSendingThread", {"_merge_metadata_by_pp_rank"}, metadata_types
+        "base_scheduler.py", "MooncakeMetadataThread", {"_merge_metadata_by_pp_rank"}, metadata_types
     )
     scheduler = cls()
     scheduler.engine_id = "p"
@@ -94,8 +95,13 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
     merged = scheduler._merge_metadata_by_pp_rank({0: first, 1: first})[0]
     assert merged.layer_names == ["a", "z"]
     assert merged.dcp_sharded == [True, False]
+    assert merged.block_inner_strides == [[(128, 8, 2)], [(128, 8, 2)]]
     with pytest.raises(ValueError, match="mismatch in.*dcp_sharded"):
         scheduler._merge_metadata_by_pp_rank({0: first, 1: replace(first, dcp_sharded=[True, True])})
+    with pytest.raises(ValueError, match="mismatch in.*block_inner_strides"):
+        scheduler._merge_metadata_by_pp_rank(
+            {0: first, 1: replace(first, block_inner_strides=[[(8, 8, 2)], [(128, 8, 2)]])}
+        )
 
 
 @pytest.fixture
@@ -231,3 +237,66 @@ def test_indexer_replication_uses_explicit_metadata(worker, local_replicas, remo
         1 if local_replicas > 1 else 2,
         1 if remote_replicas > 1 else 4,
     )
+
+
+@pytest.mark.parametrize("local_layout", ["HND", "NHD"])
+@pytest.mark.parametrize("remote_layout", ["HND", "NHD"])
+@pytest.mark.parametrize(
+    "local_heads,remote_heads,local_offset,remote_offset,count",
+    [(2, 2, 0, 0, 2), (4, 2, 2, 0, 2), (2, 4, 0, 2, 2), (4, 4, 1, 2, 1)],
+)
+def test_attention_transfer_copies_logical_heads(
+    local_layout, remote_layout, local_heads, remote_heads, local_offset, remote_offset, count
+):
+    cls = load_class("pull_worker.py", "MooncakePullRecvingThread", {"_attention_transfer_slices"})
+    tokens, dim, item_size = 7, 3, 2
+
+    def strides(layout, heads):
+        return (
+            (tokens * dim * item_size, dim * item_size, item_size)
+            if layout == "HND"
+            else (dim * item_size, heads * dim * item_size, item_size)
+        )
+
+    local_strides = strides(local_layout, local_heads)
+    remote_strides = strides(remote_layout, remote_heads)
+    # A padded physical block stride must not change the logical head mapping.
+    local_block_stride = local_heads * tokens * dim * item_size + 16
+    remote_block_stride = remote_heads * tokens * dim * item_size + 32
+    source = bytearray(remote_block_stride * 3)
+    destination = bytearray([255] * (local_block_stride * 3))
+    expected = bytearray(destination)
+    for token in range(tokens):
+        for head in range(count):
+            for d in range(dim):
+                value = (100 * head + 10 * token + d).to_bytes(item_size, "little")
+                src = (
+                    2 * remote_block_stride
+                    + (remote_offset + head) * remote_strides[0]
+                    + token * remote_strides[1]
+                    + d * item_size
+                )
+                dst = (
+                    local_block_stride
+                    + (local_offset + head) * local_strides[0]
+                    + token * local_strides[1]
+                    + d * item_size
+                )
+                source[src : src + item_size] = value
+                expected[dst : dst + item_size] = value
+    slices = cls._attention_transfer_slices(
+        (local_heads, tokens, dim),
+        (remote_heads, tokens, dim),
+        local_strides,
+        remote_strides,
+        local_offset,
+        remote_offset,
+        count,
+    )
+    for dst, src, size in slices:
+        destination[local_block_stride + dst : local_block_stride + dst + size] = source[
+            2 * remote_block_stride + src : 2 * remote_block_stride + src + size
+        ]
+    assert destination == expected
+    if local_layout == remote_layout and local_heads == remote_heads == count:
+        assert len(slices) == 1

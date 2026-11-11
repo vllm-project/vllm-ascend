@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -84,11 +85,14 @@ def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
     assert worker.layer_name_to_spec_index == {"layer.0": 0, "layer.1": 1}
 
 
+@pytest.mark.parametrize("heads", [1, 2, 4])
 @pytest.mark.parametrize("layout", ["HND", "NHD"])
 @pytest.mark.parametrize("spec_factory", [make_full_spec, make_sliding_spec])
-def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monkeypatch, layout, spec_factory) -> None:
-    spec = spec_factory()
-    shape = (4, 1, 16, 8) if layout == "HND" else (4, 16, 1, 8)
+def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(
+    monkeypatch, layout, spec_factory, heads
+) -> None:
+    spec = replace(spec_factory(), num_kv_heads=heads)
+    shape = (4, heads, 16, 8) if layout == "HND" else (4, 16, heads, 8)
     k_cache = torch.empty(shape, dtype=torch.float16)
     v_cache = torch.empty(shape, dtype=torch.float16)
     config = KVCacheConfig(
@@ -132,10 +136,12 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     assert metadata.layer_names == ["layer.0"]
     assert metadata.layer_block_sizes == [spec.block_size]
     assert metadata.kv_caches_base_addr == [[k_cache.data_ptr(), v_cache.data_ptr()]]
-    assert metadata.block_shapes == [[(1, 16, 8), (1, 16, 8)]]
+    assert metadata.block_shapes == [[(heads, 16, 8), (heads, 16, 8)]]
+    expected_strides = (256, 16, 2) if layout == "HND" else (16, heads * 16, 2)
+    assert metadata.block_inner_strides == [[expected_strides, expected_strides]]
     assert metadata.block_size_scales == [[2, 2]]
     assert metadata.block_strides == [[k_cache.stride(0) * 2, v_cache.stride(0) * 2]]
-    assert metadata.block_lens == [[256, 256]]
+    assert metadata.block_lens == [[256 * heads, 256 * heads]]
     assert tuple(k_cache.shape) == shape
     transfer_engine.register_buffer.assert_called_once()
 
@@ -143,7 +149,6 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
 @pytest.mark.parametrize(
     ("heads", "shape", "step", "error"),
     [
-        (2, (2, 16, 2, 8), 1, "exactly one KV head"),
         (16, (2, 16, 16, 8), 1, "cannot distinguish HND from NHD"),
         (1, (2, 16, 1, 16), 2, "contiguous bytes"),
     ],

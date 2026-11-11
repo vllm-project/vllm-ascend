@@ -1028,14 +1028,14 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
         num_key_value_heads=64,
         kv_cache_specs=[make_full_spec(num_kv_heads=4)],
         block_shapes=[[(4, 16, 8)]],
-        block_lens=[[128]],
-        block_strides=[[128]],
+        block_lens=[[1024]],
+        block_strides=[[1024]],
         kv_caches_base_addr=[[1000]],
     )
     remote = make_pp_metadata(
         block_shapes=[[(2, 16, 8)]],
-        block_lens=[[64]],
-        block_strides=[[64]],
+        block_lens=[[512]],
+        block_strides=[[512]],
         tp_base_addrs={0: [[5000]], 1: [[6000]]},
     )
     src: list[int] = []
@@ -1056,9 +1056,9 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
         length_list=lengths,
     )
 
-    assert src == [1000 + 128 + 64]
-    assert dst == [6000 + 2 * 64]
-    assert lengths == [64]
+    assert src == [1000 + 1024 + 512]
+    assert dst == [6000 + 2 * 512]
+    assert lengths == [512]
 
 
 @pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])

@@ -4,6 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import prod
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -41,8 +42,24 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    # Byte strides in block_shapes' logical axis order (HND for attention).
+    # Older senders omit this field and describe contiguous HND blocks.
+    block_inner_strides: list[list[tuple[int, ...]]] | None = None
 
     def __post_init__(self) -> None:
+        if self.block_inner_strides is None:
+            object.__setattr__(
+                self,
+                "block_inner_strides",
+                [
+                    [
+                        tuple(prod(shape[i + 1 :]) * length // prod(shape) for i in range(len(shape)))
+                        for shape, length in zip(shapes, lengths)
+                    ]
+                    for shapes, lengths in zip(self.block_shapes, self.block_lens)
+                ],
+            )
+        assert self.block_inner_strides is not None
         if self.cp_kv_cache_interleave_size <= 0:
             raise ValueError("Mooncake CP interleave size must be positive.")
         num_layers = len(self.layer_names)
@@ -58,6 +75,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
             ("block_strides", self.block_strides),
             ("block_lens", self.block_lens),
             ("block_shapes", self.block_shapes),
+            ("block_inner_strides", self.block_inner_strides),
             ("block_size_scales", self.block_size_scales),
         )
         for field_name, values in per_layer_fields:
@@ -70,6 +88,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
             ("block_strides", self.block_strides),
             ("block_lens", self.block_lens),
             ("block_shapes", self.block_shapes),
+            ("block_inner_strides", self.block_inner_strides),
             ("block_size_scales", self.block_size_scales),
         )
         for layer_index, layer_name in enumerate(self.layer_names):
@@ -81,6 +100,9 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
                         f"Mooncake transfer metadata for layer {layer_name!r} "
                         f"has {len(values)} {field_name}, expected {num_addrs}."
                     )
+            for shape, strides in zip(self.block_shapes[layer_index], self.block_inner_strides[layer_index]):
+                if len(shape) != len(strides) or any(stride <= 0 for stride in strides):
+                    raise ValueError(f"Invalid block inner strides for layer {layer_name!r}.")
 
 
 @dataclass(frozen=True)
@@ -122,6 +144,7 @@ class MooncakePPTransferMetadata:
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
+    block_inner_strides: list[list[tuple[int, ...]]] | None = None
 
 
 @dataclass(frozen=True)
