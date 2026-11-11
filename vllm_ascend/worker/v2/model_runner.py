@@ -1341,12 +1341,14 @@ class NPUModelRunner(GPUModelRunner):
         model_state = self.model_state
         orig_postprocess_state = model_state.postprocess_state
 
-        def _postprocess_state_after_early_copy(idx_mapping_, num_sampled_, num_computed_tokens_):
+        # Signature-agnostic pass-through: upstream postprocess_state evolves
+        # independently, so mirror its arguments verbatim instead of naming them.
+        def _postprocess_state_after_early_copy(*args, **kwargs):
             nonlocal issue_copy
             if issue_copy:
                 self._copy_num_computed_tokens_to_cpu()
                 issue_copy = False
-            orig_postprocess_state(idx_mapping_, num_sampled_, num_computed_tokens_)
+            orig_postprocess_state(*args, **kwargs)
 
         model_state.postprocess_state = _postprocess_state_after_early_copy
         try:
@@ -1376,6 +1378,12 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         # Match this D2H and event with the consumer in _update_seq_lens_cpu.
+        # The next step may stage request-state GPU writes before the consumer
+        # waits on the event, so this copy can overlap them without a stream
+        # barrier. That is safe by slot disjointness: staged writes only touch
+        # newly added requests' slots, while the consumer reads only
+        # scheduled_cached_reqs slots; the last writer of those slots is
+        # post_update, which wait_stream below already orders this copy after.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
