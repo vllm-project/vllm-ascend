@@ -7,11 +7,13 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    RSWASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -107,6 +109,21 @@ class KVPoolScheduler:
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        self.swa_group_ids = {
+            group_id
+            for group_id in self.cacheable_group_ids
+            if kv_cache_groups is not None
+            and (
+                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
+                or (
+                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
+                    and any(
+                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
+                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
+                    )
+                )
+            )
+        }
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -135,6 +152,7 @@ class KVPoolScheduler:
         self._loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
+        self._kv_cache_manager: KVCacheManager | None = None
         self.sending_event_id = 0
         # {event_id, flattened block_ids}
         self.sending_blocks: dict[int, list[int]] = {}
@@ -670,6 +688,7 @@ class KVPoolScheduler:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
             request_tracker.update(new_block_ids, request.num_computed_tokens)
+        self._sync_swa_block_ids(request_tracker)
         load_spec = None
         if self.layerwise_offload and num_current_tokens > 0:
             load_spec = LoadSpec(
@@ -692,6 +711,16 @@ class KVPoolScheduler:
             request.prompt_token_ids,
             skip_save,
         )
+
+    def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
+        """Use the current request table rather than retained SWA block IDs."""
+        if not self.swa_group_ids:
+            return
+        assert self._kv_cache_manager is not None
+        current_ids = self._kv_cache_manager.get_block_ids(tracker.req_id)
+        for group_id in self.swa_group_ids:
+            if group_id < len(current_ids) and group_id < len(tracker.allocated_block_ids_by_group):
+                tracker.allocated_block_ids_by_group[group_id][:] = current_ids[group_id]
 
     def _process_async_load_request(
         self,
@@ -899,6 +928,9 @@ class KVPoolScheduler:
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free all groups after synchronous saving."""
         return False, None
+
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        self._kv_cache_manager = kv_cache_manager
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         self._block_pool = gpu_block_pool
