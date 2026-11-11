@@ -122,12 +122,11 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-# Online-quantized LM-head copies and these helpers exist only on paired main.
-if not vllm_version_is("0.32.0"):
-    from vllm.model_executor.layers.quantization.online.lm_head import (
-        restore_quantized_lm_heads,
-        share_source_lm_heads,
-    )
+
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    restore_quantized_lm_heads,
+    share_source_lm_heads,
+)
 
 
 def get_kv_cache_groups(
