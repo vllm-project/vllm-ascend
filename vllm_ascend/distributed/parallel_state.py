@@ -23,6 +23,7 @@ _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
 _QKV_IPROJ_TP: GroupCoordinator | None = None
+_GPROJ_TP: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -233,7 +234,7 @@ def init_ascend_model_parallel(
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
     qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP, _GPROJ_TP
 
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -245,6 +246,14 @@ def init_ascend_model_parallel(
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
     if qkv_iproj_tp_size > 1:
         _QKV_IPROJ_TP = _create_or_get_group(qkv_iproj_tp_size, "qkv_iproj_tp")
+    config = get_ascend_config().finegrained_tp_config
+    if config.gproj_tensor_parallel_size > 1:
+        _GPROJ_TP = _create_or_get_group(config.gproj_tensor_parallel_size, "gproj_tp")
+
+
+def get_gproj_tp_group() -> GroupCoordinator:
+    assert _GPROJ_TP is not None, "G projection TP group is not initialized"
+    return _GPROJ_TP
 
 
 def model_parallel_initialized():
@@ -316,25 +325,13 @@ def destroy_ascend_model_parallel():
         _MC2.destroy()
     _MC2 = None
 
-    global _MLP_TP
-    if _MLP_TP:
-        _MLP_TP.destroy()
-    _MLP_TP = None
-
-    global _LMTP
-    if _LMTP:
-        _LMTP.destroy()
-    _LMTP = None
-
-    global _EMBED_TP
-    if _EMBED_TP:
-        _EMBED_TP.destroy()
-    _EMBED_TP = None
-
-    global _OTP
-    if _OTP:
-        _OTP.destroy()
-    _OTP = None
+    global _MLP_TP, _LMTP, _EMBED_TP, _OTP, _QKV_IPROJ_TP, _GPROJ_TP
+    seen = set()
+    for group in (_MLP_TP, _LMTP, _EMBED_TP, _OTP, _QKV_IPROJ_TP, _GPROJ_TP):
+        if group is not None and id(group) not in seen:
+            group.destroy()
+            seen.add(id(group))
+    _MLP_TP = _LMTP = _EMBED_TP = _OTP = _QKV_IPROJ_TP = _GPROJ_TP = None
 
     global _P_TP
     if _P_TP:
