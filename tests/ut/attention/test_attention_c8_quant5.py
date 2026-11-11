@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 import vllm_ascend.attention.attention_v1 as attn_module
-from tests.ut.attention.test_attention_v1 import TestAscendAttentionBackendImpl
+from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import C8_FIA_PSEUDO_QUANT_MODE, AscendC8AttentionBackendImpl
 
 NUM_HEADS = 8
@@ -56,9 +56,28 @@ def _fake_fia_recorder(calls):
     return fake_fia
 
 
-class TestC8Quant5MultiTokenDecode(TestAscendAttentionBackendImpl):
+class TestC8Quant5MultiTokenDecode(TestBase):
+    """Standalone fixtures: deliberately NOT derived from the shared
+    TestAscendAttentionBackendImpl so its suite is not re-executed against
+    the C8 impl built here."""
+
     def setUp(self):
-        super().setUp()
+        self.attention_type = MagicMock()
+        self.attention_type.DECODER = "decoder"
+        self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.mock_vllm_config.cache_config.cache_dtype = "float16"
+        self.config_patcher = patch(
+            "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
+        self.config_patcher.start()
+        self.utils_config_patcher.start()
+        self.addCleanup(self.config_patcher.stop)
+        self.addCleanup(self.utils_config_patcher.stop)
+
         self.impl = AscendC8AttentionBackendImpl(
             num_heads=NUM_HEADS,
             head_size=HEAD_SIZE,
