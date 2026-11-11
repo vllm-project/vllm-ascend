@@ -1,0 +1,5 @@
+pr: 21603
+entries:
+  - category: performance
+    text: Improve exact owner-prefix candidate merging on Ascend A3 with adaptive parallel peer counts.
+    hardware: [A3]
