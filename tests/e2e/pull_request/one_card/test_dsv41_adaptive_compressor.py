@@ -114,13 +114,18 @@ def test_c2_adaptive_graph_replay_matches_sequential_reference(max_query_len, fu
                 graph.replay()
             else:
                 forward()
-            snapshots.append((output.clone(), state.clone(), visible.clone(), window_indices.clone(), window_lengths.clone()))
+            snapshots.append(
+                (output.clone(), state.clone(), visible.clone(), window_indices.clone(), window_lengths.clone())
+            )
         # Accept only the anchor, then rewind over the rejected suffix. The
         # next C2 residual may need the first row from a much longer prior step.
         histories = [history + 1 for history in histories]
     torch.npu.synchronize()
     for (actual, actual_state, actual_visible, actual_indices, actual_lengths), (
-        reference, reference_state, reference_visible, reference_indices
+        reference,
+        reference_state,
+        reference_visible,
+        reference_indices,
     ) in zip(snapshots, expected):
         assert torch.isfinite(actual).all()
         torch.testing.assert_close(actual.cpu(), reference, rtol=1e-2, atol=1e-2)

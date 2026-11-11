@@ -589,7 +589,9 @@ require separate qualification.
 V4.1 uses device query boundaries for SWA writes, compressed cache lengths,
 indexer/attention metadata, and C2 ring state. FULL graph capture preserves
 the maximum verification width even when its dummy queries have one token.
-Padding rows do not write caches. The graph capability is bounded by both
+Padding rows do not write caches. On A5, replay also moves the sparse SWA
+index window with its visible length, preserving the current query's KV and
+excluding keys below the replay boundary. The graph capability is bounded by both
 `1 + num_speculative_tokens` and the 32-row C2 ring: configurations with more
 than 31 draft tokens are rejected by adaptive initialization. The existing
 MRV2 draft-load hook maps the checkpoint's auxiliary attention-input layer

@@ -16,8 +16,8 @@ from vllm_ascend.attention.dsa_v41 import (
     build_replay_swa_visible_lens,
 )
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
-from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.models.deepseek_v41 import mixed_quant_attention
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 
 
 @pytest.mark.parametrize("num_drafts", [5, 7, 15, STATE_RING_ROWS - 1, STATE_RING_ROWS])
@@ -129,7 +129,7 @@ def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch)
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
     )
     spec = AscendSlidingWindowMLASpec(
-        block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=4
+        block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=4, model_version="deepseek_v41"
     )
     builder = AscendDSAV41MetadataBuilder(spec, [], config, torch.device("cpu"))
     # Execute the real metadata builder, replacing only A5's index producer.
