@@ -526,6 +526,7 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -575,6 +576,7 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -624,6 +626,7 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -673,6 +676,7 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -722,6 +726,7 @@ jobs:
             -f download_path="$DOWNLOAD_PATH" \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
