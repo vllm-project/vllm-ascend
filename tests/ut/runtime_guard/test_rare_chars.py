@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from vllm_ascend.observability.runtime_config.config import RuntimeConfig
@@ -29,6 +30,7 @@ from vllm_ascend.observability.runtime_guard.detector.rare import (
     CONFIG_RC4,
     RareDetector,
     build_from_token_bytes,
+    rare_native,
     register_rare_table,
 )
 from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
@@ -37,6 +39,13 @@ from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
 )
 from vllm_ascend.observability.runtime_guard.hooks import need_pre_sample_hook
 from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+
+def _require_native() -> None:
+    rare_native._MOD = None
+    rare_native._MOD_TRIED = False
+    if rare_native._module() is None:
+        pytest.skip("rare_feed_native not built")
 
 
 def _synthetic_table() -> str:
@@ -93,6 +102,7 @@ def test_narrow_collect_formula_matches_log_softmax():
 
 
 def test_rare_chars_feed_precomputed_bad_utf8(tmp_path: Path):
+    _require_native()
     key = _synthetic_table()
     tid = 1  # lone continuation byte
     V = 4

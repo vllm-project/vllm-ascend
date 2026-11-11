@@ -262,7 +262,7 @@ class RareCharsDetector(ConfigBackedDetector):
         with self._lock:
             row = self._row_of.pop(req_id, None)
             batch = self._row_batch
-            if batch is not None and batch._native is not None and batch._id_map is not None:
+            if batch is not None and batch._id_map is not None:
                 batch._native.map_del(batch._id_map, req_id)
             if row is not None and batch is not None:
                 if row < len(batch._req_at):
@@ -280,13 +280,13 @@ class RareCharsDetector(ConfigBackedDetector):
             cfg = json.load(f)
         self._engine = RareDetector(self._corpus_key, cfg, think_end=self._think_end_id)
         self._engine_key = key
+        # RareRowBatch requires rare_feed_native (built by setuptools Extension).
         self._row_batch = RareRowBatch(self._engine)
         self._row_of.clear()
         logger.info(
-            "[runtime_guard: rare_chars] loaded rc4 table=%s think_end=%s native=%s",
+            "[runtime_guard: rare_chars] loaded rc4 table=%s think_end=%s",
             self._corpus_key,
             self._think_end_id,
-            self._row_batch._native is not None,
         )
         return self._engine
 
@@ -312,7 +312,7 @@ class RareCharsDetector(ConfigBackedDetector):
                     logger.warning("[runtime_guard: rare_chars] lazy warmup failed: %s", exc)
                     return []
             try:
-                engine = self._ensure_engine_locked()
+                self._ensure_engine_locked()
             except Exception as exc:
                 logger.warning("[runtime_guard: rare_chars] engine init failed: %s", exc)
                 return []
@@ -331,8 +331,7 @@ class RareCharsDetector(ConfigBackedDetector):
                 keep_tok.append(token_id)
                 keep_top1.append(float(top1_logprobs[i]))
                 keep_chosen.append(float(chosen_logprobs[i]))
-            return self._feed_token_batch_locked(
-                engine=engine,
+            return self._feed_native_locked(
                 req_ids=keep_ids,
                 req_idxs=keep_idx,
                 token_ids=keep_tok,
@@ -340,12 +339,6 @@ class RareCharsDetector(ConfigBackedDetector):
                 chosen=keep_chosen,
                 log_leader=runner_tp_rank(self._runner) == 0,
             )
-
-    def _ensure_row_batch(self, engine: RareDetector) -> RareRowBatch:
-        if self._row_batch is None or self._row_batch.det is not engine:
-            self._row_batch = RareRowBatch(engine)
-            self._row_of.clear()
-        return self._row_batch
 
     def _copy_recent(self, st: RareCharsReqState, batch: RareRowBatch, row: int) -> None:
         n = int(batch._recent_len[row])
@@ -367,7 +360,7 @@ class RareCharsDetector(ConfigBackedDetector):
     ) -> list[Incident]:
         batch = self._row_batch
         if batch is None or batch._native is None:
-            return []
+            raise RuntimeError("rare_feed_native.so is not built (required for rare_chars)")
         native = batch._native
         n = min(len(req_ids), len(token_ids), len(top1), len(chosen))
         if n <= 0:
@@ -440,88 +433,6 @@ class RareCharsDetector(ConfigBackedDetector):
             )
             if alert is not None:
                 batch._done[row] = True
-                alerts.append(alert)
-        return alerts
-
-    def _feed_token_batch_locked(
-        self,
-        *,
-        engine: RareDetector,
-        req_ids: list[str],
-        req_idxs: list[int],
-        token_ids: list[int],
-        top1: list[float],
-        chosen: list[float],
-        log_leader: bool,
-    ) -> list[Incident]:
-        batch = self._ensure_row_batch(engine)
-        if batch._native is not None:
-            return self._feed_native_locked(
-                req_ids=req_ids,
-                req_idxs=req_idxs,
-                token_ids=token_ids,
-                top1=top1,
-                chosen=chosen,
-                log_leader=log_leader,
-            )
-        rows: list[int] = []
-        live_ids: list[str] = []
-        live_idx: list[int] = []
-        live_tok: list[int] = []
-        live_top1: list[float] = []
-        live_chosen: list[float] = []
-        states: list[RareCharsReqState] = []
-        for req_id, req_idx, token_id, lp1, lpc in zip(req_ids, req_idxs, token_ids, top1, chosen):
-            st = self._states.get(req_id)
-            if st is None:
-                st = RareCharsReqState()
-                self._states[req_id] = st
-            if st.alerted:
-                continue
-            row = self._row_of.get(req_id)
-            if row is None:
-                row = batch.add()
-                self._row_of[req_id] = row
-            rows.append(row)
-            live_ids.append(req_id)
-            live_idx.append(req_idx)
-            live_tok.append(token_id)
-            live_top1.append(lp1)
-            live_chosen.append(lpc)
-            states.append(st)
-        if not rows:
-            return []
-        try:
-            batch.feed_rows(
-                np.asarray(rows, np.int64),
-                np.asarray(live_tok, np.int64),
-                np.asarray(live_top1, np.float64),
-                np.asarray(live_chosen, np.float64),
-            )
-        except Exception as exc:
-            logger.warning("[runtime_guard: rare_chars] batched feed failed: %s", exc)
-            return []
-        alerts: list[Incident] = []
-        for row, st, req_id, req_idx, token_id, lp1, lpc in zip(
-            rows, states, live_ids, live_idx, live_tok, live_top1, live_chosen
-        ):
-            st.tokens_seen += 1
-            st.recent.append({"token_id": int(token_id), "top1": float(lp1), "chosen": float(lpc)})
-            if len(st.recent) > 16:
-                st.recent = st.recent[-16:]
-            alert = self._incident_from_row(
-                st,
-                res=batch.strict_at(row),
-                mon=batch.monitor_at(row),
-                req_id=req_id,
-                req_idx=req_idx,
-                token_id=token_id,
-                top1=lp1,
-                chosen=lpc,
-                log_leader=log_leader,
-                source="guard_rare_chars_rc4",
-            )
-            if alert is not None:
                 alerts.append(alert)
         return alerts
 
@@ -606,8 +517,7 @@ class RareCharsDetector(ConfigBackedDetector):
             except Exception as exc:
                 logger.warning("[runtime_guard: rare_chars] finish failed req=%s: %s", req_id, exc)
                 return None
-            if self._row_batch._native is not None:
-                self._copy_recent(st, self._row_batch, row)
+            self._copy_recent(st, self._row_batch, row)
             return self._incident_from_row(
                 st,
                 res=res,

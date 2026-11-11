@@ -10,4 +10,5 @@ entries:
     text: >-
       rare_chars builds its per-tokenizer table at model warmup (table=auto)
       instead of shipping qwen3/glm/dsv4 npz blobs; the shared rc4_gb model
-      remains packaged. rare_feed_native is built by setup.py / CMake.
+      remains packaged. rare_feed_native is always a setuptools Extension so
+      wheels include it for both COMPILE_CUSTOM_KERNELS=0 and =1.
