@@ -274,6 +274,7 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     markov.assert_called_once_with(32, draft_vocab_size or 32, 4, prefix="model.layers.42.markov_head")
     confidence.assert_called_once_with(input_dim=12, prefix="model.confidence_head", bias=False, with_markov=True)
     assert linear.call_args.kwargs["quant_config"] is quant_config
+    assert linear.call_args.kwargs["prefix"] == "mtp.0.main_proj"
     assert model.layers["42"].markov_head is model.markov_head
     assert len(draft_impls) == 3
     for impl in draft_impls:
@@ -281,6 +282,62 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
         impl.reserve_oproj_buffers.assert_called_once_with(
             torch.device(module.current_platform.device_type), torch.float16
         )
+
+
+@pytest.mark.parametrize(
+    "checkpoint_quant_method,runtime_quant_method",
+    [("ascend", None), (None, "ascend")],
+)
+def test_draft_main_proj_keeps_modelslim_quant_contract(monkeypatch, checkpoint_quant_method, runtime_quant_method):
+    config = SimpleNamespace(
+        hc_mult=4,
+        hidden_size=8,
+        head_dim=4,
+        vocab_size=32,
+        draft_vocab_size=None,
+        dspark_block_size=6,
+        dspark_target_layer_ids=[37, 38, 39],
+        dspark_markov_rank=4,
+        num_hidden_layers=40,
+        rms_norm_eps=1e-6,
+    )
+    quantization_config = None if checkpoint_quant_method is None else {"quant_method": checkpoint_quant_method}
+    quant_config = SimpleNamespace(get_name=lambda: runtime_quant_method)
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                hf_text_config=config,
+                hf_config=SimpleNamespace(quantization_config=quantization_config),
+            )
+        ),
+        parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+        model_config=SimpleNamespace(dtype=torch.float16),
+        quant_config=quant_config,
+    )
+    module = deepseek_v41_dspark_module
+
+    def layer(*args, **kwargs):
+        result = torch.nn.Module()
+        result.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        impl = MagicMock(spec=module.AscendDSAImpl)
+        result.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=impl)))
+        return result
+
+    monkeypatch.setattr(module, "DeepseekV41DSparkDecoderLayer", layer)
+    monkeypatch.setattr(module, "VocabParallelEmbedding", lambda *a, **kw: torch.nn.Identity())
+    linear = MagicMock(return_value=torch.nn.Identity())
+    monkeypatch.setattr(module, "ColumnParallelLinear", linear)
+    monkeypatch.setattr(module, "MergedColumnParallelLinear", MagicMock(return_value=torch.nn.Identity()))
+    monkeypatch.setattr(module, "RMSNorm", lambda *a, **kw: torch.nn.Identity())
+    with (
+        patch.object(module.DeviceOperator, "get_dsv41_packed_cache_ops", return_value=object()),
+        patch.object(module, "DSparkMarkovHead", autospec=True, return_value=torch.nn.Identity()),
+        patch.object(module, "DSparkConfidenceHead", autospec=True, return_value=torch.nn.Identity()),
+    ):
+        DeepseekV41DSparkModel(vllm_config=vllm_config, prefix="model")
+
+    assert linear.call_args.kwargs["quant_config"] is quant_config
+    assert linear.call_args.kwargs["prefix"] == "mtp.0.main_proj"
 
 
 def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):

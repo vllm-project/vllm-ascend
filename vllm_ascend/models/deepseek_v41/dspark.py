@@ -208,16 +208,18 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         )
 
         # V4.1 keeps the checkpoint quantization contract on the composite
-        # config.  Its DSpark main projection is FP8 in the release checkpoint,
-        # so constructing a BF16 linear drops the scale parameter and makes the
-        # draft loader fail on ``main_proj.scale``.
+        # config.  Release checkpoints mark main_proj FP8, and ModelSlim
+        # ascend_v1 checkpoints might mark it W8A8_MXFP8.  A BF16 linear drops the
+        # scale parameter and makes the draft loader fail on main_proj.scale.
         checkpoint_config = getattr(draft_model_config, "hf_config", None)
         model_quant_config = getattr(checkpoint_config, "quantization_config", None)
+        quant_method = None if model_quant_config is None else model_quant_config.get("quant_method")
+        if quant_method is None and vllm_config.quant_config is not None:
+            quant_method = vllm_config.quant_config.get_name()
         main_proj_quant_config = (
             vllm_config.quant_config
             if DeviceOperator.get_dsv41_packed_cache_ops() is not None
-            and model_quant_config is not None
-            and model_quant_config.get("quant_method") == "fp8"
+            and quant_method in ("fp8", "ascend")
             else None
         )
         self.main_proj = ColumnParallelLinear(
@@ -226,7 +228,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             bias=False,
             return_bias=False,
             quant_config=main_proj_quant_config,
-            prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
+            # Match the checkpoint name so per-layer quant descriptions resolve.
+            prefix="mtp.0.main_proj",
             gather_output=True,
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

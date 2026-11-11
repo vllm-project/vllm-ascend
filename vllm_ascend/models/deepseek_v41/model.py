@@ -435,6 +435,8 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
     # so the weight must remain ND.
     self.wo_a.skip_weight_nz_conversion = True
+    # Let W8A8_MXFP8 post-processing emit the DSA batched-matmul layout.
+    self.wo_a.dsa_wo_a_3d_layout = True
     self.wo_b = RowParallelLinear(
         self.n_groups * config.o_lora_rank,
         self.dim,
