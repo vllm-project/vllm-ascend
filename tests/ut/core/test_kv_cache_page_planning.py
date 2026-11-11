@@ -88,21 +88,6 @@ def test_indexer_keeps_its_own_page_class():
     assert planned["full"].page_size_bytes == planned["state"].page_size_bytes == 128
 
 
-def test_compatibility_entry_aligns_before_upstream_grouping(monkeypatch):
-    from vllm_ascend.patch.platform import patch_kv_cache_utils as cache_patch
-
-    specs = {"full": _attention(), "state": _state(32)}
-    upstream = Mock(return_value=[])
-    monkeypatch.setattr(cache_patch, "_orig_get_kv_cache_groups", upstream)
-    monkeypatch.setattr(cache_patch, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
-    config = SimpleNamespace()
-    assert cache_patch._get_ascend_kv_cache_groups(config, specs) == []
-
-    planned = upstream.call_args.args[1]
-    assert planned["full"].page_size_bytes == 128
-    assert specs["full"].page_size_padded is None
-
-
 def test_builder_aligns_before_default_grouping(monkeypatch):
     planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
@@ -117,4 +102,32 @@ def test_builder_aligns_before_default_grouping(monkeypatch):
 
     planned = upstream.call_args.args[1]
     assert planned["full"].page_size_bytes == 128
+    assert specs["full"].page_size_padded is None
+
+
+def test_builder_fallback_aligns_once_and_uses_unpatched_grouping(monkeypatch):
+    import vllm.v1.core.kv_cache_planning as upstream_planning
+
+    from vllm_ascend.core import kv_cache_config_builder as builder_module
+    from vllm_ascend.patch.platform import patch_kv_cache_utils  # noqa: F401
+
+    # Importing Ascend patches must leave the public upstream grouping entry intact.
+    assert upstream_planning.get_kv_cache_groups.__module__ == "vllm.v1.core.kv_cache_planning"
+    specs = {"full": _attention(), "state": _state(32)}
+    upstream = Mock(return_value=[])
+    align = Mock(wraps=builder_module.align_hybrid_kv_cache_specs)
+    monkeypatch.setattr(upstream_planning, "get_kv_cache_groups", upstream)
+    monkeypatch.setattr(builder_module, "align_hybrid_kv_cache_specs", align)
+    monkeypatch.setattr(builder_module, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(builder_module, "is_deepseek_v41_cache", lambda *_: False)
+    monkeypatch.setattr(builder_module, "group_and_unify_kv_cache_specs", lambda *_: None)
+    monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        model_config=SimpleNamespace(supports_kv_cache_grouping=False),
+    )
+    assert builder_module.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs) == []
+    align.assert_called_once_with(specs)
+    upstream.assert_called_once()
+    assert upstream.call_args.args[1]["full"].page_size_bytes == 128
     assert specs["full"].page_size_padded is None

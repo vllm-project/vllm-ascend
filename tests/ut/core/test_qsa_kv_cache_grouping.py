@@ -8,6 +8,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.patch.platform import patch_kv_cache_utils
 
 
@@ -24,16 +25,21 @@ def _ordinary_specs() -> dict[str, KVCacheSpec]:
 
 def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
     specs = _ordinary_specs()
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")))
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        model_config=SimpleNamespace(supports_kv_cache_grouping=False, hf_config=SimpleNamespace(model_type="qwen3")),
+    )
     expected = [Mock(spec=KVCacheGroupSpec)]
     upstream_grouping = Mock(return_value=expected)
+    import vllm.v1.core.kv_cache_planning as upstream_planning
+
     monkeypatch.setattr(
-        patch_kv_cache_utils,
-        "_orig_get_kv_cache_groups",
+        upstream_planning,
+        "get_kv_cache_groups",
         upstream_grouping,
     )
 
-    actual = patch_kv_cache_utils._get_ascend_kv_cache_groups(
+    actual = AscendKVCacheConfigBuilder().get_kv_cache_groups(
         vllm_config,
         specs,
     )

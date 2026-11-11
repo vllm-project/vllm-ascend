@@ -23,7 +23,6 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -34,21 +33,14 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
-    get_glm5_next_kv_cache_groups,
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
-from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
-    paired_sfa_cache_config,
-    paired_sfa_cache_groups,
-    paired_sfa_max_memory,
-    paired_sfa_pool_bytes,
+    paired_sfa_cache_config, paired_sfa_max_memory, paired_sfa_pool_bytes,
 )
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
-    get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_max_memory_usage,
     get_qwen4_exp_pool_bytes_per_block,
 )
@@ -64,7 +56,6 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cac
 from vllm_ascend.utils import vllm_version_is
 
 _orig_get_kv_cache_groups_uniform_page_size = _kv_cache_planning._get_kv_cache_groups_uniform_page_size
-_orig_get_kv_cache_groups = _kv_cache_planning.get_kv_cache_groups
 _orig_get_packed_kv_cache_groups = _kv_cache_planning._get_packed_kv_cache_groups
 _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_groups", None)
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
@@ -543,24 +534,6 @@ def _ascend_max_memory_usage_bytes_from_groups(
     )
 
 
-def _get_ascend_kv_cache_groups(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec]:
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-        return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
-    step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
-    if step5_groups is not None:
-        return step5_groups
-    if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
-        return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
-    if groups is not None:
-        return groups
-    kv_cache_spec = align_hybrid_kv_cache_specs(kv_cache_spec)
-    return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
-
-
 def _ascend_get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -652,7 +625,6 @@ if _orig_annotate_eagle_groups is not None:
     _kv_cache_planning._annotate_eagle_groups = _ascend_annotate_eagle_groups
 _kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 _kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-_kv_cache_planning.get_kv_cache_groups = _get_ascend_kv_cache_groups
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
