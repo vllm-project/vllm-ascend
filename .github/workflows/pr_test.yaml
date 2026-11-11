@@ -112,7 +112,7 @@ jobs:
           if {group["npu_type"] for group in groups} != {"a2", "a3"}:
               raise SystemExit("Expected nonempty A2 and A3 full-suite selections")
           prefixes = {
-              "a2": "linux-aarch64-a2-fed-",
+              "a2": "linux-aarch64-a2b1b3-fed-",
               "a3": "linux-aarch64-a3-800i-fed-",
           }
           for group in groups:
@@ -148,7 +148,7 @@ jobs:
     needs: [select-tests, prepare-csrc-cache]
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
-      runner: linux-aarch64-a2-fed-1
+      runner: linux-aarch64-a2b1b3-fed-1
       vllm: ${{ needs.select-tests.outputs.main_commit }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
