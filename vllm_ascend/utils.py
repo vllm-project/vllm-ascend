@@ -962,6 +962,13 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
+    if vllm_config is not None:
+        expert_offload_config = vllm_config.additional_config.get("expert_offload_config", {})
+        if expert_offload_config.get("enabled", False):
+            from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadRoutedExperts
+
+            REGISTERED_ASCEND_OPS["RoutedExperts"] = ExpertOffloadRoutedExperts
+
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 

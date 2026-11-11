@@ -9,6 +9,9 @@ from typing import cast
 import torch
 from vllm.logger import logger
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+
 from .transfer import TorchExpertTransfer
 from .utils import ExpertMapBuffer, ExpertWeightView, PreparedExpertTensor
 
@@ -26,6 +29,15 @@ def expert_offload_quant_method(layer, native_method, expert_offload_config):
     from .method import ExpertOffloadMoEMethod
 
     return ExpertOffloadMoEMethod(native_method, layer.moe_config, expert_offload_config)
+
+
+class ExpertOffloadRoutedExperts(AscendRoutedExperts):
+    """Resolve the native quantization method before adding target offload."""
+
+    def _get_quant_method(self, prefix, quant_config, moe_config):
+        native_method = super()._get_quant_method(prefix, quant_config, moe_config)
+        expert_offload_config = get_ascend_config().expert_offload_config
+        return expert_offload_quant_method(self, native_method, expert_offload_config)
 
 
 class MXFPExpertAdapter:
