@@ -1657,7 +1657,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         if attn_metadata.num_decode_tokens != attn_metadata.num_decodes:
             # Multi-token-query decode (MTP / speculative decoding): the BNSD
             # fast path below assumes exactly one query token per request and
-            # would mis-slice query rows against KV batch rows.
+            # would slice query rows against mismatched KV batch rows.
             return self._forward_c8_fia_quant5_decode(query, attn_metadata, output, layer)
 
         key = self._nz_5d_view(self.key_cache, block_size)
@@ -1819,7 +1819,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # Multi-token-query decode segment (MTP / speculative
                 # decoding): route through FIA TND + quant_mode=5 (or the
                 # gather+dequant fallback) instead of the one-query-row BNSD
-                # call below, which would mis-slice query rows against KV
+                # call below, which would slice query rows against mismatched KV
                 # batch rows. The prefill segment below still runs.
                 self._forward_c8_fia_quant5_decode(query, attn_metadata, output, layer)
             else:
