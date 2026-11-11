@@ -1,6 +1,4 @@
-# Replace null with the new PR number and rename this file to <PR number>.yaml
-# when opening the A5 PR. This change is separate from the merged PR #19000.
-pr: null
+pr: 21508
 entries:
   - category: feature
     text: >-
