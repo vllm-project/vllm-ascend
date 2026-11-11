@@ -1,0 +1,4 @@
+pr: 21466
+entries:
+  - category: performance
+    text: Removed BA projection copies before GDN gating by allowing the Triton kernel to read the original input strides.
