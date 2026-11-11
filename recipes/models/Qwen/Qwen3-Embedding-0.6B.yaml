@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3-Embedding-0.6B — the smallest Qwen3 Embedding model (0.6B dense), for text embedding and retrieval; single-card pooling deployment on Ascend 910C with vLLM Ascend"
   date_added: 2026-10-14
-  date_updated: 2026-11-03
+  date_updated: 2026-11-11
   tasks:
     - embedding
   performance_headline: "Single-card pooling serving on Ascend 910C with vLLM Ascend"
@@ -14,7 +14,7 @@ meta:
 
 model:
   model_id: "Qwen/Qwen3-Embedding-0.6B"
-  min_vllm_version: "0.9.2"
+  min_vllm_version: "0.9.2rc1"
   architecture: dense
   parameter_count: "0.6B"
   active_parameters: "0.6B"
