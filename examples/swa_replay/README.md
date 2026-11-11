@@ -106,7 +106,7 @@ CONCURRENCY=4 NUM_REQUESTS=16 bash examples/swa_replay/04_concurrent.sh
 
 这些请求是非流式请求，`time_total_s` 包含完整生成和 HTTP 往返，**不是 TTFT**。
 并发脚本的总体耗时还包含客户端生成请求和收集结果的时间，不用作稳态吞吐基准。
-正式性能测量使用 [A3 验证指南](../../docs/source/developer_guide/cann_swa_bounded_replay_backport.md)
+正式性能测量使用 [单机 streaming benchmark 指南](BENCHMARK.md)
 中的 `vllm bench serve` 方法。
 
 ## OFF/ON 对照
@@ -130,6 +130,6 @@ OUTPUT_DIR=/workspace/swa-on bash examples/swa_replay/run_all.sh
 
 已使用本地 HTTP 模拟服务执行实际 Bash、curl 和 Python 脚本，验证四个场景、
 共享前缀、并发上限、特殊字符参数，以及 HTTP 500、超时、无效 JSON、空回答和
-并发失败的错误返回。检查结果见 [validation.json](validation.json)。
+并发失败的错误返回。
 尚未用这些脚本执行 A3 模型推理，不能将模拟服务结果当作真实缓存命中、replay
 激活、模型质量或性能收益的证据。
