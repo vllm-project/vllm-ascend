@@ -113,10 +113,16 @@ returns. There is no separate cross-layer save session or completion tracker.
 - Bounded replay can write its cut source again; that source uses a final-step
   event instead of its first attention/cache-only boundary.
 - Missing hooks and unmapped groups also save at step end.
-- DSpark saves are deferred until the runner finalizes after draft context
-  preparation, preserving final target/draft cache contents.
+- DSpark target groups use the same ready events and sender queue during
+  target forward; draft context preparation writes the draft's own caches.
+  Draft groups, including mixed groups identified by registered draft names,
+  remain deferred until the runner finalizes after draft preparation.
 - The final publication task remains deferred even when its attention callback
   runs: earlier replay-cut tasks may not have been submitted yet.
+
+The step-end fence waits for remaining work and publication; it does not
+postpone every target copy. This preserves save/compute overlap for ready
+target layers while keeping later-written cache ranges at their final boundary.
 
 ## Memcache 1.3 contract
 

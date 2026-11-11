@@ -1005,8 +1005,10 @@ Expected output: MetaService starts successfully with no errors.
 
     With the V2 model runner, DeepSeek V4.1 DSpark can use pipelined target
     loads. Draft KV and other unmapped cacheable groups load synchronously
-    before forward, and all target loads drain before drafting. Speculative
-    saves use final-step GVA events after draft context preparation. Other
+    before forward, and all target loads drain before drafting. Ready target
+    KV saves use the existing per-layer GVA sender during target computation.
+    Draft/mixed groups, replay-cut writes and final publication retain the
+    step-end fence after draft preparation. Other
     speculative methods or draft architectures restore synchronously with GVA.
 
     The initial shared-source worker supports TP; PP/PCP/DCP/KVPP are rejected.

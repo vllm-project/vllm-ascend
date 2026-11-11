@@ -10,9 +10,9 @@ entries:
     model: deepseek-v4.1
   - category: feature
     text: >-
-      Experimental cross-layer target KV loads can run with DeepSeek-V4.1
-      DSpark on the V2 model runner. Draft cache groups restore synchronously,
-      and speculative saves use final-step GVA publication after draft preparation.
+      Experimental cross-layer target KV loads and ready-layer saves can overlap
+      computation with DeepSeek-V4.1 DSpark on Model Runner V2.
+      Draft and replay-cut saves plus GVA publication retain the final-step fence.
     model: deepseek-v4.1
   - category: other
     text: >-

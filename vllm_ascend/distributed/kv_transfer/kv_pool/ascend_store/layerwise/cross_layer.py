@@ -30,7 +30,7 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
     Source/SWA tasks prefetch in consumer order. Draft and unknown groups
     restore synchronously before target forward. Save tasks use the ordinary
     GVA sender and group publication, with source-ready events or the final
-    step boundary for replay cuts, unmapped groups and speculative writes.
+    step boundary for replay cuts, unmapped groups and draft writes.
     """
 
     def __init__(self, vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None):
@@ -85,10 +85,11 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
         if not self._pipeline_enabled or self.kv_cache_config is None:
             return set()
         sources = set(kv_source_layer_ids(self.hf_config))
+        draft_names = set(getattr(self.kv_cache_config, "dspark_draft_layer_names", ()) or ())
         groups = set()
         for group_id in self.cacheable_group_ids:
             names = self.kv_cache_config.kv_cache_groups[group_id].layer_names
-            if not names or any(".mtp." in f".{name}" for name in names):
+            if not names or any(name in draft_names or ".mtp." in f".{name}" for name in names):
                 continue
             if all(name.endswith(".swa_cache") for name in names) or (
                 sources
@@ -204,9 +205,9 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
         super().reset_store()
 
     def on_cross_layer_save_trigger(self, trigger_layer: int) -> None:
-        # DSpark verification/draft preparation can still change cache pages.
-        # The final step boundary is their publication boundary.
-        if self.vllm_config.speculative_config is not None or not self.can_put:
+        # Target groups can use the ordinary GVA ready event even with DSpark.
+        # Draft/mixed groups stay outside _pipeline_groups until step end.
+        if not self.can_put:
             return
         sources = kv_source_layer_ids(self.hf_config)
         if self.vllm_config.cache_config.swa_bounded_replay and sources and trigger_layer == max(sources):

@@ -40,6 +40,7 @@ class MemoryGVAStore:
         self.copies = []
         self.finish_calls = []
         self.block_address = None
+        self.block_direction = 1
         self.blocked = threading.Event()
         self.resume = threading.Event()
         self.fail_copy = False
@@ -75,7 +76,7 @@ class MemoryGVAStore:
         return result
 
     def batch_copy(self, gvas, addrs, sizes, direction):
-        if direction == 1 and self.block_address in addrs:
+        if direction == self.block_direction and self.block_address in addrs:
             self.blocked.set()
             if not self.resume.wait(timeout=5):
                 raise RuntimeError("test copy was not released")

@@ -6,6 +6,8 @@ from unittest.mock import patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
+import torch
+
 from tests.ut.distributed.ascend_store.test_cross_layer_gva import make_cross_worker, metadata, save_prefix
 
 
@@ -54,8 +56,16 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
             ("dspark", "OtherDraft"),
         ):
             with self.subTest(method=method, architecture=architecture):
-                worker, _, _ = make_cross_worker(self, method=method, architecture=architecture)
+                worker, store, _ = make_cross_worker(self, method=method, architecture=architecture)
                 self.assertFalse(worker._pipeline_enabled)
+                meta = metadata(worker)
+                worker.prepare_cross_layer_step(meta)
+                for layer in range(12):
+                    worker.on_cross_layer_save_trigger(layer)
+                worker.kv_send_thread.request_queue.join()
+                self.assertFalse(store.copies)
+                worker.wait_for_save(meta)
+                self.assertTrue(store.published)
 
     def test_draft_restores_before_forward_while_target_loads_continue(self):
         worker, store, caches = make_cross_worker(self, bounded=True, draft=True, method="dspark")
@@ -72,17 +82,72 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
         store.resume.set()
         worker.finish_cross_layer_loads()
 
-    def test_speculative_saves_use_final_cache_contents(self):
+    def test_dspark_target_saves_overlap_and_late_groups_use_final_contents(self):
+        for bounded in (False, True):
+            with self.subTest(bounded=bounded):
+                worker, store, caches = make_cross_worker(self, bounded=bounded, draft=True, method="dspark")
+                meta = metadata(worker)
+                worker.prepare_cross_layer_step(meta)
+                for layer in range(12):
+                    worker.on_cross_layer_save_trigger(layer)
+                worker.kv_send_thread.request_queue.join()
+                self.assertTrue(store.copies)
+                self.assertFalse(store.published)
+                copied = {address for direction, addresses in store.copies if direction == 0 for address in addresses}
+                for name, cache in caches.items():
+                    late = ".mtp." in name or (bounded and ".layers.8." in name)
+                    self.assertEqual(cache[1].data_ptr() in copied, not late, name)
+                    if late:
+                        cache[1].fill_(37)
+                expected = {name: cache[1].clone() for name, cache in caches.items()}
+                worker.wait_for_save(meta)
+                self.assertTrue(store.published)
+                for cache in caches.values():
+                    cache.zero_()
+                restore = metadata(worker, load=True, save=False)
+                worker.prepare_cross_layer_step(restore)
+                worker.start_load_kv(restore)
+                for layer in range(12):
+                    worker.wait_for_cross_layer_load(layer)
+                worker.finish_cross_layer_loads()
+                for name, cache in caches.items():
+                    torch.testing.assert_close(cache[1], expected[name])
+
+    def test_target_sender_runs_while_later_layers_continue(self):
         worker, store, caches = make_cross_worker(self, bounded=True, draft=True, method="dspark")
+        store.block_direction = 0
+        store.block_address = caches["model.layers.2.attn.long_kv_cache"][1].data_ptr()
         meta = metadata(worker)
         worker.prepare_cross_layer_step(meta)
-        for layer in range(12):
-            worker.on_cross_layer_save_trigger(layer)
-        self.assertFalse(store.copies)
-        for cache in caches.values():
-            cache[1].fill_(37)
+        worker.on_cross_layer_save_trigger(2)
+        self.assertTrue(store.blocked.wait(timeout=2))
+        # The producer thread proceeds while the original GVA sender is held.
+        caches["model.layers.8.attn.long_kv_cache"][1].fill_(37)
+        worker.on_cross_layer_save_trigger(8)
+        self.assertFalse(worker.layer_save_finished_events[worker._global_to_local_layer[2]].is_set())
+        self.assertFalse(store.published)
+        store.resume.set()
         worker.wait_for_save(meta)
         self.assertTrue(store.published)
-        for key in store.published:
-            address, size = store.objects[key]
-            self.assertEqual(store.pool[address : address + size], bytes([37]) * size)
+
+    def test_mixed_target_draft_group_without_mtp_prefix_stays_late(self):
+        worker, store, _ = make_cross_worker(self, method="dspark")
+        worker.kv_cache_config.dspark_draft_layer_names = ("model.layers.3.attn.swa_cache",)
+        meta = metadata(worker)
+        worker.prepare_cross_layer_step(meta)
+        worker.on_cross_layer_save_trigger(3)
+        worker.kv_send_thread.request_queue.join()
+        self.assertFalse(store.copies)
+        worker.wait_for_save(meta)
+        self.assertTrue(store.published)
+
+    def test_failed_early_target_save_never_publishes(self):
+        worker, store, _ = make_cross_worker(self, bounded=True, draft=True, method="dspark")
+        meta = metadata(worker)
+        worker.prepare_cross_layer_step(meta)
+        store.fail_copy = True
+        worker.on_cross_layer_save_trigger(2)
+        worker.kv_send_thread.request_queue.join()
+        worker.wait_for_save(meta)
+        self.assertFalse(store.published)
+        self.assertFalse(store.finish_calls)
