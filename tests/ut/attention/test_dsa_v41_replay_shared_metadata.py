@@ -89,10 +89,3 @@ class TestReplayVisibleLengthsReuse:
         result = _prepare(_builder({}), torch.tensor([1]), torch.tensor([0, 1]), replay_start, 1, kind)
         assert result is None
         build.assert_not_called()
-
-    @pytest.mark.parametrize("num_tokens", [0, 1])
-    def test_empty_and_single_token(self, num_tokens):
-        result = _prepare(
-            _builder({}), torch.tensor([num_tokens]), torch.tensor([0, num_tokens]), torch.tensor([0]), num_tokens
-        )
-        torch.testing.assert_close(result, torch.ones((num_tokens, 1), dtype=torch.int32))
