@@ -35,7 +35,6 @@ TABLES_DIR = os.path.join(PKG_DIR, "tables")
 CONFIG_RARE = os.path.join(PKG_DIR, "rare.json")
 
 from .rare_vocab import (  # noqa: E402
-    THINK_END,
     build_from_token_bytes,
     build_from_tokenizer,
     register as register_rare_table,
@@ -49,7 +48,6 @@ __all__ = [
     "RareRowBatch",
     "Result",
     "TABLES_DIR",
-    "THINK_END",
     "build_from_token_bytes",
     "build_from_tokenizer",
     "register_rare_table",
