@@ -58,8 +58,6 @@ import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # Re-apply the V2-only runner selection on pickled configs, plus the V2
 # feature patches, in worker processes.
-from vllm_ascend.utils import vllm_version_is
-
 import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
