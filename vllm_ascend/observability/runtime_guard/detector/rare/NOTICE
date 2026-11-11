@@ -1,11 +1,11 @@
-rare_chars (rc4) algorithm and tables
+rare_chars algorithm and tables
 ======================================
 
 Adapted from https://github.com/RinshannKaihou/self_evolving_inference_detector
-(package v35_detector 0.4.0; research commit 5118334 for rc4).
+(package v35_detector 0.4.0; research commit 5118334).
 
 Files under this directory (rare.py, rare_vocab.py, rare_gb.py, rare_ref.py,
-rc4.json, tables/rc4_gb.npz) preserve the evaluated detector logic and the
+rare.json, tables/rare_gb.npz) preserve the evaluated detector logic and the
 shared GB artifact. Per-tokenizer rare tables are built at Guard warmup from
-the served tokenizer (table=auto). Guard wiring, Ascend (top1, chosen) logprob
+the served tokenizer. Guard wiring, Ascend (top1, chosen) logprob
 collection, and the ConfigBackedDetector wrapper live outside this package.

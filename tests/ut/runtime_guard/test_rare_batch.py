@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from vllm_ascend.observability.runtime_guard.detector.rare import (
-    CONFIG_RC4,
+    CONFIG_RARE,
     RareDetector,
     RareRowBatch,
     build_from_token_bytes,
@@ -73,7 +73,7 @@ def test_batch_matches_scalar_streams():
     top1_rows = [np.zeros(len(t), np.float64) for t in token_rows]
     chosen_rows = [np.zeros(len(t), np.float64) for t in token_rows]
 
-    det = RareDetector(key, CONFIG_RC4, think_end=None)
+    det = RareDetector(key, CONFIG_RARE, think_end=None)
     batch = RareRowBatch(det)
     scalars = [det.start() for _ in token_rows]
     rows = [batch.add() for _ in token_rows]

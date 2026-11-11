@@ -114,13 +114,13 @@ Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | bool | `false` | Alert on visible garbled / foreign-script / illegal UTF-8 (rc4) |
+| `enabled` | bool | `false` | Alert on visible garbled / foreign-script / illegal UTF-8 |
 
-Algorithm knobs live in packaged ``detector/rare/rc4.json`` (not runtime_config):
+Algorithm knobs live in packaged ``detector/rare/rare.json`` (not runtime_config):
 ``think_end`` (default ``auto``, resolved from the served tokenizer) and
 ``alert_monitor`` (default ``false`` = strict-tier alerts only). The
 per-tokenizer rare table is always built at model warmup from the served
-tokenizer; the shared GB model (`rc4_gb.npz`) ships with the package.
+tokenizer; the shared GB model (`rare_gb.npz`) ships with the package.
 
 Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
 stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
@@ -128,7 +128,7 @@ stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
 logits by stride. Each step's device pair is attached to that step's
 ``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to a
 dedicated rare-pair wait queue; that worker waits for collect, issues the pair
-D2H, then pack+feeds. Request finish flushes rc4 look-ahead only after those
+D2H, then pack+feeds. Request finish flushes look-ahead only after those
 jobs drain. Prefer shadow/`report` first — strict-tier holdout false-positive
 rate can exceed 0.1% on some corpora.
 

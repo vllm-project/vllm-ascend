@@ -747,7 +747,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         return cpu
 
     def consume_rare_pairs(self, output: Any, *, pending: tuple[Any, Any] | None = None) -> None:
-        """After token-id ``get_output``: issue pair D2H and feed rc4.
+        """After token-id ``get_output``: issue pair D2H and feed rare_chars.
 
         ``pending`` is the per-step ``(device_hold, collect_event)`` attached to
         ``AscendAsyncOutput``. Submit collect-wait + D2H + pack + feed to

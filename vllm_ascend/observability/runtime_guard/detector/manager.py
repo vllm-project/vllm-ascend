@@ -166,7 +166,7 @@ class DetectorManager:
         return bool(self._token_repeat_det.enabled)
 
     def rare_chars_enabled(self) -> bool:
-        """True when Guard should stash logits and run rc4 rare_chars."""
+        """True when Guard should stash logits and run rare_chars."""
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             return bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
         return bool(self._rare_chars_det.enabled)
@@ -281,7 +281,7 @@ class DetectorManager:
         return []
 
     def finish_rare_chars(self, req_ids: list[str] | set[str] | tuple[str, ...]) -> list[Incident]:
-        """Flush rc4 look-ahead state when requests finish."""
+        """Flush rare_chars look-ahead state when requests finish."""
         if not self.rare_chars_enabled():
             return []
         alerts: list[Incident] = []

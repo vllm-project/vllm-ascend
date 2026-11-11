@@ -16,7 +16,7 @@
 """Dedicated queue: wait for rare_chars collect, issue pair D2H, then pack+feed.
 
 Separate from ActionQueue so pair completion does not contend with report/dump
-jobs and a short ActionQueue cannot drop rc4 feeds under high concurrency.
+jobs and a short ActionQueue cannot drop rare_chars feeds under high concurrency.
 The sample / get_output path only submits; this worker owns collect-wait + copy.
 """
 
