@@ -588,12 +588,22 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             return super()._fused_preprocess_type()
         return None
 
-    def exec_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+        *,
+        defer_wait: bool = False,
+    ) -> tuple | Callable[[], tuple]:
         if self.pcp_enabled and self._has_prefill(attn_metadata):
             assert isinstance(attn_metadata, AscendSFADCPMetadata)
             assert attn_metadata.dcp_context is not None
             slots = attn_metadata.dcp_context.slot_mapping
-        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata, defer_wait=defer_wait)
 
     def _get_sfa_kv_slot_mapping(self, attn_metadata: M) -> torch.Tensor:
         assert isinstance(attn_metadata, AscendSFADCPMetadata)

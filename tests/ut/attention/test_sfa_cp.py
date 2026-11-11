@@ -785,16 +785,18 @@ def test_sfa_pcp_dcp_native_cache_write_uses_full_dcp_slots():
     metadata.dcp_context = SimpleNamespace(slot_mapping=main_slots)
     kv, rope = torch.zeros(2, 3), torch.zeros(2, 1)
     cache = (torch.empty(1), torch.empty(1))
+    group = SimpleNamespace(world_size=2)
     with (
-        patch(
-            "vllm_ascend.attention.sfa_v1._gather_prefill_cache_inputs",
-            return_value=((kv.repeat(2, 1), rope.repeat(2, 1), rope.repeat(2, 1)), main_slots),
-        ) as gather,
+        patch.object(sparse_mla, "get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "all_gather_async", side_effect=lambda value, _: (value.repeat(2, 1), None)) as gather,
         patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True) as write,
     ):
         assert impl.exec_kv(kv, rope, rope, cache, torch.tensor([-1, -1]), metadata) == (None, None)
-    gather.assert_called_once_with((kv, rope, rope), main_slots, 0)
-    assert write.call_args.args[4] is main_slots
+    assert gather.call_count == 3
+    for call, expected in zip(gather.call_args_list, (kv, rope, rope)):
+        torch.testing.assert_close(call.args[0], expected)
+        assert call.args[1] is group
+    torch.testing.assert_close(write.call_args.args[4], main_slots)
 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
@@ -829,32 +831,30 @@ def test_sfa_gathers_main_kv_only_when_pcp_enabled(
     kv = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
     sin = cos + 10
-    slots = torch.tensor([4, 5], dtype=torch.int32)
+    slots = torch.tensor([0, 1, 4, 5], dtype=torch.int32)
     needs_gather = pcp_enabled and (sharded_decode or num_prefills > 0 or global_prefill)
-    if pcp_enabled and not needs_gather:
-        slots = torch.cat((slots, torch.tensor([-1, -1], dtype=slots.dtype)))
-    gathered_kv = torch.arange(12, dtype=torch.float32).view(4, 3)
-    gathered_cos = torch.arange(4, dtype=torch.float32).view(4, 1)
-    gathered_sin = gathered_cos + 10
-    gathered_slots = torch.tensor([0, 1, 4, 5], dtype=torch.int32)
+    group = SimpleNamespace(world_size=2, all_gather=lambda value, dim: torch.cat((value, value + 10), dim=dim))
     cache = (torch.empty(1), torch.empty(1))
+    expected_values = (kv, cos, sin)
+    expected_slots = slots if not pcp_enabled else slots[:2]
+    if needs_gather:
+        with patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group):
+            expected_values, expected_slots = _gather_prefill_cache_inputs(
+                expected_values, slots, 0 if sharded_decode else num_decode_tokens
+            )
     with (
-        patch(
-            "vllm_ascend.attention.sfa_v1._gather_prefill_cache_inputs",
-            return_value=((gathered_kv, gathered_cos, gathered_sin), gathered_slots),
+        patch.object(sparse_mla, "get_pcp_group", return_value=group),
+        patch.object(
+            sparse_mla, "all_gather_async", side_effect=lambda value, _: (group.all_gather(value, 0), None)
         ) as gather,
         patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True) as write,
     ):
         assert impl.exec_kv(kv, cos, sin, cache, slots, metadata) == (None, None)
-    expected_kv = gathered_kv if needs_gather else kv
-    torch.testing.assert_close(write.call_args.args[0].flatten(1), expected_kv)
-    torch.testing.assert_close(write.call_args.args[2], gathered_cos if needs_gather else cos)
-    torch.testing.assert_close(write.call_args.args[3], gathered_sin if needs_gather else sin)
-    torch.testing.assert_close(write.call_args.args[4], (gathered_slots if needs_gather else slots[:2]).long())
-    if needs_gather:
-        gather.assert_called_once_with((kv, cos, sin), slots, 0 if sharded_decode else num_decode_tokens)
-    else:
-        gather.assert_not_called()
+    torch.testing.assert_close(write.call_args.args[0].flatten(1), expected_values[0])
+    torch.testing.assert_close(write.call_args.args[2], expected_values[1])
+    torch.testing.assert_close(write.call_args.args[3], expected_values[2])
+    torch.testing.assert_close(write.call_args.args[4], expected_slots.long())
+    assert gather.call_count == (3 if needs_gather else 0)
 
 
 def test_sfa_pcp_replicated_draft_decode_skips_kv_gather() -> None:
@@ -870,7 +870,7 @@ def test_sfa_pcp_replicated_draft_decode_skips_kv_gather() -> None:
     local = torch.tensor([[1.0], [2.0]])
     slots = torch.tensor([5, 7], dtype=torch.int64)
     with (
-        patch("vllm_ascend.attention.sfa_v1._gather_prefill_cache_inputs") as gather,
+        patch("vllm_ascend.attention.sfa_v1.all_gather_async") as gather,
         patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_", create=True) as write,
     ):
         assert impl.exec_kv(local, None, None, (torch.empty(8, 1),), slots, metadata) == (None, None)
@@ -893,14 +893,11 @@ def test_sfa_pcp_gathers_nope_kv_without_rope() -> None:
     remote = torch.tensor([[3.0, 4.0, 5.0], [9.0, 10.0, 11.0]])
     group = SimpleNamespace(world_size=2, all_gather=Mock(return_value=remote))
     with (
-        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
-        patch(
-            "vllm_ascend.attention.sfa_v1._gather_prefill_cache_inputs", wraps=_gather_prefill_cache_inputs
-        ) as gather,
+        patch.object(sparse_mla, "get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "all_gather_async", side_effect=lambda value, _: (group.all_gather(value, 0), None)),
         patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_", create=True) as write,
     ):
         assert impl.exec_kv(local, None, None, (torch.empty(8, 3),), slots, metadata) == (None, None)
-    gather.assert_called_once_with((local,), slots, 1)
     group.all_gather.assert_called_once()
     torch.testing.assert_close(group.all_gather.call_args.args[0], local[1:])
     torch.testing.assert_close(write.call_args.args[2], torch.cat((local[:1], remote)))
@@ -930,7 +927,8 @@ def test_sfa_pcp_gathers_nope_kv_with_padded_rank_slots(packed_cache: bool, num_
 
     group = SimpleNamespace(world_size=2, all_gather=all_gather)
     with (
-        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "all_gather_async", side_effect=lambda value, _: (group.all_gather(value, 0), None)),
         patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope", return_value=(None, None, None)) as quantize,
         patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_", create=True) as write,
     ):
@@ -1195,6 +1193,11 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     with (
         patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
         patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=group),
+        patch.object(
+            sparse_mla,
+            "all_gather_async",
+            side_effect=lambda values, _: (group.all_gather(values, 0), SimpleNamespace(wait=lambda: None)),
+        ),
         patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope", side_effect=quantize),
         patch("vllm_ascend.attention.sfa_v1.turboquant_kv_rmsnorm_rope", side_effect=quantize),
         patch("vllm_ascend.attention.sfa_v1.DeviceOperator.scatter_cache", side_effect=scatter),
@@ -1229,7 +1232,8 @@ def test_sfa_pcp_gathers_nope_kv_when_local_rank_has_no_prefill() -> None:
         world_size=2, all_gather=lambda tensor, dim=0: torch.cat((tensor, torch.arange(10, 18).view(8, 1).float()))
     )
     with (
-        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "all_gather_async", side_effect=lambda value, _: (group.all_gather(value, 0), None)),
         patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_", create=True) as write,
     ):
         impl.exec_kv(torch.empty(0, 1), None, None, (torch.empty(16, 1),), slots, metadata)
@@ -1505,7 +1509,7 @@ def test_sfa_pcp_forward_selects_mode_and_gathers_weight_for_global_prefill(
         assert owner._parallel_o_proj.mode is expected_mode
         assert owner._parallel_o_proj.uses_full_weight is expected_gather
         owner.o_proj.quant_method.all_gather_weight.assert_not_called()
-        owner._parallel_o_proj.all_gather_weights()
+        owner._start_o_proj_weight_gather()
         return output
 
     hidden = torch.empty(1, 4)
@@ -2154,7 +2158,8 @@ def test_sfa_pcp_nope_gathers_latent_kv_without_rope(dcp_enabled, mode):
         return target
 
     with (
-        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "get_pcp_group", return_value=group),
+        patch.object(sparse_mla, "all_gather_async", side_effect=lambda value, _: (group.all_gather(value, 0), None)),
         patch("torch_npu.npu_scatter_nd_update_", side_effect=scatter),
     ):
         assert impl.exec_kv(inputs, None, None, (cache,), slots, metadata) == (None, None)
@@ -2441,12 +2446,18 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
     impl.fused_qkv_a_proj = lambda value: (torch.ones(value.shape[0], 3),)
     impl.q_a_layernorm = lambda value: value
 
-    def exec_kv(*args):
+    def exec_kv(*args, defer_wait=False):
         torch.testing.assert_close(args[4], slots)
-        events.append("kv_preprocess" if packed_cache else "cache_write")
-        if packed_cache:
-            return torch.ones(2, 1), torch.ones(2, 1), torch.ones(2, 1)
-        return None, None
+        assert defer_wait == pcp_enabled
+
+        # This test isolates DCP collectives; PCP exchange has dedicated coverage.
+        def finish():
+            events.append("kv_preprocess" if packed_cache else "cache_write")
+            if packed_cache:
+                return torch.ones(2, 1), torch.ones(2, 1), torch.ones(2, 1)
+            return None, None
+
+        return finish if defer_wait else finish()
 
     impl.exec_kv = Mock(side_effect=exec_kv)
     impl._q_proj_and_k_up_proj = lambda value: (torch.ones(2, 1, 1), torch.ones(2, 1, 1))
@@ -2508,6 +2519,7 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
             events.clear()
             collective.reset_mock()
             output = impl.forward("layer", hidden, cache, metadata, torch.empty(2, 1))
+            assert impl.exec_kv.call_args.kwargs == ({"defer_wait": True} if pcp_enabled else {})
             expected = ["o_proj_gather"] if pcp_enabled else []
             if packed_cache:
                 expected.append("kv_preprocess")
