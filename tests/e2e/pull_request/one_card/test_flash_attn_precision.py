@@ -13,8 +13,8 @@ from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
     AscendFlashAttentionMetadataBuilder,
-    flash_attn_capture_context,
 )
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 
 def golden(query, key, value, block_table, lengths, window, query_len, causal):
@@ -100,9 +100,8 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     def run():
         common.seq_lens.copy_(optimistic - rejected)
         metadata = captured_metadata if execution_mode == "graph" else builder.build(0, common)
-        with flash_attn_capture_context({"draft": metadata}):
-            for _ in range(6):
-                result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
+        for _ in range(6):
+            result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
         return result
 
     if execution_mode == "graph":
@@ -114,7 +113,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
             for _ in range(3):
                 run()
         torch.npu.current_stream().wait_stream(stream)
-        graph = torch.npu.NPUGraph()
+        graph = UpdatableGraph()
         with torch.npu.graph(graph, stream=stream):
             run()
 

@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionMetadata
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -26,35 +26,6 @@ class _BackendA:
     @staticmethod
     def get_impl_cls():
         return object
-
-
-def test_dflash_capture_scopes_plans_to_each_forward(monkeypatch):
-    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
-    manager.speculator = object()
-    metadata = AscendFlashAttentionMetadata()
-    attn_metadata = {"draft.0": metadata, "draft.1": metadata}
-    capturing = False
-    calls = []
-
-    def forward(*args):
-        assert args == (1, 8, attn_metadata, "slots", None, CUDAGraphMode.FULL)
-        calls.append(metadata.flash_attn_capture_cache)
-
-    def capture(self, wrapped, *args, **kwargs):
-        nonlocal capturing
-        for capturing in (False, True, True):
-            wrapped(1, 8, attn_metadata, "slots", None, CUDAGraphMode.FULL)
-            assert metadata.flash_attn_capture_cache is None
-
-    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
-    monkeypatch.setattr(aclgraph_module, "communicator_switch", nullcontext)
-    monkeypatch.setattr(aclgraph_module, "model_capture_wrapper", lambda *_args: nullcontext())
-    monkeypatch.setattr(DFlashCudaGraphManager, "capture", capture)
-    manager.capture(forward, None, None, [], None, 4096)
-    assert calls[0] is None
-    assert calls[1] is not None
-    assert calls[2] is not None
-    assert calls[1] is not calls[2]
 
 
 @pytest.mark.parametrize("num_reqs", [1, 2, 4])
