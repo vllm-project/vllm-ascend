@@ -20,6 +20,7 @@ class TestGraphFusionPassManagerConfig(TestBase):
                 "fuse_norm_quant": "false",
                 "fuse_qknorm_rope": "false",
                 "fuse_muls_add": "false",
+                "fuse_swiglu": "false",
             }
         }
         init_ascend_config(vllm_config)
@@ -30,6 +31,7 @@ class TestGraphFusionPassManagerConfig(TestBase):
         self.assertFalse(manager.ascend_compilation_config.fuse_norm_quant)
         self.assertFalse(manager.ascend_compilation_config.fuse_qknorm_rope)
         self.assertFalse(manager.ascend_compilation_config.fuse_muls_add)
+        self.assertFalse(manager.ascend_compilation_config.fuse_swiglu)
         self.assertEqual(manager.passes, [])
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -41,6 +43,7 @@ class TestGraphFusionPassManagerConfig(TestBase):
                 "fuse_norm_quant": "false",
                 "fuse_qknorm_rope": "false",
                 "fuse_muls_add": "false",
+                "fuse_swiglu": "false",
             }
         }
         init_ascend_config(vllm_config)
