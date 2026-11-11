@@ -65,7 +65,10 @@ class IntermediateTensors:
 def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runner_v2=False):
     return SimpleNamespace(
         use_v2_model_runner=runner_v2,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(architectures=[architecture]),
+            get_vocab_size=lambda: 16,
+        ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
@@ -203,6 +206,19 @@ def runtime(monkeypatch):
     context = threading.local()
     context.rank = 0
     context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+
+    def fake_spec_decode_needs_target_embed(vllm_config):
+        # Mirror the upstream predicate (vLLM main shape): the AST-extracted
+        # provisioning predicate delegates the stage/may-use verdict to it.
+        # The REAL upstream predicate (both v0.33.0 and main-pin shapes) is
+        # exercised by test_kimi_k3_target_embedding.py, which stubs only the
+        # PP topology, not the predicate itself.
+        spec = vllm_config.speculative_config
+        if spec is None or not spec.uses_target_hidden_states or not spec.draft_model_config.may_use_target_embed:
+            return False
+        pp = context.pp
+        return getattr(pp, "world_size", 1) > 1 and pp.is_last_rank
+
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -222,6 +238,8 @@ def runtime(monkeypatch):
         "is_forward_context_available": lambda: True,
         "get_forward_context": lambda: context.forward,
         "get_pp_group": lambda: context.pp,
+        "spec_decode_needs_target_embed": fake_spec_decode_needs_target_embed,
+        "get_rotation_path": lambda _: None,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
         # BaseModel above models the release's cumulative aux protocol.
@@ -273,7 +291,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
-        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
+        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP", "_draft_needs_target_embed"},
         namespace,
         bases={
             "AscendKimiLinearModel": "BaseModel",
@@ -507,7 +525,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
 def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draft_type, draft_arch, materialized):
     namespace, context = runtime
     context.tp = 2
-    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
+    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3, world_size=4)
     cfg = config(tp=2, pp=4, runner_v2=runner_v2)
     cfg.model_config.hf_text_config = SimpleNamespace(
         vocab_size=16,
@@ -520,8 +538,12 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draf
     cfg.speculative_config = (
         SimpleNamespace(
             method="dspark",
+            uses_target_hidden_states=True,
             draft_model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(model_type=draft_type, architectures=[draft_arch])
+                may_use_target_embed=True,
+                architectures=[draft_arch],
+                hf_config=SimpleNamespace(model_type=draft_type, architectures=[draft_arch]),
+                get_vocab_size=lambda: 16,
             ),
         )
         if draft_type is not None

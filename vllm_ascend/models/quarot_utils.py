@@ -144,7 +144,10 @@ def align_draft_weights(model, projection, vllm_config):
             return
         # PP stages past the first cannot alias the target's stage-0
         # embedding; load this rank's vocab shard from the target
-        # checkpoint unrotated so the draft owns its copy.
+        # checkpoint unrotated so the draft owns its copy. The embedding is
+        # skipped when the load-time share already placed the target shard
+        # (own flags above); the lm_head stays skipped on every unrotated
+        # path because it can still alias the target's last-stage module.
         rotation = None
         weight = projection.weight
     target_config = vllm_config.model_config.hf_text_config

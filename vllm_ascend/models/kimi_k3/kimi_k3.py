@@ -52,6 +52,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
@@ -926,6 +927,72 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         return prefix_sum, block_residual, hidden_states
 
 
+def _draft_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether this PP stage must provision the target input embedding for a draft.
+
+    Mirrors the upstream NVIDIA Kimi K3 construction (``nvidia/model.py``:
+    ``is_first_rank or spec_decode_needs_target_embed(vllm_config)``), with
+    Ascend consumption-side gates on top: the upstream predicate answers
+    whether the last PP stage's draft may use the target embedding, while the
+    gates below exclude drafts whose provisioned shard would never be
+    consumed. The Kimi K3 MLA DSpark draft is excluded: it ships a frozen
+    checkpoint-owned embedding and allocates its own copy under PP, so
+    provisioning a second target copy would waste a vocab shard on every
+    last-stage TP rank. Drafts whose vocab exceeds the target's are
+    excluded too: ``load_dspark_model`` skips the share check for them, so a
+    provisioned shard would have no consumer. QuaRot targets are excluded as
+    well: the draft's post_process rebuilds a rotated private copy over the
+    shared one, so the provisioned shard would sit unconsumed. Draft TP size
+    is deliberately not gated: only one TP group exists in the worker (the
+    target's), the shared module is sharded for that group, and its
+    all-reduce yields the full hidden states on every last-stage rank
+    regardless of the draft's TP setting. The align fallback builds its
+    private copy for the same group, so sharing and fallback are equivalent
+    in layout. Upstream constrains draft TP to {1, target TP}; if that
+    constraint is ever relaxed, this assumption needs re-evaluation.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or spec_config.method != "dspark":
+        return False
+    # v0.33.0 has no uses_target_hidden_states field; there every dspark
+    # draft consumes target hidden states, so default to True. This is a
+    # defensive duplicate of the upstream predicate's own check (vLLM main
+    # reads the same property); cross-version compatibility comes from
+    # delegating to the upstream predicate below, not from this gate.
+    if not getattr(spec_config, "uses_target_hidden_states", True):
+        return False
+    # Upstream owns the stage/may-use verdict (and tracks its own drift).
+    if not spec_decode_needs_target_embed(vllm_config):
+        return False
+    draft_model_config = spec_config.draft_model_config
+    # Use the registry-normalized architectures (same convention as
+    # model_runner's draft dispatch), not the raw hf_config copy.
+    draft_architectures = draft_model_config.architectures or ()
+    if "K3DSparkModel" in draft_architectures:
+        return False
+    if draft_model_config.get_vocab_size() > vllm_config.model_config.get_vocab_size():
+        return False
+    return get_rotation_path(vllm_config) is None
+
+
+def _embed_weight_loaded(loaded_params: set[str]) -> bool:
+    """Whether a loaded-params set contains the target input embedding weight.
+
+    Matches the plain ``.weight`` name only: the input embedding is expected
+    unquantized on every PP stage (upstream Kimi K3 is isomorphic), so packed
+    weight names (``weight_packed`` etc.) are out of contract here. MTP-layer
+    copies (``layers.N.embed_tokens.weight``) do not count as the target's
+    input embedding. Assumes a non-tied checkpoint (KimiLinearConfig defaults
+    ``tie_word_embeddings=False``); a checkpoint shipping no embedding weight
+    at all would trip the fail-fast even when the draft never consumes the
+    provisioned shard.
+    """
+    return any(
+        (name == "embed_tokens.weight" or name.endswith(".embed_tokens.weight")) and ".layers." not in name
+        for name in loaded_params
+    )
+
+
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
@@ -979,7 +1046,12 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             and parallel_config.tensor_parallel_size > 1
         )
 
-        if get_pp_group().is_first_rank:
+        # A DSpark draft that shares the target embedding runs on the last PP
+        # stage, where this layer is otherwise a PPMissingLayer. Provision the
+        # real shard there and let the normal target checkpoint loader fill it.
+        # The short-circuit keeps the predicate off the first-rank path.
+        provision_for_draft = not get_pp_group().is_first_rank and _draft_needs_target_embed(vllm_config)
+        if get_pp_group().is_first_rank or provision_for_draft:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -987,6 +1059,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        # Records whether this stage provisioned the shard for a draft.
+        # load_weights fails fast when the checkpoint loader never fills it:
+        # the draft would otherwise alias uninitialized memory and emit
+        # garbage tokens instead of raising.
+        self._draft_embed_provisioned = provision_for_draft
 
         topk_indices_buffer = (
             torch.empty(
@@ -1130,6 +1207,16 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        # getattr(..., False): unit tests build this model through mocks
+        # that bypass __init__, leaving the marker unset; an unprovisioned
+        # instance must not fail here.
+        if getattr(self, "_draft_embed_provisioned", False) and not _embed_weight_loaded(loaded_params):
+            raise RuntimeError(
+                "Kimi K3 provisioned the last-stage input embedding for a DSpark "
+                "draft, but the checkpoint loader loaded no *embed_tokens.weight "
+                "tensor on this stage; the draft would alias uninitialized "
+                f"memory. Loaded parameter names: {sorted(loaded_params)[:8]}"
+            )
         return loaded_params | standalone_gate_params
 
     def forward(
