@@ -107,41 +107,13 @@ def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.n
 
 
 def _last_token_ids(sampled: Any, n: int) -> np.ndarray:
-    """Last non-negative id of each of the first ``n`` rows."""
-    if isinstance(sampled, torch.Tensor):
-        chosen = device_chosen_token_ids(sampled)
-        if chosen.device.type != "cpu":
-            chosen = chosen.detach().cpu()
-        return np.ascontiguousarray(chosen.numpy()[:n], np.int64)
-    if isinstance(sampled, np.ndarray):
-        arr = np.asarray(sampled)
-        if arr.ndim == 1:
-            return np.ascontiguousarray(arr[:n], np.int64)
-        out = np.full(n, -1, np.int64)
-        width = arr.shape[1]
-        block = arr[:n]
-        for i in range(n):
-            val = -1
-            for j in range(width):
-                tok = int(block[i, j])
-                if tok >= 0:
-                    val = tok
-            out[i] = val
-        return out
-    rows = list(sampled) if isinstance(sampled, (list, tuple)) else []
-    out = np.full(n, -1, np.int64)
-    for i in range(min(n, len(rows))):
-        row = rows[i]
-        if isinstance(row, (list, tuple, np.ndarray)):
-            val = -1
-            for tok in row:
-                tok_i = int(tok)
-                if tok_i >= 0:
-                    val = tok_i
-            out[i] = val
-        else:
-            out[i] = int(row)
-    return out
+    """Last non-negative id of each of the first ``n`` rows (tensor or array-like)."""
+    if not isinstance(sampled, torch.Tensor):
+        sampled = torch.as_tensor(sampled, dtype=torch.int64)
+    chosen = device_chosen_token_ids(sampled)
+    if chosen.device.type != "cpu":
+        chosen = chosen.detach().cpu()
+    return np.ascontiguousarray(chosen.numpy()[:n], np.int64)
 
 
 @dataclass

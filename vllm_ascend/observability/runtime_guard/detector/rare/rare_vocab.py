@@ -322,7 +322,7 @@ def register(key: str, table: dict[str, Any]) -> str:
 
 
 def load(corpus: str) -> dict[str, Any]:
-    """Load a registered in-memory table or a ``*.npz`` path built by ``main``."""
+    """Load a warmup-registered in-memory table, or a ``*.npz`` from offline ``main``."""
     key = corpus if isinstance(corpus, str) else str(corpus)
     if key in _CACHE:
         return _CACHE[key]
@@ -332,11 +332,10 @@ def load(corpus: str) -> dict[str, Any]:
         z = np.load(key)
         table = {k: z[k] for k in z.files}
         return register(key, table)
-    # Legacy shipped names are no longer bundled; build at warmup with table=auto.
     raise FileNotFoundError(
         f"rare_chars table {key!r} is not registered. "
-        "Enable rare_chars so warmup builds from the served tokenizer "
-        "(table=auto), or pass an absolute path to a *_rare.npz."
+        "Enable rare_chars so model warmup builds it from the served tokenizer "
+        "(register_rare_table), or load a .npz produced by rare_vocab.main."
     )
 
 
