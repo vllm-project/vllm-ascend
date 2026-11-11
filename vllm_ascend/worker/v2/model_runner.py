@@ -340,35 +340,32 @@ class NPUModelRunner(GPUModelRunner):
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
-        mirror = getattr(self, "_host_mirror", None)
-        try:
-            if (
-                lmhead_tp_enable()
-                and self.prompt_logprobs_worker is not None
-                and (
-                    self.prompt_logprobs_worker.uses_prompt_logprobs.any()
-                    or getattr(self.prompt_logprobs_worker, "token_id_scores", {})
-                )
-            ):
-                # The prompt-logprobs worker issues a second compute_logits with
-                # unpadded rows that desyncs the LM-head collectives and hangs.
-                # vLLM #54335 adds fixed-token scoring through the same unpadded
-                # compute_logits path, so it has the same collective restriction.
-                raise NotImplementedError(
-                    "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
-                )
+        if (
+            lmhead_tp_enable()
+            and self.prompt_logprobs_worker is not None
+            and (
+                self.prompt_logprobs_worker.uses_prompt_logprobs.any()
+                or getattr(self.prompt_logprobs_worker, "token_id_scores", {})
+            )
+        ):
+            # The prompt-logprobs worker issues a second compute_logits with
+            # unpadded rows that desyncs the LM-head collectives and hangs.
+            # vLLM #54335 adds fixed-token scoring through the same unpadded
+            # compute_logits path, so it has the same collective restriction.
+            raise NotImplementedError(
+                "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
+            )
 
-            state = self.execute_model_state
-            self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
-            output = super().sample_tokens(grammar_output)
-            self._lmhead_pad_size = None
-            # Close the per-step msprobe dump cycle on the normal last-PP-rank
-            # path (v1 parity: v1 finalizes at the end of sample_tokens).
-            self._finalize_dump_data()
-            return output
-        finally:
-            if mirror is not None:
-                mirror.join_pending()
+        state = self.execute_model_state
+        self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
+        output = super().sample_tokens(grammar_output)
+        self._lmhead_pad_size = None
+        # Close the per-step msprobe dump cycle on the normal last-PP-rank
+        # path (v1 parity: v1 finalizes at the end of sample_tokens).
+        self._finalize_dump_data()
+        if (mirror := getattr(self, "_host_mirror", None)) is not None:
+            mirror.join_pending()
+        return output
 
     def pool(self):
         output = super().pool()
