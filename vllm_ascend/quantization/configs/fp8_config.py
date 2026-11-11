@@ -58,11 +58,42 @@ class AscendFp8Config(Fp8Config):
                 f"but this one declares `activation_scheme: {self.activation_scheme}`."
             )
 
+    def _is_layer_skipped(self, prefix: str) -> bool:
+        """Allow flat checkpoint prefixes to match layers under a model wrapper."""
+        if not getattr(self, "ignored_layers", None):
+            return False
+
+        skip_kwargs = {}
+        if _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE:
+            skip_kwargs["match_mode"] = getattr(self, "ignored_layers_match_mode", "exact")
+        if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, **skip_kwargs):
+            return True
+
+        if not _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE or skip_kwargs.get("match_mode") == "suffix":
+            return False
+
+        if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, match_mode="suffix"):
+            logger.warning_once(
+                "Layer '%s' was left unquantized because it matched an entry in this "
+                "checkpoint's `ignored_layers` / `modules_to_not_convert` only via a "
+                "module-prefix suffix, not an exact match. This usually means the "
+                "checkpoint's `quantization_config` was written for a different "
+                "module-prefix convention than the one vLLM constructed for this model "
+                "(for example, a nested conditional-generation wrapper whose language "
+                "model lives under a `language_model.` submodule). The layer is being "
+                "treated as intentionally unquantized, which is very likely correct, but "
+                "you should fix the checkpoint's `ignored_layers` prefixes to match "
+                "vLLM's module names directly so this fallback is no longer needed.",
+                prefix,
+            )
+            return True
+
+        return False
+
     def get_quant_method(
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         # Delayed imports: both modules reach back into the quantization package.
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
@@ -78,18 +109,10 @@ class AscendFp8Config(Fp8Config):
         if not is_linear and not is_moe:
             return None
 
-        skip_kwargs = {}
-        if _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE:
-            skip_kwargs["match_mode"] = getattr(self, "ignored_layers_match_mode", "exact")
-        if is_layer_skipped(
-            prefix,
-            self.ignored_layers,
-            self.packed_modules_mapping,
-            **skip_kwargs,
-        ):
+        if self._is_layer_skipped(prefix):
             if is_linear:
                 return AscendUnquantizedLinearMethod()
-            return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid)
+            return AscendUnquantizedFusedMoEMethod(layer.moe_config)
 
         self._verify_block_quantization()
         logger.info_once("Using the vLLM Ascend block-wise fp8 Quantization now!")
@@ -105,7 +128,6 @@ class AscendFp8Config(Fp8Config):
             return AscendFusedMoEMethod(
                 scheme_class(self.weight_block_size, layer.moe_config),
                 layer.moe_config,
-                tid2eid=tid2eid,
             )
 
         return None
@@ -121,7 +143,6 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendFusedMoEMethod,
@@ -139,6 +160,6 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
                 assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_w4a8_moe"
             else:
                 raise NotImplementedError
-            quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config, tid2eid=tid2eid)
+            quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config)
             return quant_method
         return None

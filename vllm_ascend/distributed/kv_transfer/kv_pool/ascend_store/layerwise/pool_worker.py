@@ -75,7 +75,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_dcp_mismatch_info,
     is_kv_save_role,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
@@ -99,7 +99,7 @@ PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 
-class LayerwiseKVPoolWorker(KVPoolWorker):
+class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -107,6 +107,20 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self.external_slot_release_waiter: Callable[[int], None] | None = None
+        self._put_started_keys: set[str] = set()
+        self._put_started_keys_lock = threading.Lock()
+        self._load_session_lock = threading.Lock()
+        self._layer_load_aborted = threading.Event()
+        self._layerwise_session_tracker = LayerwiseSessionTracker()
+        self._current_layerwise_request_ids: set[str] = set()
+        self._current_layerwise_last_chunk_req_ids: set[str] = set()
+        # (tag, req_id, group_id, start_block, end_block) -> runs, cleared per
+        # step in process_layer_data(). masked_block_runs inputs are
+        # layer-invariant, so only the first layer pays the O(blocks) scan.
+        self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
+        self._dspark_prefix_keys: DSparkPrefixKeys | None = None
+        self.dspark_prefix_cache: DSparkPrefixCache | None = None
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
@@ -168,20 +182,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 f"transfer. Both the producer and consumer must use the same "
                 f"dcp_size/pcp_size so the layerwise GVA shard layout is consistent."
             )
-
-    def _init_state_vars(self) -> None:
-        super()._init_state_vars()
-        self._put_started_keys: set[str] = set()
-        self._put_started_keys_lock = threading.Lock()
-        self._load_session_lock = threading.Lock()
-        self._layer_load_aborted = threading.Event()
-        self._layerwise_session_tracker = LayerwiseSessionTracker()
-        self._current_layerwise_request_ids: set[str] = set()
-        self._current_layerwise_last_chunk_req_ids: set[str] = set()
-        # (tag, req_id, group_id, start_block, end_block) -> runs, cleared per
-        # step in process_layer_data(). masked_block_runs inputs are
-        # layer-invariant, so only the first layer pays the O(blocks) scan.
-        self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -586,6 +586,17 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         self.kv_recv_thread.start()
         ready_event.wait()
         self._transfer_threads_started = True
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        draft_names = set(getattr(self, "_dspark_draft_layer_names", ()))
+        draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
+        target_caches = (
+            {name: cache for name, cache in kv_caches.items() if name not in draft_names} if draft_names else kv_caches
+        )
+        self._set_num_blocks(target_caches)
+        self._register_dspark_prefix_cache(draft_caches)
+        auxiliary_caches = draft_caches if getattr(self, "dspark_prefix_cache", None) is not None else None
+        self._register_kv_caches(target_caches, auxiliary_caches, draft_names)
 
     def _register_dspark_prefix_cache(self, draft_caches: dict[str, torch.Tensor]) -> None:
         prefix_keys: DSparkPrefixKeys | None = getattr(self, "_dspark_prefix_keys", None)

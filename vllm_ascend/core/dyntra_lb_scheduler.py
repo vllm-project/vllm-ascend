@@ -30,7 +30,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -433,6 +432,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -594,9 +595,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         break
 
             if new_blocks is None:
-                if not vllm_version_is("0.32.0") and (
-                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
-                ):
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
                     # The request was the lowest-priority running request and
                     # preempted itself. The requests after it have higher
                     # priority and may still fit; it was removed from
@@ -1002,6 +1001,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -1167,6 +1169,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
         if self._scheduler_output_supports("kv_connector_block_state"):
             scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        if self._scheduler_output_supports("has_sync_kv_loads"):
+            scheduler_output_kwargs["has_sync_kv_loads"] = has_sync_kv_loads
         if self._scheduler_output_supports("ec_manager_metadata"):
             get_manager_metadata = getattr(
                 self.encoder_cache_manager,

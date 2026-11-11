@@ -42,6 +42,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    runner.dcp_size = 1
     # Dump contract from the production initializer; helpers no-op on None.
     runner.debugger = None
     runner._debugger_started = False
@@ -224,8 +225,8 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft and vllm_version_is("0.32.0"):
-        # 0.32.0 exposes the permissive-row mask as the fourth sampler argument;
+    if with_grammar and with_draft and vllm_version_is("0.33.0"):
+        # 0.33.0 exposes the permissive-row mask as the fourth sampler argument;
         # main feeds it through the scheduler/draft-token handler instead.
         invalid_drafts = runner.rejection_sampler.call_args.args[3]
         assert invalid_drafts.tolist() == [False, False, True]
@@ -290,7 +291,7 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
     execute_model_state (as the real forward does) for the hook to read."""
 
     def super_execute(scheduler_output, **kwargs):
-        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states)
+        runner.execute_model_state = SimpleNamespace(hidden_states=hidden_states, dp_sync=None, dp_sync_state=None)
         return "upstream-output"
 
     with (
@@ -383,18 +384,18 @@ def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enable
 @pytest.mark.parametrize(
     "draft_method, bypass, argmax, adaptive, match",
     [
-        ("probabilistic", False, False, False, "probabilistic"),
+        ("probabilistic", False, False, False, None),
         ("greedy", False, False, False, None),  # default stays supported
-        ("greedy", True, False, False, "sample_draft"),  # DSpark/DFlash2 style
+        ("greedy", True, False, False, "sample_draft"),  # DFlash2/LiLiCorr opt-out
         ("greedy", False, True, False, "use_local_argmax_reduction"),
         ("greedy", False, False, True, "enable_adaptive_verification"),
     ],
 )
 def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match):
     """Unsupported combinations must fail at construction, not at the first
-    sampling step in a running engine (probabilistic gumbel buffers, paths
-    that bypass sample_draft, local argmax under pure DP, adaptive
-    verification's row-count-indexed estimator buffers)."""
+    sampling step in a running engine. Probabilistic sampling is now
+    supported; bypassing paths, local argmax and adaptive verification retain
+    their independent restrictions."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass

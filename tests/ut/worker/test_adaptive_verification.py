@@ -17,13 +17,9 @@ from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
-from vllm_ascend.device.device_op import BaseDeviceAdaptor
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
-
-_NATIVE_TORCH_SUM = torch.sum
 
 
 @pytest.mark.parametrize(
@@ -80,68 +76,13 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
 def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
-    if not vllm_version_is("0.32.0"):
-        # Main trims the budget in a Triton kernel, so the patch must leave
-        # the allocator untouched.
-        before = adaptive.assign_draft_token_budget
-        module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-        importlib.reload(module)
-        assert adaptive.assign_draft_token_budget is before
-        return
-
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-    importlib.reload(module)
-
-    assert adaptive._assign_draft_token_budget_compiled is module._assign_draft_token_budget_ascend
-    assert module._original_assign_draft_token_budget is adaptive._assign_draft_token_budget
-
-
-def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
-    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
-    if not vllm_version_is("0.32.0"):
-        before = adaptive.assign_draft_token_budget
-        module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-        importlib.reload(module)
-        assert adaptive.assign_draft_token_budget is before
-        return
-
-    # Isolate this test from batch-invariant tests that patch torch.sum globally.
-    monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-    importlib.reload(module)
-    confidence_probs = torch.tensor([[0.95, 0.8, 0.5], [0.9, 0.85, 0.7], [0.7, 0.6, 0.5]])
-    idx_mapping = torch.tensor([0, 1])
-    capacities = torch.tensor([3, 2], dtype=torch.int32)
-    expected = capacities.clone()
-    adaptive._assign_draft_token_budget(confidence_probs, idx_mapping, expected, draft_budget=3, num_steps=3)
-
-    with patch(
-        "vllm_ascend.device.device_op.DeviceOperator.index_fill",
-        side_effect=lambda tensor, dim, indices, value: tensor.scatter_(dim, indices, value),
-    ) as mock_index_fill:
-        module._assign_draft_token_budget_ascend(confidence_probs, idx_mapping, capacities, draft_budget=3, num_steps=3)
-
-    mock_index_fill.assert_called_once()
-    torch.testing.assert_close(capacities, expected)
-
-
-def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
-    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
+    allocator = Mock()
+    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
     module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
-    tensor = torch.zeros(5)
-    indices = torch.tensor([1, 3])
 
-    with patch("vllm_ascend.device.device_op.DeviceOperator", BaseDeviceAdaptor), module._IndexFillMode():
-        result = tensor.index_fill_(0, indices, 2)
-
-    assert result is tensor
-    torch.testing.assert_close(result, torch.tensor([0, 2, 0, 2, 0], dtype=result.dtype))
+    assert adaptive._assign_draft_token_budget_compiled is allocator
 
 
 @pytest.mark.parametrize("adaptive", [False, True])
@@ -149,6 +90,7 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptive, is_profile, dummy_run):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.pcp_manager = None
     spec.use_dcp = False
     spec.replicated_pcp = False
     spec.input_buffers = SimpleNamespace(positions=torch.arange(20))

@@ -1,4 +1,0 @@
-pr: 20864
-entries:
-  - category: bugfix
-    text: Aligned dummy weight loading errors and enabled randomized DP dummy inputs on the current vLLM development lane.

@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from vllm.config import SpeculativeConfig
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
@@ -26,6 +25,7 @@ from vllm_ascend.worker.v2.sample.rejection_greedy import (
 )
 
 _SAMPLING_EPS = 1e-5
+PLACEHOLDER_TOKEN_ID = -1
 
 
 class RejectionSampler310V2(RejectionSampler):

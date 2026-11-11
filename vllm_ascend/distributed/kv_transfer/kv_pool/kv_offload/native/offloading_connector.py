@@ -14,6 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    get_offloading_group_ids,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
@@ -160,9 +163,17 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         ],
     ) -> None:
         kv_cache_config = self.kv_cache_config
+        # Only the groups the scheduler actually offloads, i.e. the same
+        # selection as vLLM's native offloading worker. Hybrid models expose
+        # extra non-prefix-cacheable groups (e.g. DeepSeek-V4.1 Engram and
+        # sparse attention); registering those here would make the group count
+        # diverge from GPULoadStoreSpec.group_sizes and misalign block ids.
+        selected_groups = tuple(
+            kv_cache_config.kv_cache_groups[group_id] for group_id in get_offloading_group_ids(kv_cache_config)
+        )
 
         requires_layout_adaptation = False
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -223,7 +234,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 )
             )
 
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -299,7 +310,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                     raise NotImplementedError(f"Unsupported KV cache spec: {type(layer_spec).__name__}")
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])

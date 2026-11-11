@@ -29,6 +29,11 @@ def _parent_init(
 ):
     """Mock the parent graph manager initialization."""
     self._capture_descs = [object()]
+    self.cudagraph_mode = cudagraph_mode
+
+
+def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
 
 
 def test_init_draft_prefill_graph():
@@ -45,12 +50,38 @@ def test_init_draft_prefill_graph():
         ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
-        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2)
+        manager = AutoRegressiveAclGraphManager(
+            _graph_config(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2
+        )
     assert manager.capture_sizes == [4, 8]
     assert manager.is_draft_model_prefill is True
     assert manager.speculator is None
     set_prefill.assert_called_once_with([4, 8])
     set_decode.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("decode_query_len", "mode", "expected"),
+    [
+        (2, CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE),
+        (1, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY),
+    ],
+)
+def test_sharded_pcp_draft_prefill_avoids_full_graphs(decode_query_len, mode, expected):
+    """Sharded draft prefill stages inputs and all-gathers outside the forward."""
+    with (
+        patch.object(SpeculatorCudaGraphManager, "__init__", _parent_init),
+        patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.collect_sorted_captured_token_sizes",
+            return_value=[4],
+        ),
+    ):
+        manager = AutoRegressiveAclGraphManager(
+            _graph_config(pcp_size=2), torch.device("cpu"), mode, decode_query_len=decode_query_len
+        )
+    assert manager.cudagraph_mode == expected
 
 
 def test_init_draft_decode_graph():
@@ -136,17 +167,25 @@ def test_run_fullgraph_uses_legacy_graph():
     manager._updatable_graph_replay.assert_not_called()
 
 
-def test_capture_draft_prefill_delegates_to_parent():
-    """Verify draft prefill capture delegates to the parent implementation."""
+@pytest.mark.parametrize("warmup", [False, True])
+def test_capture_draft_prefill_prepares_pcp_inputs_and_runs_forward(warmup):
+    """Draft prefill capture stages PCP metadata before invoking its forward."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.speculator = object()
     manager.is_draft_model_prefill = True
+    manager.max_num_reqs = 4
+    manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
     forward_fn = MagicMock()
-    model_state = object()
-    input_buffers = object()
-    block_tables = object()
+    model_state, input_buffers, block_tables, kv_cache_config = (object() for _ in range(4))
     attn_groups: Any = object()
-    kv_cache_config = object()
+    pcp_manager = MagicMock()
+    metadata, slots = object(), object()
+    desc = SimpleNamespace(num_tokens=8, num_reqs=2, cg_mode=CUDAGraphMode.FULL, max_query_len=4, uniform_token_count=4)
+
+    def capture_side_effect(manager_arg, create_forward_fn, progress_bar_desc=None):
+        assert manager_arg is manager
+        create_forward_fn(desc, warmup)(CUDAGraphMode.FULL)
+
     with (
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.communicator_switch",
@@ -156,18 +195,31 @@ def test_capture_draft_prefill_delegates_to_parent():
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.model_capture_wrapper",
             return_value=nullcontext(),
         ),
-        patch.object(SpeculatorCudaGraphManager, "capture") as parent_capture,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.prepare_inputs_to_capture",
+            return_value=(metadata, slots),
+        ) as prepare_inputs,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.CudaGraphManager.capture",
+            side_effect=capture_side_effect,
+        ),
     ):
-        manager.capture(forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config)
-    parent_capture.assert_called_once_with(
-        forward_fn,
+        manager.capture(
+            forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config, pcp_manager=pcp_manager
+        )
+    prepare_inputs.assert_called_once_with(
+        2,
+        8,
         model_state,
         input_buffers,
         block_tables,
         attn_groups,
         kv_cache_config,
-        progress_bar_desc="Capturing CUDA graphs",
+        full_cudagraph=True,
+        max_query_len=4,
+        pcp_manager=pcp_manager,
     )
+    forward_fn.assert_called_once_with(2, 8, metadata, slots, None, CUDAGraphMode.FULL)
 
 
 def test_capture_draft_decode_prepares_inputs_and_runs_forward():
@@ -206,7 +258,8 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
             return_value=nullcontext(),
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.prepare_inputs_to_capture"
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.prepare_inputs_to_capture",
+            return_value=(None, None),
         ) as prepare_inputs,
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.CudaGraphManager.capture",
@@ -217,6 +270,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
 
     expected_capture_kwargs: dict[str, Any] = {"full_cudagraph": True}
     expected_capture_kwargs["max_query_len"] = None
+    expected_capture_kwargs["pcp_manager"] = None
     prepare_inputs.assert_called_once_with(
         3,
         4,
