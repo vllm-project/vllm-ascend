@@ -20,10 +20,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
-    KVConnectorRole,
-    MooncakeLayerwiseConnector,
-)
 
 
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
@@ -106,6 +102,12 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
 
 
 def test_layerwise_prefill_truncation_precedes_local_prefix_lookup():
+    # Other connector tests reload these modules during collection.
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
+        KVConnectorRole,
+        MooncakeLayerwiseConnector,
+    )
+
     block_size = 16
     config = create_vllm_config(
         block_size=block_size,
@@ -133,7 +135,6 @@ def test_layerwise_prefill_truncation_precedes_local_prefix_lookup():
     config.cache_config.num_gpu_blocks = plan.num_blocks
     register_all_kvcache_specs(None)
     init_none_hash(sha256)
-    # Other connector tests reload the upstream connector modules during collection.
     # Use the connector and role from the same module to avoid mixed class identities.
     connector = MooncakeLayerwiseConnector(config, KVConnectorRole.SCHEDULER, plan)
     with patch.object(KVConnectorFactory, "create_connector", return_value=connector):
