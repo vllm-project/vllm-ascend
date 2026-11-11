@@ -337,3 +337,29 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+## GDN input projection overlap
+
+Set `gdn_projection_overlap_max_tokens` to a positive integer in
+`--additional-config` to allow Qwen GDN layers to capture the QKVZ and BA
+input projections on separate NPU streams. The default is `0` (disabled).
+The threshold counts input rows after graph padding. The projections use the
+same weights and operators as the serial path.
+
+This option requires an uncompiled forward (`mode: 0`) captured in
+`FULL` or `FULL_DECODE_ONLY` ACLGraph mode. It applies only to plain BF16
+projections with no LoRA, dual batch overlap, prefill context parallelism,
+output gather, or custom communication operator. Eager execution, piecewise
+graphs and other ineligible paths keep the serial projections.
+
+For an initial 910C trial with Model Runner V2, use:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <qwen-bf16-model> --dtype bfloat16 \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"gdn_projection_overlap_max_tokens":64}'
+```
+
+`64` is a trial threshold. Confirm the selected graph buckets and actual
+overlap with a profiler, and compare decode latency and output accuracy
+against the same graph configuration with the threshold set to `0`.
