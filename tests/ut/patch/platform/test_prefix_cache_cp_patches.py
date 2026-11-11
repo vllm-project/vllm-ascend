@@ -1732,6 +1732,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     ]
     config = SimpleNamespace(
         cache_config=CacheConfig(block_size=4, num_gpu_blocks_override=num_blocks_override),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
