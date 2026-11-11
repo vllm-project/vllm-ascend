@@ -14,8 +14,9 @@
 # This file is a part of the vllm-ascend project.
 #
 # Doc Quality Review - evaluate documentation changes on PRs touching
-# docs/source markdown files, then report findings as a sticky summary
-# comment plus inline review comments anchored on diff lines.
+# docs/source markdown files or docs .po translation catalogs, then
+# report findings as a sticky summary comment plus inline review
+# comments anchored on diff lines.
 #
 # Evaluation rules come from the doc-quality skill repository (cloned at
 # runtime, always latest); orchestration scripts live in-repo under
@@ -41,6 +42,7 @@ on:
   pull_request:
     paths:
       - 'docs/source/**/*.md'
+      - 'docs/**/*.po'
   pull_request_target:
     types: [labeled]
   issue_comment:
@@ -96,6 +98,15 @@ jobs:
           esac
           echo "pr=${n}" >> "$GITHUB_OUTPUT"
 
+      # Visual ack for /doc-eval triggers (same UX idea as stream_progress
+      # in Triton-ascend's doc-review): react to the command comment.
+      - name: React to trigger comment
+        if: github.event_name == 'issue_comment'
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=rocket > /dev/null
+
       # Check out the PR head so issue line numbers match the permanent
       # blob links in the report. Read-only use: no PR code is executed.
       - name: Checkout PR head
@@ -148,6 +159,10 @@ jobs:
 
       - name: Run doc evaluation
         id: eval
+        # Never fail the check on infra/eval errors (Triton-ascend style):
+        # failures surface as a workflow warning annotation; the sticky
+        # comment is simply not updated and artifacts keep the evidence.
+        continue-on-error: true
         run: |
           gh pr diff --repo "$GITHUB_REPOSITORY" "${{ steps.pr.outputs.pr }}" \
             --name-only > changed.txt
@@ -180,3 +195,11 @@ jobs:
           path: ${{ runner.temp }}/eval-out
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Finalize
+        if: always()
+        run: |
+          if [ "${{ steps.eval.outcome }}" != "success" ]; then
+            echo "::warning::Doc quality evaluation failed; the PR comment was not updated. Check logs and artifacts."
+          fi
+          exit 0

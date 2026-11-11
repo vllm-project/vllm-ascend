@@ -60,13 +60,20 @@ def safe_name(rel):
 
 
 def read_changed(changed_file, repo_root, path_prefix):
-    """读取变更清单，过滤出目标目录下仍存在（未被删除）的 md 文件。"""
+    """读取变更清单，过滤出仍存在（未被删除）的 md / .po 文件。
+
+    md 限定在 path_prefix（docs/source/）下；.po 允许 docs/ 下任意
+    locale 目录（翻译质量检测）。
+    """
     with open(changed_file, encoding="utf-8") as f:
         names = [ln.strip().lstrip('"') for ln in f if ln.strip()]
     keep, deleted = [], []
     for n in dict.fromkeys(names):
         n = n.replace("\\", "/")
-        if not n.endswith(".md") or not n.startswith(path_prefix):
+        lower = n.lower()
+        is_md = lower.endswith(".md") and n.startswith(path_prefix)
+        is_po = lower.endswith(".po") and n.startswith("docs/")
+        if not is_md and not is_po:
             continue
         if os.path.isfile(os.path.join(repo_root, n)):
             keep.append(n)
@@ -228,14 +235,16 @@ def eval_one(rel, cfg):
         f.write(start_time)
 
     warnings = []
-    procs = launch_scripts(doc_path, temp_dir, std_dir, cfg["skip_link"])
+    # .po 翻译文件只走 LLM 翻译质量检测；确定性脚本面向 md，不适用
+    is_po = rel.lower().endswith(".po")
+    procs = {} if is_po else launch_scripts(doc_path, temp_dir, std_dir, cfg["skip_link"])
 
     import llm_eval
 
     llm_expect, llm_warns = llm_eval.eval_doc(doc_path, temp_dir, std_dir, cfg["dims"], {**cfg, "repo_root": repo_root})
     warnings.extend(llm_warns)
 
-    script_status = wait_scripts(procs, temp_dir)
+    script_status = {} if is_po else wait_scripts(procs, temp_dir)
     for name, st in script_status.items():
         if st != "ok":
             warnings.append(f"prescan script {name} {st} (detection item falls back to LLM-only)")

@@ -354,12 +354,71 @@ def eval_script_linked_h2(dim, item, lines, total, rel_path, cfg, scoring, temp_
     return extract_problems(_call_llm(cfg, sys_prompt, user))
 
 
+PO_RULE_PROMPT = (
+    "You are reviewing a gettext .po translation file (Chinese msgid -> English msgstr)\n"
+    "for a technical documentation project. Evaluate ONLY the English msgstr entries:\n"
+    "- Accuracy: msgstr must faithfully convey the msgid meaning; flag mistranslation, omission or additions.\n"
+    "- Terminology: API names, parameters, flags and code identifiers must remain untranslated and consistent.\n"
+    "- Grammar, spelling and typos in msgstr.\n"
+    "- Placeholders/markup from msgid ({}, {0}, %s, <tag>, `code`, URLs) must be preserved in msgstr.\n"
+    "Skip the PO header metadata, obsolete entries (|#|) and empty msgstr (untranslated items are not errors).\n"
+    "Report the file line of the offending msgstr, and put the problematic msgstr text (verbatim) in original.\n"
+)
+
+
+def eval_po_doc(doc_path, temp_dir, standard_dir, cfg):
+    """gettext .po 翻译文件走单一「翻译质量」检测，不套用 21 个 H2。
+
+    产出 correctness_problems_po.json——merge 按文件名前缀归维度，
+    口径与逐 H2 文件完全一致。
+    """
+    scoring = load_scoring_rules(standard_dir)
+    lines = read_text(doc_path).splitlines()
+    total = len(lines)
+    rel_path = os.path.relpath(doc_path, cfg.get("repo_root") or ".").replace(os.sep, "/")
+    cfg = {**cfg, "standard_dir": standard_dir}
+    fname = "correctness_problems_po.json"
+    h2_name = "翻译质量"
+    dim = "正确性"
+    print(f"[llm_eval] {rel_path}: .po translation-quality detection ({total} lines)")
+    warns = []
+    probs_raw = []
+    try:
+        sys_prompt = build_system_prompt(dim, h2_name, PO_RULE_PROMPT, scoring, None, False)
+        user = build_user_prompt(rel_path, total, lines, 1, "")
+        probs_raw = extract_problems(_call_llm(cfg, sys_prompt, user))
+    except Exception as e:  # noqa: BLE001 —— 失败写空文件，保证 merge --expect 可通过
+        warns.append(f"[po] translation-quality detection failed: {e}")
+        print(f"[llm_eval] {warns[-1]}", file=sys.stderr)
+    deduped, seen = [], set()
+    for p in probs_raw:
+        n = normalize_problem(p, dim, h2_name)
+        if not n:
+            continue
+        k = (n["line"], n["original"][:50], n["h2"])
+        if k in seen:
+            continue
+        seen.add(k)
+        deduped.append(n)
+    out = {
+        "dimension": dim,
+        "files_loaded": 1,
+        "h2_summaries": [{"h2": h2_name, "loaded_files": [os.path.basename(doc_path)], "problems": len(deduped)}],
+        "problems": deduped,
+    }
+    with open(os.path.join(temp_dir, fname), "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+    return [fname], warns
+
+
 def eval_doc(doc_path, temp_dir, standard_dir, dims, cfg):
     """对单个文档执行全部选中 H2 的 LLM 检测，逐 H2 落盘。
 
     返回 (expect_files, warnings)。即使某个 H2 失败也写空文件，
     保证 merge --expect 可通过（失败信息进 warnings，最终体现在 PR 评论中）。
     """
+    if str(doc_path).lower().endswith(".po"):
+        return eval_po_doc(doc_path, temp_dir, standard_dir, cfg)
     registry = load_registry(standard_dir)
     scoring = load_scoring_rules(standard_dir)
     lines = read_text(doc_path).splitlines()
