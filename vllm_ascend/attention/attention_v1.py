@@ -24,6 +24,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
@@ -70,6 +71,11 @@ SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+
+# FIA quant_mode for KV-cache pseudo-quantization (KV stays INT8 in the paged
+# cache and is dequantized inside the operator via the antiquant scales), used
+# for the multi-token-query decode segment of MTP / speculative decoding.
+C8_FIA_PSEUDO_QUANT_MODE = 5
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -1648,6 +1654,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         assert block_size % 32 == 0, f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
         batch_size = len(attn_metadata.seq_lens_list)
 
+        if attn_metadata.num_decode_tokens != attn_metadata.num_decodes:
+            # Multi-token-query decode (MTP / speculative decoding): the BNSD
+            # fast path below assumes exactly one query token per request and
+            # would mis-slice query rows against KV batch rows.
+            return self._forward_c8_fia_quant5_decode(query, attn_metadata, output, layer)
+
         key = self._nz_5d_view(self.key_cache, block_size)
         value = self._nz_5d_view(self.value_cache, block_size)
 
@@ -1674,6 +1686,117 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output[:batch_size] = attn_output
         return output
 
+    def _forward_c8_fia_quant5_decode(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        """Multi-token-query decode segment (MTP / speculative decoding) via
+        FIA V1 TND with paged INT8 KV and quant_mode=5 pseudo-quantization.
+
+        Each request carries several query tokens (1 + num_speculative_tokens),
+        so the batch is described by the cumulative `actual_seq_lengths_q`
+        instead of one-query-row-per-request. The paged INT8 KV is handed to
+        the operator directly (NZ 5D views + block_table), avoiding the
+        gather+dequant round trip of the generic fallback.
+
+        The antiquant arguments mirror the working BNSD fast path; the
+        causal mask travels with `sparse_mode=3` as in the base TND paths.
+        """
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_decodes = attn_metadata.num_decodes
+        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
+        assert block_size % 32 == 0, f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
+
+        if not getattr(self, "_c8_fia_quant5_supported", True):
+            return self._forward_c8_decode_tnd_dequant(
+                query, attn_metadata, output, layer, num_decode_tokens=num_decode_tokens, num_decodes=num_decodes
+            )
+
+        key = self._nz_5d_view(self.key_cache, block_size)
+        value = self._nz_5d_view(self.value_cache, block_size)
+        try:
+            attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query[:num_decode_tokens],
+                key=key,
+                value=value,
+                key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+                antiquant_mode=0,
+                key_antiquant_mode=0,
+                value_antiquant_mode=0,
+                inner_precise=1,
+                block_table=attn_metadata.block_tables[:num_decodes],
+                atten_mask=attn_metadata.attn_mask,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q[:num_decodes],
+                actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                scale=self.scale,
+                quant_mode=C8_FIA_PSEUDO_QUANT_MODE,
+                sparse_mode=3,
+            )
+        except (RuntimeError, ValueError) as exc:
+            # quant_mode=5 is not accepted by the installed torch_npu for this
+            # combination; degrade to the gather+dequant path and stay there.
+            self._c8_fia_quant5_supported = False
+            logger.warning(
+                "FIA quant_mode=5 pseudo-quant rejected by the operator "
+                "(%s); falling back to gather+dequant for the MTP decode segment.",
+                exc,
+            )
+            return self._forward_c8_decode_tnd_dequant(
+                query, attn_metadata, output, layer, num_decode_tokens=num_decode_tokens, num_decodes=num_decodes
+            )
+        attn_out = attn_out.view(num_decode_tokens, self.num_heads, self.head_size)
+        output[:num_decode_tokens] = attn_out
+        return output
+
+    def _forward_c8_decode_tnd_dequant(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+        *,
+        num_decode_tokens: int,
+        num_decodes: int,
+    ) -> torch.Tensor:
+        """Gather+dequant fallback for the multi-token decode segment: same TND
+        contract as `_forward_c8_fused_infer_attention`, scoped to the decode
+        rows so the prefill segment stays on its own path.
+        """
+        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
+        paged_k = self._nz_5d_view(self.key_cache, block_size)
+        paged_v = self._nz_5d_view(self.value_cache, block_size)
+        seq_lens = attn_metadata.seq_lens_list[:num_decodes]
+        key, value = self._dequant_paged_kv_to_dense(
+            paged_k, paged_v, attn_metadata.block_tables[:num_decodes], seq_lens, query.dtype, layer
+        )
+        actual_seq_lengths_kv = torch.tensor(seq_lens, dtype=torch.int32).cumsum(dim=0)
+        attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query[:num_decode_tokens],
+            key=key,
+            value=value,
+            atten_mask=attn_metadata.attn_mask,
+            block_table=None,
+            input_layout="TND",
+            block_size=block_size,
+            actual_seq_lengths=attn_metadata.actual_seq_lengths_q[:num_decodes],
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            sparse_mode=3,
+        )
+        attn_out = attn_out.view(num_decode_tokens, self.num_heads, self.head_size)
+        output[:num_decode_tokens] = attn_out
+        return output
+
     def _forward_c8_chunked_prefill(
         self,
         query: torch.Tensor,
@@ -1692,33 +1815,41 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]
 
         if num_decode_tokens > 0:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-            assert block_size % 32 == 0, (
-                f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
-            )
-            kv_k = self._nz_5d_view(self.key_cache, block_size)
-            kv_v = self._nz_5d_view(self.value_cache, block_size)
+            if num_decode_tokens != num_decodes:
+                # Multi-token-query decode segment (MTP / speculative
+                # decoding): route through FIA TND + quant_mode=5 (or the
+                # gather+dequant fallback) instead of the one-query-row BNSD
+                # call below, which would mis-slice query rows against KV
+                # batch rows. The prefill segment below still runs.
+                self._forward_c8_fia_quant5_decode(query, attn_metadata, output, layer)
+            else:
+                num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
+                assert block_size % 32 == 0, (
+                    f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
+                )
+                kv_k = self._nz_5d_view(self.key_cache, block_size)
+                kv_v = self._nz_5d_view(self.value_cache, block_size)
 
-            attn_out, _ = torch_npu.npu_fused_infer_attention_score(
-                query[:num_decode_tokens].unsqueeze(2),
-                kv_k,
-                kv_v,
-                key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
-                value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
-                block_table=attn_metadata.block_tables[:num_decodes],
-                actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="BNSD",
-                scale=self.scale,
-                block_size=block_size,
-                antiquant_mode=0,
-                key_antiquant_mode=0,
-                value_antiquant_mode=0,
-                inner_precise=1,
-                sparse_mode=0,
-            )
-            output[:num_decode_tokens] = attn_out.squeeze(2)
+                attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                    query[:num_decode_tokens].unsqueeze(2),
+                    kv_k,
+                    kv_v,
+                    key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                    value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+                    block_table=attn_metadata.block_tables[:num_decodes],
+                    actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="BNSD",
+                    scale=self.scale,
+                    block_size=block_size,
+                    antiquant_mode=0,
+                    key_antiquant_mode=0,
+                    value_antiquant_mode=0,
+                    inner_precise=1,
+                    sparse_mode=0,
+                )
+                output[:num_decode_tokens] = attn_out.squeeze(2)
 
         if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
