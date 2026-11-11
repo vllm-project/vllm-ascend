@@ -71,6 +71,8 @@ configuration rather than the runner input or sampling interface.
 | [activation/swiglu_quant.py](activation/swiglu_quant.py) | Activation/quantization |
 | [activation/swiglustep.py](activation/swiglustep.py) | Activation/quantization |
 | [ascend_jit_warmup.py](ascend_jit_warmup.py) | Shared JIT warmup infrastructure |
+| [dcp/dcp_jit.py](dcp/dcp_jit.py) | DCP compile-only JIT owners |
+| [dcp/dcp_warmup.py](dcp/dcp_warmup.py) | SFA/MLA DCP owner registration and key coverage |
 | [attention_update.py](attention_update.py) | Model/attention primitive or shared utility |
 | [batch_invariant/matmul.py](batch_invariant/matmul.py) | Batch-invariant operations |
 | [batch_invariant/mean.py](batch_invariant/mean.py) | Batch-invariant operations |
@@ -83,7 +85,7 @@ configuration rather than the runner input or sampling interface.
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
-| [dcp/sfa_dcp_query.py](dcp/sfa_dcp_query.py) | Model/attention primitive or shared utility |
+| [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
 | [dspark_swa_indices.py](dspark_swa_indices.py) | Model/attention primitive or shared utility |
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |

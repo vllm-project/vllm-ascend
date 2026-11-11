@@ -152,15 +152,26 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "vLLM target: ${target} (base_ref=${BASE_REF}, test ref=${primary_ref}, lint ref=${main_commit})"
 
-      - name: cp problem matchers
-        run: |
-          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
-          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
-          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+          # =========== Copy problem matchers =====================
+          echo "::group::Copy problem matchers"
+          for matcher in actionlint markdownlint mypy; do
+            cp ".github/workflows/matchers/$matcher.json" "$RUNNER_TEMP/$matcher.json"
+          done
+          echo "::endgroup::"
 
-      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+          # =========== Calculate pre-commit cache key ============
+          echo "::group::Calculate pre-commit cache key"
+          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      # Keep a step boundary so the Kubernetes runner can synchronize the files
+      # before processing add-matcher outside the job container.
+      - name: Register problem matchers
+        run: |
+          for matcher in actionlint markdownlint mypy; do
+            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
+          done
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
