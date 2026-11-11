@@ -1,0 +1,4 @@
+pr: 21575
+entries:
+  - category: bugfix
+    text: Fixed KV-consumer chunked prefills skipping reusable Mamba/KDA state checkpoints after an existing computed prefix.
