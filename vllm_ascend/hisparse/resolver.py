@@ -34,56 +34,43 @@ def _load_resolver():
     return namespace
 
 
-def resolve_tensors(native, arguments, resolved_scratch, errors, *, attention_capacity=0, attention_block_stride=None):
-    """Pass live tensors; C++ derives geometry and protects queued storage.
+def resolve(owner, arguments):
+    """Dispatch live tensors to the native request-union resolver.
 
     During replay, external tensors remain owned by the runtime/workspace.
     Callers must destroy graphs before releasing or rebinding those owners.
     """
-    a = arguments
-    native.hisparse_resolve_residency(
-        a["global_indices"],
-        a["request_ids"],
-        a["request_state_indices"],
-        a["source_block_table"],
-        a["resident_block_table"],
-        a["hot_block_table"],
-        a["device_global_indices"],
-        a["lru_slots"],
-        a["hot_indices"],
-        a["attention_indices"],
-        resolved_scratch,
-        a["valid_counts"],
-        a["swap_host_physical_rows"],
-        a["swap_device_physical_rows"],
-        a["swap_counts"],
-        a["miss_mask"],
-        a["stats"],
-        errors,
-        a["num_valid_rows"],
-        a["host_cache"].shape[0],
-        a["hot_cache"].shape[1],
-        a["source_block_size"],
-        a["resident_block_size"],
-        a["resident_null_block"],
-        a["attention_block_stride"] if attention_block_stride is None else attention_block_stride,
-        a["max_union_rows"],
-        attention_capacity,
-    )
-
-
-def resolve(owner, scope):
-    """Resolve with the native request-union kernel; no Triton fallback."""
-    rows, topk = scope["global_indices"].shape
+    rows, topk = arguments["global_indices"].shape
     workspace = owner.workspace
-    resolved = scope["resolved_global_indices"]
+    resolved = arguments["resolved_global_indices"]
     if resolved is None:
         resolved = workspace.first_refs[: rows * topk].view(rows, topk)
-    resolve_tensors(
-        workspace.native,
-        scope,
+    workspace.native.hisparse_resolve_residency(
+        arguments["global_indices"],
+        arguments["request_ids"],
+        arguments["request_state_indices"],
+        arguments["source_block_table"],
+        arguments["resident_block_table"],
+        arguments["hot_block_table"],
+        arguments["device_global_indices"],
+        arguments["lru_slots"],
+        arguments["hot_indices"],
+        arguments["attention_indices"],
         resolved,
+        arguments["valid_counts"],
+        arguments["swap_host_physical_rows"],
+        arguments["swap_device_physical_rows"],
+        arguments["swap_counts"],
+        arguments["miss_mask"],
+        arguments["stats"],
         workspace.errors[:rows],
-        attention_capacity=owner.attention_capacity,
-        attention_block_stride=owner.attention_block_stride,
+        arguments["num_valid_rows"],
+        arguments["host_cache"].shape[0],
+        arguments["hot_cache"].shape[1],
+        arguments["source_block_size"],
+        arguments["resident_block_size"],
+        arguments["resident_null_block"],
+        arguments["attention_block_stride"] if owner.attention_block_stride is None else owner.attention_block_stride,
+        arguments["max_union_rows"],
+        owner.attention_capacity,
     )
