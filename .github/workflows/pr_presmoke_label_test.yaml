@@ -1,0 +1,81 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# TEMPORARY VERIFICATION WORKFLOW -- DELETE BEFORE MERGING.
+#
+# Pre-merge entry point for the presmoke feature. It must be a `pull_request`
+# (not `pull_request_target`, `issue_comment` or `repository_dispatch`) trigger,
+# because only `pull_request` resolves the workflow definition from the PR head.
+# That is what makes it usable before these changes reach the default branch.
+#
+# Usage: add the `presmoke` label to a PR targeting main. Every chip is
+# dispatched with the full test matrix.
+#
+# Only PRs whose head branch lives in this repository work: fork PRs have no
+# access to the push credentials, so they are skipped.
+name: 'PR presmoke (temporary)'
+
+run-name: presmoke on PR #${{ github.event.pull_request.number }}
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+    types: [ labeled ]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.label.name == 'presmoke' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Dispatch presmoke test workflows
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const ref = pr.head.ref;
+            const workflows = [
+              'schedule_nightly_test_a2.yaml',
+              'schedule_nightly_test_a3.yaml',
+              'schedule_nightly_test_a3_560t.yaml',
+              'schedule_nightly_test_a5.yaml',
+              'schedule_nightly_test_310p.yaml',
+            ];
+            for (const workflow of workflows) {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: workflow,
+                ref,
+                inputs: {
+                  test_cases: 'all',
+                  vllm_ascend_branch: ref,
+                  vllm_ascend_ref: pr.head.sha,
+                  request_id: String(pr.number),
+                  skip_build_image: 'false',
+                  skip_base: 'false',
+                  image_tag_suffix: '-presmoke',
+                },
+              });
+              core.info(`Dispatched ${workflow} on ${ref}`);
+            }
