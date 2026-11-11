@@ -7,7 +7,7 @@ from torch import nn
 from transformers import Glm5NextTextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import divide, get_pcp_group
+from vllm.distributed import divide, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -46,50 +46,56 @@ class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
 
 
 def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
-    """Use PCP head sharding only when tensor parallelism is disabled."""
-    # TODO: Support joint TP * PCP head partitioning for projections and state.
-    if parallel_config.tensor_parallel_size == 1:
-        return parallel_config.prefill_context_parallel_size
-    return parallel_config.tensor_parallel_size
+    """Number of head shards shared by projections and KDA state."""
+    return parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size
+
+
+def _get_kda_parallel_rank(tp_group, pcp_group) -> int:
+    # Match the TP-major ordering of Mooncake state transfer.
+    return tp_group.rank_in_group * pcp_group.world_size + pcp_group.rank_in_group
 
 
 class PCPColumnParallelLinear(ColumnParallelLinear):
-    """Column-parallel projection using PCP ranks and collectives."""
+    """Column-parallel projection using combined TP and PCP head shards."""
 
     def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        pcp_group = get_pcp_group()
+        self.pcp_group = get_pcp_group()
+        self.tp_group = get_tp_group()
         super().__init__(
             input_size,
             output_size,
-            tp_rank=pcp_group.rank_in_group,
-            tp_size=pcp_group.world_size,
+            tp_rank=_get_kda_parallel_rank(self.tp_group, self.pcp_group),
+            tp_size=self.tp_group.world_size * self.pcp_group.world_size,
             **kwargs,
         )
-        self.tp_group = pcp_group
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
         output = self.quant_method.apply(self, input_, bias)
-        if self.gather_output and self.tp_size > 1:
-            output = self.tp_group.all_gather(output, dim=-1)
+        if self.gather_output:
+            if self.pcp_group.world_size > 1:
+                output = self.pcp_group.all_gather(output, dim=-1)
+            if self.tp_group.world_size > 1:
+                output = self.tp_group.all_gather(output, dim=-1)
         if not self.return_bias:
             return output
         return output, self.bias if self.skip_bias_add else None
 
 
 class PCPRowParallelLinear(RowParallelLinear):
-    """Row-parallel projection reducing head contributions over PCP."""
+    """Row-parallel projection reducing PCP and TP head contributions separately."""
 
     def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        pcp_group = get_pcp_group()
+        self.pcp_group = get_pcp_group()
+        self.tp_group = get_tp_group()
+        shard_count = self.tp_group.world_size * self.pcp_group.world_size
         # The pinned RowParallelLinear has no rank/size overrides. Allocate
-        # the local input shard, then bind its inherited weight loaders to PCP.
-        super().__init__(divide(input_size, pcp_group.world_size), output_size, disable_tp=True, **kwargs)
+        # the local input shard, then bind its inherited weight loaders to the combined rank.
+        super().__init__(divide(input_size, shard_count), output_size, disable_tp=True, **kwargs)
         self.input_size = input_size
         self.disable_tp = False
-        self.tp_size = pcp_group.world_size
-        self.tp_rank = pcp_group.rank_in_group
-        self.tp_group = pcp_group
+        self.tp_size = shard_count
+        self.tp_rank = _get_kda_parallel_rank(self.tp_group, self.pcp_group)
         self.update_param_tp_status()
 
     def forward(self, input_):
@@ -99,7 +105,11 @@ class PCPRowParallelLinear(RowParallelLinear):
             input_parallel = input_.chunk(self.tp_size, dim=-1)[self.tp_rank].contiguous()
         bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
         output = self.quant_method.apply(self, input_parallel, bias)
-        if self.reduce_results and self.tp_size > 1:
+        # The decoder can defer TP reduction to sequence-parallel reduce-scatter.
+        # It does not reduce over PCP, so always combine those shards here.
+        if self.pcp_group.world_size > 1:
+            output = self.pcp_group.all_reduce(output)
+        if self.reduce_results and self.tp_group.world_size > 1:
             output = self.tp_group.all_reduce(output)
         if not self.return_bias:
             return output
@@ -277,13 +287,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.pcp_group = get_pcp_group()
         self.pcp_size = self.pcp_group.world_size
         self.pcp_rank = self.pcp_group.rank_in_group
-        self.use_pcp_head_sharding = self.tp_size == 1 and self.pcp_size > 1
+        self.use_pcp_head_sharding = self.pcp_size > 1
         column_linear = ColumnParallelLinear
         merged_linear = _Glm5NextMergedColumnParallelLinear
         row_linear = RowParallelLinear
         if self.use_pcp_head_sharding:
             self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
-            self.tp_rank = self.pcp_rank
+            self.tp_rank = _get_kda_parallel_rank(get_tp_group(), self.pcp_group)
             column_linear = PCPColumnParallelLinear
             merged_linear = PCPGlm5NextMergedColumnParallelLinear
             row_linear = PCPRowParallelLinear
@@ -291,7 +301,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
         self.conv_size = config.linear_conv_kernel_dim
-        assert self.num_heads % self.tp_size == 0
+        if self.num_heads % self.tp_size:
+            raise ValueError(
+                f"GLM KDA head count ({self.num_heads}) must be divisible by "
+                f"the TP x PCP shard count ({self.tp_size})."
+            )
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 
         projection_size = self.head_dim * self.num_heads
@@ -444,7 +458,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert pcp_context.padded_gather_idx is not None
             # PCP assigns the first and last chunks of a prefill to the same
             # rank. Reconstruct causal order before advancing the head-sharded
-            # recurrent state. With TP=1 each PCP rank owns different heads.
+            # recurrent state across the combined TP and PCP head shards.
             hidden_states = self.pcp_group.all_gather(hidden_states, dim=0)[pcp_context.hidden_restore_idx]
         num_tokens = hidden_states.size(0)
         # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
