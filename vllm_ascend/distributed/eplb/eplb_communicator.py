@@ -574,7 +574,15 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         """Set the recorded buffer-consumption dependency for one layer."""
         self._consumed_event = event
 
-    def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+    def set_transfer_context(
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
+    ) -> None:
+        # HIXL is receiver-initiated: it reads into the caller's tensor rows, so
+        # the per-rank recv rows needed by push backends are unused here.
+        del recv_rows
         self._require_session()
         if self._pending_reads:
             raise RuntimeError("HIXL EPLB started a layer with pending transfers")

@@ -28,6 +28,6 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 cudagraph_module.build_attn_metadata = build_attn_metadata
 speculator_module.DFlashCudaGraphManager = DFlashAclGraphManager
 
-# triton-ascend cannot lower tldevice.log1p in the upstream selector walk;
-# swap in the algebraically equivalent log(1 - u) variant.
+# Use Ascend's int32 random path with the upstream stable Gumbel transform
+# and draft noise salt; keep the shared candidate sampler unchanged.
 speculator2_module._selector_walk_kernel = _selector_walk_kernel_ascend

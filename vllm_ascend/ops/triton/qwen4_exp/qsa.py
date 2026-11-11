@@ -42,6 +42,7 @@ def _pack_qsa_group_indices_kernel(
         ),
         BLOCK_TOPK,
     )
+    complete_groups = tl.maximum(complete_groups, 0).to(tl.int32)
     is_group = columns < BLOCK_TOPK
     safe_group_column = tl.minimum(columns, BLOCK_TOPK - 1)
     group = tl.load(
@@ -52,8 +53,10 @@ def _pack_qsa_group_indices_kernel(
     tail_offset = columns - BLOCK_TOPK
     tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
     tail_count = tl.minimum((query_position + 1) - tail_start, COMPRESS_RATIO - 1)
-    tail = tail_start + tail_offset
-    valid_tail = (~is_group) & (tail_offset >= 0) & (tail_offset < tail_count) & (tail < sequence_length)
+    # Keep wide scalar position arithmetic, but use bounded int32 vectors.
+    valid_tail_count = tl.maximum(tl.minimum(tail_count, sequence_length - tail_start), 0).to(tl.int32)
+    tail = tail_start.to(tl.int32) + tail_offset
+    valid_tail = (~is_group) & (tail_offset >= 0) & (tail_offset < valid_tail_count)
     packed = tl.where(is_group, group, tl.where(valid_tail, tail, -1))
     tl.store(
         output_ptr + row * stride_output_row + columns * stride_output_column,

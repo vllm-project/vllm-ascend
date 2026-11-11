@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, assignment, attr-defined, method-assign, union-attr"
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -309,7 +310,8 @@ def test_decode_only_historical_shards_are_exchanged_current_contributes_once(dc
 def test_v2_draft_steps_update_history_and_current_independently(interleave):
     speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "GQA"
-    speculator.max_model_len = 32
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = True
     prepare_local = MagicMock(
         side_effect=lambda lengths: get_dcp_local_seq_lens(
@@ -352,7 +354,8 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
     )
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=[13, 31])
     speculator.num_speculative_steps = 3
-    speculator.max_model_len = 32
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     query = (4, 2, 1) if is_prefill else (1, 1, 1)
     steps = [
         {

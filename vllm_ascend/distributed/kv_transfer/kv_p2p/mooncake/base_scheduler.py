@@ -87,13 +87,6 @@ class MooncakeBaseConnectorScheduler:
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
-        # Remove this restriction once the backend supports joint PCP/TP sharding.
-        if (
-            self.pcp_size > 1
-            and self.tp_size > 1
-            and any(isinstance(spec, MambaSpec) for specs in self.group_unique_specs for spec in specs)
-        ):
-            raise ValueError("Mooncake Mamba requires PCP=1 or TP=1 on both producer and consumer")
         self.need_truncate = self._needs_prefill_token_truncation()
         self._logged_mamba_allocation = False
 
@@ -212,6 +205,9 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
+        # Request already hashed the full prompt. Rebuild for the shortened one.
+        request.block_hashes.clear()
+        request.update_block_hashes()
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

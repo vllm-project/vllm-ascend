@@ -42,7 +42,7 @@ def test_mla_constructor_preserves_decode_mask_flag(monkeypatch, non_causal):
     attention = torch.nn.Module()
     patch_deepseek_v2._deepseek_v2_mla_attention_init(
         attention,
-        vllm_config=SimpleNamespace(),
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1)),
         config=_config(rms_norm_eps=1e-5, rope_parameters={"rope_type": "default"}),
         hidden_size=32,
         num_heads=4,
@@ -197,7 +197,7 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
 @pytest.mark.parametrize("v2", [False, True])
 def test_aux_buffer_factory_uses_one_protocol(monkeypatch, v2):
     factory = object()
-    model = SimpleNamespace(layers=[], make_empty_intermediate_tensors=factory)
+    model = SimpleNamespace(layers=[], embed_tokens=torch.nn.Identity(), make_empty_intermediate_tensors=factory)
     monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", lambda *args, **kwargs: None)
     wrapped = object()
     wrap_factory = Mock(return_value=wrapped)
@@ -229,6 +229,7 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
     topk_indices_buffer = torch.zeros((8, 2), dtype=torch.int32)
 
     def original_init(model, *, vllm_config, prefix):
+        model.embed_tokens = torch.nn.Identity()
         model.layers = [SimpleNamespace(self_attn=SimpleNamespace(topk_indices_buffer=topk_indices_buffer))]
         model.config = _config(
             num_hidden_layers=8,

@@ -112,8 +112,8 @@ class TestCaMem(PytestBase):
     def test_release_pools_clears_all_tags(self, monkeypatch):
         allocator = CaMemAllocator.get_instance()
         pools = {
-            "weights": (MagicMock(name="weights_pool"), MagicMock(name="weights_allocator")),
-            "kv_cache": (MagicMock(name="kv_pool"), MagicMock(name="kv_allocator")),
+            "weights": [(MagicMock(name="weights_pool"), MagicMock(name="weights_allocator"))],
+            "kv_cache": [(MagicMock(name="kv_pool"), MagicMock(name="kv_allocator"))],
         }
         monkeypatch.setattr(allocator, "allocator_and_pools", pools)
 
@@ -307,6 +307,26 @@ class TestCaMem(PytestBase):
                 assert allocator.current_tag == "my_tag"
             # restore old tag after context manager exits
             assert allocator.current_tag == old_tag
+
+    def test_use_memory_pool_keeps_all_pools_per_tag(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "allocator_and_pools", {})
+        first, second = (object(), object()), (object(), object())
+
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.side_effect = [first, second]
+        mock_ctx.__exit__.return_value = None
+
+        with patch(
+            "vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator",
+            return_value=mock_ctx,
+        ):
+            with allocator.use_memory_pool("weights"):
+                pass
+            with allocator.use_memory_pool(tag="weights"):
+                pass
+
+        assert allocator.allocator_and_pools == {"weights": [first, second]}
 
     def test_get_current_usage(self):
         allocator = CaMemAllocator.get_instance()

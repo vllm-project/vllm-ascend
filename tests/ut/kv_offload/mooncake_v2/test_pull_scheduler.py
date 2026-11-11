@@ -479,6 +479,52 @@ def test_zero_external_tokens_acknowledges_without_worker_transfer() -> None:
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
 
 
+def test_request_finished_acks_unallocated_remote_prefill() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+            "remote_block_ids": ([20, 21],),
+        },
+    )
+
+    delay_free, params = scheduler.request_finished(request, ([],))
+
+    assert delay_free is False
+    assert params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert "request-d" not in scheduler._reqs_need_recv
+
+
+def test_request_finished_does_not_ack_prefill_already_queued_for_workers() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params={
+            "do_remote_prefill": False,
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler._reqs_need_recv["request-d"] = (request, ([10],), ([10],), 16)
+
+    delay_free, params = scheduler.request_finished(request, ([],))
+
+    assert (delay_free, params) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert scheduler._reqs_need_recv["request-d"][3] == 16
+
+
 def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     scheduler = make_pull_scheduler()
     scheduler._sending_thread = MagicMock()
@@ -497,6 +543,129 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params["remote_request_id"] == "request-p"
     assert params["last_token_id"] == 123
     scheduler._sending_thread.add_delayed_request.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
+def test_request_finished_before_allocation_releases_remote_blocks_once(status: RequestStatus) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="rejected-d",
+        prompt_token_ids=[0],
+        status=status,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20], [30, 31]),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+
+    # Includes the pre-aborted request submitted by AsyncLLM after an API 400.
+    assert scheduler.request_finished(request, ([], [])) == (False, None)
+    assert scheduler.request_finished(request, ([], [])) == (False, None)
+
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert not scheduler._reqs_need_recv
+    assert not scheduler._reqs_recv_info
+
+
+def test_rejected_consumer_completes_producer_delayed_free_without_timeout() -> None:
+    producer = make_pull_scheduler()
+    producer._sending_thread = make_sending_thread()
+    request_p = make_request(
+        request_id="request-p",
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        kv_transfer_params={"do_remote_decode": True},
+    )
+    delay_free, params = producer.request_finished(request_p, ([10, 11],))
+    assert delay_free
+    assert "request-p" in producer._sending_thread.delayed_free_requests
+
+    consumer = make_pull_scheduler()
+    consumer._recving_thread = MagicMock()
+    consumer._recving_thread.add_request.side_effect = lambda host, port, req_id: (
+        producer._sending_thread._handle_finished_request(req_id)
+    )
+    request_d = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+    assert consumer.request_finished(request_d, ([],)) == (False, None)
+
+    # The actual producer completion path returns the held request to vLLM.
+    output = SimpleNamespace(finished_recving=set(), finished_sending=None)
+    producer.update_connector_output(output)
+    assert output.finished_sending == {"request-p"}
+    assert not producer._reqs_need_send
+    assert not producer._sending_thread.delayed_free_requests
+
+
+def test_cancel_after_allocation_waits_for_worker_completion() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20],),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=16)
+    request.status = RequestStatus.FINISHED_ABORTED
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert "request-d" in scheduler._reqs_need_recv
+    assert "request-d" in scheduler._reqs_recv_info
+
+    output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None, failed_recving=set())
+    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(output)
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert not scheduler._reqs_recv_info
+
+
+def test_request_finished_after_zero_external_tokens_does_not_repeat_ack() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20],),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=0)
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+
+
+@pytest.mark.parametrize("missing", ["remote_host", "remote_port", "remote_request_id"])
+def test_rejected_consumer_without_remote_address_does_not_send_done(missing: str) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([20],),
+        "remote_host": "10.0.0.1",
+        "remote_port": 6000,
+        "remote_request_id": "request-p",
+    }
+    del params[missing]
+    request = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -553,6 +722,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
         max_tokens=8,
     )
 
+    request.block_hashes = ["full-prompt-hash"]
     scheduler._truncate_request_for_prefill(request)
     scheduler._truncate_request_for_prefill(request)
 
@@ -561,6 +731,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
     assert request.num_prompt_tokens == 2
     assert request.max_tokens == 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
+    assert request.block_hashes == [(1, 2)]
 
 
 def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
@@ -850,3 +1021,53 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     assert not scheduler._reqs_need_send
     assert not scheduler._reqs_in_batch
     assert not scheduler._reqs_recv_info
+
+
+@pytest.mark.parametrize("sizes", [[0, 1, 8], [0, 0, 0]])
+def test_sending_thread_aligns_indexer_replication_sizes_by_layer(sizes) -> None:
+    first = replace(
+        make_transfer_metadata(layer_names=["layer.0", "layer.1", "layer.2"]),
+        indexer_replication_sizes=sizes,
+    )
+    second = replace(
+        make_transfer_metadata(layer_names=["layer.2", "layer.1", "layer.0"]),
+        indexer_replication_sizes=list(reversed(sizes)),
+    )
+    thread = make_sending_thread({0: first, 1: second}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == sizes
+
+
+@pytest.mark.parametrize("other_sizes", [[1], [8]])
+def test_sending_thread_rejects_inconsistent_indexer_replication_sizes(other_sizes) -> None:
+    first = replace(make_transfer_metadata(), indexer_replication_sizes=[0])
+    second = replace(make_transfer_metadata(), indexer_replication_sizes=other_sizes)
+    with pytest.raises(ValueError, match="indexer_replication_sizes"):
+        make_sending_thread({0: first, 1: second}, tp_size=2)
+
+
+def test_sending_thread_merges_replication_for_split_layers() -> None:
+    workers: dict[int | tuple[int, ...], object] = {
+        rank: replace(
+            make_transfer_metadata(layer_names=[layer]),
+            indexer_replication_sizes=[0 if rank == 0 else 8],
+        )
+        for rank, layer in enumerate(["layer.0", "layer.1"])
+    }
+    thread = make_sending_thread(workers, tp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == [0, 8]
+
+
+def test_sending_thread_publishes_cp_interleave() -> None:
+    metadata = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
+    thread = make_sending_thread({0: metadata})
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].cp_kv_cache_interleave_size == 128
+
+
+def test_sending_thread_rejects_inconsistent_cp_interleave() -> None:
+    first = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
+    second = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=256)
+    with pytest.raises(ValueError, match="cp_kv_cache_interleave_size"):
+        make_sending_thread({0: first, 1: second}, tp_size=2)

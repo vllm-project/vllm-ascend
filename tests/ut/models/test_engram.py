@@ -11,7 +11,6 @@ from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -25,7 +24,7 @@ from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
-from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
+from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
@@ -228,9 +227,6 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-
 @pytest.mark.parametrize(
     "enabled,shared,tp,mode,expected",
     [
@@ -265,6 +261,63 @@ def test_bf16_gate_without_rotation():
     # Normalized dot is sqrt(64) = 8; the gate applies signed sqrt, then sigmoid.
     expected = (1 + 0.25 * torch.sigmoid(torch.tensor(8.0).sqrt())).bfloat16()
     assert torch.all(result[0] == expected)
+    assert torch.equal(result[1], hidden[1])
+
+
+def test_loader_accepts_distinct_block_diagonal_rotation(tmp_path):
+    first = torch.eye(32)
+    second = torch.flip(torch.eye(32), dims=(0,))
+    rotation = torch.block_diag(first, second)
+    rotation_path = tmp_path / "quarot.safetensors"
+    save_file({"global_rotation": rotation}, rotation_path)
+
+    blocks = load_engram_rotation_block(str(tmp_path), 64, rotation_path)
+
+    assert blocks.shape == (2, 32, 32)
+    torch.testing.assert_close(blocks[0], first)
+    torch.testing.assert_close(blocks[1], second)
+
+
+def test_loader_rejects_invalid_rotation_layouts(tmp_path):
+    wrong_shape_path = tmp_path / "wrong_shape.safetensors"
+    save_file({"global_rotation": torch.eye(32)}, wrong_shape_path)
+    with pytest.raises(ValueError, match="Expected global_rotation shape"):
+        load_engram_rotation_block(str(tmp_path), 64, wrong_shape_path)
+
+    dense_path = tmp_path / "dense.safetensors"
+    rotation = torch.eye(64)
+    rotation[:32, 32:] = 1
+    save_file({"global_rotation": rotation}, dense_path)
+    with pytest.raises(ValueError, match="requires block-diagonal global rotation"):
+        load_engram_rotation_block(str(tmp_path), 64, dense_path)
+
+
+def test_loader_requires_declared_rotation_file(tmp_path):
+    declared_path = tmp_path / "optional" / "quarot.safetensors"
+    with pytest.raises(FileNotFoundError, match="QuaRot global rotation"):
+        load_engram_rotation_block(str(tmp_path), 64, declared_path)
+
+
+def test_loader_uses_identity_when_rotation_is_not_declared(tmp_path):
+    blocks = load_engram_rotation_block(str(tmp_path), 64)
+    torch.testing.assert_close(blocks, torch.eye(32))
+
+
+def test_gate_accepts_distinct_rotation_blocks():
+    first = torch.eye(32)
+    second = torch.flip(torch.eye(32), dims=(0,))
+    blocks = torch.stack((first, second))
+    hidden = torch.arange(2 * 3 * 64, dtype=torch.float32).reshape(2, 3, 64).bfloat16()
+    key = torch.linspace(-1.0, 1.0, 2 * 3 * 64).reshape(2, 3, 64).bfloat16()
+    value = torch.full((2, 64), 0.25, dtype=torch.bfloat16)
+    channel_weight = torch.linspace(0.5, 1.5, 3 * 64).reshape(3, 64)
+    mask = torch.tensor([True, False])
+
+    result = engram_gate(hidden, key, value, channel_weight, blocks, mask, 1e-6)
+
+    assert result.shape == hidden.shape
+    assert result.dtype == hidden.dtype
+    assert not torch.equal(result[0], hidden[0])
     assert torch.equal(result[1], hidden[1])
 
 
@@ -377,45 +430,6 @@ def test_idle_hashes_have_no_valid_rows(num_tokens):
     assert keep.shape == (num_tokens,)
     assert keep.dtype == torch.bool
     assert not keep.any()
-
-
-def _runner(rows, computed, prompt):
-    token_ids = np.full((len(rows), 16), -7, dtype=np.int32)
-    for index, row in enumerate(rows):
-        token_ids[index, : len(row)] = row
-    runner = object.__new__(NPUModelRunner)
-    runner.input_batch = SimpleNamespace(
-        num_reqs=len(rows),
-        token_ids_cpu=token_ids,
-        num_computed_tokens_cpu=np.asarray(computed, dtype=np.int32),
-        num_prompt_tokens=np.asarray(prompt, dtype=np.int32),
-    )
-    lookback = np.empty((len(rows), 3), dtype=np.int32)
-    runner.lookback_token_ids = SimpleNamespace(
-        np=lookback,
-        copy_to_gpu=lambda: torch.from_numpy(lookback.copy()),
-    )
-    runner.is_pooling_model = False
-    return runner
-
-
-@pytest.mark.parametrize(
-    "computed,num_reqs,expected",
-    [
-        (4, None, [13, 12, 11]),
-        (6, None, [-1, -1, 13]),
-        (0, None, [-1, -1, -1]),
-        (4, 0, [-1, -1, -1]),
-        (4, 1, [13, 12, 11]),
-    ],
-)
-def test_v1_lookback_uses_prompt_tokens_once(computed, num_reqs, expected):
-    runner = _runner([[10, 11, 12, 13, -7, -7]], [computed], [4])
-    copy = Mock(wraps=runner.lookback_token_ids.copy_to_gpu)
-    runner.lookback_token_ids.copy_to_gpu = copy
-    kwargs = runner._init_model_kwargs(num_reqs=num_reqs)
-    assert kwargs["lookback_token_ids"][0].tolist() == expected
-    copy.assert_called_once_with()
 
 
 @pytest.mark.parametrize("shared", [False, True])

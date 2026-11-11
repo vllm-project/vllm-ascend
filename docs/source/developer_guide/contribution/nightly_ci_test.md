@@ -345,7 +345,7 @@ can be earlier or later than the 60-second default:
 ```
 
 The test name and `perf` key in this example come from the nightly matrix and its
-[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
+[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
 Choose the corresponding names from your PR when testing another configuration.
 
 Wait for the capture job and its `Plan`, `Parse / node-N`, and `Finalize` jobs.

@@ -3,9 +3,11 @@
 
 import torch
 
-from vllm_ascend.ops.fused_moe.eplb import (
+from vllm_ascend.distributed.eplb.tensor_ops import (
     EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
     build_expert_replica_routing_table,
+)
+from vllm_ascend.ops.fused_moe.eplb import (
     map_to_physical,
     map_to_physical_for_ascend,
     record_expert_tokens,

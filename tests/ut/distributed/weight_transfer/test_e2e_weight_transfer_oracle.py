@@ -28,9 +28,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
-    MODEL_CASES,
+from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
+from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,

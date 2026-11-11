@@ -1,0 +1,10 @@
+pr: 20382
+entries:
+  - category: feature
+    text: >-
+      Enabled device-length CANN FlashAttn for supported GLM GQA DSpark drafts
+      on A5 with Model Runner V2, including 192-wide heads through zero padding.
+      The padded draft KV payload uses one third more storage, while eligible
+      configurations skip speculative CPU length synchronization.
+    model: GLM
+    hardware: [A5]

@@ -267,8 +267,10 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
 
     def _send_packed(self, source: "WeightSource") -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
+        # Both supported versions drive the WeightSource iter_full protocol.
+        iterator = source.iter_full()
         for chunk in packed_npu_ipc_producer(
-            iterator=iter(source),
+            iterator=iterator,
             npu_uuid=self.npu_uuid,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,

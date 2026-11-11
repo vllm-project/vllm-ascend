@@ -12,15 +12,13 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
-from vllm_ascend.ops.fused_moe import eplb as eplb_ops
-from vllm_ascend.ops.fused_moe import routed_experts as routed_module
-from vllm_ascend.ops.fused_moe.eplb import (
+from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
     count_allgather_tokens,
     make_allgather_mask,
-    map_to_physical,
-    record_expert_tokens,
 )
+from vllm_ascend.ops.fused_moe import routed_experts as routed_module
+from vllm_ascend.ops.fused_moe.eplb import map_to_physical, record_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -160,39 +158,6 @@ def test_other_paths_keep_rank_dependent_mapping(monkeypatch, device, comm):
     assert _ascend_apply_eplb_mapping(router, torch.tensor([[0, 1]])).tolist() == [[3, 3]]
 
 
-@pytest.mark.parametrize(
-    "device,comm",
-    [
-        (AscendDeviceType.A5, afc.MoECommType.MC2),
-        (AscendDeviceType.A5, afc.MoECommType.ALLTOALL),
-        (AscendDeviceType.A3, afc.MoECommType.ALLGATHER),
-    ],
-)
-def test_source_mask_is_unused_outside_a5_allgather(monkeypatch, device, comm):
-    state = AscendEplbLayerState()
-    state.expert_load_view = torch.zeros(2, dtype=torch.int32)
-    state.should_record_tensor = torch.tensor(True)
-    state.local_expert_start = 0
-    state.local_expert_count = 2
-    context = SimpleNamespace(additional_kwargs={"moe_comm_type": comm})
-    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
-    monkeypatch.setattr(
-        "vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: get_hardware_profile(device)
-    )
-    prepare = MagicMock(spec=PrepareAndFinalizeWithAllGather)
-    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
-    state.record_load(
-        torch.tensor([2, 3]),
-        1,
-        topk_ids=torch.empty(0, 1, dtype=torch.int32),
-        num_source_tokens=2,
-        is_sequence_parallel=False,
-        prepare_finalize=prepare,
-    )
-    assert state.expert_load_view.tolist() == [2, 3]
-    prepare.all_gather_eplb_mask.assert_not_called()
-
-
 @pytest.mark.parametrize("padding_source", ["draft", "context", "unpadded_count"])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
 def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_source, sequence_parallel):
@@ -205,9 +170,9 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     state.local_expert_start = 0
     state.local_expert_count = 1
     context = SimpleNamespace(
-        is_padding=None if padding_source == "unpadded_count" else torch.tensor([False, True, True, False])
+        is_padding=None if padding_source == "unpadded_count" else torch.tensor([False, True, True, False]),
+        additional_kwargs={},
     )
-    monkeypatch.setattr(eplb_ops, "use_allgather_eplb", lambda enabled: enabled)
     monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 1)
     monkeypatch.setattr(state_module, "get_tensor_model_parallel_world_size", lambda: 2)
@@ -231,22 +196,137 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
             topk_ids=torch.zeros(2, 1, dtype=torch.int32),
             num_source_tokens=2,
             is_sequence_parallel=sequence_parallel,
-            prepare_finalize=prepare,
+            all_gather_mask=prepare.all_gather_eplb_mask,
         )
 
     record()
     assert prepare.all_gather_eplb_mask.call_args.args[0].tolist() == expected
     assert state.expert_load_view.item() == sum(expected)
     state.should_record_tensor.fill_(False)
+    # The recording gate only changes between forwards, so the closed gate
+    # arrives with a forward context of its own.
+    context = SimpleNamespace(is_padding=context.is_padding, additional_kwargs={})
     record()
     assert prepare.all_gather_eplb_mask.call_args.args[0].tolist() == [False, False]
     assert state.expert_load_view.item() == sum(expected)
     assert prepare.all_gather_eplb_mask.call_count == 2
 
 
-@pytest.mark.parametrize("source_padding,expected", [([False, False, False, True], 3), ([True] * 4, 0)])
-@pytest.mark.parametrize("dp_size", [1, 2])
-def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source_padding, expected, dp_size):
+def _mask_layer_state():
+    state = AscendEplbLayerState()
+    state.num_unpadded_tokens_tensors = [torch.tensor(2), torch.tensor(2)]
+    state.should_record_tensor = torch.tensor(True)
+    state.allgather_record_tensor = torch.tensor(-1, dtype=torch.int32)
+    state.expert_load_view = torch.zeros(1, dtype=torch.int32)
+    state.local_expert_start = 0
+    state.local_expert_count = 1
+    return state
+
+
+def _forward_context():
+    """A context like the one every forward enters, with its own extras dict."""
+    return SimpleNamespace(is_padding=None, additional_kwargs={})
+
+
+def _record(state, gather):
+    state.record_load(
+        torch.tensor([2]),
+        1,
+        topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+        num_source_tokens=2,
+        all_gather_mask=gather,
+    )
+
+
+def test_source_mask_is_gathered_once_for_all_layers_of_a_model(monkeypatch):
+    """Every MoE layer of a model derives the same mask, so one gather is enough.
+
+    Gathering per layer repeats the collective as many times as the model has
+    MoE layers, which on A5 lands on the prefill forwards.
+    """
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    gather = MagicMock(side_effect=lambda mask: mask)
+    context = _forward_context()
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
+    layers = [_mask_layer_state() for _ in range(4)]
+
+    for layer in layers:
+        _record(layer, gather)
+
+    assert gather.call_count == 1
+    assert [layer.expert_load_view.item() for layer in layers] == [2, 2, 2, 2]
+
+
+@pytest.mark.parametrize("bypass", ["draft", "capture"])
+def test_consecutive_forwards_outside_the_controller_each_gather_a_mask(monkeypatch, bypass):
+    """Not every forward passes through AscendEPLBController.prepare_forward.
+
+    A drafter runs one forward per speculative step, and graph capture runs a
+    warmup and a capture forward per size, both straight into the model. The
+    mask is therefore held on the forward context, which each of them enters
+    on its own.
+    """
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    gather = MagicMock(side_effect=lambda mask: mask)
+    # Capture runs the same layers again for the next size; the draft is one
+    # model running its next speculative step.
+    layers = [_mask_layer_state() for _ in range(2 if bypass == "capture" else 1)]
+    context = _forward_context()
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
+
+    for _ in range(2):
+        for layer in layers:
+            _record(layer, gather)
+        context = _forward_context()
+
+    assert gather.call_count == 2
+
+
+@pytest.mark.parametrize("separated_by", ["forward", "ubatch"])
+def test_source_mask_is_not_shared_across_forwards_or_ubatches(monkeypatch, separated_by):
+    """The two dimensions that can hold different masks at once stay apart.
+
+    A draft forward carries its own padding source, and micro-batches have
+    their own token counts, so neither may read the other's mask.
+    """
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    ubatch = 0
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: ubatch)
+    gather = MagicMock(side_effect=lambda mask: mask)
+    # DBO runs both micro-batches inside one context and separates them by
+    # index; a separate forward brings a fresh context.
+    context = _forward_context()
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
+    first = _mask_layer_state()
+    second = _mask_layer_state()
+
+    _record(first, gather)
+    if separated_by == "ubatch":
+        ubatch = 1
+    else:
+        context = _forward_context()
+    _record(second, gather)
+
+    assert gather.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "device,comm_type,dp_size,source_padding,expected_load,expected_record_flag",
+    [
+        (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 1, [False, False, False, True], 3, 1),
+        (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 2, [False, False, False, True], 3, 1),
+        (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 1, [True] * 4, 0, 0),
+        (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 2, [True] * 4, 0, 0),
+        (AscendDeviceType.A5, afc.MoECommType.MC2, 1, [False, False, False, True], 4, -1),
+        (AscendDeviceType.A5, afc.MoECommType.ALLTOALL, 1, [False, False, False, True], 4, -1),
+        (AscendDeviceType.A3, afc.MoECommType.ALLGATHER, 1, [False, False, False, True], 4, -1),
+    ],
+)
+def test_eplb_recording_preserves_order_and_source_eligibility(
+    monkeypatch, device, comm_type, dp_size, source_padding, expected_load, expected_record_flag
+):
     events = []
     state = AscendEplbLayerState()
     state.num_unpadded_tokens_tensors = [torch.tensor(4)]
@@ -265,13 +345,12 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
         dp_group=SimpleNamespace(all_gather=lambda rows, dim: torch.cat([rows, torch.zeros_like(rows)])),
     )
     prepare = PrepareAndFinalizeWithAllGather(config)
-    make_mask = eplb_ops.make_allgather_mask
     gather_mask = prepare.all_gather_eplb_mask
 
     def source_mask(*args, **kwargs):
         events.append("source_mask")
         assert args[0] == 4
-        return make_mask(*args, **kwargs)
+        return make_allgather_mask(*args, **kwargs)
 
     def prepare_inputs(**kwargs):
         events.append("prepare")
@@ -315,19 +394,24 @@ def test_draft_source_mask_overrides_synthetic_model_padding(monkeypatch, source
     layer.dynamic_eplb = False
     layer.return_with_event = False
     context = SimpleNamespace(
-        is_padding=torch.zeros(4, dtype=torch.bool), additional_kwargs={"max_tokens_across_dp": 4}
+        is_padding=torch.zeros(4, dtype=torch.bool),
+        additional_kwargs={"max_tokens_across_dp": 4, "moe_comm_type": comm_type},
     )
     monkeypatch.setattr(routed_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(afc, "get_forward_context", lambda: context)
-    monkeypatch.setattr(
-        routed_module, "_EXTRA_CTX", SimpleNamespace(in_profile_run=False, moe_comm_type=afc.MoECommType.ALLGATHER)
-    )
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(routed_module, "_EXTRA_CTX", SimpleNamespace(in_profile_run=False, moe_comm_type=comm_type))
     monkeypatch.setattr(routed_module, "get_moe_comm_method", lambda *_: comm)
-    monkeypatch.setattr(eplb_ops, "use_allgather_eplb", lambda enabled: enabled)
-    monkeypatch.setattr(eplb_ops, "make_allgather_mask", source_mask)
+    monkeypatch.setattr(
+        "vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: get_hardware_profile(device)
+    )
+    monkeypatch.setattr(state_module, "make_allgather_mask", source_mask)
     monkeypatch.setattr(prepare, "all_gather_eplb_mask", gather_source_mask)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_load)
     AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(4, 2), router_logits=torch.ones(4, 1))
-    assert events == ["prepare", "route", "ffn", "source_mask", "gather_mask", "record_load", "finalize"]
-    assert state.expert_load_view.item() == expected
-    assert state.allgather_record_tensor.item() == int(expected > 0)
+    expected_events = ["prepare", "route", "ffn"]
+    if expected_record_flag != -1:
+        expected_events += ["source_mask", "gather_mask"]
+    assert events == expected_events + ["record_load", "finalize"]
+    assert state.expert_load_view.item() == expected_load
+    assert state.allgather_record_tensor.item() == expected_record_flag

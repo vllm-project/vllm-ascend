@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.model_executor import custom_op, parameter
 from vllm.model_executor.layers import linear
 
@@ -103,7 +104,19 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
 
 
 @pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 1), (1, 2), (1, 4), (2, 1), (2, 4), (4, 2)])
-def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(monkeypatch, parallel_groups, tp_size, pcp_size):
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "needs_output_buffer"),
+    [
+        (CUDAGraphMode.NONE, False),
+        (CUDAGraphMode.PIECEWISE, True),
+        (CUDAGraphMode.FULL, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, False),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, True),
+    ],
+)
+def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
+    monkeypatch, parallel_groups, tp_size, pcp_size, cudagraph_mode, needs_output_buffer
+):
     # Construct the complete KDA layer to catch mismatched projection, gate,
     # convolution, and cache dimensions, including the TP>1 fallback.
     monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: tp_size)
@@ -124,7 +137,7 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(monkeypat
         cache_config=SimpleNamespace(mamba_cache_dtype="auto", use_replayssm=False),
         speculative_config=None,
         quant_config=None,
-        compilation_config=SimpleNamespace(static_forward_context={}),
+        compilation_config=SimpleNamespace(static_forward_context={}, cudagraph_mode=cudagraph_mode),
     )
 
     def init_base(self, config, vllm_config, prefix):
@@ -141,6 +154,7 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(monkeypat
         "vllm.third_party.flash_linear_attention.ops.kda.FusedRMSNormGated", lambda *args, **kwargs: torch.nn.Identity()
     )
     layer = model_kda.Glm5NextLinearAttention(config, vllm_config, prefix="model.layers.0.linear_attn")
+    assert layer._needs_output_buffer is needs_output_buffer
     assert layer.pcp_group is parallel_groups
     assert layer.pcp_size == pcp_size
     assert layer.pcp_rank == pcp_size - 1
