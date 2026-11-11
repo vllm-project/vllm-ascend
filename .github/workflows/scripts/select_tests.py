@@ -501,6 +501,7 @@ def _has_accuracy_tests(
 def _schedule_singlecard_ops(
     all_groups: dict[PartitionKey, list[str]],
     partition_config: dict[PartitionKey, PartitionInfo],
+    only: str = "",
 ) -> None:
     """Add singlecard operator tests to the full-suite selection.
 
@@ -520,6 +521,13 @@ def _schedule_singlecard_ops(
         for path in sorted(root.rglob("test_*.py"))
         if "__pycache__" not in path.parts
     ]
+    needle = only.replace("\\", "/").strip()
+    if needle:
+        files = [path for path in files if needle in path]
+        print(
+            f"Singlecard ops filter {needle!r} kept {len(files)} test(s)",
+            file=sys.stderr,
+        )
     if not files:
         return
 
@@ -789,6 +797,11 @@ def main():
         help="Schedule only tests/e2e/nightly/single_node/ops/singlecard_ops "
         "on a3-2 and a5-1. Does not select UT or pull-request tests.",
     )
+    parser.add_argument(
+        "--singlecard-ops-only",
+        default="",
+        help="When used with --singlecard-ops, keep only test paths containing this substring.",
+    )
     input_group.add_argument(
         "--curated",
         type=str,
@@ -933,7 +946,7 @@ def main():
     # Added after dedup and the 560T relabel. The same files are scheduled on
     # both cards, and the generic A3 label must stay linux-aarch64-a3-2.
     if args.singlecard_ops:
-        _schedule_singlecard_ops(all_groups, partition_config)
+        _schedule_singlecard_ops(all_groups, partition_config, args.singlecard_ops_only)
 
     # A command-line override is an explicit, transient choice and therefore
     # has higher priority than static routing.
