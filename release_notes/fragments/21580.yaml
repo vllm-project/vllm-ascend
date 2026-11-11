@@ -1,0 +1,4 @@
+pr: 21580
+entries:
+  - category: performance
+    text: Added a quant_mode=5 FIA pseudo-quant fast path for the multi-token-query decode segment of C8 INT8 KV cache models under MTP / speculative decoding, with automatic fallback to the gather+dequant path when unsupported.
