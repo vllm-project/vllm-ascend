@@ -64,7 +64,7 @@ def _cache_layout(host_cache: torch.Tensor, hot_cache: torch.Tensor) -> tuple[in
         raise ValueError("HiSparse host cache must be a contiguous CPU [rows, width] view")
     _check_packed_cache(hot_cache)
     row_bytes = hot_cache.size(2) * hot_cache.element_size()
-    if hot_cache.stride(1) != hot_cache.size(2) or host_cache.size(1) * host_cache.element_size() != row_bytes:
+    if host_cache.size(1) * host_cache.element_size() != row_bytes:
         raise ValueError("HiSparse cache rows must be dense and have matching byte widths")
     return (
         row_bytes,
