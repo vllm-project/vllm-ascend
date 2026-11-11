@@ -97,15 +97,6 @@ class AscendHiSparseBackend(HiSparseBackend):
         _load_resolver()
         install_row_dma(AscendHiSparseBackend)
 
-    def allocate_private_host_pool(self, size: int) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm_ascend.hisparse.host_pool import allocate_mapped_host
-
-        payload = allocate_mapped_host((size,), torch.int8)
-        registration = payload._hisparse_registration
-        registered = registration.tensor.view(torch.int8)
-        registered._hisparse_registration = registration
-        return registered[:size], registered
-
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.hisparse.host_pool import MappedHostTensor
 

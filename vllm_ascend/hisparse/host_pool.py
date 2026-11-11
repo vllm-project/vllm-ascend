@@ -120,7 +120,11 @@ def install() -> None:
     def allocate(size):
         backend = get_hisparse_backend()
         if isinstance(backend, AscendHiSparseBackend):
-            return backend.allocate_private_host_pool(size)
+            payload = allocate_mapped_host((size,), torch.int8)
+            registration = payload._hisparse_registration
+            registered = registration.tensor.view(torch.int8)
+            registered._hisparse_registration = registration
+            return registered[:size], registered
         return original(size)
 
     allocate._ascend_pinned_private_pool = True
