@@ -78,6 +78,21 @@ on:
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com'
         description: 'SWR registry domain'
+      skip_sync:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, the base image build does not dispatch the quay.io sync. Used by presmoke builds, whose images are for issue localization only and must not be mirrored to quay.io."
+      checkout_ref:
+        required: false
+        type: string
+        default: ''
+        description: "Ref to build from (e.g. a PR commit). Empty keeps vllm_ascend_branch."
+      image_tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix for base and nightly image tags, e.g. '-presmoke'."
     secrets:
       SWR_USERNAME:
         required: false
@@ -93,12 +108,14 @@ jobs:
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ inputs.dockerfile }}
-      suffix: ${{ inputs.suffix }}
+      suffix: ${{ inputs.suffix }}${{ inputs.image_tag_suffix }}
       soc: ${{ inputs.soc }}
       should_push: ${{ inputs.should_push }}
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
+      checkout_ref: ${{ inputs.checkout_ref }}
       swr_registry: ${{ inputs.swr_registry }}
+      skip_sync: ${{ inputs.skip_sync }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
@@ -114,6 +131,9 @@ jobs:
       os_filter: ${{ inputs.os }}
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       base_image_branch: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
+      checkout_ref: ${{ inputs.checkout_ref }}
+      base_tag_suffix: ${{ inputs.image_tag_suffix }}
+      image_tag_suffix: ${{ inputs.image_tag_suffix }}
       build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}

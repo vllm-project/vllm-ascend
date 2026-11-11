@@ -55,6 +55,21 @@ on:
         type: string
         default: ''
         description: "Branch used to resolve the base image (nightly-<branch>). Defaults to vllm_ascend_branch. For PR verification builds, set to the target branch instead of the head SHA."
+      checkout_ref:
+        required: false
+        type: string
+        default: ''
+        description: "Ref to build from. Defaults to vllm_ascend_branch. Set to the PR commit for presmoke builds so Dockerfile changes are included."
+      base_tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the base image tag, e.g. '-presmoke'. The base image is nightly-<base_image_branch>-<target><suffix>."
+      image_tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the published nightly image tag, e.g. '-presmoke'."
       build_type:
         required: false
         type: string
@@ -195,7 +210,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ inputs.vllm_ascend_branch }}
+          ref: ${{ inputs.checkout_ref || inputs.vllm_ascend_branch }}
 
       - name: Record source commit
         if: ${{ inputs.should_push }}
@@ -243,8 +258,8 @@ jobs:
           fi
           # Runtime image tags are stable now that dependency versions are pinned
           # in the Dockerfiles, so no CANN/date suffix is appended.
-          TAG_SUFFIX=""
-          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
+          TAG_SUFFIX="${{ inputs.base_tag_suffix }}"
+          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}${{ inputs.image_tag_suffix }}"
           # Same dual-tag rule as the mainline nightly builds: the stable tag is
           # overwritten by each nightly, while a unique tag (CANN version +
           # build date + run number) keeps the history of nightly images.
@@ -352,7 +367,7 @@ jobs:
               # atlas_inference mirror, matching the retired daily pipeline.
               DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             fi
-            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
+            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}${{ inputs.image_tag_suffix }}"
             # The build step pushed the per-arch images under the unique tag.
             UNIQUE_TAG="${TAG}${TAG_SUFFIX}"
             TEMP="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}"

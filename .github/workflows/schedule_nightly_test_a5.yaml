@@ -48,6 +48,11 @@ on:
         required: false
         default: 'false'
         type: string
+      skip_base:
+        description: 'If false, rebuild the runtime base image from the CANN base image before building the nightly layer (used by /presmoke). Default true reuses the existing base image.'
+        required: false
+        default: 'true'
+        type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
         required: false
@@ -253,15 +258,28 @@ jobs:
       matrix:
         vllm_ascend_branch: >-
           ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
-    uses: ./.github/workflows/_nightly_image_build.yaml
+    uses: ./.github/workflows/_schedule_nightly_pair_image_build.yaml
     with:
       target: a5
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      os: ubuntu
       soc: '950'
+      dockerfile: Dockerfile.a5
+      suffix: 'a5'
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      # The nightly layer always keeps the release shape (ubuntu arm64). The
+      # /presmoke command additionally rebuilds the runtime base image from CANN
+      # by passing skip_base=false.
+      build_type: 'release'
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      skip_base: ${{ inputs.skip_base != 'false' }}
+      # presmoke images are for issue localization only and must not be mirrored to quay.io.
+      skip_sync: true
+      checkout_ref: ${{ inputs.skip_base == 'false' && inputs.vllm_ascend_ref || '' }}
+      image_tag_suffix: ${{ inputs.skip_base == 'false' && '-presmoke' || '' }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   multi-node-tests:
     name: multi-node
@@ -281,7 +299,7 @@ jobs:
     with:
       soc_version: a5
       runner: linux-aarch64-a5-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.skip_base == 'false' && '-presmoke' || '' }}"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -339,7 +357,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a5
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.skip_base == 'false' && '-presmoke' || '' }}"
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
@@ -389,7 +407,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.skip_base == 'false' && '-presmoke' || '' }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -414,7 +432,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.skip_base == 'false' && '-presmoke' || '' }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
