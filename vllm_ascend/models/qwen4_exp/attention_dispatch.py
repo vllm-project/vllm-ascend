@@ -66,7 +66,6 @@ class QSARequestPlan:
 
     requests: tuple[QSARequest, ...]
     fia_requests: tuple[QSARequest, ...]
-    gbsa_spans: tuple[tuple[int, int], ...]
     union_batches: tuple[QSAUnionBatch, ...]
     decode_spans: tuple[tuple[int, int], ...]
 
@@ -104,17 +103,12 @@ def build_qsa_request_plan(
             )
     requests_tuple = tuple(requests)
     fia_requests = tuple(request for request in requests_tuple if request.use_fia)
-    gbsa_spans: list[tuple[int, int]] = []
     union_requests: list[list[QSARequest]] = []
     decode_spans: list[tuple[int, int]] = []
     for request in requests_tuple:
         start = request.gbsa_query_start
         if start >= request.query_end:
             continue
-        if gbsa_spans and gbsa_spans[-1][1] == start:
-            gbsa_spans[-1] = (gbsa_spans[-1][0], request.query_end)
-        else:
-            gbsa_spans.append((start, request.query_end))
         if request.is_prefill:
             if union_requests and union_requests[-1][-1].query_end == start:
                 union_requests[-1].append(request)
@@ -133,7 +127,7 @@ def build_qsa_request_plan(
         )
         for batch in union_requests
     )
-    return QSARequestPlan(requests_tuple, fia_requests, tuple(gbsa_spans), union_batches, tuple(decode_spans))
+    return QSARequestPlan(requests_tuple, fia_requests, union_batches, tuple(decode_spans))
 
 
 def dispatch_qsa_attention(
