@@ -66,7 +66,11 @@ class MappedHostTensor:
         )
         if status:
             raise RuntimeError(f"aclrtHostRegister for HiSparse failed: {status}")
-        self.device_ptr = int(mapped.value)
+        device_ptr = mapped.value
+        if device_ptr is None:
+            self._lib.aclrtHostUnregister(self.host_address)
+            raise RuntimeError("aclrtHostRegister returned a null device pointer for HiSparse")
+        self.device_ptr = device_ptr
         self.closed = False
 
     def address_of(self, tensor: torch.Tensor) -> int:
@@ -127,5 +131,5 @@ def install() -> None:
             return registered[:size], registered
         return original(size)
 
-    allocate._ascend_pinned_private_pool = True
+    allocate.__dict__["_ascend_pinned_private_pool"] = True
     runtime.allocate_pinned_host_pool = allocate

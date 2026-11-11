@@ -247,16 +247,15 @@ class HiSparseNPUOps:
             != 1
         ):
             raise ValueError("All three compact HiSparse swap outputs are required together")
-        self._resolve(locals())
+        self._resolve(workspace, locals())
 
-    def _resolve(self, arguments):
+    def _resolve(self, workspace: ResolverWorkspace, arguments) -> None:
         """Dispatch live tensors to the native request-union resolver.
 
         During replay, external tensors remain owned by the runtime/workspace.
         Callers must destroy graphs before releasing or rebinding those owners.
         """
         rows, topk = arguments["global_indices"].shape
-        workspace = self.workspace
         resolved = arguments["resolved_global_indices"]
         if resolved is None:
             resolved = workspace.first_refs[: rows * topk].view(rows, topk)

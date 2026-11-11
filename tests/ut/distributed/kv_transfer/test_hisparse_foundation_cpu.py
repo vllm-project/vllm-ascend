@@ -423,6 +423,29 @@ def test_c8_compaction_preserves_duplicate_order_and_empty_rows():
     torch.testing.assert_close(compact_c8_indices(indices), expected, rtol=0, atol=0)
 
 
+def test_bf16_hisparse_indexer_passes_through_page_scatter_indices(monkeypatch):
+    cache = torch.empty((2, 4, 128), dtype=torch.bfloat16)
+    keys = torch.zeros((2, 128), dtype=torch.bfloat16)
+    slots = torch.tensor([2, 4], dtype=torch.int32)
+    scatter_indices = torch.tensor([[0, 2], [1, 0]], dtype=torch.int32)
+    writer = AscendHiSparseIndexerBackend.__new__(AscendHiSparseIndexerBackend)
+    torch.nn.Module.__init__(writer)
+    writer.k_cache = NS(kv_cache=(cache,))
+    writer.enable_sparse_li_c8 = False
+    writer.enable_sparse_li_c4 = False
+    calls = []
+
+    def write_cache_tensor(cache_arg, updates, slots_arg, indices_arg):
+        calls.append(indices_arg)
+        assert cache_arg is cache
+        assert slots_arg is slots
+        torch.testing.assert_close(updates, keys)
+
+    monkeypatch.setattr(writer, "_write_cache_tensor", write_cache_tensor)
+    writer.write_cache(keys, None, slots, scatter_indices)
+    assert len(calls) == 1 and calls[0] is scatter_indices
+
+
 @pytest.mark.parametrize("padding", [0, 256])
 def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch, indexer_spec, padding):
     spec = replace(
@@ -479,5 +502,6 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
         expected[start : start + 128] = values_raw[i]
         start = offset + page * stride + key_bytes + row * 4
         expected[start : start + 4] = scale_bytes[i]
-    writer.write_cache(values, scales, slots)
+    scatter_indices = torch.stack((slots // spec.block_size, slots % spec.block_size), dim=-1)
+    writer.write_cache(values, scales, slots, scatter_indices)
     torch.testing.assert_close(raw, expected, rtol=0, atol=0)

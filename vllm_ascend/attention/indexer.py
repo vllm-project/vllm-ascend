@@ -922,9 +922,15 @@ class AscendHiSparseIndexerBackend(AscendSFAIndexerBackend):
     def get_builder_cls():
         return AscendHiSparseIndexerMetadataBuilder
 
-    def write_cache(self, k_li, k_li_scale, slot_mapping) -> None:
+    def write_cache(
+        self,
+        k_li: torch.Tensor,
+        k_li_scale: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        cache_scatter_indices: torch.Tensor | None = None,
+    ) -> None:
         if not self.enable_sparse_li_c8:
-            return super().write_cache(k_li, k_li_scale, slot_mapping)
+            return super().write_cache(k_li, k_li_scale, slot_mapping, cache_scatter_indices)
         if k_li_scale is None:
             raise ValueError("HiSparse Indexer C8 requires FP32 scales")
         from vllm_ascend.hisparse.binding import write_hisparse_indexer_c8

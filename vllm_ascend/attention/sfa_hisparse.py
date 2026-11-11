@@ -4,6 +4,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch.overrides import TorchFunctionMode
@@ -97,7 +98,7 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
 
 class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
     def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-        metadata = super().build_for_cudagraph_capture(common_attn_metadata, **kwargs)
+        metadata = cast(AscendHiSparseMetadata, super().build_for_cudagraph_capture(common_attn_metadata, **kwargs))
         metadata.hisparse_for_capture = True
         return metadata
 
@@ -115,7 +116,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
         draft_index=None,
         pcp_context=None,
     ):
-        metadata = super()._build(common_attn_metadata, draft_index, pcp_context)
+        metadata = cast(AscendHiSparseMetadata, super()._build(common_attn_metadata, draft_index, pcp_context))
         metadata.num_reqs = common_attn_metadata.num_reqs
         if draft_index not in self._request_row_buffers:
             self._request_row_buffers[draft_index] = torch.empty(
@@ -313,14 +314,14 @@ class AscendHiSparseImpl(AscendSFAImpl):
         self.index_group.prepare_for_batch(self.index_group_index, attn_metadata)
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
-    def exec_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
+    def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
         from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
 
         assert self.kv_a_layernorm is not None
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.hisparse.c8 import pack_c8_components
 
-            rope, latent, scales = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+            rope, latent, scales = super()._exec_kv_local(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
             rows = latent.numel() // self.kv_lora_rank
             packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
             cache = self.hisparse_cache
@@ -342,7 +343,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             # Match ordinary SFA's fused RMSNorm/RoPE rounding. Separate RMSNorm
             # can differ by a BF16 ULP near a rounding midpoint. Local slots
             # isolate padding from the real resident/hot destination below.
-            super().exec_kv(values, cos, sin, (latent_cache, rope_cache), local_slots[:num_tokens], attn_metadata)
+            super()._exec_kv_local(
+                values, cos, sin, (latent_cache, rope_cache), local_slots[:num_tokens], attn_metadata
+            )
             latent = latent_cache.view(-1, self.kv_lora_rank)[:num_tokens]
             rope = rope_cache.view(-1, self.qk_rope_head_dim)[:num_tokens]
         else:

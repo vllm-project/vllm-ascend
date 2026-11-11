@@ -43,7 +43,7 @@ def _install_worker_dma_hooks() -> None:
                         )
             worker._ascend_recycled_invalidator = RecycledGroupInvalidator.bind(worker)
 
-    init._ascend_row_dma = True
+    init.__dict__["_ascend_row_dma"] = True
     HiSparseConnectorWorker._init_dma = init
     original_invalidate = HiSparseConnectorWorker.invalidate_blocks
 
