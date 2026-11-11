@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.models.utils import PPMissingLayer
@@ -105,8 +106,8 @@ def test_checkpoint_loader_populates_every_local_physical_expert(draft_factory, 
     ]
     loaded = draft.load_weights(iter(weights))
 
-    # vLLM initializes physical slots as original experts followed by replicas.
-    expected = [physical % logical for physical in range(begin, begin + local)]
+    # The loader must match the initial physical placement used by the running EPLB version.
+    expected = EplbState.build_initial_global_physical_to_logical_map(logical, redundant)[begin : begin + local]
     expected = torch.tensor(expected, dtype=torch.float32)
     torch.testing.assert_close(routed.w13_weight[:, 0], expected)
     torch.testing.assert_close(routed.w13_weight[:, 1], expected)
