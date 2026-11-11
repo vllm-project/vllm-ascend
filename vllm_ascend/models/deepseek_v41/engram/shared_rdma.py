@@ -619,7 +619,10 @@ class SharedOwner(socketserver.ThreadingTCPServer):
     def engine_for_reader(self, address, device):
         # A2 Device RoCE cannot connect a NIC to itself. Reuse the same DRAM
         # through another owner device only for the colocated same-device rank.
-        if os.getenv("ENGRAM_HIXL_FABRIC") == "ub":
+        fabric = os.getenv("ENGRAM_HIXL_FABRIC") or "roce"
+        if fabric not in ("roce", "ub"):
+            raise ValueError("ENGRAM_HIXL_FABRIC must be 'roce' or 'ub'")
+        if fabric == "ub":
             return self.engine, self.engine_endpoint
         if address != self.server_address[0] or device != self.device:
             return self.engine, self.engine_endpoint

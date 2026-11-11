@@ -135,6 +135,14 @@ def test_ub_reader_reuses_owner_engine_without_second_npu(rdma, monkeypatch):
     assert owner.engine_for_reader("10.0.0.1", 0) == (owner.engine, owner.engine_endpoint)
 
 
+@pytest.mark.parametrize("fabric", ["UB", "urb", "invalid"])
+def test_invalid_fabric_fails_before_selecting_an_engine(rdma, monkeypatch, fabric):
+    owner = object.__new__(rdma.SharedOwner)
+    monkeypatch.setenv("ENGRAM_HIXL_FABRIC", fabric)
+    with pytest.raises(ValueError, match="ENGRAM_HIXL_FABRIC"):
+        owner.engine_for_reader("10.0.0.1", 0)
+
+
 def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
     hashes = torch.tensor(
         [[[0, 10, -1, 13], [20, 21, 22, 23]], [[30, 31, 32, 33], [40, -1, 42, 43]]], dtype=torch.int32
