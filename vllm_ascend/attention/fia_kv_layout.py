@@ -2,6 +2,8 @@
 
 import torch
 
+FIA_MAX_KV_ELEMENTS = torch.iinfo(torch.int32).max
+
 
 def fia_kv_cache_views(key: torch.Tensor, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Expose gaps as unused physical blocks; return the block-ID multiplier.
@@ -28,5 +30,10 @@ def fia_kv_cache_views(key: torch.Tensor, value: torch.Tensor) -> tuple[torch.Te
     # End at the last logical page, not after its trailing gap. This keeps
     # both aliases within their backing even for the last layer and V page.
     shape = ((num_blocks - 1) * block_stride + 1, block_size, hidden_size)
+    # FIA validates the logical view size, even though the gaps do not
+    # allocate any additional storage. Keep its original conversion path
+    # when the expanded K/V would exceed the operator's INT32_MAX limit.
+    if shape[0] * page_elements > FIA_MAX_KV_ELEMENTS:
+        return key, value, 1
     strides = (page_elements, hidden_size, 1)
     return key.as_strided(shape, strides), value.as_strided(shape, strides), block_stride

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vllm_ascend.attention.fia_kv_layout import fia_kv_cache_views
+from vllm_ascend.attention.fia_kv_layout import FIA_MAX_KV_ELEMENTS, fia_kv_cache_views
 
 
 @pytest.mark.parametrize("gap", [2, 4])
@@ -45,3 +45,21 @@ def test_fia_views_keep_unsupported_layouts():
     ]:
         k, v, factor = fia_kv_cache_views(key, value)
         assert k is key and v is value and factor == 1
+
+
+@pytest.mark.parametrize("block_delta", [-1, 0, 1])
+def test_fia_views_respect_expanded_element_limit(block_delta):
+    # Meta tensors exercise the real INT32 boundary without allocating GBs.
+    gap = 2
+    num_blocks = (FIA_MAX_KV_ELEMENTS + 1) // gap + block_delta
+    backing = torch.empty((num_blocks, gap, 1, 1), device="meta")
+    key, value = backing[:, 0], backing[:, 1]
+    assert key.numel() < FIA_MAX_KV_ELEMENTS
+    dense_key, dense_value, factor = fia_kv_cache_views(key, value)
+    if block_delta > 0:
+        assert dense_key is key and dense_value is value and factor == 1
+    else:
+        assert factor == gap
+        assert dense_key.numel() == FIA_MAX_KV_ELEMENTS + gap * block_delta
+        assert dense_value.numel() == dense_key.numel()
+        assert dense_key.is_contiguous() and dense_value.is_contiguous()

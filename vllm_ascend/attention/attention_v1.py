@@ -243,6 +243,8 @@ class AscendMetadata:
         if block_stride == 1:
             return self.block_tables
         if block_stride not in self.fia_block_tables:
+            if self.block_tables.device.type == "npu" and torch.npu.is_current_stream_capturing():
+                raise RuntimeError("FIA block tables must be prepared before ACL graph capture.")
             self.fia_block_tables[block_stride] = self.block_tables * block_stride
         return self.fia_block_tables[block_stride]
 
@@ -501,6 +503,28 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if metadata.num_prefills > 0:
             metadata.attn_state = AscendAttentionState.ChunkedPrefill
 
+    def _prepare_fia_block_tables(self, metadata: AscendMetadata) -> None:
+        """Remap shared tables before capture, so replay has no stale multiply."""
+        # Metadata is built before a forward context exists. Determine the
+        # layout from the bound caches rather than execution-time flags.
+        if metadata.block_tables is None:
+            return
+        for layer_name in self.layer_names:
+            layer = self.compilation_config.static_forward_context[layer_name]
+            impl = layer.impl
+            if not isinstance(impl, AscendAttentionBackendImpl) or impl.enable_c8_quant or impl.use_bnsd_kv_cache:
+                continue
+            key, value, _ = impl._get_kv_cache_view(layer.kv_cache[0], layer.kv_cache[1])
+            _, _, block_stride = fia_kv_cache_views(key, value)
+            # Layers in this metadata group share the same source block table.
+            # The metadata cache computes each supported stride only once.
+            metadata.get_fia_block_tables(block_stride)
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata) -> AscendMetadata:
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        self._prepare_fia_block_tables(metadata)
+        return metadata
+
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -521,6 +545,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             )
 
         attn_metadata.attn_state = attn_state
+        self._prepare_fia_block_tables(attn_metadata)
         return attn_metadata
 
 
