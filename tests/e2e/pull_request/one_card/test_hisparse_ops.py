@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     ResolverWorkspace,
@@ -16,6 +15,9 @@ from vllm_ascend.hisparse.cache_ops import (
     scatter_packed_kv,
 )
 from vllm_ascend.hisparse.host_pool import MappedHostTensor, allocate_mapped_host
+
+pytest.importorskip("vllm.v1.hisparse.backend")
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -381,17 +383,21 @@ def test_resolver_strides_padding_graph(device_row_count, compact_attention):
     mapping.close()
 
 
-@pytest.mark.parametrize("query_rows,hot_size", [(2, 4096), (4, 10240)])
+@pytest.mark.parametrize("query_rows,hot_size", [(2, 4096), (4, 10240), (3, 4096)])
 @pytest.mark.parametrize("cross_stream", [False, True])
 def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
     topk, width, block = 2048, 576, 128
-    union = query_rows * topk
+    positions = query_rows * topk
+    union = min(positions, hot_size)
+    # The 3 x 2048 case has more positions than the 4096-row mask/scan
+    # capacity. Its duplicates cross tiles of the iterative miss scan.
     blocks = hot_size // block + 1
     host = allocate_mapped_host((hot_size + block, width), torch.bfloat16)
     mapping = host._hisparse_registration
     host.copy_((torch.arange(host.size(0)) % 97).to(torch.bfloat16)[:, None].expand_as(host))
     hot = torch.zeros((blocks, block, width), dtype=torch.bfloat16, device="npu")
-    indices = torch.arange(union, dtype=torch.int32, device="npu").view(query_rows, topk)
+    logical = torch.arange(positions, dtype=torch.int32).view(query_rows, topk) % union
+    indices = logical.npu()
     requests = torch.zeros(query_rows, dtype=torch.int32, device="npu")
     states = torch.zeros(1, dtype=torch.int32, device="npu")
     table = torch.arange(1, blocks, dtype=torch.int32, device="npu")[None, :]
@@ -452,17 +458,21 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
 
     forward()
     torch.npu.synchronize()
-    expected = torch.arange(block, block + union, dtype=torch.int32).view(query_rows, topk)
+    expected = logical + block
+    expected_swaps = torch.tensor(
+        [min(topk, max(0, union - row * topk)) for row in range(query_rows)], dtype=torch.int32
+    )
+    cold_hits = positions - union
     torch.testing.assert_close(out.cpu(), expected)
-    torch.testing.assert_close(sc.cpu(), torch.full((query_rows,), topk, dtype=torch.int32))
-    torch.testing.assert_close(stats.cpu(), torch.tensor([0, union], dtype=torch.int64))
+    torch.testing.assert_close(sc.cpu(), expected_swaps)
+    torch.testing.assert_close(stats.cpu(), torch.tensor([cold_hits, union], dtype=torch.int64))
     torch.testing.assert_close(hot[1:].cpu().reshape(hot_size, width)[:union], host[block : block + union])
     expected_lru = torch.cat((torch.arange(union, hot_size), torch.arange(union))).to(torch.int16)[None, :]
     torch.testing.assert_close(lru.cpu(), expected_lru)
     forward()
     torch.npu.synchronize()
     torch.testing.assert_close(sc.cpu(), torch.zeros(query_rows, dtype=torch.int32))
-    torch.testing.assert_close(stats.cpu(), torch.tensor([union, union], dtype=torch.int64))
+    torch.testing.assert_close(stats.cpu(), torch.tensor([cold_hits + positions, union], dtype=torch.int64))
     capture_stream = torch.npu.Stream()
     capture_stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(capture_stream):
@@ -477,13 +487,13 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
     graph.replay()
     torch.npu.synchronize()
     torch.testing.assert_close(out.cpu(), expected)
-    torch.testing.assert_close(sc.cpu(), torch.full((query_rows,), topk, dtype=torch.int32))
-    torch.testing.assert_close(stats.cpu(), torch.tensor([0, union], dtype=torch.int64))
+    torch.testing.assert_close(sc.cpu(), expected_swaps)
+    torch.testing.assert_close(stats.cpu(), torch.tensor([cold_hits, union], dtype=torch.int64))
     for _ in range(10):
         graph.replay()
     torch.npu.synchronize()
     torch.testing.assert_close(sc.cpu(), torch.zeros(query_rows, dtype=torch.int32))
-    torch.testing.assert_close(stats.cpu(), torch.tensor([10 * union, union], dtype=torch.int64))
+    torch.testing.assert_close(stats.cpu(), torch.tensor([cold_hits + 10 * positions, union], dtype=torch.int64))
     torch.testing.assert_close(hot[1:].cpu().reshape(hot_size, width)[:union], host[block : block + union])
     torch.testing.assert_close(lru.cpu(), expected_lru)
     graph.reset()

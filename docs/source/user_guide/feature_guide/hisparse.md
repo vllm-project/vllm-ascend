@@ -18,19 +18,10 @@ Attention interface. Attention core arithmetic is unchanged.
 C4, TurboQuant, INT8-format C8, context parallelism and external P/D transport
 are outside this backend's current support.
 
-## Build the resolver
-
-Use the paired merged vLLM version in `.github/vllm-main-verified.commit` and
-install vllm-ascend normally in the matching Torch/torch-npu/CANN environment.
-The standard CMake build compiles `csrc/hisparse/hisparse_resolver.cpp` using
-CANN's ASC integration when the Ascend 950 SIMT headers are available. It links
-the kernel into `vllm_ascend_C` and registers
-`torch.ops._C_ascend.hisparse_resolve_residency` with the other Ascend operators;
-there is no separate resolver build or library-loading step.
-
-An unsupported capacity or missing extension raises an error before execution;
-there is no Triton resolver fallback. Other build targets retain their existing
-operators without registering this resolver.
+Use the vLLM revision pinned in `.github/vllm-main-verified.commit` and install
+vLLM Ascend in the matching Torch, torch-npu and CANN environment. Ascend
+HiSparse needs vLLM's pluggable HiSparse backend interface. The vLLM 0.33.0
+release supports HiSparse on NVIDIA CUDA only.
 
 ## Enable HiSparse
 

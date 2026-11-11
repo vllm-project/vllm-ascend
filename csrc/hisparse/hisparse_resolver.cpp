@@ -487,6 +487,8 @@ __simt_vf__ __launch_bounds__(kThreads) inline void resolve_vf(
             if (swap_device) swap_device[int64_t(first) * topk + rank] = physical;
             store_miss(d, int64_t(row) * topk + col, 1);
         }
+        // Finish this tile's reads and miss-slot writes before the next tile
+        // reuses the block prefix scratch or the output pass reads the slots.
         asc_syncthreads();
         consumed += tile_misses;
     }

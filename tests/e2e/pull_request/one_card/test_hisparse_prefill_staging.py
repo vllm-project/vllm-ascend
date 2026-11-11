@@ -10,12 +10,14 @@ import torch_npu  # noqa: F401
 from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 
 from vllm_ascend.attention.sfa_hisparse import build_hisparse_prefill_staging_plan
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     scatter_packed_kv,
 )
 from vllm_ascend.hisparse.host_pool import allocate_mapped_host
+
+pytest.importorskip("vllm.v1.hisparse.backend")
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.mark.parametrize("resident_block_size", [128, 64, 32])

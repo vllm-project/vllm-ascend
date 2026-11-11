@@ -13,6 +13,7 @@ import torch_npu
 
 @pytest.fixture
 def _require_npu_sfa():
+    pytest.importorskip("vllm.v1.hisparse.backend")
     from vllm_ascend.utils import bootstrap_custom_op_env
 
     # Match platform initialization: publish the OPP path before device queries
@@ -222,6 +223,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
 
 @pytest.fixture
 def _require_a5_preprocess():
+    pytest.importorskip("vllm.v1.hisparse.backend")
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse integration currently targets Ascend 950")
     torch.npu.set_device(0)
