@@ -24,8 +24,6 @@ import vllm.envs as envs
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
-from packaging.version import Version
-
 # in case recursive call in reduce_sum.
 torch_sum = torch.sum
 
@@ -110,18 +108,16 @@ def override_envs_for_invariance():
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
-    # Enable deterministic computation for operators. Some operators on Ascend A5
-    # do not have deterministic mode enabled by default and must be explicitly set.
-    # Enable batch consistency (level 3) with torch-npu >= 2.10.0.post7 and CANN 9.2.0.
-    if Version(torch_npu.__version__) < Version("2.10.0.post7"):
-        raise RuntimeError(
-            f"Expected torch-npu >= 2.10.0.post7, got {torch_npu.__version__}"
-        )
+    # Enable deterministic computation for operators: on the target stack
+    # (torch-npu >= 2.10.0.post7 with CANN 9.2.0) deterministic level 3 guarantees
+    # batch consistency for the operators. Set the torch flag first so that
+    # set_deterministic_level() keeps warn_only=True instead of forcing strict mode.
+    torch.use_deterministic_algorithms(True, warn_only=True)
     torch_npu.npu.set_deterministic_level(3)
 
     logger.debug(
         "Batch-invariant env override: weight_nz_mode=0, HCCL_DETERMINISTIC=strict, "
-        "LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
+        "LCCL_DETERMINISTIC=1, deterministic_level=3",
     )
 
 
