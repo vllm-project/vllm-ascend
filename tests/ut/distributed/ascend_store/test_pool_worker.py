@@ -49,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
+    PoolCacheGeometry,
     ReqMeta,
 )
 
@@ -180,6 +181,18 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_partial_hits_follow_core_alignment(self):
+        for alignment, expected in ((32, True), (640, False)):
+            with self.subTest(alignment=alignment):
+                geometry = PoolCacheGeometry(
+                    block_sizes=(640,),
+                    cacheable_group_ids=(0,),
+                    hash_block_size=32,
+                    core_hit_alignment=alignment,
+                    transfer_granularity=640,
+                )
+                self.assertEqual(geometry.partial_hits, expected)
+
     def test_hash_hits_use_core_geometry_and_keep_physical_pages(self):
         spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
         core_config = SimpleNamespace(
@@ -197,7 +210,6 @@ class TestPCPPoolWorker(unittest.TestCase):
         self.assertEqual(worker.hash_block_size, 32)
         self.assertEqual(worker.grouped_block_size, [640])
         self.assertEqual(worker.cache_transfer_granularity, 640)
-        self.assertFalse(worker.pool_cache_geometry.block_only)
         self.assertTrue(worker.enable_partial_hash_hits)
 
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):

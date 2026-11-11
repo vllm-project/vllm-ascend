@@ -324,7 +324,6 @@ class PoolCacheGeometry:
     hash_block_size: int
     core_hit_alignment: int
     transfer_granularity: int
-    block_only: bool
     groups: tuple = ()
     scheduler_block_size: int = 0
     use_eagle: bool = False
@@ -332,7 +331,7 @@ class PoolCacheGeometry:
 
     @property
     def partial_hits(self) -> bool:
-        return not self.block_only and self.core_hit_alignment < self.transfer_granularity
+        return self.core_hit_alignment < self.transfer_granularity
 
 
 def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: bool) -> PoolCacheGeometry:
@@ -414,7 +413,6 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         hash_size,
         hit_alignment,
         page_alignment,
-        False,
         resolved_groups,
         page_alignment,
         use_eagle,

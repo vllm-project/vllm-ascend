@@ -254,11 +254,7 @@ class BaseKVPoolScheduler(ABC):
 
         # Core passes the candidate load start and owns local-tail arbitration:
         # it drops a local sub-block tail only if the remote hit strictly
-        # extends it. We still require the start to align to our transfer
-        # pages, which can be larger than Core's scheduler block.
-        if self.pool_cache_geometry.block_only and num_computed_tokens % self.cache_transfer_granularity:
-            logger.debug("AscendStore skips whole-page load from unaligned start %d", num_computed_tokens)
-            return 0, False
+        # extends it.
 
         num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)
         if not num_external_hit_tokens:
@@ -288,7 +284,7 @@ class BaseKVPoolScheduler(ABC):
                 )
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
-        if self.pool_cache_geometry.block_only or len(self.cacheable_group_ids) != len(self.original_block_size):
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt locally. Recompute the last
             # whole token page rather than resume inside a compressed block.
             num_external_hit_tokens = self._floor_to_cache_transfer_granularity(num_external_hit_tokens)
