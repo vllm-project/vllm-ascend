@@ -1363,6 +1363,9 @@ def _make_worker_for_cache_write_event_test():
     worker.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
     )
+    # __new__ skips __init__, and prepare_layerwise_step() restarts the per-step
+    # layer cursor at this offset, so a hand-built worker must expose it too.
+    worker.pp_layer_offset = 0
     worker.current_layer = 0
     worker.total_layers = 1
     worker.index_to_name = {0: ["layer0"]}
