@@ -1,8 +1,8 @@
 """Streaming rare_chars detector (DESIGN.md §17): token-level rules on the token id, the top-1 logprob and the generated token's
 logprob (what vLLM returns with logprobs=1); no top-20.
 
-    from v35_detector import RareDetector, CONFIG_RC3
-    det = RareDetector('qwen3', CONFIG_RC3)                 # table name or a .npz built by rare_vocab.py; config: dict or JSON path
+    # table key from warmup register_rare_table; think_end from resolve_think_end_id
+    det = RareDetector(table_key, CONFIG_RARE, think_end=think_end_id)  # id or None
     st = det.start()
     for ids, top1_lp, chosen_lp in chunks:                  # natural-log logprobs, any chunk size
         res = det.feed(st, ids, top1_lp, chosen_lp)         # Result once a strict-tier rule fires, else None
