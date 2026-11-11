@@ -39,6 +39,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAReqMetadata,
     OProjBufferPool,
     build_compressor_metadata_out,
+    build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -2969,3 +2970,29 @@ def test_adaptive_query_bound_reaches_metadata(adaptive, prefill_tokens, expecte
         )
     assert builder._build_sas_metadata.call_args.kwargs["max_seqlen_q"] == expected
     assert builder._build_qli_metadata.call_args.kwargs["max_seqlen_q"] == expected
+
+
+def test_dspark_indices_write_caller_output():
+    """indices_output is filled in place and returned as-is.
+
+    The V4.1 draft metadata builder passes a persistent buffer view so ACL
+    graph capture keeps stable addresses; the eager fallback must write into
+    it instead of returning a freshly allocated temporary.
+    """
+    indices_output = torch.full((3, 1, 8), -7, dtype=torch.int32)
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([6], dtype=torch.int32),
+        num_decode_tokens=3,
+        index_width=8,
+        indices_output=indices_output,
+        use_logical_indices=True,
+    )
+    assert indices is indices_output
+    assert indices[:, 0].tolist() == [[0, 1, 2, 3, 4, 5, -1, -1]] * 3
+    assert lengths.flatten().tolist() == [6] * 3
+    
