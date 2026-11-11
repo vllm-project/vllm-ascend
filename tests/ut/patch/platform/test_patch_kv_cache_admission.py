@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -27,7 +28,7 @@ from vllm.v1.request import Request
 from vllm_ascend.patch.platform import patch_kv_cache_admission  # noqa: F401
 
 
-def _manager(kind="sliding", cap=8197, enable_caching=True):
+def _manager(kind="sliding", cap=8197, enable_caching=True, block_pool=None):
     register_all_kvcache_specs(None)
     kwargs = dict(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
     if kind == "sliding":
@@ -39,11 +40,13 @@ def _manager(kind="sliding", cap=8197, enable_caching=True):
     else:
         cls = FullAttentionManager
         spec = FullAttentionSpec(**kwargs)
-    null = KVCacheBlock(block_id=0)
-    null.is_null = True
+    if block_pool is None:
+        null = KVCacheBlock(block_id=0)
+        null.is_null = True
+        block_pool = SimpleNamespace(null_block=null)
     return cls(
         kv_cache_spec=spec,
-        block_pool=SimpleNamespace(null_block=null),
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=2,
@@ -87,13 +90,61 @@ def test_remote_hit_reserves_window_and_remaining_tokens(kind, expected):
     assert _required(_manager(kind)) == expected
 
 
-def test_local_hit_counts_only_evictable_blocks_inside_window():
-    manager = _manager()
-    blocks = [manager._null_block] * 51196 + [KVCacheBlock(block_id=i + 1) for i in range(4)]
-    assert _required(manager, new_blocks=blocks, local=102400) == 5546
-    for block in blocks[-4:]:
-        block.ref_cnt = 1
-    assert _required(manager, new_blocks=blocks, local=102400) == 5542
+@pytest.mark.parametrize("kind", ["sliding", "chunked"])
+@pytest.mark.parametrize("ref_cnt", [0, 1, 2])
+def test_local_hit_counts_only_evictable_blocks_inside_window(kind, ref_cnt):
+    manager = _manager(kind)
+    blocks = [manager._null_block] * 51196 + [KVCacheBlock(block_id=i + 1, ref_cnt=ref_cnt) for i in range(4)]
+    expected = 5546 if kind == "sliding" and ref_cnt == 0 else 5542
+    assert _required(manager, new_blocks=blocks, local=102400) == expected
+
+
+@pytest.mark.parametrize("kind", ["sliding", "chunked"])
+@pytest.mark.parametrize("sharing", ["exclusive", "shared", "mixed"])
+def test_shared_held_blocks_do_not_offset_admission_capacity(kind, sharing):
+    # Use real allocations and prefix-hit references: a shared block returns
+    # to the pool only after both requests release it.
+    num_pool_blocks = 64
+    cap = 10
+    computed = 206
+    pool = BlockPool(num_gpu_blocks=num_pool_blocks, enable_caching=True, hash_block_size=2)
+    manager = _manager(kind, cap=cap, block_pool=pool)
+    manager.add_local_computed_blocks("request", [], 0, computed)
+    manager.allocate_external_computed_blocks("request", 0, computed)
+    blocks = manager.req_to_blocks["request"]
+    loaded_blocks = [block for block in blocks if not block.is_null]
+    assert len(blocks) > cap > len(loaded_blocks) > 0
+    exclusive_blocks = len(loaded_blocks)
+    if sharing != "exclusive":
+        manager.add_local_computed_blocks("other", list(blocks), computed, 0)
+        assert all(block.ref_cnt == 2 for block in loaded_blocks)
+        exclusive_blocks = 0
+        if sharing == "mixed":
+            exclusive_blocks = 2
+            allocated_tokens = computed + exclusive_blocks * manager.block_size
+            manager.allocate_new_blocks("request", allocated_tokens, allocated_tokens)
+            assert all(block.ref_cnt == 1 for block in blocks[-exclusive_blocks:])
+
+    target_tokens = 400
+    uncapped = target_tokens // manager.block_size - len(blocks)
+    assert _required(manager, tokens=target_tokens, computed=computed, capped=False) == uncapped
+    assert _required(manager, tokens=target_tokens, computed=computed) == cap - exclusive_blocks
+    # A short tail still needs only one block, even when all held blocks are
+    # shared. Rejected speculative tokens need no additional allocation.
+    tail_tokens = (len(blocks) + 1) * manager.block_size
+    assert _required(manager, tokens=tail_tokens, computed=computed) == 1
+    rejected_tokens = (len(blocks) - 1) * manager.block_size
+    assert _required(manager, tokens=rejected_tokens, computed=computed) == 0
+    manager.max_admission_blocks_per_request = exclusive_blocks
+    assert _required(manager, tokens=target_tokens, computed=computed) == 0
+
+    free_before = pool.get_num_free_blocks()
+    manager.free("request")
+    assert pool.get_num_free_blocks() == free_before + exclusive_blocks
+    if sharing != "exclusive":
+        assert all(block.ref_cnt == 1 for block in loaded_blocks)
+        manager.free("other")
+    assert pool.get_num_free_blocks() == num_pool_blocks - 1
 
 
 @pytest.mark.parametrize("kind", ["sliding", "chunked"])

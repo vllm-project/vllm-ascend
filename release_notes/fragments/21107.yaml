@@ -1,4 +1,4 @@
 pr: 21107
 entries:
   - category: bugfix
-    text: Fixed async prefill stalls after long prefix-cache hits by reserving physical KV blocks correctly for sliding-window and chunked-local attention. Reservations also account for held blocks when prefix caching is disabled, avoiding unnecessary delays to other async KV loads.
+    text: Fixed async prefill stalls after long prefix-cache hits by reserving physical KV blocks correctly for sliding-window and chunked-local attention. Reservations distinguish shared blocks from recyclable blocks and account for held blocks when prefix caching is disabled.
