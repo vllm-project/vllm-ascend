@@ -78,16 +78,6 @@ on:
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com'
         description: 'SWR registry domain'
-      image_repo_suffix:
-        required: false
-        type: string
-        default: ''
-        description: "Suffix appended to the default image repositories for the nightly layer (base_image/ascend-ci/vllm-ascend and atlas_inference/vllm-ascend). E.g. '_presmoke' for presmoke builds. Nightly builds keep the default empty suffix."
-      base_tag_suffix:
-        required: false
-        type: string
-        default: ''
-        description: "Suffix appended to the runtime base image tag that Dockerfile.nightly.<target> layers on. E.g. '-presmoke' when build-base rebuilds the runtime image under a '-presmoke' tag in the same run. Nightly builds keep the default empty suffix."
       skip_sync:
         required: false
         type: boolean
@@ -133,8 +123,6 @@ jobs:
       build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
-      image_repo_suffix: ${{ inputs.image_repo_suffix }}
-      base_tag_suffix: ${{ inputs.base_tag_suffix }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
