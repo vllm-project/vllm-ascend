@@ -12,7 +12,6 @@ from vllm.logger import logger
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.dsa_attn_kv_plan import (
@@ -526,9 +525,6 @@ class AscendDSAPCPImpl(AscendDSAImpl):
         # PCP prepares replicated caches before local attention, leaving no
         # cache-update work for the auxiliary stream to overlap.
         self.multistream_dsv4_dsa_overlap = False
-        self.pcp_q_projection_overlap = get_ascend_config().pcp_q_projection_overlap
-        if self.pcp_q_projection_overlap:
-            logger.info_once("DSA PCP local Q projection overlap enabled.")
 
         self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
         self._parallel_o_proj = ParallelOProjection(
@@ -587,42 +583,88 @@ class AscendDSAPCPImpl(AscendDSAImpl):
         return self._parallel_o_proj.forward(o_proj_input, output)
 
     def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
+        """Prepare global PCP caches and overlap the local prefill Q projection."""
         pcp_metadata = next(iter(attn_metadata.values()))
+        if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
+            return super()._prepare_caches_and_query(layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata)
+
         common = layer_metadata.attention
         if common is None:
             common = layer_metadata.swa
         actual_tokens = common.num_actual_tokens
-        if (
-            not self.pcp_q_projection_overlap
-            or not isinstance(pcp_metadata, AscendDSAPCPMetadata)
-            or not pcp_metadata.pcp_has_global_prefill
-            or actual_tokens == 0
-        ):
-            return super()._prepare_caches_and_query(layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata)
-
-        req_metadata = dsa_v1._require_req_metadata(common)
-        caller = torch.npu.current_stream()
-        query_stream = dsa_v1.dsv4_dsa_overlap_stream()
-        query_stream.wait_stream(caller)
-        with torch.npu.stream(query_stream):
-            prepared_query = self._mla_prolog_single_stream(
-                hidden_states[:actual_tokens],
-                req_metadata.cos[layer_name][:actual_tokens],
-                req_metadata.sin[layer_name][:actual_tokens],
-                None,
-                None,
-                write_swa_cache=False,
-            )
-        # Keep PCP collectives in their original order on the caller stream.
-        # Q reads only local inputs/weights; global cache writes are independent.
+        prepared_query = None
+        query_stream = None
+        current_stream = None
         try:
-            cache_is_prepared = self._prepare_caches_before_attention(
-                layer_name, hidden_states, kv_cache, attn_metadata
+            if pcp_metadata.pcp_has_global_prefill and actual_tokens > 0:
+                req_metadata = dsa_v1._require_req_metadata(common)
+                current_stream = torch.npu.current_stream()
+                query_stream = dsa_v1.dsv4_dsa_overlap_stream()
+                query_stream.wait_stream(current_stream)
+                with torch.npu.stream(query_stream):
+                    prepared_query = self._mla_prolog_single_stream(
+                        hidden_states[:actual_tokens],
+                        req_metadata.cos[layer_name][:actual_tokens],
+                        req_metadata.sin[layer_name][:actual_tokens],
+                        None,
+                        None,
+                        write_swa_cache=False,
+                    )
+            # All PCP ranks prepare caches, including empty local query shards.
+            # Collectives stay in their original order on the current stream.
+            global_hidden_states = self._gather_and_restore_hidden_states(
+                hidden_states,
+                pcp_metadata,
             )
+
+            global_dsa_metadata_by_prefix = {}
+            for cache_prefix, metadata in attn_metadata.items():
+                assert isinstance(metadata, AscendDSAPCPMetadata)
+                global_dsa_metadata_by_prefix[cache_prefix] = metadata.global_dsa_metadata
+            global_layer_metadata = self._get_layer_metadata(
+                layer_name,
+                global_dsa_metadata_by_prefix,
+            )
+
+            cmp_kv, swa_kv, state_cache, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(
+                kv_cache, self.compress_ratio
+            )
+
+            self._update_global_swa_cache(
+                layer_name,
+                global_hidden_states,
+                swa_kv,
+                global_layer_metadata.swa,
+            )
+            if self.compress_ratio > 1:
+                compressor_metadata = global_layer_metadata.compressor
+                assert compressor_metadata is not None
+                assert cmp_kv is not None
+                assert state_cache is not None
+                self._update_global_compressor_cache(
+                    global_hidden_states,
+                    compressor_metadata,
+                    cmp_kv,
+                    state_cache,
+                )
+
+                if self.compress_ratio == 4:
+                    indexer_metadata = global_layer_metadata.indexer
+                    assert indexer_metadata is not None
+                    self._update_global_indexer_cache(
+                        global_hidden_states,
+                        kv_cache,
+                        indexer_metadata,
+                    )
+            # Every rank must join the weight gathers, including ranks that return
+            # before local attention. Launch after the cache collectives to overlap
+            # local attention on nonempty ranks.
+            self._parallel_o_proj.all_gather_weights()
         finally:
-            caller.wait_stream(query_stream)
+            if query_stream is not None:
+                current_stream.wait_stream(query_stream)
         # No tensor is cached on the layer: every invocation owns its outputs.
-        return cache_is_prepared, prepared_query
+        return True, prepared_query
 
     def _gather_and_restore_hidden_states(
         self,
@@ -711,71 +753,6 @@ class AscendDSAPCPImpl(AscendDSAImpl):
             kv_cache=kv_cache,
             metadata=metadata,
         )
-
-    def _prepare_caches_before_attention(
-        self,
-        layer_name: str,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: DSAMetadataDict,
-    ) -> bool:
-        """Use ordinary decode updates or restore the global prefill batch."""
-        pcp_metadata = next(iter(attn_metadata.values()))
-        if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
-            return super()._prepare_caches_before_attention(
-                layer_name,
-                hidden_states,
-                kv_cache,
-                attn_metadata,
-            )
-        global_hidden_states = self._gather_and_restore_hidden_states(
-            hidden_states,
-            pcp_metadata,
-        )
-
-        global_dsa_metadata_by_prefix = {}
-        for cache_prefix, metadata in attn_metadata.items():
-            assert isinstance(metadata, AscendDSAPCPMetadata)
-            global_dsa_metadata_by_prefix[cache_prefix] = metadata.global_dsa_metadata
-        global_layer_metadata = self._get_layer_metadata(
-            layer_name,
-            global_dsa_metadata_by_prefix,
-        )
-
-        cmp_kv, swa_kv, state_cache, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
-
-        self._update_global_swa_cache(
-            layer_name,
-            global_hidden_states,
-            swa_kv,
-            global_layer_metadata.swa,
-        )
-        if self.compress_ratio > 1:
-            compressor_metadata = global_layer_metadata.compressor
-            assert compressor_metadata is not None
-            assert cmp_kv is not None
-            assert state_cache is not None
-            self._update_global_compressor_cache(
-                global_hidden_states,
-                compressor_metadata,
-                cmp_kv,
-                state_cache,
-            )
-
-            if self.compress_ratio == 4:
-                indexer_metadata = global_layer_metadata.indexer
-                assert indexer_metadata is not None
-                self._update_global_indexer_cache(
-                    global_hidden_states,
-                    kv_cache,
-                    indexer_metadata,
-                )
-        # Every rank must join the weight gathers, including ranks that return
-        # before local attention. Launch after the cache collectives to overlap
-        # local attention on nonempty ranks.
-        self._parallel_o_proj.all_gather_weights()
-
-        return True
 
     def _get_o_proj_input_shape(
         self,
