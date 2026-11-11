@@ -127,3 +127,8 @@ Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hard
 
 - [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
 - Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`
+
+## Optional token repetition backend
+
+See [M4 token repetition detection](m4_token_repeat.md) for independent CPU extension
+installation, tokenizer warmup, configuration and validation.

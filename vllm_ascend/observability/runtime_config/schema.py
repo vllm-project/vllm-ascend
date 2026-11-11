@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-FieldKind = Literal["bool", "int", "float", "list_int"]
+FieldKind = Literal["bool", "int", "float", "list_int", "str"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,8 @@ class DetectorSchema:
     fields: tuple[ConfigField, ...]
     help: str = ""
     stage: str = ""  # e.g. before_sample / after_sample / after_spec (panel hint)
+
+    validator: Callable[[dict[str, Any]], None] | None = None
 
     def defaults_dict(self) -> dict[str, Any]:
         return {f.name: f.default for f in self.fields}
@@ -126,7 +129,13 @@ def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -
                 min_value=float(f.min_value) if f.min_value is not None else None,
                 max_value=float(f.max_value) if f.max_value is not None else None,
             )
+        elif f.kind == "str":
+            if not isinstance(section[f.name], str):
+                raise ValueError(f"{path} must be str")
         elif f.kind == "list_int":
             section[f.name] = coerce_list_int(section[f.name], path)
         else:
             raise ValueError(f"unknown ConfigField.kind {f.kind!r} for {path}")
+
+    if schema.validator is not None:
+        schema.validator(section)

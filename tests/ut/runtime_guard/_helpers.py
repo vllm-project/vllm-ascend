@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -35,6 +36,7 @@ def bare_processor(*, boom_detectors: bool = False) -> RuntimeGuardProcessor:
     soft-fail wrappers around detector hot-paths (e.g. V3a/V3b).
     """
     p = object.__new__(RuntimeGuardProcessor)
+    p._reap_lock = threading.RLock()
     p.detectors = MagicMock()
     if boom_detectors:
         p.detectors.after_sample_hot_path = MagicMock(side_effect=RuntimeError("boom"))
