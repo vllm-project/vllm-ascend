@@ -19,7 +19,7 @@ name: Handle /nightly Command
 
 on:
   repository_dispatch:
-    types: [nightly-command, weekly-command]
+    types: [nightly-command, presmoke-command, weekly-command]
 
 defaults:
   run:
@@ -471,11 +471,11 @@ jobs:
 
           # Fetch the matching test matrix from the PR head ref via pull/<num>/head,
           # which is accessible through the base repo without fork access permission.
-          # Nightly reads nightly_config.yaml; weekly reads weekly_config.yaml.
-          # resolve_nightly_tests.py picks the non-empty one.
+          # Nightly and presmoke read nightly_config.yaml; weekly reads
+          # weekly_config.yaml. resolve_nightly_tests.py picks the non-empty one.
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           case "$COMMAND" in
-            nightly)
+            nightly|presmoke)
               NIGHTLY_MATRIX=$(gh api "repos/$REPO/contents/.github/workflows/configs/nightly_config.yaml?ref=pull/$PR_NUMBER/head" --jq '.content' 2>/dev/null || echo "")
               ;;
             weekly)
@@ -492,7 +492,7 @@ jobs:
   dispatch-a2:
     name: Trigger Nightly-A2
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a2 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && (needs.authorize.outputs.command == 'nightly' || needs.authorize.outputs.command == 'presmoke') && needs.authorize.outputs.dispatch_a2 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -524,7 +524,8 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -540,7 +541,7 @@ jobs:
   dispatch-a3:
     name: Trigger Nightly-A3
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && (needs.authorize.outputs.command == 'nightly' || needs.authorize.outputs.command == 'presmoke') && needs.authorize.outputs.dispatch_a3 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -572,7 +573,8 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -588,7 +590,7 @@ jobs:
   dispatch-a3-560t:
     name: Trigger Nightly-A3-560T
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && (needs.authorize.outputs.command == 'nightly' || needs.authorize.outputs.command == 'presmoke') && needs.authorize.outputs.dispatch_a3_560t == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -620,7 +622,8 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -636,7 +639,7 @@ jobs:
   dispatch-a5:
     name: Trigger Nightly-A5
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a5 == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && (needs.authorize.outputs.command == 'nightly' || needs.authorize.outputs.command == 'presmoke') && needs.authorize.outputs.dispatch_a5 == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -668,7 +671,8 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -684,7 +688,7 @@ jobs:
   dispatch-310p:
     name: Trigger Nightly-310P
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_310p == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && (needs.authorize.outputs.command == 'nightly' || needs.authorize.outputs.command == 'presmoke') && needs.authorize.outputs.dispatch_310p == 'true'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
@@ -716,7 +720,8 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f download_path="$DOWNLOAD_PATH" \
-            -f skip_build_image=true \
+            -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
+            -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
