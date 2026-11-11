@@ -146,7 +146,7 @@ jobs:
                 BASE_SHA=$(git rev-parse FETCH_HEAD)
               fi
               git cat-file -e "${BASE_SHA}^{commit}"
-              git rebase "$BASE_SHA"
+              git merge-base --is-ancestor "$BASE_SHA" HEAD || git rebase "$BASE_SHA"
               git submodule sync --recursive
               git submodule update --init --recursive
 

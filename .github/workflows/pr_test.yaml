@@ -531,7 +531,7 @@ jobs:
             exit 1
           fi
 
-          git rebase "$BASE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD || git rebase "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Validate test coverage config
