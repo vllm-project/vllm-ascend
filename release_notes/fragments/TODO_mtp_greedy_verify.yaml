@@ -1,0 +1,4 @@
+pr: TODO
+entries:
+  - category: performance
+    text: Added an opt-in experimental Model Runner V2 MTP greedy verification path, default off, with fallback for unsupported sampling modes.

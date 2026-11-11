@@ -5,6 +5,7 @@ from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 
@@ -165,3 +166,11 @@ thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
 thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
 trace_replay.apply_trace_tokens = apply_trace_tokens
+
+# Opt-in experiment, installed only inside this candidate worktree.
+if ascend_envs.VLLM_ASCEND_EXPERIMENT_GREEDY_VERIFY:
+    from vllm_ascend.worker.v2.spec_decode.greedy_verify_experiment import (
+        install as _install_greedy_verify,
+    )
+
+    _install_greedy_verify(rejection_sampler.RejectionSampler)
