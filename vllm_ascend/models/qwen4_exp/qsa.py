@@ -376,6 +376,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             # Host counts are prepared with this batch's QSA metadata.
             num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
             num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
+            prepared_metadata=getattr(metadata, "qsa_lightning_v2_metadata", None),
         )
 
 
@@ -450,6 +451,7 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(attn_metadata, "qsa_gbsa_metadata", None),
             )
         return dispatch_qsa_attention(
             query[:num_tokens],
@@ -612,15 +614,25 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if not self._main_fused_norm_rope_eligible(qkv, positions):
             raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
 
-        # Gather directly from the stable rotary cache using the current graph
-        # inputs; padded rows are clamped inside the kernel.
+        # MRV2 can prepare graph-stable rotary rows outside the forward pass.
+        # Other paths gather from the full cache inside the fused kernel.
+        prepared = getattr(self, "_qsa_prepared_cos_sin", None)
+        expected_shape = (*positions.shape, self.rotary_emb.cos_sin_cache.shape[-1])
         cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+        rope_positions = positions
+        q_weight = self.q_norm.weight
+        k_weight = self.k_norm.weight
+        if prepared is not None and tuple(prepared.shape) == expected_shape:
+            cache = prepared.to(device=qkv.device, dtype=qkv.dtype)
+            rope_positions = None
+            q_weight = 1.0 + q_weight
+            k_weight = 1.0 + k_weight
         return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
-            q_weight=self.q_norm.weight,
-            k_weight=self.k_norm.weight,
+            q_weight=q_weight,
+            k_weight=k_weight,
             cos_sin=cache,
-            positions=positions,
+            positions=rope_positions,
             num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
