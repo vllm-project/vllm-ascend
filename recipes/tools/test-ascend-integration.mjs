@@ -4,16 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { after, test } from "node:test";
-import { assertInstallationAdapter } from "./ascend-checks.mjs";
+import { assertInstallationAdapter, installationFor } from "./ascend-checks.mjs";
 import { run } from "./validate-ascend.mjs";
 
 const { values } = parseArgs({ options: { renderer: { type: "string" } } });
 assert.ok(values.renderer, "Pass --renderer PATH.");
 const renderer = path.resolve(values.renderer);
+const synthesis = await import(pathToFileURL(path.join(renderer, "src/lib/command-synthesis.js")).href);
 const require = createRequire(path.join(renderer, "package.json"));
 const yaml = require("js-yaml");
 const cli = fileURLToPath(new URL("validate-ascend.mjs", import.meta.url));
@@ -67,6 +68,59 @@ test("missing effective pip configuration is an error independent of image", asy
   const report = await run(config({ recipes }));
   assert.ok(hasCode(report, "ASC002"));
   assert.equal(report.summary.blocking, 1);
+});
+
+test("hardware pip command replaces the inherited generic installation", async () => {
+  const recipes = fixture((o) => {
+    o.variants.ascend.hardware_overrides.ascend_910c.install.pip = { command: "uv pip install vllm-ascend" };
+  });
+  const report = await run(config({ recipes }));
+  assert.equal(report.summary.errors, 0);
+  assert.equal(report.results[0].installation.pipCommand, "uv pip install vllm-ascend");
+  assert.equal(report.results[0].installation.defaultPip, false);
+});
+
+test("variant installation can disable pip or supply its Ascend command", async () => {
+  for (const pip of [false, { command: "uv pip install vllm-ascend" }]) {
+    const recipes = fixture((o) => {
+      delete o.variants.ascend.hardware_overrides.ascend_910c.install;
+      o.variants.ascend.install = { pip };
+    });
+    const report = await run(config({ recipes }));
+    assert.equal(report.summary.errors, 0);
+    assert.equal(report.results[0].installation.pipEnabled, pip !== false);
+  }
+});
+
+test("hardware pip command re-enables a variant's disabled pip tab", async () => {
+  const recipes = fixture((o) => {
+    o.variants.ascend.install = { pip: false };
+    o.variants.ascend.hardware_overrides.ascend_910c.install.pip = { command: "uv pip install vllm-ascend" };
+  });
+  const report = await run(config({ recipes }));
+  assert.equal(report.summary.errors, 0);
+  assert.equal(report.results[0].installation.pipEnabled, true);
+});
+
+test("hardware Docker opt-out permits a pip-only configuration without an image", async () => {
+  const recipes = fixture((o) => {
+    const hw = o.variants.ascend.hardware_overrides.ascend_910c;
+    delete hw.docker_image;
+    hw.install = { docker: false, pip: { command: "uv pip install vllm-ascend" } };
+  });
+  const report = await run(config({ recipes }));
+  assert.equal(report.summary.errors, 0);
+  assert.equal(report.results[0].installation.dockerEnabled, false);
+});
+
+test("hardware profile installation is resolved by the shared renderer helpers", () => {
+  const profile = { brand: "Huawei", generation: "npu", gpu_count: 8,
+    install: { pip: { command: "uv pip install vllm-ascend" } } };
+  const recipe = { model: { install: { pip: false } }, variants: { ascend: {} } };
+  const meta = synthesis.computeDockerMeta(recipe, recipe.variants.ascend, profile, "ascend_910c");
+  const install = installationFor(recipe, "ascend", "ascend_910c", meta, synthesis, profile);
+  assert.equal(install.pipEnabled, true);
+  assert.equal(install.pipCommand, "uv pip install vllm-ascend");
 });
 test("same findings in the target snapshot remain visible but do not block", async () => {
   const recipes = fixture((o) => { delete o.variants.ascend.hardware_overrides.ascend_910c.install; });
@@ -127,10 +181,9 @@ test("inherited RECIPES overrides cannot replace the candidate source", async ()
 test("caller cannot override candidate source through the local source override option", async () => {
   await assert.rejects(run(config({ override: [`vllm-ascend=${empty}`] })), /Invalid source override/);
 });
-test("UI installation semantics changes are detected but unrelated text is allowed", () => {
-  const ui = fs.readFileSync(path.join(renderer, "src/components/recipes/CommandBuilder.jsx"), "utf8");
-  assert.doesNotThrow(() => assertInstallationAdapter(ui + "\n// unrelated comment\n"));
-  assert.throws(() => assertInstallationAdapter(ui.replace("hwInstall?.pip === false", "hwInstall?.pip === true")), /semantics changed/);
+test("missing shared installation APIs fail instead of reverting to stale UI rules", () => {
+  assert.doesNotThrow(() => assertInstallationAdapter(synthesis));
+  assert.throws(() => assertInstallationAdapter({ ...synthesis, resolveInstall: undefined }), /resolveInstall/);
 });
 test("CLI saves reports and uses exit 0, 1 and 2 for success, findings and bad input", () => {
   const recipes = fixture();

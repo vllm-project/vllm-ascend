@@ -113,7 +113,8 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
           if (!workers.length || workers.some((w) => !Array.isArray(w.argv) || !w.argv.length)) {
             sourceError("SOURCE_RENDER", `No structured worker argv for ${hw}/${variantKey}/${strategyName}`); continue;
           }
-          const installation = installationFor(recipe, variantKey, hw, synth.computeDockerMeta(recipe, variant, profile, hw));
+          const installation = installationFor(recipe, variantKey, hw,
+            synth.computeDockerMeta(recipe, variant, profile, hw), synth, profile);
           const findings = checkScenario({ profile, deployType: result.deployType, installation, workers,
             router: result.orchestrator, expectedPD: expectations[hfId]?.[hw]?.[variantKey] });
           snapshot.results.push({ ...context, nodes, pdNodes, installation, workers, findings,
@@ -137,7 +138,6 @@ export async function run(options) {
   const sha = execFileSync("git", ["-C", renderer, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const dirty = execFileSync("git", ["-C", renderer, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }).trim();
   if (dirty) throw new Error("Use a renderer checkout without tracked modifications.");
-  assertInstallationAdapter(fs.readFileSync(path.join(renderer, "src/components/recipes/CommandBuilder.jsx"), "utf8"));
   const require = createRequire(path.join(renderer, "package.json"));
   const yaml = require("js-yaml");
   const readYaml = (file) => normalize(yaml.load(fs.readFileSync(file, "utf8")));
@@ -155,6 +155,7 @@ export async function run(options) {
     overrides[name] = path.resolve(override.slice(equal + 1));
   }
   const synth = await import(pathToFileURL(path.join(renderer, "src/lib/command-synthesis.js")).href);
+  assertInstallationAdapter(synth);
   const taxonomy = readYaml(path.join(renderer, "taxonomy.yaml"));
   const strategies = Object.fromEntries(["strategies", "kv_store"].flatMap((dir) =>
     yamlFiles(path.join(renderer, dir)).map((file) => { const spec = readYaml(file); return [spec.name, spec]; })));

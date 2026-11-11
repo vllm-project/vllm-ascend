@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkScenario, installationFor } from "./ascend-checks.mjs";
+import { checkScenario } from "./ascend-checks.mjs";
 import { compareFindings } from "./validate-ascend.mjs";
 
 const profile = { brand: "Huawei", generation: "npu", gpu_count: 8 };
-const recipe = { model: {}, variants: { ascend: { hardware_overrides: {
-  a5: { docker_image: "registry.example/team/custom:1", install: { pip: false } },
-} } } };
 function scenario(patch = {}) {
   return { profile, deployType: "single_node", installation: {
     dockerEnabled: true, pipEnabled: false, image: "registry.example/team/custom:1",
@@ -40,14 +37,6 @@ test("explicit CUDA wheel index is rejected", () => {
 });
 test("disabling both installation methods is rejected", () => {
   assert.ok(codes(scenario({ installation: { dockerEnabled: false, pipEnabled: false } })).includes("ASC004"));
-});
-test("exact hardware pip false matches current renderer UI precedence", () => {
-  assert.equal(installationFor(recipe, "ascend", "a5", { image: "custom:1" }).pipEnabled, false);
-});
-test("hardware pip command is not treated as overriding the renderer main pip command", () => {
-  const r = structuredClone(recipe);
-  r.variants.ascend.hardware_overrides.a5.install = { pip: { command: "pip install vllm-ascend" } };
-  assert.equal(installationFor(r, "ascend", "a5", { image: "custom:1" }).defaultPip, true);
 });
 test("PD without reviewed expectation is not silently accepted as Ascend-ready", () => {
   assert.ok(codes(scenario({ deployType: "pd_cluster" })).includes("ASC010"));

@@ -1,31 +1,16 @@
 // CPU-only semantic checks. Never executes recipe shell commands.
-import { createHash } from "node:crypto";
-
-// Guard the JSX-only installation resolver until the renderer exports one.
-// Other renderer changes are allowed; changes to these semantics need review.
-export function assertInstallationAdapter(source) {
-  const text = source.replaceAll("\r\n", "\n");
-  const block = text.slice(text.indexOf("function InstallBlock("));
-  const sections = [
-    [text, "  const hwInstall =", "  const effectiveInstallMode =", "668c2e58b17c2788abe2a9ef6d5bd7ea0446fa068dbd6ab21c5bc2937c61ea01"],
-    [block, "  const install = recipe.model?.install || {};", "  const [open, setOpen]", "d04be1258218b6ff81e5885e906aa72d65ad5b0d3a56570389e2895d30006ba9"],
-    [block, "  const nightlyRequired =", "  // A CUDA map", "e375afe4c095df6ec378926d3bd797bf60da7b046f70d0bf8b37e51b2947c04c"],
-    [block, "  const pipCudaTag =", "  const pipNote =", "a51f62ae340d3cb373665bd720cb4fc307263faa20dc75259a787cd9a2defb20"],
-    [block, "  const defaultDockerCmd =", "  const defaultDockerNote =", "9b74e89c78484d0a82215ccf24c5b2e32f552d4f1047c40e327aae23c09b566a"],
-  ];
-  for (const [body, start, end, expected] of sections) {
-    const first = body.indexOf(start);
-    const last = body.indexOf(end, first);
-    const digest = first < 0 || last < first ? null
-      : createHash("sha256").update(body.slice(first, last).trim()).digest("hex");
-    if (digest !== expected) throw new Error(`Renderer installation semantics changed at ${start.trim()}; review the adapter before updating its fingerprint.`);
+// Use the same exported installation resolvers as the current renderer UI.
+export function assertInstallationAdapter(synthesis) {
+  for (const name of ["resolveInstall", "hardwareInstall", "hwPipOverride", "isPipInstallAvailable", "computeDockerMeta"]) {
+    if (typeof synthesis[name] !== "function") throw new Error(`Renderer must export ${name}; installation checks cannot use a stale fallback.`);
   }
 }
-export function installationFor(recipe, variantKey, hardwareId, meta) {
+export function installationFor(recipe, variantKey, hardwareId, meta, synthesis, profile) {
   const variant = recipe.variants?.[variantKey] || {};
-  const install = recipe.model?.install || {};
-  const hwInstall = variant.hardware_overrides?.[hardwareId]?.install
-    || recipe.hardware_overrides?.[hardwareId]?.install || {};
+  const install = synthesis.resolveInstall(recipe, variant);
+  const hwInstall = synthesis.hardwareInstall(recipe, variant, profile, hardwareId);
+  const pipCommand = synthesis.hwPipOverride(hwInstall)?.command || install.pip?.command || null;
+  if (typeof meta.dockerEnabled !== "boolean") throw new Error("Renderer must return a boolean dockerEnabled value.");
   const exact = variant.hardware_overrides?.[hardwareId]?.docker_image;
   let imageSource = "renderer-default";
   if (typeof exact === "string" && exact) {
@@ -39,10 +24,10 @@ export function installationFor(recipe, variantKey, hardwareId, meta) {
     }
   }
   return {
-    dockerEnabled: install.docker !== false,
-    pipEnabled: install.pip !== false && hwInstall.pip !== false,
-    pipCommand: install.pip?.command || null,
-    defaultPip: !install.pip?.command,
+    dockerEnabled: meta.dockerEnabled,
+    pipEnabled: synthesis.isPipInstallAvailable(recipe, variant, profile, hardwareId),
+    pipCommand,
+    defaultPip: !pipCommand,
     nightly: recipe.model?.nightly_required === true || variant.nightly_required === true,
     image: meta.image,
     imageSource,
