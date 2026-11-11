@@ -8,10 +8,9 @@ import pytest
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
+from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as dflash2_speculator
 
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
@@ -106,15 +105,12 @@ def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_st
 
 def _make_draft_logits(num_reqs, steps, vocab, device):
     fill = -float("inf")
-    if vllm_version_is("0.33.0"):
+    cache_cls = getattr(dflash2_speculator, "DraftLogitsCache", None)
+    if cache_cls is None:
         logits = torch.full((num_reqs, steps, vocab), fill, device=device)
         return logits, logits
 
-    from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # type: ignore[import-not-found]
-        DraftLogitsCache,
-    )
-
-    cache = DraftLogitsCache(num_reqs, steps, vocab, dtype=torch.get_default_dtype(), fill=fill, device=device)
+    cache = cache_cls(num_reqs, steps, vocab, dtype=torch.get_default_dtype(), fill=fill, device=device)
     return cache, cache.values
 
 
@@ -123,7 +119,7 @@ def test_candidate_walk_preserves_conditional_scores_and_clears_old_cache(probab
     """Zero-temperature walks must preserve q along the chosen path for rejection."""
     max_reqs, num_reqs, steps, topk, vocab = 4, 3, 2, 4, 64
     device = "npu"
-    sampler = CandidateSampler(max_reqs, steps, topk, torch.device(device))
+    sampler = dflash2_speculator.CandidateSampler(max_reqs, steps, topk, torch.device(device))
     draft_logits, logits = _make_draft_logits(max_reqs, steps, vocab, device) if probabilistic else (None, None)
     mapping = torch.tensor([[2, 2], [0, 0], [-1, -1]], dtype=torch.int32, device=device).flatten()
     positions = torch.full((num_reqs * steps,), 10, dtype=torch.int32, device=device)
@@ -165,7 +161,7 @@ def test_probabilistic_candidate_walk_matches_proposal_distribution(temperature)
     """The NPU walk must draw from the same softmax q supplied to rejection."""
     num_reqs, steps, topk = 8192, 1, 4
     device = "npu"
-    sampler = CandidateSampler(num_reqs, steps, topk, torch.device(device))
+    sampler = dflash2_speculator.CandidateSampler(num_reqs, steps, topk, torch.device(device))
     unary = torch.tensor([-1.0, 0.0, 0.5, 1.0])
     scores = unary.expand(num_reqs, steps, topk, topk).contiguous().to(device)
     candidates = torch.arange(topk).expand(num_reqs, steps, topk).contiguous().to(device)
@@ -208,7 +204,7 @@ def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(t
     """Each second-step proposal and cache must depend on the sampled predecessor."""
     num_reqs, steps, topk = 8192, 2, 2
     device = torch.device("npu")
-    sampler = CandidateSampler(num_reqs, steps, topk, device)
+    sampler = dflash2_speculator.CandidateSampler(num_reqs, steps, topk, device)
     start = torch.tensor([0.0, 0.5])
     transitions = torch.tensor([[1.0, -0.5], [-1.0, 0.5]])
     scores = torch.stack((start.expand(topk, topk), transitions)).expand(num_reqs, -1, -1, -1).contiguous()
