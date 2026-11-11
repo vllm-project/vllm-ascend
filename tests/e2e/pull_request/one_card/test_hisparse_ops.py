@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend, capture_aware_stream
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     ResolverWorkspace,
@@ -393,7 +393,7 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
     sh, sd, sc = torch.empty_like(out), torch.empty_like(out), torch.empty_like(counts)
     stats = torch.zeros(2, dtype=torch.int64, device="npu")
 
-    stream = capture_aware_stream(torch.Stream(device="npu")) if cross_stream else None
+    stream = torch.Stream(device="npu") if cross_stream else None
     ready = torch.Event() if cross_stream else None
 
     def resolve_and_gather():

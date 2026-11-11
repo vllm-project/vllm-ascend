@@ -66,39 +66,6 @@ def prepare_hisparse_workspaces(forward_context: dict[str, Any]) -> None:
             runtime._ascend_profiled_cache_ops = workspace, _allocate_attention_lengths(runtime)
 
 
-class _CaptureAwareStream(torch.Stream):
-    """Propagate a captured dependency before PTA allocates CANN workspace.
-
-    PTA's native NPUEvent wait drains Host submission queues during capture;
-    its generic event binding does not. Keep generic event points and stream
-    identity, adding the missing submission boundary only during capture.
-    Remove when the supported PTA generic binding has the same behavior.
-    """
-
-    def _finish_capture_propagation(self) -> None:
-        if torch.npu.is_current_stream_capturing():
-            native = torch.npu.Stream(
-                stream_id=self.stream_id, device_index=self.device_index, device_type=self.device_type
-            )
-            # Obtaining the native handle drains its Host task queue. This is
-            # not a device synchronization and does not run during graph replay.
-            _ = native.npu_stream
-
-    def wait_event(self, event) -> None:
-        super().wait_event(event)
-        self._finish_capture_propagation()
-
-    def wait_stream(self, stream) -> None:
-        super().wait_stream(stream)
-        self._finish_capture_propagation()
-
-
-def capture_aware_stream(stream: torch.Stream) -> torch.Stream:
-    if stream.device.type != "npu" or isinstance(stream, _CaptureAwareStream):
-        return stream
-    return _CaptureAwareStream(stream.stream_id, stream.device_index, stream.device_type)
-
-
 class AscendHiSparseBackend(HiSparseBackend):
     # Keep private pools until NPU IPC events interoperate with Core's generic streams.
     stats_dtype = torch.int64
@@ -155,9 +122,6 @@ class AscendHiSparseBackend(HiSparseBackend):
         from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps
 
         group = runtime.index_group
-        # Runtime copied the model group's stream reference at layer creation.
-        # Adapt the live runtime binding before any graph captures use it.
-        group.copy_stream = capture_aware_stream(group.copy_stream)
         prepared = getattr(runtime, "_ascend_profiled_cache_ops", None)
         if runtime is group.leader:
             workspace = prepared[0] if prepared is not None else _allocate_resolver_workspace(runtime)

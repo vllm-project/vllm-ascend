@@ -208,7 +208,6 @@ def test_prefill_singleton_column_mapping_tracks_current_residency():
 def test_profiled_workspace_rebind_preserves_prior_length_graphs(pages, stride_rows):
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
-    from vllm_ascend.hisparse.backend import capture_aware_stream
     from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces as actual_prepare
 
     prepare_hisparse_workspaces = torch.inference_mode()(actual_prepare)
@@ -227,7 +226,7 @@ def test_profiled_workspace_rebind_preserves_prior_length_graphs(pages, stride_r
 
     def runtime():
         group = SimpleNamespace(
-            copy_stream=capture_aware_stream(torch.Stream(device=device)),
+            copy_stream=torch.Stream(device=device),
             shared_topk=SimpleNamespace(device_topk_rows=torch.empty((4, 64), dtype=torch.int32, device=device)),
         )
         owner = SimpleNamespace(
