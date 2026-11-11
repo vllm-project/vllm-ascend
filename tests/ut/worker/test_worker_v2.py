@@ -14,7 +14,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -428,7 +427,6 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         )
         return worker, draft
 
-    @pytest.mark.skipif(vllm_version_is("0.32.0"), reason="Online-quantized LM-head copies are main-only")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_draft_session_selects_speculator_and_restores_quantized_heads(self, ascend_config):
         ascend_config.return_value.weight_nz_mode = 0
@@ -436,7 +434,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         engine = worker.weight_transfer_engine
         engine.start_weight_update.side_effect = lambda: self.assertIs(get_current_vllm_config(), worker.vllm_config)
         with (
-            patch("vllm_ascend.worker.worker.share_source_lm_heads") as share,
+            patch("vllm.v1.worker.gpu_worker.share_source_lm_heads") as share,
             patch("vllm_ascend.worker.worker.restore_quantized_lm_heads") as restore,
         ):
             worker.start_draft_weight_update()
@@ -451,7 +449,6 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         self.assertFalse(worker._weight_update_active)
         self.assertFalse(worker._weight_update_is_draft)
 
-    @pytest.mark.skipif(vllm_version_is("0.32.0"), reason="Online-quantized LM-head copies are main-only")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_draft_failures_restore_quantized_head_references(self, ascend_config):
         ascend_config.return_value.weight_nz_mode = 0
@@ -461,8 +458,9 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                 engine = worker.weight_transfer_engine
                 getattr(engine, stage).side_effect = RuntimeError("reload failed")
                 with (
-                    patch("vllm_ascend.worker.worker.share_source_lm_heads"),
-                    patch("vllm_ascend.worker.worker.restore_quantized_lm_heads") as restore,
+                    patch("vllm.v1.worker.gpu_worker.share_source_lm_heads"),
+                    patch("vllm.v1.worker.gpu_worker.restore_quantized_lm_heads") as upstream_restore,
+                    patch("vllm_ascend.worker.worker.restore_quantized_lm_heads") as finish_restore,
                 ):
                     if stage != "start_weight_update":
                         worker.start_draft_weight_update()
@@ -473,7 +471,10 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                             worker.update_weights({})
                         else:
                             worker.finish_weight_update()
+                restore = finish_restore if stage == "finish_weight_update" else upstream_restore
+                other_restore = upstream_restore if stage == "finish_weight_update" else finish_restore
                 restore.assert_called_once_with(draft, refresh=False)
+                other_restore.assert_not_called()
                 engine.reset_weight_update_target.assert_called_once_with()
                 self.assertFalse(worker._weight_update_active)
                 self.assertFalse(worker._weight_update_is_draft)
@@ -493,6 +494,79 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                         getattr(worker, name)()
                     engine.start_weight_update.assert_not_called()
                     self.assertFalse(worker._weight_update_active)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_engine_without_draft_support_still_accepts_target_updates(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 0
+        worker, _ = self._make_worker()
+        engine = worker.weight_transfer_engine
+        engine.supports_draft_weight_update = False
+        with (
+            patch("vllm.v1.worker.gpu_worker.share_source_lm_heads") as share,
+            patch("vllm_ascend.worker.worker.restore_quantized_lm_heads") as restore,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "does not support draft model weight updates"):
+                worker.start_draft_weight_update()
+            engine.set_weight_update_target.assert_not_called()
+            engine.start_weight_update.assert_not_called()
+            engine.reset_weight_update_target.assert_not_called()
+            self.assertFalse(worker._weight_update_active)
+            self.assertFalse(worker._weight_update_is_draft)
+
+            worker.start_weight_update()
+            engine.start_weight_update.assert_called_once_with()
+            worker.finish_weight_update()
+
+        share.assert_not_called()
+        restore.assert_not_called()
+        engine.reset_weight_update_target.assert_called_once_with()
+        worker.model_runner.reset_lora_state.assert_called_once_with()
+        self.assertFalse(worker._weight_update_active)
+        self.assertFalse(worker._weight_update_is_draft)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_overlapping_target_and_draft_sessions_preserve_the_active_session(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 0
+        for first, second, is_draft in (
+            ("start_draft_weight_update", "start_weight_update", True),
+            ("start_weight_update", "start_draft_weight_update", False),
+        ):
+            with self.subTest(first=first):
+                worker, draft = self._make_worker()
+                engine = worker.weight_transfer_engine
+                with (
+                    patch("vllm.v1.worker.gpu_worker.share_source_lm_heads") as share,
+                    patch("vllm_ascend.worker.worker.restore_quantized_lm_heads") as restore,
+                ):
+                    getattr(worker, first)()
+                    with self.assertRaisesRegex(RuntimeError, "already active"):
+                        getattr(worker, second)()
+
+                    self.assertTrue(worker._weight_update_active)
+                    self.assertEqual(worker._weight_update_is_draft, is_draft)
+                    engine.start_weight_update.assert_called_once_with()
+                    engine.reset_weight_update_target.assert_not_called()
+                    restore.assert_not_called()
+                    if is_draft:
+                        engine.set_weight_update_target.assert_called_once_with(
+                            draft, worker.speculative_config.draft_model_config
+                        )
+                        share.assert_called_once_with(draft)
+                    else:
+                        engine.set_weight_update_target.assert_not_called()
+                        share.assert_not_called()
+
+                    worker.finish_weight_update()
+
+                engine.reset_weight_update_target.assert_called_once_with()
+                if is_draft:
+                    restore.assert_called_once_with(draft)
+                    worker.model_runner.reset_lora_state.assert_not_called()
+                else:
+                    restore.assert_not_called()
+                    worker.model_runner.reset_lora_state.assert_called_once_with()
+                self.assertFalse(worker._weight_update_active)
+                self.assertFalse(worker._weight_update_is_draft)
 
 
 @pytest.mark.parametrize("with_kv_transfer", [False, True])
@@ -551,46 +625,46 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
             assert worker._scale_kv_cache_memory_for_multi_group(12345) == expected
 
 
-def test_worker_imports_lm_head_helpers_only_on_main():
-    from vllm_ascend.worker import worker
-
-    if vllm_version_is("0.32.0"):
-        assert not hasattr(worker, "share_source_lm_heads")
-        assert not hasattr(worker, "restore_quantized_lm_heads")
-    else:
-        from vllm.model_executor.layers.quantization.online import lm_head
-
-        assert worker.share_source_lm_heads is lm_head.share_source_lm_heads
-        assert worker.restore_quantized_lm_heads is lm_head.restore_quantized_lm_heads
-
-
-@pytest.mark.parametrize("failure_stage", [None, "start_weight_update", "update_weights", "finish_weight_update"])
-def test_release_draft_lifecycle_does_not_call_main_lm_head_helpers(failure_stage):
-    from vllm_ascend.worker import worker as worker_module
-
+@pytest.mark.parametrize("is_draft", [False, True], ids=["target", "draft"])
+@pytest.mark.parametrize("as_list", [False, True], ids=["dict", "list"])
+@pytest.mark.parametrize(("dp_index", "rank"), [(0, 0), (1, 1)], ids=["worker-0", "worker-3"])
+def test_update_weights_selects_the_current_worker_payload(is_draft, as_list, dp_index, rank):
     worker, _ = TestNPUWorkerV2WeightUpdate._make_worker()
+    worker.vllm_config.parallel_config = SimpleNamespace(data_parallel_index=dp_index, world_size=2)
+    worker.rank = rank
+    worker._weight_update_active = True
+    worker._weight_update_is_draft = is_draft
     engine = worker.weight_transfer_engine
-    if failure_stage is not None:
-        getattr(engine, failure_stage).side_effect = RuntimeError("reload failed")
+
+    def check_config(update_info):
+        assert get_current_vllm_config() is worker.vllm_config
+
+    engine.update_weights.side_effect = check_config
+    payloads = [{"worker": index} for index in range(4)]
+    expected = payloads[dp_index * 2 + rank]
+    worker.update_weights(payloads if as_list else expected)
+
+    engine.update_weights.assert_called_once_with(expected)
+    engine.reset_weight_update_target.assert_not_called()
+    assert worker._weight_update_active
+    assert worker._weight_update_is_draft == is_draft
+
+
+def test_invalid_dp_payload_list_cleans_up_the_draft_session():
+    worker, draft = TestNPUWorkerV2WeightUpdate._make_worker()
+    worker.vllm_config.parallel_config = SimpleNamespace(data_parallel_index=1, world_size=2)
+    worker.rank = 1
+    worker._weight_update_active = True
+    worker._weight_update_is_draft = True
+    engine = worker.weight_transfer_engine
     with (
-        patch.object(worker_module, "vllm_version_is", return_value=True),
-        patch.object(worker_module, "get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=0)),
-        patch.object(worker_module, "share_source_lm_heads", create=True) as share,
-        patch.object(worker_module, "restore_quantized_lm_heads", create=True) as restore,
+        patch("vllm.v1.worker.gpu_worker.restore_quantized_lm_heads") as restore,
+        pytest.raises(IndexError),
     ):
+        worker.update_weights([{"worker": 0}])
 
-        def update():
-            worker.start_draft_weight_update()
-            worker.update_weights({})
-            worker.finish_weight_update()
-
-        if failure_stage is None:
-            update()
-        else:
-            with pytest.raises(RuntimeError, match="reload failed"):
-                update()
-        share.assert_not_called()
-        restore.assert_not_called()
+    engine.update_weights.assert_not_called()
     engine.reset_weight_update_target.assert_called_once_with()
+    restore.assert_called_once_with(draft, refresh=False)
     assert not worker._weight_update_active
     assert not worker._weight_update_is_draft

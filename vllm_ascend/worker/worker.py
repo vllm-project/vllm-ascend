@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.quantization.online.lm_head import restore_quantized_lm_heads
 from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -119,13 +120,6 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
-)
-
-
-from vllm.model_executor.layers.quantization.online.lm_head import (
-    restore_quantized_lm_heads,
-    share_source_lm_heads,
 )
 
 
@@ -396,61 +390,28 @@ class NPUWorker(WorkerBase):
             )
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
-        """Begin a target or draft update; prepare the selected model for reload."""
+        """Validate Ascend reload requirements, then use the upstream lifecycle."""
+        # Reject an unconfigured engine before accessing the Ascend config.
         self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
-            raise RuntimeError(
-                f"{type(self.weight_transfer_engine).__name__} does not support draft model weight updates."
-            )
-        if self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
-            )
-
         self._check_nz_disabled()
-        draft_model = self.get_draft_model() if is_draft else None
+        VllmWorker._start_weight_update(self, is_draft=is_draft)
+
+    def update_weights(self, update_info: dict | list[dict]) -> None:
+        """Use upstream DP payload selection and transfer-failure cleanup."""
         try:
-            if is_draft:
-                self._set_draft_weight_update_target()
-            if draft_model is not None and not vllm_version_is("0.32.0"):
-                share_source_lm_heads(draft_model)
-            self.weight_transfer_engine.start_weight_update()
+            VllmWorker.update_weights(self, update_info)
         except BaseException:
-            self.weight_transfer_engine.reset_weight_update_target()
-            if draft_model is not None and not vllm_version_is("0.32.0"):
-                restore_quantized_lm_heads(draft_model, refresh=False)
-            raise
-        self._weight_update_active = True
-        self._weight_update_is_draft = is_draft
-
-    def update_weights(self, update_info: dict) -> None:
-        """Receive a chunk of weights from the trainer and load them in place."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        # state machine driven by start/finish.
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before update_weights.")
-
-        with set_current_vllm_config(self.vllm_config):
-            try:
-                self.weight_transfer_engine.update_weights(update_info)
-            except BaseException:
-                self._weight_update_active = False
-                self.weight_transfer_engine.reset_weight_update_target()
-                if (
-                    not vllm_version_is("0.32.0")
-                    and self._weight_update_is_draft
-                    and (draft_model := self.get_draft_model()) is not None
-                ):
-                    restore_quantized_lm_heads(draft_model, refresh=False)
+            # Upstream restores routing/heads and clears the active flag on
+            # transfer failure. Also clear our session-type bookkeeping.
+            if not self._weight_update_active:
                 self._weight_update_is_draft = False
-                raise
+            raise
 
     def finish_weight_update(self) -> None:
-        """Finish reload and restore online-quantized draft heads."""
+        """Finish reload and restore heads/routing even if the backend fails.
+
+        Upstream vLLM v0.33.0 does not clean up sessions on FINISH errors.
+        """
         self._check_weight_transfer_engine()
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
@@ -461,11 +422,11 @@ class NPUWorker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if draft_model is not None and not vllm_version_is("0.32.0"):
+                if draft_model is not None:
                     restore_quantized_lm_heads(draft_model, refresh=False)
                 raise
             else:
-                if draft_model is not None and not vllm_version_is("0.32.0"):
+                if draft_model is not None:
                     restore_quantized_lm_heads(draft_model)
                 if not is_draft:
                     self.model_runner.reset_lora_state()
