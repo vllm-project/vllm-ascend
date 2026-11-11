@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Common scheduler-side logic for Mooncake KV transfer connectors."""
 
+import threading
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -13,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
@@ -21,17 +23,338 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from zmq.constants import SocketOption, SocketType
+from zmq.error import Again
 
 from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    MooncakePCPTransferMetadata,
+    MooncakePPTransferMetadata,
+    MooncakeTPTransferMetadata,
+    MooncakeTransferMetadata,
+    MooncakeTransferMetadataGroups,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import zmq_ctx
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+
+GET_META_MSG = b"get_meta_msg"
+_METADATA_TIMEOUT_MS = 1000
+
+
+class MooncakeMetadataThread(threading.Thread):
+    """Common scheduler metadata aggregation and ROUTER query service."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        engine_id: str,
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+        tp_size: int,
+        pp_size: int,
+        pcp_size: int,
+        dcp_size: int,
+        use_kv_pp: bool,
+        ready_event: threading.Event,
+    ) -> None:
+        super().__init__(daemon=True, name=type(self).__name__)
+        encoder = msgspec.msgpack.Encoder()
+        self.host = host
+        self.port = port
+        self.tp_size = tp_size
+        self.pp_size = pp_size
+        self.pcp_size = pcp_size
+        self.dcp_size = dcp_size
+        self.engine_id = engine_id
+        self.use_kv_pp = use_kv_pp
+        if self.use_kv_pp and self.dcp_size != 1:
+            raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
+        metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
+        self.encoded_metadata = encoder.encode(
+            MooncakeTransferMetadataGroups(
+                engine_id=engine_id,
+                scheduler_host=host,
+                scheduler_port=port,
+                pp_size=pp_size,
+                pcp_size=pcp_size,
+                dcp_size=dcp_size,
+                tp_size=tp_size,
+                use_kv_pp=self.use_kv_pp,
+                metadata_by_pp_rank=metadata_by_pp_rank,
+            )
+        )
+        logger.info(
+            "Initialized Mooncake scheduler handshake metadata: engine_id=%s, "
+            "worker_count=%d, pp_ranks=%s, tp_size=%d, pp_size=%d, "
+            "pcp_size=%d, dcp_size=%d, use_kv_pp=%s",
+            engine_id,
+            len(metadata),
+            sorted(metadata_by_pp_rank),
+            tp_size,
+            pp_size,
+            pcp_size,
+            dcp_size,
+            self.use_kv_pp,
+        )
+        self.ready_event = ready_event
+        self.stop_event = threading.Event()
+        self.error: Exception | None = None
+        self.address = make_zmq_path("tcp", host, port)
+
+    def _merge_metadata_by_pp_rank(
+        self,
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+    ) -> dict[int, MooncakePPTransferMetadata]:
+        """Merge worker metadata into one PP-wide layer table.
+
+        LayerSplit may assign different layers to any PCP/TP worker. Per-layer
+        fields are therefore aligned by layer name instead of requiring every
+        worker to expose the same layer list. Worker-private address tables are
+        padded to the PP-union layer order, while ``layer_indices`` records the
+        entries physically owned by each PCP/TP worker.
+        """
+        # pp_rank -> pcp_rank -> tp_rank -> worker handshake metadata.
+        workers_by_pp_rank: dict[int, dict[int, dict[int, MooncakeTransferMetadata]]] = {}
+        for metadata_key, rank_metadata in metadata.items():
+            if isinstance(metadata_key, int):
+                pp_rank, pcp_rank, tp_rank = 0, 0, metadata_key
+            elif len(metadata_key) == 2:
+                pp_rank, tp_rank = metadata_key
+                pcp_rank = 0
+            elif len(metadata_key) == 3:
+                pp_rank, pcp_rank, tp_rank = metadata_key
+            else:
+                raise ValueError(
+                    "Mooncake handshake metadata key must be tp_rank, "
+                    f"(pp_rank, tp_rank), or (pp_rank, pcp_rank, tp_rank), got {metadata_key!r}"
+                )
+
+            if not isinstance(rank_metadata, MooncakeTransferMetadata):
+                raise ValueError(
+                    "Mooncake scheduler expects MooncakeTransferMetadata, "
+                    f"got {type(rank_metadata).__name__} for key {metadata_key!r}"
+                )
+            if rank_metadata.engine_id != self.engine_id:
+                raise ValueError(
+                    "Mooncake worker metadata engine ID mismatch: expected "
+                    f"{self.engine_id!r}, got {rank_metadata.engine_id!r}"
+                )
+
+            workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {}).setdefault(pcp_rank, {})
+            if tp_rank in workers_by_tp_rank:
+                raise ValueError(
+                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, TP rank {tp_rank}"
+                )
+            workers_by_tp_rank[tp_rank] = rank_metadata
+
+        expected_pp_ranks = set(range(self.pp_size))
+        if set(workers_by_pp_rank) != expected_pp_ranks:
+            raise ValueError(
+                "Mooncake worker metadata has incomplete PP ranks: expected "
+                f"{sorted(expected_pp_ranks)}, got {sorted(workers_by_pp_rank)}"
+            )
+
+        expected_pcp_ranks = set(range(self.pcp_size))
+        expected_tp_ranks = set(range(self.tp_size))
+        merged: dict[int, MooncakePPTransferMetadata] = {}
+        for pp_rank, workers_by_pcp_rank in sorted(workers_by_pp_rank.items()):
+            if set(workers_by_pcp_rank) != expected_pcp_ranks:
+                raise ValueError(
+                    "Mooncake worker metadata has incomplete PCP ranks for "
+                    f"PP rank {pp_rank}: expected {sorted(expected_pcp_ranks)}, "
+                    f"got {sorted(workers_by_pcp_rank)}"
+                )
+            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
+                if set(workers_by_tp_rank) != expected_tp_ranks:
+                    raise ValueError(
+                        "Mooncake worker metadata has incomplete TP ranks for "
+                        f"PP rank {pp_rank}, PCP rank {pcp_rank}: "
+                        f"expected {sorted(expected_tp_ranks)}, got {sorted(workers_by_tp_rank)}"
+                    )
+
+            reference_pcp_rank = min(workers_by_pcp_rank)
+            reference_tp_rank = min(workers_by_pcp_rank[reference_pcp_rank])
+            reference = workers_by_pcp_rank[reference_pcp_rank][reference_tp_rank]
+            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
+                for tp_rank, worker_metadata in workers_by_tp_rank.items():
+                    mismatched_fields = [
+                        field_name
+                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
+                        if getattr(worker_metadata, field_name) != getattr(reference, field_name)
+                    ]
+                    if mismatched_fields:
+                        raise ValueError(
+                            "Mooncake worker metadata differs across PCP/TP ranks for "
+                            f"PP rank {pp_rank}: PCP/TP {reference_pcp_rank}/{reference_tp_rank} and "
+                            f"{pcp_rank}/{tp_rank} mismatch in {mismatched_fields}"
+                        )
+
+            # layer_name -> (first owning worker metadata, its local layer index).
+            # The source supplies PP-shared fields after all duplicate owners
+            # have been checked against the corresponding structural signature.
+            layer_source_by_name: dict[str, tuple[MooncakeTransferMetadata, int]] = {}
+            # layer_name -> (group index, block size, strides, lengths, shapes,
+            #                block-size scales, indexer replication size).
+            layer_signature_by_name: dict[str, tuple[object, ...]] = {}
+            reference_layer_names: set[str] | None = None
+            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
+                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
+                    worker_layer_names = set(worker_metadata.layer_names)
+                    if len(worker_layer_names) != len(worker_metadata.layer_names):
+                        raise ValueError(
+                            f"Mooncake worker metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, "
+                            f"TP rank {tp_rank} contains duplicate layers"
+                        )
+                    if reference_layer_names is None:
+                        reference_layer_names = worker_layer_names
+                    elif not self.use_kv_pp and worker_layer_names != reference_layer_names:
+                        raise ValueError(
+                            "Mooncake workers expose different KV-cache layers while KVPP is disabled: "
+                            f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
+                        )
+                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        layer_signature = (
+                            worker_metadata.group_indices[local_layer_index],
+                            worker_metadata.layer_block_sizes[local_layer_index],
+                            worker_metadata.block_strides[local_layer_index],
+                            worker_metadata.block_lens[local_layer_index],
+                            worker_metadata.block_shapes[local_layer_index],
+                            worker_metadata.block_size_scales[local_layer_index],
+                            worker_metadata.indexer_replication_sizes[local_layer_index],
+                        )
+                        previous_signature = layer_signature_by_name.get(layer_name)
+                        if previous_signature is not None and previous_signature != layer_signature:
+                            layer_field_names = (
+                                "group_indices",
+                                "layer_block_sizes",
+                                "block_strides",
+                                "block_lens",
+                                "block_shapes",
+                                "block_size_scales",
+                                "indexer_replication_sizes",
+                            )
+                            mismatched_layer_fields = [
+                                field_name
+                                for field_name, previous_value, value in zip(
+                                    layer_field_names, previous_signature, layer_signature
+                                )
+                                if previous_value != value
+                            ]
+                            raise ValueError(
+                                "Mooncake worker metadata differs across PCP/TP ranks for "
+                                f"PP rank {pp_rank}, layer {layer_name!r}: mismatch in {mismatched_layer_fields}"
+                            )
+                        if previous_signature is None:
+                            layer_source_by_name[layer_name] = (worker_metadata, local_layer_index)
+                            layer_signature_by_name[layer_name] = layer_signature
+            layer_names = sorted(layer_source_by_name)
+            layer_block_sizes: list[int] = []
+            group_indices: list[int] = []
+            block_strides: list[list[int]] = []
+            block_lens: list[list[int]] = []
+            block_shapes: list[list[tuple[int, ...]]] = []
+            block_size_scales: list[list[int]] = []
+            indexer_replication_sizes: list[int] = []
+            for layer_name in layer_names:
+                worker_metadata, local_layer_index = layer_source_by_name[layer_name]
+                layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
+                group_indices.append(worker_metadata.group_indices[local_layer_index])
+                block_strides.append(worker_metadata.block_strides[local_layer_index])
+                block_lens.append(worker_metadata.block_lens[local_layer_index])
+                block_shapes.append(worker_metadata.block_shapes[local_layer_index])
+                block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
+                indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
+
+            layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
+            metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
+            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
+                metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
+                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
+                    layer_indices = sorted(
+                        layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names
+                    )
+                    # PP-union layer index -> this worker's per-cache-tensor
+                    # addresses; unowned entries remain empty.
+                    aligned_base_addrs: list[list[int]] = [[] for _ in layer_names]
+                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        layer_index = layer_index_by_name[layer_name]
+                        aligned_base_addrs[layer_index] = worker_metadata.kv_caches_base_addr[local_layer_index]
+                    metadata_by_tp_rank[tp_rank] = MooncakeTPTransferMetadata(
+                        te_rpc_port=worker_metadata.te_rpc_port,
+                        layer_indices=layer_indices,
+                        kv_caches_base_addr=aligned_base_addrs,
+                        local_ip=worker_metadata.local_ip,
+                        handshake_port=worker_metadata.handshake_port,
+                    )
+                metadata_by_pcp_rank[pcp_rank] = MooncakePCPTransferMetadata(metadata_by_tp_rank=metadata_by_tp_rank)
+
+            merged[pp_rank] = MooncakePPTransferMetadata(
+                block_size=reference.block_size,
+                cp_kv_cache_interleave_size=reference.cp_kv_cache_interleave_size,
+                num_blocks=reference.num_blocks,
+                layer_names=layer_names,
+                layer_block_sizes=layer_block_sizes,
+                group_indices=group_indices,
+                block_strides=block_strides,
+                block_lens=block_lens,
+                block_shapes=block_shapes,
+                block_size_scales=block_size_scales,
+                metadata_by_pcp_rank=metadata_by_pcp_rank,
+                indexer_replication_sizes=indexer_replication_sizes,
+            )
+        return merged
+
+    def shutdown(self) -> None:
+        self.stop_event.set()
+        if self.ident is not None:
+            self.join()
+
+    def run(self) -> None:
+        try:
+            with zmq_ctx(SocketType.ROUTER, self.address) as sock:
+                sock.setsockopt(SocketOption.SNDTIMEO, _METADATA_TIMEOUT_MS)
+                sock.setsockopt(SocketOption.RCVTIMEO, _METADATA_TIMEOUT_MS)
+                self.address = sock.getsockopt(SocketOption.LAST_ENDPOINT).decode()
+                self.ready_event.set()
+                self._run_busy_loop(sock)
+        except Exception as exc:
+            self.error = exc
+            logger.exception("Mooncake scheduler metadata thread failed on %s", self.address)
+        finally:
+            self.ready_event.set()
+
+    def _run_busy_loop(self, sock: Any) -> None:
+        decoder = msgspec.msgpack.Decoder(type=tuple)
+        while not self.stop_event.is_set():
+            try:
+                frames = sock.recv_multipart()
+            except Again:
+                continue
+            identity = frames[0]
+            payload = [frame for frame in frames[1:] if frame]
+            if len(payload) != 1:
+                logger.warning("Invalid Mooncake scheduler control frames: %s", frames)
+                continue
+            try:
+                response = self._handle_message(decoder.decode(payload[0]))
+                if response is not None:
+                    sock.send_multipart((identity, b"", response))
+            except Exception:
+                logger.exception("Failed to handle Mooncake scheduler control message")
+
+    def _handle_message(self, message: tuple) -> bytes | None:
+        if message and message[0] == GET_META_MSG:
+            return self.encoded_metadata
+        return None
 
 
 class MooncakeBaseConnectorScheduler:
@@ -224,8 +547,24 @@ class MooncakeBaseConnectorScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
-        raise NotImplementedError
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+        """Return prompt tokens that will be loaded from a remote producer."""
+        params = request.kv_transfer_params
+        logger.debug(
+            "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
+            num_computed_tokens,
+            params,
+        )
+
+        if params is not None and params.get("do_remote_prefill"):
+            token_ids = request.prompt_token_ids or []
+            actual = self._state_prefill_token_count(len(token_ids))
+            params["num_computed_tokens"] = num_computed_tokens
+            count = max(actual - num_computed_tokens, 0)
+            if count > 0:
+                return count, True
+
+        return 0, False
 
     def update_state_after_alloc(
         self,
