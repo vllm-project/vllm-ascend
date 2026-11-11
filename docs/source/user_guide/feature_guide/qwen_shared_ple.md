@@ -18,6 +18,8 @@ For the HIXL backend, use `backend: "rdma"`, replace `root` with the owner's rea
 
 Choose the prefix, shard count and embedding width from the actual checkpoint. Start the owner first using `python -m vllm_ascend.shared_ple --help` for BM or `python -m vllm_ascend.shared_ple_rdma --help` for HIXL. BM consumers need access to the same pool directory and a compatible fabric; HIXL consumers must be able to reach the owner's control and engine endpoints. Use a new BM pool directory for each owner generation. The HIXL control protocol is for trusted serving networks and must not be exposed as a public storage endpoint.
 
+For the A5 code path, configure HIXL device UB communication resources for each process through `ENGRAM_HIXL_LOCAL_COMM_RES`. The resource file path can contain `{physical}` to select the JSON for that process's physical device. Set `ENGRAM_HIXL_FABRIC=ub` on the owner to bypass the A2 same-device RoCE workaround; this switch does not itself select the HIXL transport. The resource file must specify device UB. These settings are inherited from the shared Engram HIXL implementation and have not been validated on A5 for Qwen.
+
 The current HIXL path requires ETP=TP, PCP=DCP=1 and does not support speculative decoding, DBO or elastic EP. It synchronizes the device before reusing its graph input buffer, which can affect latency. Both backends currently support BF16 PLE tables only. They do not provide transparent owner failover.
 
 Stop all consumers cleanly before stopping the owner. Set a positive `--shutdown-timeout` long enough for graph and transport teardown; a forced worker exit can leave leases retained and prevent owner shutdown. Do not release backing memory while consumers may still access it.
