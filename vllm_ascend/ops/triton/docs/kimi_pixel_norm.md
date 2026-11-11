@@ -16,15 +16,18 @@
      inputs. Dispatch boundaries are 196608 and 2408448 elements, corresponding
      to 334 and 4096 complete patches.
   2. Start at most the actual number of Vector cores and assign tiles by a
-     grid-stride loop. Each program loads the 256-entry table once.
-  3. Convert uint8 pixels through FP16 to int32 indices, Gather from the table and
-     write the result. All 256 pixel values are exactly representable by FP16;
-     this bridge avoids the tested A5 compiler's direct uint8-index Gather layout
-     failure.
+     grid-stride loop. Small tiles use the 256-entry table directly; medium and
+     large tiles expand it into a repeated 512-entry table on chip.
+  3. Small tiles convert uint8 pixels through FP16 to int32 indices, avoiding
+     table expansion overhead. Medium and large tiles widen pixels to integers
+     and add 256 before Gather. Indices 256 through 511 avoid the tested A5
+     compiler's 8-bit Gather layout failure without floating-point index
+     conversions. Both paths preserve the table values and their rounding.
   4. Mask the last tile; empty input returns an empty output without a launch.
 - **Supported modes**: A3 and 950PR&950DT Products, eager execution, dynamic Torch
-  compile and ACL graph capture/replay. Hardware validation used Ascend910_9382
-  and Ascend950DT_9582. A2 has not been validated for this operator.
+  compile and ACL graph capture/replay. The integer-index update was validated on
+  Ascend950DT_9582. Ascend910_9382 results below used the previous FP16-index
+  kernel; an A3 rerun is pending an available card. A2 has not been validated.
 
 ## Parameters
 
@@ -85,18 +88,39 @@ compilation while executing previously unseen patch counts and graph replay.
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_pixel_norm.py
 ```
 
-A3/A5 real-image validation on the main-based revision used 1730 MMMU_Pro
-requests and 2015 images; all 2,735,879,328 BF16 projection-input elements
-matched on each host. The C=1 comparison included decoded RGB preprocessing,
-pinning, H2D and synchronization, with one consumer, four Numba threads and
-three alternating CPU/device pairs.
+A5 real-image validation was refreshed after the integer-index update using
+1730 MMMU_Pro requests and 2015 images; all 2,735,879,328 BF16 projection-input
+elements matched the CPU processor. Manual checks covered both output dtypes,
+all pixel values, empty inputs, tails and dispatch boundaries. Cold-cache shared
+registry warmup compiled three keys per dtype; a compiler-denying guard passed
+for new shapes and graph replay with changed inputs. The nightly file was not
+rerun for this update.
 
-| Hardware | CPU requests/s | NPU requests/s | Throughput gain |
+The C=1 comparison included decoded RGB preprocessing, pinning, H2D and
+synchronization, with one consumer, four Numba threads and three alternating
+CPU/device pairs. A3 measurements are retained as historical evidence for the
+previous kernel.
+
+| Hardware / kernel | CPU requests/s | NPU requests/s | Throughput gain |
 | --- | ---: | ---: | ---: |
-| A3 | 148.93 | 171.62 | 15.24% |
-| A5 | 126.83 | 159.65 | 25.87% |
+| A3 / previous FP16-index kernel | 148.93 | 171.62 | 15.24% |
+| A5 / current kernel | 120.28 | 146.02 | 21.41% |
+
+A5 pure-kernel comparisons reused preallocated buffers in graph replay and
+bracketed each current-kernel measurement with the previous FP16-index kernel.
+Both used the same shape, dtype, BLOCK and program count. Compilation, allocation
+and H2D were excluded. The BF16 results below use nine paired rounds, with 200
+launches per event sample and three samples per section.
+
+| Patches | BLOCK | Current kernel (us) | Median paired latency reduction |
+| ---: | ---: | ---: | ---: |
+| 1064 | 4096 | 2.15 | 1.29% |
+| 1152 | 4096 | 2.17 | 2.17% |
+| 20000 | 8192 | 8.95 | 2.76% |
 
 These are preprocessing observations, not a full-model serving result or a
-hardware-only speed ratio. A5 used a shared card. Per-shape and paired-round
-variation must be considered separately; aggregate throughput improvement does
-not establish every latency gate.
+hardware-only speed ratio. A5 used a shared card, and pure-kernel measurements
+reused cached buffers. The refreshed run is a new CPU/device comparison; changes
+from historical throughput cannot be attributed solely to index optimization.
+Per-shape and paired-round variation must be considered separately; aggregate
+throughput improvement does not establish every latency gate.
