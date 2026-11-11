@@ -2823,7 +2823,8 @@ class MooncakeConnectorWorker:
                 raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
             time.sleep(3)
         if self.kv_role == "kv_producer":
-            actual_port = thread.handshake_port
+            assert self.kv_send_thread is not None
+            actual_port = self.kv_send_thread.handshake_port
             if actual_port is None:
                 raise RuntimeError("Mooncake handshake listener has no bound port.")
             self.handshake_port = actual_port
