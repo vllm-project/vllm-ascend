@@ -29,7 +29,7 @@ model:
     - "/vllm-workspace/vllm/examples/pooling/score/template/qwen3_vl_reranker.jinja"
   base_env: {}
   docker_image:
-    ascend_910c: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+    ascend_910c: "quay.io/ascend/vllm-ascend:v0.23.0.post1-a3"
 
 variants:
   default:
@@ -38,12 +38,12 @@ variants:
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0.post1-a3"
         docker_serve_command: "vllm serve"
         extra_args:
           - "--max-model-len"
           - "1024"
-    description: "BF16 checkpoint for single-node Ascend 910C pooling with the official chat template; rerank behaviour recorded on a pre-release build, not yet re-run on the pinned v0.23.0-a3 image"
+    description: "BF16 checkpoint for single-node Ascend 910C pooling with the official chat template; rerank behaviour recorded on a pre-release build, not yet re-run on the pinned v0.23.0.post1-a3 image"
 
 compatible_strategies:
   - single_node_tp
@@ -63,11 +63,11 @@ guide: |
   ## Validation scope and support status
 
   The main tutorial marks this model discontinued since vLLM Ascend v0.30.0 and points at the
-  v0.23.0 documentation, so this recipe is pinned to the `v0.23.0-a3` image and only covers the
+  v0.23.0 documentation, so this recipe is pinned to the `v0.23.0.post1-a3` image and only covers the
   single-node pooling scenario that document describes. Atlas 800 A3 is declared `supported`
   rather than `verified`: the results below were recorded on a pre-release stack (vLLM
   0.32.0+empty, vLLM Ascend 0.19.1rc2.dev3230+g469c6c260) and have not been repeated on the
-  pinned `v0.23.0-a3` image. The checkpoint config exposes 262144 positions while the model
+  pinned `v0.23.0.post1-a3` image. The checkpoint config exposes 262144 positions while the model
   card lists a 32K context; the recorded runs used `--max-model-len 1024`. The tutorial query
   returned 181 prompt tokens and relevance scores of 0.877913 for the capital-of-China document
   and 0.096828 for the gravity document, and two independent 100-request benchmarks at
