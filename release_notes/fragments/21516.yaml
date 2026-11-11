@@ -1,0 +1,6 @@
+pr: 21516
+entries:
+  - category: bugfix
+    text: Native block-wise FP8 checkpoints now fail early with an actionable error on devices without FP8 execution support instead of silently expanding weights to BF16.
+    hardware: [A2, A3]
+
