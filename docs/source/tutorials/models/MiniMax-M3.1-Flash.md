@@ -162,7 +162,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 | PD colocation, A2 | 133000 |
 | PD disaggregation, A3 | 133000 |
 | PD disaggregation, 950DT products | 133000 |
-| 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment)) | 1050624 |
+| 1M PD disaggregation, A3 or 950DT products ([Section 5.5](#55-1m-token-context-deployment)) | 1050624 |
 
 These values belong to different deployment profiles. Weights, communication buffers, parallelism, and KV caches share device memory, so a context budget that fits one profile may not fit another. Select a value that covers the prompt and generated tokens together, and check available KV cache capacity at the intended concurrency. The `1M` model limit in the support matrix does not mean every example configuration reserves enough memory for 1M-token requests. To use the `263000` setting reported in [Text Evaluation](#72-text-evaluation), update `MAX_MODEL_LEN` in the serving scripts, including both roles for PD deployment, and recheck memory capacity before evaluation.
 
@@ -171,6 +171,8 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 ### 5.1 Single-Node Deployment
 
 Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
+
+The examples enable graph execution for both the target model and the DSpark draft. On 950DT products, draft graph execution also requires `fuse_qknorm_rope=false`. See [DSpark and KV Cache Configuration](#921-dspark-and-kv-cache-configuration) for the settings and eager fallback.
 
 === "A3 series (W8A8)"
 
@@ -221,7 +223,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
       --speculative-config '{
           "method":"dspark",
           "num_speculative_tokens":7,
-          "enforce_eager":true,
+          "enforce_eager":false,
           "kv_cache_dtype":"bfloat16"
       }' \
       --safetensors-load-strategy prefetch
@@ -281,12 +283,15 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
           "enable_cpu_binding": true,
           "enable_flashcomm1": true,
           "multistream_overlap_shared_expert": true,
-          "enable_shared_expert_dp":true
+          "enable_shared_expert_dp":true,
+          "ascend_compilation_config": {
+              "fuse_qknorm_rope": false
+          }
       }' \
       --speculative-config '{
           "method":"dspark",
           "num_speculative_tokens":7,
-          "enforce_eager":true,
+          "enforce_eager":false,
           "kv_cache_dtype":"bfloat16"
       }' \
       --safetensors-load-strategy prefetch
@@ -493,6 +498,8 @@ There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match t
 
 Both platforms use a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global data-parallel group; D1 and D2 identify physical hosts within that service. Multiple Decode API endpoints represent ranks or local rank groups within the same distributed service. Prefill processes the prompt, Decode generates tokens, and a proxy forwards requests between them while Mooncake transfers the KV cache. For the general workflow, refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Both platforms use DSpark speculative decoding with seven draft tokens. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
+The scripts keep Prefill and its DSpark draft eager, and enable graph execution for Decode and its draft. On 950DT products, both Decode scripts also set `fuse_qknorm_rope=false`; see [DSpark and KV Cache Configuration](#921-dspark-and-kv-cache-configuration).
+
 Start Prefill, D1, and D2 within a few seconds of each other, and start the proxy only after every engine prints `Application startup complete`. Do not wait for one role to become ready before starting the next: a role that is still missing blocks the distributed rendezvous, and the roles started earlier fail when `VLLM_ENGINE_READY_TIMEOUT_S` expires before the group is complete.
 
 Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress to monitor initialization, and wait for `Application startup complete` on every HTTP-serving instance to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
@@ -695,7 +702,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --disable-hybrid-kv-cache-manager \
-        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
         --data-parallel-size 8 \
         --data-parallel-size-local 1 \
@@ -789,7 +796,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --disable-hybrid-kv-cache-manager \
-        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
         --data-parallel-size 8 \
         --data-parallel-size-local 1 \
@@ -1030,7 +1037,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
             "enable_cpu_binding": true,
             "ascend_compilation_config": {
                 "fuse_norm_quant": false,
-                "fuse_qknorm_rope": true
+                "fuse_qknorm_rope": false
             },
             "multistream_overlap_shared_expert": true,
             "enable_shared_expert_dp": true,
@@ -1039,7 +1046,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --speculative-config '{
             "method":"dspark",
             "num_speculative_tokens":7,
-            "enforce_eager":true,
+            "enforce_eager":false,
             "kv_cache_dtype":"bfloat16"
         }' \
         --kv-transfer-config '{
@@ -1134,7 +1141,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
             "enable_cpu_binding": true,
             "ascend_compilation_config": {
                 "fuse_norm_quant": false,
-                "fuse_qknorm_rope": true
+                "fuse_qknorm_rope": false
             },
             "multistream_overlap_shared_expert": true,
             "enable_shared_expert_dp": true,
@@ -1143,7 +1150,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --speculative-config '{
             "method":"dspark",
             "num_speculative_tokens":7,
-            "enforce_eager":true,
+            "enforce_eager":false,
             "kv_cache_dtype":"bfloat16"
         }' \
         --kv-transfer-config '{
@@ -2249,31 +2256,84 @@ Proxy (:19080)
 
 ### 5.5 1M-Token Context Deployment
 
-This text-only W8A8 profile uses a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global DP4 × TP8 × PP1 group. All three hosts are Atlas 800I A3 machines, each with 16 visible 64 GB NPU devices. Here, 1M means **1,048,576 input tokens**. The total context limit is `1050624`, reserving 2048 positions for generation; the verification request below caps generation at 256 tokens. Use the model image and W8A8 checkpoint from Sections 3 and 4 on every node. The validated runtime uses vLLM 0.32.0, torch_npu 2.10.0.post7, and CANN 9.2.0, with the M3.1 operators and selected-parameter prefetch options shown below available in the image.
+Both platforms use a text-only 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. Here, 1M means **1,048,576 input tokens**. Both profiles set `--max-model-len 1050624`, reserving 2048 positions for generation, and disable local prefix caching on all roles. Select the hardware tab for its topology, scripts, launch commands, and verification workload.
 
-| Host | Global DP / TP / PP | Local DP ranks | API ports | Batched-token budget |
-| --- | --- | --- | --- | --- |
-| Prefill host | 1 / 8 / 2 | 0 | 31050 | 8192 |
-| Decode host 1 | 4 / 8 / 1 | 0–1 | 31260, 31261 | 1 |
-| Decode host 2 | 4 / 8 / 1 | 2–3 | 31260, 31261 | 1 |
+=== "Atlas 800I A3 (W8A8)"
 
-This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. The batched-token budget limits each iteration; it does not limit the total input length.
+    ```text
+    Client → Proxy (:19080) → Prefill (DP1 × TP8 × PP2, :31050)
+                                 │ Mooncake KV transfer
+                                 ▼
+                         Distributed Decode (DP4 × TP8 / EP32)
+                         ├─ D1: ranks 0–1 (:31260, :31261)
+                         └─ D2: ranks 2–3 (:31260, :31261)
+    ```
 
-Decode reserves `48421142528` bytes (about 45.1 GiB) of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
+    This text-only W8A8 profile uses a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global DP4 × TP8 × PP1 group. All three hosts are Atlas 800I A3 machines, each with 16 visible 64 GB NPU devices. Here, 1M means **1,048,576 input tokens**. The total context limit is `1050624`, reserving 2048 positions for generation; the verification request below caps generation at 256 tokens. Use the model image and W8A8 checkpoint from Sections 3 and 4 on every node. The validated runtime uses vLLM 0.32.0, torch_npu 2.10.0.post7, and CANN 9.2.0, with the M3.1 operators and selected-parameter prefetch options shown below available in the image.
+
+    | Host | Global DP / TP / PP | Local DP ranks | API ports | Batched-token budget |
+    | --- | --- | --- | --- | --- |
+    | Prefill host | 1 / 8 / 2 | 0 | 31050 | 8192 |
+    | Decode host 1 | 4 / 8 / 1 | 0–1 | 31260, 31261 | 1 |
+    | Decode host 2 | 4 / 8 / 1 | 2–3 | 31260, 31261 | 1 |
+
+    This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. The batched-token budget limits each iteration; it does not limit the total input length.
+
+    Decode reserves `48421142528` bytes (about 45.1 GiB) of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
+
+=== "950DT products"
+
+    This text-only W8A8-MXFP8 profile uses three 950DT products hosts, each with eight 96 GB NPUs (24 NPUs in total). One Prefill service uses DP1 × TP4 × PP2 on the first host. One distributed Decode service uses a global DP4 × TP4 × PP1 / EP16 group across the other two hosts: D1 serves ranks 0–1 and D2 serves ranks 2–3. Each Decode host exposes one HTTP API for its two local ranks; D2 also serves HTTP and must not use `--headless`.
+
+    ```text
+    Client → Proxy (:19080) → Prefill (DP1 × TP4 × PP2, :31050)
+                                 │ Mooncake KV transfer
+                                 ▼
+                         Distributed Decode (DP4 × TP4 / EP16)
+                         ├─ D1: ranks 0–1 (:31060)
+                         └─ D2: ranks 2–3 (:31060)
+    ```
+
+    | Host | Global DP / TP / PP | Local DP ranks | API port | Batched-token budget |
+    | --- | --- | --- | --- | --- |
+    | Prefill host | 1 / 4 / 2 | 0 | 31050 | 8000 |
+    | Decode host 1 | 4 / 4 / 1 | 0–1 | 31060 | 8000 |
+    | Decode host 2 | 4 / 4 / 1 | 2–3 | 31060 | 8000 |
+
+    All roles use Model Runner V2, FP8 main-model KV cache, `MAX_MODEL_LEN=1050624`, `MAX_NUM_SEQS=1`, and disabled local prefix caching. DSpark uses seven draft tokens with BF16 draft KV cache and `enforce_eager=true` on all three hosts. Prefill is eager; Decode keeps target graph mode `FULL_DECODE_ONLY` with capture size 1024 and `fuse_qknorm_rope=true`. These are the settings used in the recorded 1M run; the draft graph settings in Section 5.3 were validated separately on shorter contexts.
+
+    Prefill uses `gpu-memory-utilization=0.85` and `HCCL_BUFFSIZE=512`; both Decode hosts use `0.92` and `1024`, respectively. KV memory is allocated from that budget, without an explicit `--kv-cache-memory-bytes` or CPU weight offload. The recorded run reported at least 1,306,880 KV tokens on Prefill and 1,957,760 on each Decode replica, enough for one `1050624`-token context per replica. Recheck capacity and operator workspace on a different build before sending a 1M request.
+
+    The recorded runtime used vLLM `5df63a720` (0.32.0), vLLM Ascend `b04f258fa`, torch_npu `2.10.0.post7`, CANN `9.2.1`, and Mooncake `0.3.13`, with the native DSpark checkpoint included in the W8A8-MXFP8 weights. Use a compatible image and the same checkpoint on all three hosts.
 
 #### 5.5.1 Preparation
 
-Complete the communication checks in [Section 3.2](#32-verify-multi-node-communication), and prepare the containers, W8A8 weights, and Mooncake dependencies from Sections 4 and 5.3. Replace the IP/NIC placeholders with each host's communication-network IP and matching interface. Adjust the CANN environment-script path if needed. The templates set `VLLM_HOST_IP` as well as the HCCL/GLOO interfaces so KV-transfer endpoints advertise the intended network.
+Complete the communication checks in [Section 3.2](#32-verify-multi-node-communication), and prepare the containers, platform-specific weights, and Mooncake dependencies from Sections 4 and 5.3. Replace the IP/NIC placeholders with each host's communication-network IP and matching interface. Adjust the CANN environment-script path if needed. Both profiles use `MooncakeConnectorV1` for direct P→D KV transfer, without a KV cache pool.
 
-Use the same `launch_online_dp.py` as [MiniMax-M3 Section 5.3.1](MiniMax-M3.md#531-prefill-decode-disaggregation): copy that section's complete Python launcher, including its `--pp-size` option. Create separate role directories inside the containers:
+=== "Atlas 800I A3 (W8A8)"
 
-```bash
-mkdir -p /workspace/m31-1m/prefill /workspace/m31-1m/decode
-```
+    Use W8A8 weights. The templates set `VLLM_HOST_IP` as well as the HCCL/GLOO interfaces so KV-transfer endpoints advertise the intended network.
 
-Save a copy of `launch_online_dp.py` in each role directory that will be used. Save the Prefill template below as `/workspace/m31-1m/prefill/run_dp_template.sh` on P, and the Decode template as `/workspace/m31-1m/decode/run_dp_template.sh` on both D hosts. Keep P and D directories separate even on shared storage: the launcher reads `./run_dp_template.sh` from its working directory.
+    Use the same `launch_online_dp.py` as [MiniMax-M3 Section 5.3.1](MiniMax-M3.md#531-prefill-decode-disaggregation): copy that section's complete Python launcher, including its `--pp-size` option. Create separate role directories inside the containers:
 
-The templates use named environment variables. Set host-specific values in the launch blocks in Section 5.5.3; the launcher supplies each engine's `DP_RANK`, `SERVICE_PORT`, and `VISIBLE_DEVICES`. Each engine occupies `TP_SIZE × PP_SIZE` NPUs. Each Decode engine serves one DP rank with `--data-parallel-size-local 1`; the launcher's `--dp-size-local 2` starts two engines per D host. Both D hosts use the first D host's IP as `DP_ADDRESS` and share one global DP4 group.
+    ```bash
+    mkdir -p /workspace/m31-1m/prefill /workspace/m31-1m/decode
+    ```
+
+    Save a copy of `launch_online_dp.py` in each role directory that will be used. Save the Prefill template below as `/workspace/m31-1m/prefill/run_dp_template.sh` on P, and the Decode template as `/workspace/m31-1m/decode/run_dp_template.sh` on both D hosts. Keep P and D directories separate even on shared storage: the launcher reads `./run_dp_template.sh` from its working directory.
+
+    The templates use named environment variables. Set host-specific values in the launch blocks in Section 5.5.3; the launcher supplies each engine's `DP_RANK`, `SERVICE_PORT`, and `VISIBLE_DEVICES`. Each engine occupies `TP_SIZE × PP_SIZE` NPUs. Each Decode engine serves one DP rank with `--data-parallel-size-local 1`; the launcher's `--dp-size-local 2` starts two engines per D host. Both D hosts use the first D host's IP as `DP_ADDRESS` and share one global DP4 group.
+
+=== "950DT products"
+
+    Use the W8A8-MXFP8 weights and the 950DT container from Section 4. For this profile, keep the host's `/etc/hixlep` mount and omit the `/etc/hccl_rootinfo.json` bind mount. The recorded direct-transfer run used the installed communication SDK's resource discovery, with no rootinfo file mounted and no `ascend_local_comm_res_path` set in the connector. Keep each host's own fabric configuration; do not copy another host's identity files. Verify NPU-buffer transfer among all three hosts as well as the cross-host Decode HCCL group before loading the model. TCP reachability alone does not verify the NPU data path.
+
+    ```bash
+    mkdir -p /workspace/m31-1m
+    cd /workspace/m31-1m
+    ```
+
+    Save the following role scripts in that directory on their respective hosts. This profile uses native local-DP launch: one `vllm serve` command per host, with two local DP ranks on each Decode host. It does not use the A3 `launch_online_dp.py` launcher. Keep `DECODE_HEAD_IP` set to D1's communication IP on both Decode hosts, with DP RPC port `6885` and KV port `26900`.
 
 #### 5.5.2 Service Scripts
 
@@ -2499,187 +2559,632 @@ The templates use named environment variables. Set host-specific values in the l
     }'
     ```
 
-Keep the tested Decode settings on both hosts: `HCCL_BUFFSIZE=8`, token budget and long-prefill threshold `1`, and `48421142528` bytes of KV cache per worker. The KV handshake port is `21000 + DP_RANK × 64`, giving `21000`, `21064`, `21128`, and `21192`; Prefill uses `20000`. These ports are separate from the HTTP and DP RPC ports. If changing TP/PP/DP, update both roles' KV-transfer layouts and all launch mappings together.
+    Keep the tested Decode settings on both hosts: `HCCL_BUFFSIZE=8`, token budget and long-prefill threshold `1`, and `48421142528` bytes of KV cache per worker. The KV handshake port is `21000 + DP_RANK × 64`, giving `21000`, `21064`, `21128`, and `21192`; Prefill uses `20000`. These ports are separate from the HTTP and DP RPC ports. If changing TP/PP/DP, update both roles' KV-transfer layouts and all launch mappings together.
+
+=== "950DT products"
+
+    **1. Prefill node: `run_prefill.sh`**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+    unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+    export HCCL_CONNECT_TIMEOUT=180
+    export HCCL_EXEC_TIMEOUT=1800
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    LOCAL_IP="<PREFILL_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    SERVICE_PORT=31050
+    DP_RPC_PORT=6884
+    KV_PORT=30000
+    MAX_NUM_SEQS=1
+    MAX_MODEL_LEN=1050624
+    MAX_BATCHED_TOKENS=8000
+    GPU_MEMORY_UTILIZATION=0.85
+
+    # Fixed runtime configuration.
+    export VLLM_USE_FASTOKENS=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1800
+    export HCCL_BUFFSIZE=512
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size 1 \
+        --data-parallel-size-local 1 \
+        --data-parallel-address "$LOCAL_IP" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 2 \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --dtype bfloat16 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --disable-hybrid-kv-cache-manager \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --distributed-executor-backend mp \
+        --kv-cache-dtype fp8 \
+        --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
+        --language-model-only \
+        --safetensors-load-strategy prefetch \
+        --enforce-eager \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "enable_flashcomm1": true,
+            "enable_fused_mc2": 0
+        }' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16"
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_producer",
+            "kv_port": "'"$KV_PORT"'",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 2
+                },
+                "decode": {
+                    "dp_size": 4,
+                    "tp_size": 4,
+                    "pp_size": 1
+                }
+            }
+        }'
+    ```
+
+    **2. First Decode node: `run_decode_head.sh` (DP ranks 0–1)**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+    unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+    export HCCL_CONNECT_TIMEOUT=180
+    export HCCL_EXEC_TIMEOUT=1800
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    LOCAL_IP="<FIRST_DECODE_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    # D1 is the Data Parallel master; D2 must use the same value.
+    DECODE_HEAD_IP="$LOCAL_IP"
+    SERVICE_PORT=31060
+    DP_RPC_PORT=6885
+    KV_PORT=26900
+    MAX_NUM_SEQS=1
+    MAX_MODEL_LEN=1050624
+    MAX_BATCHED_TOKENS=8000
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1800
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 2 \
+        --data-parallel-start-rank 0 \
+        --data-parallel-address "$DECODE_HEAD_IP" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --dtype bfloat16 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --disable-hybrid-kv-cache-manager \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --distributed-executor-backend mp \
+        --kv-cache-dtype fp8 \
+        --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
+        --language-model-only \
+        --safetensors-load-strategy prefetch \
+        --no-enable-prefix-caching \
+        --seed 1024 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_norm_quant": false,
+                "fuse_qknorm_rope": true
+            },
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "enable_flashcomm1": true
+        }' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16"
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "'"$KV_PORT"'",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 2
+                },
+                "decode": {
+                    "dp_size": 4,
+                    "tp_size": 4,
+                    "pp_size": 1
+                }
+            }
+        }'
+    ```
+
+    **3. Second Decode node: `run_decode_worker.sh` (DP ranks 2–3)**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+    unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    export TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+    export HCCL_CONNECT_TIMEOUT=180
+    export HCCL_EXEC_TIMEOUT=1800
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    LOCAL_IP="<SECOND_DECODE_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    DECODE_HEAD_IP="<FIRST_DECODE_NODE_IP>"
+    SERVICE_PORT=31060
+    DP_RPC_PORT=6885
+    KV_PORT=26900
+    MAX_NUM_SEQS=1
+    MAX_MODEL_LEN=1050624
+    MAX_BATCHED_TOKENS=8000
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1800
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 2 \
+        --data-parallel-start-rank 2 \
+        --data-parallel-address "$DECODE_HEAD_IP" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --dtype bfloat16 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --disable-hybrid-kv-cache-manager \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --distributed-executor-backend mp \
+        --kv-cache-dtype fp8 \
+        --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
+        --language-model-only \
+        --safetensors-load-strategy prefetch \
+        --no-enable-prefix-caching \
+        --seed 1024 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_norm_quant": false,
+                "fuse_qknorm_rope": true
+            },
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "enable_flashcomm1": true
+        }' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16"
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "'"$KV_PORT"'",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 2
+                },
+                "decode": {
+                    "dp_size": 4,
+                    "tp_size": 4,
+                    "pp_size": 1
+                }
+            }
+        }'
+    ```
+
+    Keep the topology declarations identical in all three connectors. Prefill uses DP RPC port `6884` and KV port `30000`; Decode uses `6885` and `26900`. These are separate from the HTTP ports. Prefix caching remains disabled on P and both D hosts, including when repeating an identical prompt.
 
 #### 5.5.3 Start the Services
 
-**1. Prefill node**
+=== "Atlas 800I A3 (W8A8)"
 
-```bash
-cd /workspace/m31-1m/prefill
+    **1. Prefill node**
 
-export LOCAL_IP="<PREFILL_NODE_IP>"
-export NIC_NAME="<PREFILL_NODE_NIC>"
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-export DP_SIZE=1
-export TP_SIZE=8
-export PP_SIZE=2
-export LOCAL_DP_SIZE=1
-export DP_RANK_START=0
-export DP_ADDRESS="$LOCAL_IP"
-export DP_RPC_PORT=6884
-export SERVICE_PORT=31050
+    ```bash
+    cd /workspace/m31-1m/prefill
 
-python launch_online_dp.py \
-    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
-    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
-    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
-    --vllm-start-port "$SERVICE_PORT"
-```
+    export LOCAL_IP="<PREFILL_NODE_IP>"
+    export NIC_NAME="<PREFILL_NODE_NIC>"
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    export DP_SIZE=1
+    export TP_SIZE=8
+    export PP_SIZE=2
+    export LOCAL_DP_SIZE=1
+    export DP_RANK_START=0
+    export DP_ADDRESS="$LOCAL_IP"
+    export DP_RPC_PORT=6884
+    export SERVICE_PORT=31050
 
-**2. First Decode node: global DP ranks 0–1**
+    python launch_online_dp.py \
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
+    ```
 
-```bash
-cd /workspace/m31-1m/decode
+    **2. First Decode node: global DP ranks 0–1**
 
-export LOCAL_IP="<FIRST_DECODE_NODE_IP>"
-export NIC_NAME="<FIRST_DECODE_NODE_NIC>"
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-export DP_SIZE=4
-export TP_SIZE=8
-export PP_SIZE=1
-export LOCAL_DP_SIZE=2
-export DP_RANK_START=0
-export DP_ADDRESS="$LOCAL_IP"
-export DP_RPC_PORT=31422
-export SERVICE_PORT=31260
+    ```bash
+    cd /workspace/m31-1m/decode
 
-python launch_online_dp.py \
-    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
-    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
-    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
-    --vllm-start-port "$SERVICE_PORT"
-```
+    export LOCAL_IP="<FIRST_DECODE_NODE_IP>"
+    export NIC_NAME="<FIRST_DECODE_NODE_NIC>"
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    export DP_SIZE=4
+    export TP_SIZE=8
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=2
+    export DP_RANK_START=0
+    export DP_ADDRESS="$LOCAL_IP"
+    export DP_RPC_PORT=31422
+    export SERVICE_PORT=31260
 
-This starts the DP coordinator and the first two engines. Keep this command running and start the second D host from another shell; do not wait for the first D host to become fully healthy before starting the second.
+    python launch_online_dp.py \
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
+    ```
 
-**3. Second Decode node: global DP ranks 2–3**
+    This starts the DP coordinator and the first two engines. Keep this command running and start the second D host from another shell; do not wait for the first D host to become fully healthy before starting the second.
 
-```bash
-cd /workspace/m31-1m/decode
+    **3. Second Decode node: global DP ranks 2–3**
 
-export LOCAL_IP="<SECOND_DECODE_NODE_IP>"
-export NIC_NAME="<SECOND_DECODE_NODE_NIC>"
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-export DP_SIZE=4
-export TP_SIZE=8
-export PP_SIZE=1
-export LOCAL_DP_SIZE=2
-export DP_RANK_START=2
-export DP_ADDRESS="<FIRST_DECODE_NODE_IP>"
-export DP_RPC_PORT=31422
-export SERVICE_PORT=31260
+    ```bash
+    cd /workspace/m31-1m/decode
 
-python launch_online_dp.py \
-    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
-    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
-    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
-    --vllm-start-port "$SERVICE_PORT"
-```
+    export LOCAL_IP="<SECOND_DECODE_NODE_IP>"
+    export NIC_NAME="<SECOND_DECODE_NODE_NIC>"
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    export DP_SIZE=4
+    export TP_SIZE=8
+    export PP_SIZE=1
+    export LOCAL_DP_SIZE=2
+    export DP_RANK_START=2
+    export DP_ADDRESS="<FIRST_DECODE_NODE_IP>"
+    export DP_RPC_PORT=31422
+    export SERVICE_PORT=31260
 
-The launcher's device assignment is:
+    python launch_online_dp.py \
+        --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+        --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+        --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+        --vllm-start-port "$SERVICE_PORT"
+    ```
 
-| Host / DP rank | Local logical NPUs | API port |
-| --- | --- | --- |
-| Prefill / 0 | 0–15 | 31050 |
-| First D / 0 | 0–7 | 31260 |
-| First D / 1 | 8–15 | 31261 |
-| Second D / 2 | 0–7 | 31260 |
-| Second D / 3 | 8–15 | 31261 |
+    The launcher's device assignment is:
 
-Wait for all five APIs to report `Application startup complete` and return HTTP 200 from `/health`. Run the two D launch commands concurrently until their shared initialization completes.
+    | Host / DP rank | Local logical NPUs | API port |
+    | --- | --- | --- |
+    | Prefill / 0 | 0–15 | 31050 |
+    | First D / 0 | 0–7 | 31260 |
+    | First D / 1 | 8–15 | 31261 |
+    | Second D / 2 | 0–7 | 31260 |
+    | Second D / 3 | 8–15 | 31261 |
 
-Check that each engine reports enough KV-cache tokens for `1050624` total tokens and that Decode logs confirm weight prefetching. Cache capacity alone does not establish functional readiness: retain operator workspace and complete the long-input test below when using a different image, checkpoint, or memory budget.
+    Wait for all five APIs to report `Application startup complete` and return HTTP 200 from `/health`. Run the two D launch commands concurrently until their shared initialization completes.
 
-**4. Proxy: one Prefill endpoint and four Decode endpoints**
+    Check that each engine reports enough KV-cache tokens for `1050624` total tokens and that Decode logs confirm weight prefetching. Cache capacity alone does not establish functional readiness: retain operator workspace and complete the long-input test below when using a different image, checkpoint, or memory budget.
 
-Reuse the proxy prepared in Section 5.3. Set the three host IPs and start it inside the Prefill container:
+    **4. Proxy: one Prefill endpoint and four Decode endpoints**
 
-```bash
-PREFILL_IP="<PREFILL_NODE_IP>"
-DECODE1_IP="<FIRST_DECODE_NODE_IP>"
-DECODE2_IP="<SECOND_DECODE_NODE_IP>"
-python3 /workspace/load_balance_proxy_server_example.py \
-    --host 0.0.0.0 --port 19080 \
-    --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
-    --decoder-hosts "$DECODE1_IP" "$DECODE1_IP" "$DECODE2_IP" "$DECODE2_IP" \
-    --decoder-ports 31260 31261 31260 31261 \
-    --workers 1
-```
+    Reuse the proxy prepared in Section 5.3. Set the three host IPs and start it inside the Prefill container:
+
+    ```bash
+    PREFILL_IP="<PREFILL_NODE_IP>"
+    DECODE1_IP="<FIRST_DECODE_NODE_IP>"
+    DECODE2_IP="<SECOND_DECODE_NODE_IP>"
+    python3 /workspace/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 19080 \
+        --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
+        --decoder-hosts "$DECODE1_IP" "$DECODE1_IP" "$DECODE2_IP" "$DECODE2_IP" \
+        --decoder-ports 31260 31261 31260 31261 \
+        --workers 1
+    ```
+
+=== "950DT products"
+
+    Run the following in `/workspace/m31-1m` on each respective host, from separate shells. Start all three roles within a few seconds of each other; both Decode hosts must join the global DP group before initialization can complete.
+
+    **1. Prefill node**
+
+    ```bash
+    nohup bash run_prefill.sh > prefill.log 2>&1 &
+    ```
+
+    **2. First Decode node**
+
+    ```bash
+    nohup bash run_decode_head.sh > decode-head.log 2>&1 &
+    ```
+
+    **3. Second Decode node**
+
+    ```bash
+    nohup bash run_decode_worker.sh > decode-worker.log 2>&1 &
+    ```
+
+    Wait for all three APIs to print `Application startup complete` and return HTTP 200 from `/health`: P on `31050`, D1 and D2 on `31060`. Check KV-token capacity on P and every Decode replica before sending the long prompt.
+
+    **4. Proxy: one Prefill endpoint and two Decode endpoints**
+
+    Reuse the proxy prepared in Section 5.3. Start it inside the Prefill container after setting the host IPs:
+
+    ```bash
+    PREFILL_IP="<PREFILL_NODE_IP>"
+    DECODE1_IP="<FIRST_DECODE_NODE_IP>"
+    DECODE2_IP="<SECOND_DECODE_NODE_IP>"
+    python3 /workspace/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 19080 \
+        --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
+        --decoder-hosts "$DECODE1_IP" "$DECODE2_IP" \
+        --decoder-ports 31060 31060 \
+        --max-retries 0 --workers 1
+    ```
+
+    The two Decode endpoints front four DP ranks in one distributed service. Register each host once, keeping the API enabled on D2. Send requests to the proxy on port `19080` with model name `minimax-m3.1-flash`.
 
 #### 5.5.4 Verify the 1M Input
 
-Send requests to the proxy so that the test exercises KV transfer. First run the text request in Section 6.1 and check that the response is coherent. Then generate an exact 1M-token input with three distinct records near 5%, 50%, and 95% of the context. Run the following from `/workspace/m31-1m` in a container with the checkpoint tokenizer:
+=== "Atlas 800I A3 (W8A8)"
 
-```bash
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-export SERVED_MODEL_NAME=minimax-m3.1-flash
-python3 - <<'PYCODE'
-import json
-import os
-import random
-from pathlib import Path
-from transformers import AutoTokenizer
+    Send requests to the proxy so that the test exercises KV transfer. First run the text request in Section 6.1 and check that the response is coherent. Then generate an exact 1M-token input with three distinct records near 5%, 50%, and 95% of the context. Run the following from `/workspace/m31-1m` in a container with the checkpoint tokenizer:
 
-n = 1048576
-tokenizer = AutoTokenizer.from_pretrained(
-    os.environ["MODEL_PATH"], trust_remote_code=True, local_files_only=True)
-marker = "UNIQUE_LONG_ARCHIVE_PLACEHOLDER_741b"
-rendered = tokenizer.apply_chat_template(
-    [{"role": "user", "content": marker}], tokenize=False,
-    add_generation_prompt=True, thinking_mode="disabled")
-prefix, suffix = rendered.split(marker)
-encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
-values = {"alpha": "8f3a31a57f3ea87f", "beta": "5c4af4dc5228aa06",
-          "gamma": "5345ade0b95e93dc"}
-head = encode(prefix) + encode(
-    "Read the archive. Retrieve the exact secret values for alpha, beta, gamma.\n")
-tail = encode("\nReturn only a JSON object with keys alpha, beta, gamma.\n") + encode(suffix)
-needles = [encode(f"\nUNIQUE SECRET RECORD: {key} = {value}\n")
-           for key, value in values.items()]
-rng = random.Random(1104)
-pool = encode("".join(
-    f"Ordinary archive record {i:06d}: storage code {rng.randrange(10**8):08d}; "
-    "this record contains no secret value.\n" for i in range(4096)))
-budget = n - len(head) - len(tail) - sum(map(len, needles))
-body, previous = [], 0
-for index, stop in enumerate([budget // 20, budget // 2, budget * 19 // 20, budget]):
-    size = stop - previous
-    body.extend((pool * (size // len(pool) + 1))[:size])
-    if index < len(needles):
-        body.extend(needles[index])
-    previous = stop
-ids = head + body + tail
-assert len(ids) == n
-Path("request-1m.json").write_text(json.dumps({
-    "model": os.environ["SERVED_MODEL_NAME"], "prompt": ids,
-    "max_tokens": 256, "temperature": 0, "stream": False,
-    "add_special_tokens": False,
-}))
-Path("expected-1m.json").write_text(json.dumps(values))
-print(f"Prepared {len(ids)} input tokens")
-PYCODE
+    ```bash
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    export SERVED_MODEL_NAME=minimax-m3.1-flash
+    python3 - <<'PYCODE'
+    import json
+    import os
+    import random
+    from pathlib import Path
+    from transformers import AutoTokenizer
 
-curl --noproxy '*' --fail-with-body --max-time 1800 \
-    "http://<PROXY_IP>:19080/v1/completions" \
-    -H 'Content-Type: application/json' \
-    --data-binary @request-1m.json -o response-1m.json
+    n = 1048576
+    tokenizer = AutoTokenizer.from_pretrained(
+        os.environ["MODEL_PATH"], trust_remote_code=True, local_files_only=True)
+    marker = "UNIQUE_LONG_ARCHIVE_PLACEHOLDER_741b"
+    rendered = tokenizer.apply_chat_template(
+        [{"role": "user", "content": marker}], tokenize=False,
+        add_generation_prompt=True, thinking_mode="disabled")
+    prefix, suffix = rendered.split(marker)
+    encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
+    values = {"alpha": "8f3a31a57f3ea87f", "beta": "5c4af4dc5228aa06",
+              "gamma": "5345ade0b95e93dc"}
+    head = encode(prefix) + encode(
+        "Read the archive. Retrieve the exact secret values for alpha, beta, gamma.\n")
+    tail = encode("\nReturn only a JSON object with keys alpha, beta, gamma.\n") + encode(suffix)
+    needles = [encode(f"\nUNIQUE SECRET RECORD: {key} = {value}\n")
+               for key, value in values.items()]
+    rng = random.Random(1104)
+    pool = encode("".join(
+        f"Ordinary archive record {i:06d}: storage code {rng.randrange(10**8):08d}; "
+        "this record contains no secret value.\n" for i in range(4096)))
+    budget = n - len(head) - len(tail) - sum(map(len, needles))
+    body, previous = [], 0
+    for index, stop in enumerate([budget // 20, budget // 2, budget * 19 // 20, budget]):
+        size = stop - previous
+        body.extend((pool * (size // len(pool) + 1))[:size])
+        if index < len(needles):
+            body.extend(needles[index])
+        previous = stop
+    ids = head + body + tail
+    assert len(ids) == n
+    Path("request-1m.json").write_text(json.dumps({
+        "model": os.environ["SERVED_MODEL_NAME"], "prompt": ids,
+        "max_tokens": 256, "temperature": 0, "stream": False,
+        "add_special_tokens": False,
+    }))
+    Path("expected-1m.json").write_text(json.dumps(values))
+    print(f"Prepared {len(ids)} input tokens")
+    PYCODE
 
-python3 - <<'PYCODE'
-import json
-from pathlib import Path
-response = json.loads(Path("response-1m.json").read_text())
-expected = json.loads(Path("expected-1m.json").read_text())
-text = response["choices"][0]["text"]
-assert response["usage"]["prompt_tokens"] == 1048576
-assert response["choices"][0]["finish_reason"] == "stop"
-assert all(value in text for value in expected.values())
-assert "\ufffd" not in text
-print("PASS: 1,048,576 input tokens; all three records retrieved")
-PYCODE
-```
+    curl --noproxy '*' --fail-with-body --max-time 1800 \
+        "http://<PROXY_IP>:19080/v1/completions" \
+        -H 'Content-Type: application/json' \
+        --data-binary @request-1m.json -o response-1m.json
 
-Also compare backend `/metrics` snapshots before and after the request: the Prefill `vllm:prompt_tokens_total` counter and the receiving Decode `vllm:external_prefix_cache_hits_total` counter should both increase by `1048576`. Repeat against a replica on the other Decode host when validating a new deployment.
+    python3 - <<'PYCODE'
+    import json
+    from pathlib import Path
+    response = json.loads(Path("response-1m.json").read_text())
+    expected = json.loads(Path("expected-1m.json").read_text())
+    text = response["choices"][0]["text"]
+    assert response["usage"]["prompt_tokens"] == 1048576
+    assert response["choices"][0]["finish_reason"] == "stop"
+    assert all(value in text for value in expected.values())
+    assert "\ufffd" not in text
+    print("PASS: 1,048,576 input tokens; all three records retrieved")
+    PYCODE
+    ```
+
+    Also compare backend `/metrics` snapshots before and after the request: the Prefill `vllm:prompt_tokens_total` counter and the receiving Decode `vllm:external_prefix_cache_hits_total` counter should both increase by `1048576`. Repeat against a replica on the other Decode host when validating a new deployment.
+
+=== "950DT products"
+
+    First check a short request through the proxy as in Section 6.1. Then generate the same exact-token retrieval input with the W8A8-MXFP8 tokenizer. The streaming request below uses the recorded workload: 1,048,576 input tokens and 1024 generated tokens at concurrency one, with `ignore_eos=true`.
+
+    ```bash
+    cd /workspace/m31-1m
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    export SERVED_MODEL_NAME=minimax-m3.1-flash
+    python3 - <<'PYCODE'
+    import json
+    import os
+    import random
+    from pathlib import Path
+    from transformers import AutoTokenizer
+
+    n = 1048576
+    tokenizer = AutoTokenizer.from_pretrained(
+        os.environ["MODEL_PATH"], trust_remote_code=True, local_files_only=True)
+    marker = "UNIQUE_LONG_ARCHIVE_PLACEHOLDER_741b"
+    rendered = tokenizer.apply_chat_template(
+        [{"role": "user", "content": marker}], tokenize=False,
+        add_generation_prompt=True, thinking_mode="disabled")
+    prefix, suffix = rendered.split(marker)
+    encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
+    values = {"alpha": "8f3a31a57f3ea87f", "beta": "5c4af4dc5228aa06",
+              "gamma": "5345ade0b95e93dc"}
+    head = encode(prefix) + encode(
+        "Read the archive. Retrieve the exact secret values for alpha, beta, gamma.\n")
+    tail = encode("\nReturn only a JSON object with keys alpha, beta, gamma.\n") + encode(suffix)
+    needles = [encode(f"\nUNIQUE SECRET RECORD: {key} = {value}\n")
+               for key, value in values.items()]
+    rng = random.Random(1104)
+    pool = encode("".join(
+        f"Ordinary archive record {i:06d}: storage code {rng.randrange(10**8):08d}; "
+        "this record contains no secret value.\n" for i in range(4096)))
+    budget = n - len(head) - len(tail) - sum(map(len, needles))
+    body, previous = [], 0
+    for index, stop in enumerate([budget // 20, budget // 2, budget * 19 // 20, budget]):
+        size = stop - previous
+        body.extend((pool * (size // len(pool) + 1))[:size])
+        if index < len(needles):
+            body.extend(needles[index])
+        previous = stop
+    ids = head + body + tail
+    assert len(ids) == n
+    Path("request-1m.json").write_text(json.dumps({
+        "model": os.environ["SERVED_MODEL_NAME"], "prompt": ids,
+        "max_tokens": 1024, "temperature": 0, "seed": 1024,
+        "ignore_eos": True, "stream": True, "stream_options": {"include_usage": True},
+        "add_special_tokens": False,
+    }))
+    Path("expected-1m.json").write_text(json.dumps(values))
+    print(f"Prepared {len(ids)} input tokens")
+    PYCODE
+
+    curl --noproxy '*' --fail-with-body --no-buffer --max-time 1800 \
+        "http://<PROXY_IP>:19080/v1/completions" \
+        -H 'Content-Type: application/json' \
+        --data-binary @request-1m.json -D response-1m.headers -o response-1m.sse
+
+    python3 - <<'PYCODE'
+    import json
+    from pathlib import Path
+
+    lines = Path("response-1m.sse").read_text().splitlines()
+    assert "data: [DONE]" in lines
+    events = [json.loads(line[5:].strip()) for line in lines
+              if line.startswith("data:") and line[5:].strip() != "[DONE]"]
+    usage = [event["usage"] for event in events if event.get("usage")][-1]
+    text = "".join(choice.get("text", "") for event in events
+                   for choice in event.get("choices", []))
+    expected = json.loads(Path("expected-1m.json").read_text())
+    assert usage["prompt_tokens"] == 1048576
+    assert usage["completion_tokens"] == 1024
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 0
+    assert all(value in text for value in expected.values())
+    assert "\ufffd" not in text
+    Path("response-1m.txt").write_text(text)
+    print("PASS: 1,048,576 input tokens; 1024 output tokens; all three records retrieved")
+    PYCODE
+    ```
+
+    Compare `/metrics` snapshots around each request: Prefill `vllm:prompt_tokens_total` and the receiving Decode rank's `vllm:external_prefix_cache_hits_total` must each increase by `1048576`; local `vllm:prefix_cache_hits_total` must have zero increment on all three hosts. The external-prefix hit measures this request's live P→D KV transfer, not reuse from an earlier request. Check that `vllm:num_preemptions_total` does not increase. Repeat validation through the other Decode host when reproducing the deployment.
+
+    The recorded run completed three serial streaming curl requests with these token counts, all three retrieval values present, zero local prefix-cache hits, and no preemption. This validates the serving configuration with an eager DSpark draft; 1M draft graph execution and concurrent 1M requests were not tested. The responses contained a thinking block before the correct JSON and trailing newlines after it: `ignore_eos=true` forces 1024 generated tokens, so this is not a strict JSON-format or natural-stopping check.
 
 ## 6 Functional Verification
 
@@ -2867,13 +3372,25 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 | Scenario | Starting Configuration | Parameters to Evaluate | Validation |
 | --- | --- | --- | --- |
-| Long context | All examples set `MAX_MODEL_LEN` to `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
+| Long context | The 1M profiles in [Section 5.5](#55-1m-token-context-deployment) use `MAX_MODEL_LEN=1050624`; Sections 5.1–5.4 use `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
 | Low latency | Single-node examples in Section 5.1. | Reduce request concurrency and compare `--max-num-seqs` and `--max-num-batched-tokens` settings. | Compare TTFT and TPOT alongside output-token throughput. |
 | High throughput | PD examples in Section 5.3. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
 
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 DSpark and KV Cache Configuration
+
+The single-node examples in Section 5.1 and Decode examples in Section 5.3 enable DSpark draft graph execution on A3 and 950DT products:
+
+| Setting | A3 | 950DT products |
+| --- | --- | --- |
+| Target `--compilation-config` | `"cudagraph_mode":"FULL_DECODE_ONLY"` | `"cudagraph_mode":"FULL_DECODE_ONLY"` |
+| Draft `--speculative-config` | `"enforce_eager":false` | `"enforce_eager":false` |
+| `ascend_compilation_config` inside `--additional-config` | Keep the existing fusion settings. | Set `"fuse_qknorm_rope":false`. |
+
+On 950DT products, keeping `fuse_qknorm_rope=true` can fail during draft compilation. Set it to `false` on the single-node service or on **both Decode nodes** before enabling draft graphs. This workaround does not require a source patch.
+
+For the PD deployment in Section 5.3, keep Prefill's `--enforce-eager` and draft `"enforce_eager":true`; only Decode enables draft graphs. To run the draft eagerly again, set `"enforce_eager":true` inside `--speculative-config`. This changes the draft's execution mode while preserving the target model's `FULL_DECODE_ONLY` setting. The A2 multi-node, KV cache pool, and 950DT 1M examples retain their eager draft configuration; the A3 1M profile disables speculative decoding.
 
 The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
 
@@ -2903,12 +3420,11 @@ For common environment, installation, and general parameter issues, refer to the
 {
     "method": "dspark",
     "num_speculative_tokens": 7,
-    "enforce_eager": true,
     "kv_cache_dtype": "bfloat16"
 }
 ```
 
-The scripts in Section 5.3 already include this setting. It changes only the draft KV cache dtype.
+The scripts in Section 5.3 already include this setting. It changes only the draft KV cache dtype; keep the draft execution mode appropriate to the deployment role, as described in [DSpark and KV Cache Configuration](#921-dspark-and-kv-cache-configuration).
 
 ### 10.2 Model Loading Is Still in Progress or Startup Fails
 
