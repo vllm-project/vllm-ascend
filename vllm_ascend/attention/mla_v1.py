@@ -73,7 +73,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import gather_mla_rope, get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -343,9 +343,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.nope_zero_rope_cache: dict[tuple, torch.Tensor] | None = {} if self.rope_dim == 0 else None
         static_forward_context = vllm_config.compilation_config.static_forward_context
         # MLA layers are grouped by RoPE mode before metadata builders are created.
-        self.use_mla_rope = static_forward_context[layer_names[0]].impl.use_mla_rope if layer_names else True
-        self.cos_cache = None
-        self.sin_cache = None
+        impl = static_forward_context[layer_names[0]].impl if layer_names else None
+        self.use_mla_rope = impl.use_mla_rope if impl is not None else True
+        self.rope_metadata_source = getattr(impl, "rope_metadata_source", None)
+        self.rope_buffer_capacity = scheduler_config.max_num_batched_tokens
+        self.rope_buffers: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         self.chunk_seq_lens: torch.Tensor = None
         self.cu_seq_lens_cpu: torch.Tensor = None
@@ -661,10 +663,34 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             if self.is_pcp_decode_sharded:
                 # Decode rows lead the local positions, so a decode-only batch
                 # can refresh the graph-stable RoPE buffer that decode uses.
-                metadata.pcp_cos, metadata.pcp_sin = get_cos_and_sin_mla(
-                    common_attn_metadata.positions.long(), use_cache=self.num_prefills == 0
+                decode_only = self.num_prefills == 0
+                metadata.pcp_cos, metadata.pcp_sin = self._get_metadata_rope(
+                    common_attn_metadata.positions.long(),
+                    kind="decode" if decode_only else "pcp",
+                    use_cache=decode_only,
                 )
         return metadata
+
+    def _get_metadata_rope(
+        self, positions: torch.Tensor, *, kind: str, use_cache: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.rope_metadata_source is None:
+            return get_cos_and_sin_mla(positions, use_cache=use_cache)
+
+        cos, sin = gather_mla_rope(self.rope_metadata_source.cos_sin_cache, positions)
+        num_tokens = positions.numel()
+        if num_tokens > self.rope_buffer_capacity:
+            raise ValueError("Draft RoPE positions exceed the metadata buffer capacity.")
+        buffers = self.rope_buffers.get(kind)
+        if buffers is None:
+            shape = (self.rope_buffer_capacity, *cos.shape[1:])
+            buffers = self.rope_buffers[kind] = (cos.new_empty(shape), sin.new_empty(shape))
+        # Draft prefill can also be captured. Keep stable addresses separate
+        # from the target and from the other metadata parts.
+        cos_out, sin_out = (buffer[:num_tokens] for buffer in buffers)
+        cos_out.copy_(cos)
+        sin_out.copy_(sin)
+        return cos_out, sin_out
 
     def _finalize_pcp_metadata(
         self,
@@ -787,7 +813,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         prefill_input_positions = input_positions[tokens_start:]
         if self.use_mla_rope:
-            cos, sin = get_cos_and_sin_mla(prefill_input_positions)
+            cos, sin = self._get_metadata_rope(prefill_input_positions, kind="prefill")
         else:
             cos = sin = None
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
@@ -874,7 +900,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 )
 
         if self.use_mla_rope:
-            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+            cos, sin = self._get_metadata_rope(input_positions, kind="decode", use_cache=True)
             cos = cos[: self.num_decode_tokens, ...]
             sin = sin[: self.num_decode_tokens, ...]
         else:

@@ -1315,6 +1315,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         self.mock_vllm_config.speculative_config = None
+        static_forward_context = self.mock_vllm_config.compilation_config.static_forward_context
+        static_forward_context.__getitem__.return_value.impl.rope_metadata_source = None
         self.mock_device = torch.device("cpu")
         # Avoid real ModelConfig: it inspects architectures via a subprocess
         # that requires NPU tooling on CPU CI.

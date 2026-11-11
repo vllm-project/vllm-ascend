@@ -421,6 +421,86 @@ def test_a_model_without_ssmax_needs_no_log_positions():
     assert backend.mistral_q(torch.zeros(3, 16)).shape == (3, 2, 4)
 
 
+@pytest.mark.parametrize("use_rope", [True, False])
+def test_indexer_uses_interleaved_rope_or_bypasses_it_for_both_q_and_k(monkeypatch, use_rope):
+    from vllm_ascend.attention import indexer
+
+    def init_backend(self, _indexer, rope_dim):
+        torch.nn.Module.__init__(self)
+        self.qk_rope_head_dim = rope_dim
+        self.is_rope_neox_style = True
+        self.head_dim = 8
+        self.n_head = 1
+        self.wq_b = self.wk_weights_proj = lambda x: (x, None)
+        self.k_norm = lambda x: x
+        self.enable_sparse_li_c8 = self.enable_sparse_li_c4 = False
+
+    calls = []
+
+    def fake_rope(x, cos, sin, *, rope_dim, is_neox_style):
+        calls.append((rope_dim, is_neox_style))
+        return torch.cat((x[..., :rope_dim] + 1, x[..., rope_dim:]), dim=-1)
+
+    monkeypatch.setattr(indexer.AscendSFAIndexerBackend, "__init__", init_backend)
+    monkeypatch.setattr(indexer, "HAS_TRITON", True)
+    monkeypatch.setattr(indexer, "rope_forward_triton_siso", fake_rope, raising=False)
+    upstream = SimpleNamespace(indexer_use_rope=use_rope, q_input_norm=lambda x: x, ssmax=None)
+    backend = ml4.AscendMistralIndexerBackend(upstream, 4)
+    x = torch.arange(16).reshape(2, 8)
+    cos = sin = torch.ones(2, 1, 1, 4)
+
+    q = backend.project_query(x, x, cos, sin)
+    k, _, _ = backend.forward_k(x, cos, sin)
+    assert calls == ([(4, False), (4, False)] if use_rope else [])
+    expected = x.clone()
+    if use_rope:
+        expected[:, :4] += 1
+    torch.testing.assert_close(q, expected.unsqueeze(1))
+    torch.testing.assert_close(k, q)
+
+
+def test_nontriton_indexer_restores_interleaved_cache_layout(monkeypatch):
+    from vllm_ascend.attention import indexer
+
+    def split_half_rope(x, cos, sin):
+        return torch.cat((-x[..., 1::2], x[..., 0::2]), dim=-1)
+
+    monkeypatch.setattr(indexer, "HAS_TRITON", False)
+    monkeypatch.setattr(indexer.torch_npu, "npu_interleave_rope", split_half_rope)
+    backend = SimpleNamespace(qk_rope_head_dim=4, head_dim=6, is_rope_neox_style=False)
+    x = torch.tensor([[[1, 2, 3, 4, 5, 6]]])
+    cos, sin = torch.zeros(1, 1, 1, 4), torch.ones(1, 1, 1, 4)
+
+    out = indexer.AscendSFAIndexerBackend.apply_indexer_rope(backend, x, cos, sin)
+
+    torch.testing.assert_close(out, torch.tensor([[[-2, 1, -4, 3, 5, 6]]]))
+
+
+def test_dspark_draft_uses_local_rope_and_stable_metadata_buffers(monkeypatch):
+    from vllm_ascend.attention import mla_v1
+
+    def target_rope(*args, **kwargs):
+        pytest.fail("the draft must use its own table")
+
+    monkeypatch.setattr(mla_v1, "get_cos_and_sin_mla", target_rope)
+    builder = mla_v1.AscendMLAMetadataBuilder.__new__(mla_v1.AscendMLAMetadataBuilder)
+    table = torch.arange(24).view(6, 4)
+    builder.rope_metadata_source = SimpleNamespace(cos_sin_cache=table)
+    builder.rope_buffer_capacity = 4
+    builder.rope_buffers = {}
+    positions = torch.tensor([1, 3])
+
+    prefill = builder._get_metadata_rope(positions, kind="prefill")
+    decode = builder._get_metadata_rope(torch.tensor([2]), kind="decode", use_cache=True)
+    updated = builder._get_metadata_rope(torch.tensor([4, 5]), kind="decode", use_cache=True)
+
+    for actual, expected in zip(prefill, ml4.gather_mla_rope(table, positions)):
+        torch.testing.assert_close(actual, expected)
+    for actual, expected, old in zip(updated, ml4.gather_mla_rope(table, torch.tensor([4, 5])), decode):
+        torch.testing.assert_close(actual, expected)
+        assert actual.data_ptr() == old.data_ptr()
+
+
 # ----------------------------------------------------- graph and DSpark
 
 

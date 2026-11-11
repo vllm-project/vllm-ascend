@@ -65,6 +65,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.mistral.amd.attention import MistralMLAAttention
 from vllm.models.mistral.amd.indexer import MistralIndexer
 from vllm.models.mistral.amd.ssmax import SSMaxScaling
+from vllm.models.mistral.common.layer_spec import MistralLayerSpec
 from vllm.models.mistral.mistral_large4.amd.dspark import (
     MistralLarge4DSparkForCausalLM,
 )
@@ -78,6 +79,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.ops.rotary_embedding import (
     _record_cos_and_sin_cache_interleaved,
     _record_cos_sin_cache,
+    gather_mla_rope,
 )
 
 __all__ = [
@@ -348,9 +350,17 @@ class AscendMistralMLAAttention(MistralMLAAttention):
 
 
 class AscendMistralIndexer(MistralIndexer):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        prepare_indexer_for_ascend(self, args[1] if len(args) > 1 else kwargs["config"])
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        config: Any,
+        spec: MistralLayerSpec,
+        topk_indices_buffer: torch.Tensor,
+        prefix: str,
+    ) -> None:
+        super().__init__(vllm_config, config, spec, topk_indices_buffer, prefix)
+        self.indexer_use_rope = spec.indexer_use_rope
+        prepare_indexer_for_ascend(self, config)
 
         def _get_attn_backend():
             return AscendSFAIndexerBackend
@@ -388,8 +398,9 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
     here, in the same place and the same order as upstream.
     """
 
-    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
-        super().__init__(vllm_indexer, qk_rope_head_dim)
+    def __init__(self, vllm_indexer: AscendMistralIndexer, qk_rope_head_dim: int) -> None:
+        super().__init__(vllm_indexer, qk_rope_head_dim if vllm_indexer.indexer_use_rope else 0)
+        self.is_rope_neox_style = False
         # Kept so the q path and SSMax can run from the upstream module.
         self.q_input_norm = vllm_indexer.q_input_norm
         self.ssmax = vllm_indexer.ssmax
@@ -421,7 +432,7 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         del q_c
-        return self.apply_query_rope(self.mistral_q(hidden_states), cos, sin)
+        return self.apply_indexer_rope(self.mistral_q(hidden_states), cos, sin)
 
 
 def prepare_indexer_for_ascend(indexer: nn.Module, config: Any) -> nn.Module:
@@ -621,6 +632,11 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
         finally:
             upstream_model.MistralMLAAttention = original_attention_cls
 
+        # Draft attention must rotate with the same plain YaRN table as its
+        # context KV writer. The target publishes a separate LeRoPE table.
+        for layer in self.model.layers:
+            layer.self_attn.attn.impl.rope_metadata_source = self.model.rotary_emb
+
     @staticmethod
     def _normalize_draft_kv_cache(
         kv_cache: Any,
@@ -673,9 +689,7 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
         # Use the draft's plain-YaRN cache. The target has LeRoPE, so the
         # process-global target table is not valid for these dense draft layers.
         rotary = self.model.rotary_emb
-        cos_half, sin_half = rotary.cos_sin_cache.chunk(2, dim=-1)
-        cos = cos_half.repeat(1, 2).index_select(0, context_positions).unsqueeze(1).unsqueeze(2)
-        sin = sin_half.repeat(1, 2).index_select(0, context_positions).unsqueeze(1).unsqueeze(2)
+        cos, sin = gather_mla_rope(rotary.cos_sin_cache, context_positions)
 
         # Resolve the one-tensor form into a per-layer sequence up front. A
         # bool flag plus a ternary leaves one branch holding the whole union,

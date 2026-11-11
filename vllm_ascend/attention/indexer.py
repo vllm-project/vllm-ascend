@@ -335,25 +335,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
-
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+        k_li = self.apply_indexer_rope(k_li, cos, sin)
 
         if self.enable_sparse_li_quant:
             if defer_scale_cast:
@@ -438,33 +420,28 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        return self.apply_query_rope(q_li, cos, sin)
+        return self.apply_indexer_rope(q_li, cos, sin)
 
-    def apply_query_rope(
-        self,
-        q_li: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        """Apply the indexer's RoPE layout to an already projected query."""
+    def apply_indexer_rope(self, states: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        """Apply the same rotation and output layout to indexer queries and keys."""
+        rope_dim = self.qk_rope_head_dim
+        if rope_dim == 0:
+            return states
         if HAS_TRITON:
-            return rope_forward_triton_siso(
-                q_li,
-                cos,
-                sin,
-                rope_dim=self.qk_rope_head_dim,
-                is_neox_style=self.is_rope_neox_style,
-            )
+            return rope_forward_triton_siso(states, cos, sin, rope_dim=rope_dim, is_neox_style=self.is_rope_neox_style)
 
-        q_li_pe, q_li_nope = torch.split(
-            q_li,
-            [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-            dim=-1,
-        )
-        q_li_pe = q_li_pe.unsqueeze(2)
-        q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-        q_li_pe = q_li_pe.squeeze(2)
-        return torch.cat([q_li_pe, q_li_nope], dim=-1)
+        rotary, tail = states.split([rope_dim, self.head_dim - rope_dim], dim=-1)
+        rotary = rotary.unsqueeze(2)
+        cos = cos.view(-1, 1, 1, rope_dim)
+        sin = sin.view(-1, 1, 1, rope_dim)
+        if self.is_rope_neox_style:
+            rotary = torch_npu.npu_rotary_mul(rotary, cos, sin)
+        else:
+            rotary = torch_npu.npu_interleave_rope(rotary, cos, sin)
+            # The NPU operator emits split halves. Keep the same interleaved
+            # cache layout as the Triton path.
+            rotary = torch.stack(rotary.chunk(2, dim=-1), dim=-1).flatten(-2)
+        return torch.cat([rotary.squeeze(2), tail], dim=-1)
 
     def forward(
         self,

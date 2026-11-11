@@ -92,6 +92,12 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
 
 
+def gather_mla_rope(cos_sin_cache: torch.Tensor, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather positions from a model-owned cache in MLA's cos/sin layout."""
+    cos, sin = cos_sin_cache.index_select(0, positions).chunk(2, dim=-1)
+    return cos.repeat(1, 2)[:, None, None, :], sin.repeat(1, 2)[:, None, None, :]
+
+
 def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_cache
     global _sin_cache
