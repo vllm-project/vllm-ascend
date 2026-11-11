@@ -62,8 +62,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mla import MLAModules
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.models.mistral.amd.attention import MistralMLAAttention
 from vllm.models.mistral.amd.indexer import MistralIndexer
+from vllm.models.mistral.amd.moe import MistralMoE
 from vllm.models.mistral.amd.ssmax import SSMaxScaling
 from vllm.models.mistral.common.layer_spec import MistralLayerSpec
 from vllm.models.mistral.mistral_large4.amd.dspark import (
@@ -88,6 +90,7 @@ __all__ = [
     "AscendMistralLarge4DSparkForCausalLM",
     "AscendMistralLarge4ForCausalLM",
     "AscendMistralMLAAttention",
+    "MistralLarge4MixtureOfExperts",
     "adopt_ascend_modules",
     "adopt_shared_kv_skip",
     "has_shared_kv_skip",
@@ -490,11 +493,6 @@ def _reject_unsupported(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
     compilation_config = vllm_config.compilation_config
 
-    if parallel_config.enable_eplb:
-        raise NotImplementedError(
-            "EPLB is not supported for Mistral Large 4 on Ascend: redundant "
-            "expert placement is bookkeeping this adapter does not do."
-        )
     if getattr(compilation_config.pass_config, "fuse_allreduce_rms", False):
         # defers_allreduce() would then leave sublayer outputs TP-partial and
         # fold the reduction into a fused CUDA/ROCm collective RMSNorm.
@@ -552,8 +550,76 @@ def validate_moe_parallelism(vllm_config: VllmConfig) -> None:
         )
 
 
+class MistralLarge4MixtureOfExperts(MixtureOfExperts):
+    """Model-level MoE bookkeeping that the EPLB controller reads.
+
+    The per-layer half of EPLB needs no work here: upstream's ``MistralMoE``
+    already forwards ``enable_eplb`` and ``num_redundant_experts`` into its
+    ``FusedMoEFactory`` call, so the experts record their load and own a
+    rewritable expert map. What is missing is the model-level view the
+    controller looks for, and ``is_mixture_of_experts`` returns False without
+    it, which would skip this model in silence.
+
+    Unlike the DeepSeek and Kimi adapters there is nothing to copy the counts
+    from: upstream's ``MistralLarge4ForCausalLM`` is not a
+    ``MixtureOfExperts`` and its MoE block keeps no expert counts, so they are
+    derived from the config here.
+    """
+
+    moe_mlp_layers: list[MistralMoE]
+
+    def extract_moe_parameters(self, vllm_config: VllmConfig) -> None:
+        config = vllm_config.model_config.hf_config
+        eplb_config = vllm_config.parallel_config.eplb_config
+
+        self.expert_weights: list[Sequence[torch.Tensor]] = []
+        # Upstream asserts grouped top-k is off for this model, so every
+        # expert sits in one group.
+        self.num_expert_groups = getattr(config, "n_group", None) or 1
+
+        # Only the MoE layers of this pipeline stage: a dense layer carries a
+        # plain MistralMLP, and EPLB state and transfers are per stage.
+        self.moe_mlp_layers = [
+            layer.mlp for layer in self.model.layers if isinstance(getattr(layer, "mlp", None), MistralMoE)
+        ]
+        self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+        self.num_moe_layers = len(self.moe_layers)
+
+        if not self.moe_mlp_layers:
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+
+        self.num_routed_experts = int(config.n_routed_experts)
+        self.num_shared_experts = int(getattr(config, "n_shared_experts", 0) or 0)
+        self.num_logical_experts = self.num_routed_experts
+        self.num_redundant_experts = eplb_config.num_redundant_experts
+        self.num_physical_experts = self.num_logical_experts + self.num_redundant_experts
+        # vLLM refuses EPLB without expert parallelism, so the physical
+        # experts are spread over exactly the expert-parallel group.
+        self.num_local_physical_experts = self.num_physical_experts // get_ep_group().world_size
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        # Rebalancing and elastic EP reuse the per-rank expert weight slots
+        # allocated at startup, so the local count cannot change.
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.experts.update_expert_map()
+
+
 @support_torch_compile
-class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
+class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM, MistralLarge4MixtureOfExperts):
     """Mistral Large 4 with the Ascend paths adopted after construction.
 
     Upstream builds the attention modules inside its own constructors and
@@ -590,6 +656,8 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
                 f"the config declares {expected}. Refusing to run: a missed "
                 f"layer would overwrite the latent cache it borrows."
             )
+
+        self.extract_moe_parameters(vllm_config)
 
     def get_model_state_cls(self):
         # Upstream returns MistralLarge4ModelState solely to construct the

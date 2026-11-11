@@ -4,6 +4,12 @@ entries:
     text: Enabled Mistral Large 4 Model Runner V2 graph execution and DSpark speculative decoding on Ascend.
     model: mistral-large-4
     hardware: [Ascend 950]
+  - category: feature
+    text: >-
+      Mistral Large 4 now supports expert-parallelism load balancing (EPLB) on Ascend, which
+      the adapter previously refused at startup.
+    model: mistral-large-4
+    hardware: [Ascend 950]
   - category: bugfix
     text: >-
       Corrected Mistral Large 4 sparse indexer rotary embeddings and aligned DSpark draft attention with its cache writer.

@@ -253,7 +253,6 @@ def _vllm_config(**overrides):
 @pytest.mark.parametrize(
     "overrides,match",
     [
-        ({"enable_eplb": True}, "EPLB"),
         ({"fuse_allreduce_rms": True}, "fuse_allreduce_rms"),
         ({"use_sequence_parallel_moe": True}, "Sequence-parallel MoE"),
     ],
@@ -265,6 +264,11 @@ def test_unsupported_deployments_are_rejected(overrides, match):
 
 def test_a_supported_deployment_is_accepted():
     ml4._reject_unsupported(_vllm_config())
+
+
+def test_eplb_is_accepted():
+    """EPLB is supported; vLLM itself refuses it without expert parallelism."""
+    ml4._reject_unsupported(_vllm_config(enable_eplb=True, enable_expert_parallel=True))
 
 
 def test_fused_mc2_is_not_rejected():
@@ -330,6 +334,104 @@ def test_a_dense_config_is_left_alone(monkeypatch):
     monkeypatch.setattr(ml4, "get_ep_group", lambda: SimpleNamespace(world_size=7))
 
     ml4.validate_moe_parallelism(_moe_config(enable_ep=True, n_routed_experts=0))
+
+
+# ------------------------------------------------------------------- EPLB
+
+
+class _FakeMoE:
+    """Stands in for upstream's MistralMoE, counting expert-map rewrites."""
+
+    def __init__(self):
+        self.experts = SimpleNamespace(remaps=0)
+        self.experts.update_expert_map = self._remap
+
+    def _remap(self):
+        self.experts.remaps += 1
+
+
+def _eplb_config(num_redundant_experts=0, n_shared_experts=1, n_routed_experts=128):
+    hf_config = SimpleNamespace(
+        n_routed_experts=n_routed_experts,
+        n_shared_experts=n_shared_experts,
+        n_group=1,
+    )
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(num_redundant_experts=num_redundant_experts),
+        ),
+    )
+
+
+def _moe_view(monkeypatch, num_moe=3, num_dense=1, ep_size=8, **config_kwargs):
+    """Build the mixin over a stage of ``num_moe`` MoE and ``num_dense`` dense layers."""
+    monkeypatch.setattr(ml4, "MistralMoE", _FakeMoE)
+    monkeypatch.setattr(ml4, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))
+
+    layers = [SimpleNamespace(mlp=object()) for _ in range(num_dense)]
+    layers += [SimpleNamespace(mlp=_FakeMoE()) for _ in range(num_moe)]
+
+    view = ml4.MistralLarge4MixtureOfExperts()
+    view.model = SimpleNamespace(layers=layers)
+    view.extract_moe_parameters(_eplb_config(**config_kwargs))
+    return view
+
+
+def test_only_moe_layers_of_this_stage_are_collected(monkeypatch):
+    view = _moe_view(monkeypatch, num_moe=3, num_dense=2)
+
+    assert view.num_moe_layers == 3
+    assert len(view.moe_layers) == 3
+    assert view.expert_weights == []
+
+
+def test_counts_come_from_the_config_and_the_expert_parallel_group(monkeypatch):
+    view = _moe_view(monkeypatch, ep_size=8, n_shared_experts=1)
+
+    assert view.num_routed_experts == 128
+    assert view.num_logical_experts == 128
+    assert view.num_physical_experts == 128
+    assert view.num_local_physical_experts == 16
+    assert view.num_shared_experts == 1
+    assert view.num_redundant_experts == 0
+    assert view.num_expert_groups == 1
+
+
+def test_redundant_experts_widen_the_physical_placement(monkeypatch):
+    view = _moe_view(monkeypatch, ep_size=8, num_redundant_experts=16)
+
+    assert view.num_logical_experts == 128
+    assert view.num_physical_experts == 144
+    assert view.num_local_physical_experts == 18
+
+
+def test_a_stage_without_moe_layers_reports_no_experts(monkeypatch):
+    view = _moe_view(monkeypatch, num_moe=0, num_dense=2)
+
+    # is_mixture_of_experts() keys on num_moe_layers, so a dense stage must
+    # report zero rather than the config's expert count.
+    assert view.num_moe_layers == 0
+    assert view.num_logical_experts == 0
+    assert view.num_physical_experts == 0
+    assert view.num_local_physical_experts == 0
+
+
+def test_rebalancing_rewrites_the_counts_and_remaps_every_layer(monkeypatch):
+    view = _moe_view(monkeypatch, num_moe=3, ep_size=8, num_redundant_experts=16)
+
+    view.update_physical_experts_metadata(144, 18)
+
+    assert view.num_physical_experts == 144
+    assert view.num_redundant_experts == 16
+    assert [moe.experts.remaps for moe in view.moe_mlp_layers] == [1, 1, 1]
+
+
+def test_rebalancing_refuses_to_resize_the_local_expert_slots(monkeypatch):
+    view = _moe_view(monkeypatch, ep_size=8)
+
+    with pytest.raises(AssertionError):
+        view.update_physical_experts_metadata(128, 8)
 
 
 # ---------------------------------------------------------------- indexer
