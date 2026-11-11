@@ -1,6 +1,0 @@
-pr: 21569
-entries:
-  - category: feature
-    text: Added Kimi K3 C8 decode support on Model Runner V2 using the device-metadata QuantFlashMLA operator.
-    model: kimi-k3
-    hardware: [A5]
