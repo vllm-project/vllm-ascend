@@ -4,3 +4,7 @@ entries:
     text: >-
       Fixed wait-mode pauses and sleeps hanging when Ascend-specific schedulers
       had requests holding KV blocks for asynchronous loads.
+  - category: bugfix
+    text: >-
+      Fixed DyntraLB and Balance scheduling exceeding the batch input limit
+      when speculative decoding requires additional drafting slots.
