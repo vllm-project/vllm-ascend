@@ -33,7 +33,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
-from zmq.constants import ROUTER
 from zmq.sugar.socket import Socket
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
@@ -51,6 +50,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     ReqMeta,
+    bind_handshake_zmq_ctx,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
@@ -189,7 +189,7 @@ def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pc
     with (
         patch.object(module, "get_pp_group", return_value=types.SimpleNamespace(rank_in_group=pp_rank, world_size=2)),
         patch.object(module, "get_pcp_group", return_value=types.SimpleNamespace(rank_in_group=pcp_rank, world_size=2)),
-        patch.object(module, "zmq_ctx") as transport,
+        patch.object(module, "bind_handshake_zmq_ctx") as transport,
     ):
         sender = KVCacheSendingThread(
             vllm_config=config,
@@ -203,16 +203,20 @@ def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pc
             kv_caches={},
             pcp_rank=pcp_rank,
         )
+        transport.return_value.__enter__.return_value = (transport, 41000)
 
         def receive(socket):
             assert ready.is_set()
-            assert socket is transport.return_value.__enter__.return_value
+            assert socket is transport
+            assert sender.handshake_port == 41000
+            assert sender.metadata.handshake_port == 41000
 
         # This case tests run's endpoint/readiness contract. The real wire
         # handler is exercised separately, without starting an unbounded loop.
         with patch.object(sender, "run_busy_loop", side_effect=receive) as receive_loop:
             sender.run()
-        transport.assert_called_once_with(ROUTER, f"tcp://127.0.0.1:{port}")
+        transport.assert_called_once_with("127.0.0.1")
+        assert sender.logical_handshake_port == port
         receive_loop.assert_called_once()
         transport.return_value.__exit__.assert_called_once()
         assert not sender.is_alive()
@@ -4878,8 +4882,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 {},
             )
         )
-        worker._get_remote_host_info_by_port = MagicMock(
-            side_effect=lambda _base, port, host, engine_id, _mapping: (f"{host}-{port}", engine_id)
+        worker._get_remote_endpoint_info_by_port = MagicMock(
+            side_effect=lambda _base, port, host, engine_id, _mapping: (f"{host}-{port}", engine_id, port)
         )
         meta = types.SimpleNamespace(
             remote_port=30000,
@@ -5373,27 +5377,109 @@ def test_state_prefill_token_count_boundary(truncate, tokens):
 def test_worker_handshake_mapping_preserves_previous_entries_and_updates_atomically(mode):
     scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
     scheduler.vllm_config = types.SimpleNamespace(kv_transfer_config=types.SimpleNamespace(kv_port=6000))
+    scheduler.tp_size = 4
+    scheduler.pcp_size = 2
     original = {"9": {"host": "old-host", "engine_id": "old-engine", "handshake_port": 6009}}
     scheduler.multi_nodes_meta_mapping = original.copy()
     metadata = {}
     if mode != "empty":
-        key = 2 if mode == "legacy" else (0, 1, 2)
+        key = 2 if mode == "legacy" else (0, 0, 2)
         metadata[key] = make_agent_metadata(
-            local_ip="new-host", engine_id="new-engine", handshake_port=6002 if mode == "pp-key" else 0
+            local_ip="new-host", engine_id="new-engine", handshake_port=41002 if mode != "invalid-pp-key" else 0
         )
     if mode == "invalid-pp-key":
         # Even if an earlier entry is valid, a later invalid entry must not
         # publish a partial mapping to the next request.
         metadata = {1: make_agent_metadata(local_ip="other-host"), **metadata}
-        with pytest.raises(ValueError, match="missing handshake_port"):
+        with pytest.raises(ValueError, match="handshake port"):
             scheduler.set_xfer_handshake_metadata(metadata)
         assert scheduler.multi_nodes_meta_mapping == original
     else:
         scheduler.set_xfer_handshake_metadata(metadata)
         expected = original.copy()
         if mode != "empty":
-            expected["2"] = {"host": "new-host", "engine_id": "new-engine", "handshake_port": 6002}
+            expected["2"] = {"host": "new-host", "engine_id": "new-engine", "handshake_port": 41002}
         assert scheduler.multi_nodes_meta_mapping == expected
+
+
+def test_handshake_listener_allocates_distinct_ports_and_releases_them():
+    host = "127.0.0.1"
+    occupied = zmq.Context()
+    fixed = occupied.socket(zmq.ROUTER)
+    occupied_port = fixed.bind_to_random_port(f"tcp://{host}")
+    try:
+        with (
+            bind_handshake_zmq_ctx(host) as (first, first_port),
+            bind_handshake_zmq_ctx(host) as (second, second_port),
+        ):
+            assert first is not second
+            assert len({occupied_port, first_port, second_port}) == 3
+            probe = zmq.Context()
+            conflicting = probe.socket(zmq.ROUTER)
+            with pytest.raises(zmq.ZMQError):
+                conflicting.bind(f"tcp://{host}:{first_port}")
+            conflicting.close(linger=0)
+            probe.destroy(linger=0)
+        # The listener owns the port through its context and frees it on exit.
+        rebound_ctx = zmq.Context()
+        rebound = rebound_ctx.socket(zmq.ROUTER)
+        rebound.bind(f"tcp://{host}:{first_port}")
+        rebound.close(linger=0)
+        rebound_ctx.destroy(linger=0)
+    finally:
+        fixed.close(linger=0)
+        occupied.destroy(linger=0)
+
+
+def test_sender_close_releases_port_and_is_idempotent():
+    ready = threading.Event()
+    sender = KVCacheSendingThread(
+        vllm_config=MockVllmConfig(),
+        tp_rank=0,
+        prefill_tp_size=1,
+        local_engine_id="prefill",
+        side_channel_host="127.0.0.1",
+        side_channel_port=5555,
+        metadata=make_agent_metadata(),
+        ready_event=ready,
+        kv_caches={},
+        pcp_rank=0,
+    )
+    sender.start()
+    assert ready.wait(5)
+    port = sender.handshake_port
+    assert port is not None and port != sender.logical_handshake_port
+    sender.close()
+    sender.close()
+    assert not sender.is_alive()
+    context = zmq.Context()
+    socket = context.socket(zmq.ROUTER)
+    try:
+        socket.bind(f"tcp://127.0.0.1:{port}")
+    finally:
+        socket.close(linger=0)
+        context.destroy(linger=0)
+
+
+def test_dynamic_handshake_endpoint_resolves_by_logical_rank():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.vllm_config = types.SimpleNamespace(kv_transfer_config=types.SimpleNamespace(kv_port=6000))
+    mapping = {
+        "0": {"host": "prefill-a", "engine_id": "p", "handshake_port": 41001},
+        "1": {"host": "prefill-b", "engine_id": "p", "handshake_port": 41002},
+    }
+    assert worker._get_remote_endpoint_info_by_port(6000, 6001, "fallback", "fallback", mapping) == (
+        "prefill-b",
+        "p",
+        41002,
+    )
+    with pytest.raises(RuntimeError, match="logical rank 2"):
+        worker._get_remote_endpoint_info_by_port(6000, 6002, "fallback", "fallback", mapping)
+    assert worker._get_remote_endpoint_info_by_port(6000, 6001, "fallback", "fallback", {}) == (
+        "fallback",
+        "fallback",
+        6001,
+    )
 
 
 @pytest.mark.parametrize("finish_order", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
