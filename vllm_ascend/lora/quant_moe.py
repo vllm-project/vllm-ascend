@@ -283,6 +283,133 @@ def _apply_dynamic_int8_moe_lora(
 
 
 @register_quant_moe_lora_impl(
+    QuantType.W4A8MXFP,
+    validate_activation_input=_validate_dynamic_int8_activations,
+)
+def _apply_w4a8_mxfp_moe_lora(
+    mlp_compute_input: MoEMlpComputeInput,
+    quant_method=None,
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
+    """Run packed MXFP4 base experts and inject LoRA at BF16/FP16 boundaries.
+
+    Mirrors the plain W4A8-MXFP MLP: activations are microscaling-quantized to
+    FP8 e4m3 with per-token e8m0 scales, the expert weights stay packed FP4
+    (e2m1 with ue8m0 block scales), and LoRA is applied on the dequantized
+    gate/up and down outputs so adapters keep their floating-point semantics.
+    """
+    comm_type = _EXTRA_CTX.moe_comm_type
+    if comm_type not in {MoECommType.ALLGATHER, MoECommType.ALLTOALL}:
+        raise NotImplementedError(
+            "Ascend quantized MoE LoRA currently supports the AllGather TP and AlltoAll EP paths; "
+            "MC2 and FusedMC2 are unsupported."
+        )
+    lora_context = mlp_compute_input.lora_context
+    if mlp_compute_input.dynamic_eplb:
+        raise NotImplementedError("Ascend quantized MoE LoRA does not support dynamic EPLB.")
+
+    hidden_states = mlp_compute_input.hidden_states
+    if mlp_compute_input.dynamic_scale is not None or hidden_states.dtype == torch.int8:
+        raise AssertionError(
+            "Quantized MoE LoRA requires BF16/FP16 routed activations. "
+            "Dispatch-side quantization must be disabled for LoRA batches."
+        )
+    if comm_type == MoECommType.ALLGATHER and (
+        mlp_compute_input.expanded_row_idx is None or mlp_compute_input.topk_ids is None
+    ):
+        raise AssertionError("Quantized MoE LoRA requires AllGather routing metadata (expanded_row_idx and topk_ids).")
+    if hidden_states.shape[0] == 0:
+        # An EP rank may receive no routed tokens. Keep participating in the
+        # surrounding AlltoAll collectives, but avoid empty-tensor NPU kernels.
+        return hidden_states, torch.npu.current_stream().record_event()
+
+    if quant_method is None:
+        raise NotImplementedError("MXFP4 MoE LoRA requires the quantization method that owns the expert weights.")
+    layer = mlp_compute_input.layer
+    if layer is None:
+        raise AssertionError("MXFP4 MoE LoRA requires the routed-expert layer to resolve its weights.")
+    get_mlp_weights = getattr(quant_method, "_get_mlp_weights", None)
+    if get_mlp_weights is None:
+        raise NotImplementedError("MXFP4 MoE LoRA requires a quant method exposing _get_mlp_weights.")
+
+    w1, w1_scale, w2, w2_scale = get_mlp_weights(layer)
+    if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
+        raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
+
+    group_list = mlp_compute_input.group_list
+    group_list_type = mlp_compute_input.group_list_type
+    input_dtype = hidden_states.dtype
+    quantized_input, input_scale = quant_method._quant_hidden_states(hidden_states, None)
+    gate_up_out = torch_npu.npu_grouped_matmul(
+        x=[quantized_input],
+        weight=w1,
+        scale=w1_scale,
+        bias=None,
+        per_token_scale=[input_scale],
+        split_item=2,
+        group_type=0,
+        group_list=group_list,
+        group_list_type=group_list_type,
+        output_dtype=input_dtype,
+        scale_dtype=torch_npu.float8_e8m0fnu,
+        per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+    )[0]
+
+    if comm_type == MoECommType.ALLGATHER:
+        lora_routing = _recover_moe_lora_routing_allgather(
+            lora_context,
+            mlp_compute_input.expanded_row_idx,
+            mlp_compute_input.topk_ids,
+        )
+    else:
+        lora_routing = _recover_moe_lora_routing_all2all(
+            lora_context,
+            group_list=group_list,
+        )
+    moe_lora_apply_w13(
+        lora_context,
+        gate_up_out=gate_up_out,
+        hidden_states=hidden_states,
+        lora_routing=lora_routing,
+    )
+
+    activated = _apply_moe_activation(
+        gate_up_out,
+        mlp_compute_input.activation,
+        mlp_compute_input.swiglu_limit,
+        mlp_compute_input.swiglu_alpha,
+        mlp_compute_input.swiglu_beta,
+    )
+    if mlp_compute_input.topk_scales is not None:
+        activated *= mlp_compute_input.topk_scales
+
+    quantized_activated, activated_scale = quant_method.apply_act_quant(mlp_compute_input, activated)
+    before_gmm2_evt = torch.npu.current_stream().record_event()
+    down_out = torch_npu.npu_grouped_matmul(
+        x=[quantized_activated],
+        weight=w2,
+        scale=None,
+        antiquant_scale=w2_scale,
+        bias=None,
+        per_token_scale=[activated_scale],
+        split_item=2,
+        group_type=0,
+        group_list=group_list,
+        group_list_type=group_list_type,
+        output_dtype=input_dtype,
+        per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        x_dtype=torch.float8_e4m3fn,
+        weight_dtype=torch_npu.float4_e2m1fn_x2,
+    )[0]
+    moe_lora_apply_w2(
+        lora_context,
+        down_out=down_out,
+        silu_out=activated,
+        lora_routing=lora_routing,
+    )
+    return down_out, before_gmm2_evt
+
+
+@register_quant_moe_lora_impl(
     QuantType.W4A8,
     validate_activation_input=_validate_dynamic_int8_activations,
 )

@@ -512,3 +512,63 @@ def test_mc2_comm_type_is_unsupported() -> None:
         extra_ctx.moe_comm_type = MoECommType.MC2
         with pytest.raises(NotImplementedError, match="AllGather TP"):
             quant_apply_mlp_with_moe_lora(mlp_compute_input=_make_input())
+
+
+class _ConfigRecorder:
+    """Records assignments to ``torch.npu.config`` for the FP4 cast fallback."""
+
+    assignments: list[tuple[str, object]]
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "assignments", [])
+
+    def __setattr__(self, name, value):
+        if name == "assignments":
+            object.__setattr__(self, name, value)
+            return
+        object.__getattribute__(self, "assignments").append((name, value))
+
+
+def test_w4a8_mxfp_moe_lora_backend_is_registered() -> None:
+    from vllm_ascend.lora.quant_moe import _get_quant_moe_lora_impl
+
+    impl = _get_quant_moe_lora_impl(QuantType.W4A8MXFP)
+    assert impl.apply is not None
+    # Packed FP4 experts also consume unquantized (BF16/FP16) routed
+    # activations, so the shared "reject pre-quantized input" guard applies.
+    assert impl.validate_activation_input is not None
+    with pytest.raises(NotImplementedError):
+        impl.validate_activation_input(torch.zeros(2, dtype=torch.int8), None)
+
+
+def test_packed_fp4_format_cast_retries_without_internal_format() -> None:
+    from vllm_ascend.quantization.nz import fp4_packed_nz
+
+    seen = []
+    tensor = torch.zeros(4)
+
+    def fake_cast(input_tensor, fmt, **kwargs):
+        seen.append(torch.npu.config.assignments[-1][1] if torch.npu.config.assignments else True)
+        if len(seen) == 1:
+            raise RuntimeError("aclnnNpuFormatCast not support recovery format")
+        return input_tensor
+
+    recorder = _ConfigRecorder()
+    with patch.object(torch.npu, "config", recorder):
+        with patch.object(torch_npu, "npu_format_cast", side_effect=fake_cast):
+            out = fp4_packed_nz().cast(tensor)
+
+    assert out is tensor
+    assert seen == [True, False]
+    assert recorder.assignments == [
+        ("allow_internal_format", False),
+        ("allow_internal_format", True),
+    ]
+
+
+def test_packed_fp4_format_cast_propagates_unrelated_errors() -> None:
+    from vllm_ascend.quantization.nz import fp4_packed_nz
+
+    with patch.object(torch_npu, "npu_format_cast", side_effect=RuntimeError("unrelated failure")):
+        with pytest.raises(RuntimeError, match="unrelated failure"):
+            fp4_packed_nz().cast(torch.zeros(4))
