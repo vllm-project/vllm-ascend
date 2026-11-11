@@ -68,7 +68,20 @@ Set `kv_connector` to `MooncakePushConnector` on P and D, with `kv_role` set to
 `kv_producer` and `kv_consumer`, respectively. Use
 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
 as the proxy. This experimental path supports PCP/TP routing and PP layer
-lookup; workers currently require DCP=1 and do not support KVPP.
+lookup, but does not support KVPP. Both P and D can use DCP for MLA caches
+when both sides use PCP=1 and each side's DCP size divides its TP size.
+P/D DCP sizes, interleave sizes and logical page sizes may differ, provided
+both peers use the same kernel block size and each interleave is a multiple
+of that kernel block size and divides its own logical page size.
+SWA, circular state and replicated indexer caches retain their original layout;
+non-MLA full attention and Mamba with DCP are not supported by this path.
+Each layer's ready token interval is intersected with both P and D's DCP
+stripes before WRITE. Each D worker selects a complete P DCP replica group;
+each source shard in that group sends its portion, without duplicate writes
+from other replica groups. D still waits for DONE from every P worker.
+Intermediate chunks defer incomplete kernel blocks; final chunks include the
+tail block. Layer events and completion ordering also apply to destinations
+whose current interval contains no owned stripe.
 
 The proxy sends the request to D first. After allocating blocks, D's scheduler
 submits an immutable destination snapshot to a 32-worker HTTP thread pool,

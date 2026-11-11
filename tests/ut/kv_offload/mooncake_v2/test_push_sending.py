@@ -422,10 +422,17 @@ def test_done_socket_timeout_is_bounded(worker, monkeypatch):
         assert not push_worker.MooncakePushConnectorWorker._send_done(worker, message, "failed")
 
 
-def test_dcp_is_rejected_before_initialization():
-    with pytest.raises(ValueError, match="DCP=1"):
+def test_invalid_dcp_is_rejected_before_initialization():
+    with pytest.raises(ValueError, match="divide TP"):
         push_worker.MooncakePushConnectorWorker(
-            SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2)), "p", None
+            SimpleNamespace(
+                parallel_config=SimpleNamespace(
+                    decode_context_parallel_size=2, prefill_context_parallel_size=1, tensor_parallel_size=3
+                ),
+                kv_transfer_config=SimpleNamespace(is_kv_producer=True),
+            ),
+            "p",
+            None,
         )
 
 
