@@ -18,7 +18,9 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch.nn import functional as F
+from vllm.config import CUDAGraphMode, VllmConfig
 
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.ops import finegrained_tp as fine
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import is_950
@@ -62,6 +64,7 @@ def _mx_apply(hidden, weight):
 @torch.inference_mode()
 def _worker():
     local_rank, rank, world = int(os.environ["LOCAL_RANK"]), int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
+    init_ascend_config(VllmConfig())
     torch.npu.set_device(local_rank)
     dist.init_process_group("hccl")
     assert world == 2
@@ -107,11 +110,15 @@ def _worker():
     for shard, weight in enumerate(weights["qkv"].chunk(3)):
         quantized, scale = torch_npu.npu_dynamic_mx_quant(weight, dst_type=torch.float8_e4m3fn, scale_alg=0)
         loaded.weight_loader(loaded.weight, quantized, shard)
-        loaded.weight_loader(loaded.weight_scale, scale, shard)
+        loaded.weight_loader(loaded.weight_scale, scale.reshape(weight.shape[0], -1), shard)
+    loaded._single_group_gmm_nz = True
     scheme.process_weights_after_loading(loaded)
     load_input = matrix(capacity, hidden_size)
     expected_weight = torch.cat([weight.chunk(world)[rank] for weight in weights["qkv"].chunk(3)])
-    torch.testing.assert_close(loaded(load_input)[0], F.linear(load_input, expected_weight), atol=0.12, rtol=0.12)
+    from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiK3RoutedLinear
+
+    projected = AscendKimiK3RoutedLinear.apply_projection(loaded, load_input)
+    torch.testing.assert_close(projected, F.linear(load_input, expected_weight), atol=0.12, rtol=0.12)
 
     full_qkv = _mx_weight(weights["qkv"])
     quantize = lambda x: torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn, scale_alg=0)
@@ -227,9 +234,83 @@ def _worker():
     ticket = gate_tp.gather(static_input)
     gate = gate_tp.project(ticket, _linear(weights["g"].chunk(world)[rank])).wait()
     torch.testing.assert_close(gate.flatten(1), F.linear(static_input, weights["g"]), atol=1e-3, rtol=0.02)
+    # The real NoPE SFA wrapper must restore graph capacity before the real O
+    # adapter's HCCL calls. Prolog/attention are identities here, not DSA kernels.
+    from vllm.forward_context import set_forward_context
+
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
+    from vllm_ascend.distributed import parallel_state
+    from vllm_ascend.ops.linear_op import OProjRowParallelOp
+
+    def reduce_scatter(value, dim=0):
+        result = value.new_empty((value.shape[0] // world, value.shape[1]))
+        dist.reduce_scatter_tensor(result, value.contiguous(), group=dist.group.WORLD)
+        return result
+
+    group.reduce_scatter = reduce_scatter
+    previous_otp = parallel_state._OTP
+    parallel_state._OTP = group
+    try:
+        o_layer = SimpleNamespace(
+            weight=weights["o"].chunk(world, dim=1)[rank],
+            bias=None,
+            input_is_parallel=True,
+            input_size_per_partition=width // world,
+            output_size=hidden_size,
+            reduce_results=True,
+            return_bias=True,
+            skip_bias_add=False,
+            prefix="self_attn.o_proj",
+        )
+        o_layer.quant_method = SimpleNamespace(apply=lambda layer, x, bias=None: F.linear(x, layer.weight, bias))
+        o_op = OProjRowParallelOp(o_layer)
+        o_op.update_attrs()
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sparse_sfa_turboquant = False
+        impl.qk_rope_head_dim = 0
+        impl.local_num_heads, impl.v_head_dim = heads, dim
+        impl.pcp_enabled = False
+        impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+        impl._parallel_o_proj = None
+        impl.finegrained_o_tp = True
+        impl.o_proj = o_op.apply_impl
+        impl.g_proj, impl.gproj_tp = None, None
+        impl.layerwise_kv_cache_hook = None
+        impl.layer_name = ""
+        impl.has_indexer = False
+        impl.indexer, impl.skip_topk = None, True
+        impl._get_indexer_attn_metadata = lambda: None
+        impl.preprocess_type = PreprocessType.PROLOG_V3
+        impl._sfa_preprocess_prolog_v3 = lambda hidden_states, **kwargs: (hidden_states,) * 4
+        impl._get_indexcache_topk_indices = lambda count: torch.zeros(count, 1, dtype=torch.int32, device=device)
+        impl._execute_sparse_flash_attention_process = lambda q, *args: q.clone()
+        impl._v_up_proj = lambda value: value
+        for step in range(2):
+            rows = step if rank == 0 else 2
+            output = torch.zeros_like(static_input)
+            metadata = SimpleNamespace(
+                num_actual_tokens=rows,
+                num_input_tokens=capacity,
+                slot_mapping=torch.arange(capacity, device=device),
+                cum_query_lens=[rows],
+                seq_lens=[rows],
+                cos=None,
+                sin=None,
+            )
+            with set_forward_context(
+                None, VllmConfig(), num_tokens=capacity, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+            ):
+                impl._forward_impl("", static_input, (torch.zeros(1, width, device=device),), metadata, output)
+            torch.testing.assert_close(output[:rows], F.linear(static_input[:rows], weights["o"]), atol=2e-3, rtol=0.02)
+    finally:
+        parallel_state._OTP = previous_otp
     torch.npu.synchronize()
     dist.destroy_process_group()
-    print(f"rank={rank}: 64 combinations, MXFP8 QKV, independent G, and graph replay passed", flush=True)
+    print(
+        f"rank={rank}: 64 combinations, Kimi MXFP8 post-load, independent G, "
+        "graph replay, and uneven/idle NoPE O passed",
+        flush=True,
+    )
 
 
 @pytest.mark.skipif(

@@ -87,7 +87,9 @@ without reducing precision; the existing core prepares its FP32 sigmoid.
 
 DSA starts G input gather on owner hidden before prolog, computes the G shard
 after prolog, and launches its return before indexer/SFA work. The final gate
-joins owner G after UV. Dummy ranks participate in G and O exchanges. Absorbed
+joins owner G after UV. Kimi O restores the original graph capacity before communication, including
+NoPE PIECEWISE and zero-token owners; it trims only after the output exchange.
+Dummy ranks participate in G and O exchanges. Absorbed
 UK/UV, indexing and KV ownership are unchanged.
 
 Kimi dense FFN and LM head use two owner-row chunks. Each executor launches
@@ -101,12 +103,20 @@ is joined before that module returns. Send tensors remain referenced through
 completion. Equal-sized component groups reuse the existing PG cache; teardown
 destroys each underlying group only once.
 
+The runner installs a per-execution check at the existing post-DP-dispatch
+patch boundary. Both active and idle ranks reject an unsupported eager step
+before projection collectives; startup profile and synthetic warmup are exempt.
+The callback is restored when execution finishes. This patch can be removed
+when the upstream runner provides a common post-dispatch hook.
+
 ## Validation boundaries
 
 `tests/ut/ops/test_kimi_finegrained_tp.py` exercises all 64 switch combinations
 over 32 simulated DP owners, 27 unequal QKV/G/O size combinations, real linear
 loaders, MXFP8 block32 scale slicing, idle state ownership, configuration checks
-and the deferred G join. The stateful test core is an ownership oracle, not a
+and the deferred G join. Real SFA/O adapter tests cover uneven and zero-token
+NoPE PIECEWISE owners. Sampling tests construct the LM head in a config scope
+and exercise logits after that scope exits. The stateful test core is an ownership oracle, not a
 replacement for the KDA accuracy tests.
 
 `tests/e2e/pull_request/two_card/test_kimi_finegrained_tp.py` is a small-weight

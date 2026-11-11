@@ -672,6 +672,7 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
         )
+        self.impl.finegrained_o_tp = get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
         if config.mla_use_output_gate:
             gate_size = get_ascend_config().finegrained_tp_config.gproj_tensor_parallel_size
             if gate_size > 1:
