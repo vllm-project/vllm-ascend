@@ -1,0 +1,6 @@
+pr: 21623
+entries:
+  - category: feature
+    text: Added an experimental opt-in local host VMM backend for shared CPU-offloaded DeepSeek-V4.1 Engram on supported A3 systems.
+    model: deepseek-v4.1
+    hardware: [A3]
