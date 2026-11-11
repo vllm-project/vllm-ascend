@@ -1,0 +1,4 @@
+pr: 21624
+entries:
+  - category: feature
+    text: Added independent DP-axis QKV/beta and full-rank gate tensor parallelism for Kimi, integrated with dense FFN, vocabulary, and output projection sharding on PD decode nodes. Attention state remains with its DP owner, and disabled knobs retain the existing execution paths.
