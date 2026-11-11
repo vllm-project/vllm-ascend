@@ -200,11 +200,10 @@ class FastEEPRuntime:
             verify = get_ascend_config().fasteep.verify_migration
             migration = ExpertMigration(self.layers, self.rank, self.comms, verify=verify)
             self.verified_migration_tensors = migration.execute(self.maps, placements)
-            group = self.comms.activate(target)
+            sleeping = self.active > target and target <= self.rank < self.active
+            group = self.comms.activate(target, inactive_callback=self.memory.sleep if sleeping else None)
             self._release_initial_device_groups()
             self._activate(target, group, placements)
-            if self.active > target and target <= self.rank < self.active:
-                self.memory.sleep()
             self.comms.barrier()
             self.maps = placements
             self.active = target

@@ -25,8 +25,8 @@ def test_fasteep_alltoall_serving(tmp_path, graphs):
 def test_fasteep_allgather_graph_parity(tmp_path):
     # BF16 reduction grouping changes with EP topology. Compare graph replay
     # with eager execution at each identical placement, including restored ranks.
-    eager = _run_serving(tmp_path / "eager", "0", "allgather", False)
-    graphs = _run_serving(tmp_path / "graphs", "0", "allgather", True)
+    eager = _run_serving(tmp_path / "eager", "1", "allgather", False)
+    graphs = _run_serving(tmp_path / "graphs", "1", "allgather", True)
     assert graphs == eager
 
 

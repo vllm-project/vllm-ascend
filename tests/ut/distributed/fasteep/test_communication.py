@@ -82,6 +82,60 @@ class TestCommunicationReclamation(PytestBase):
         serving.close.assert_called_once()
         destroy.assert_called_once_with(cpu)
 
+    def test_inactive_reclaim_runs_before_readiness_barrier_without_polluting_comm_bytes(self):
+        owner = self.owner()
+        events = []
+        free = [100]
+        owner.active_native.close.side_effect = lambda: events.append("close-serving")
+        owner.root.close.side_effect = lambda: events.append("close-migration")
+        owner.barrier.side_effect = lambda: events.append("barrier")
+
+        def cpu_group(size):
+            events.append("cpu-group")
+            free[0] = 400
+
+        def reclaim():
+            assert owner.root is None and owner.active_native is None
+            assert owner.last_memory_delta == 300
+            events.append("reclaim")
+            free[0] = 9000
+
+        owner._cpu_group.side_effect = cpu_group
+        with (
+            patch.object(communication.torch.npu, "synchronize"),
+            patch.object(communication.torch.npu, "mem_get_info", side_effect=lambda: (free[0], 10000)),
+        ):
+            assert owner.activate(2, inactive_callback=reclaim) is None
+        assert events == ["close-serving", "close-migration", "barrier", "cpu-group", "reclaim", "barrier"]
+        assert owner.last_memory_delta == 300
+
+    def test_active_rank_does_not_reclaim_idle_pools(self):
+        owner = self.owner()
+        owner.rank = 0
+        reclaim = MagicMock()
+        with (
+            patch.object(communication.torch.npu, "synchronize"),
+            patch.object(communication.torch.npu, "mem_get_info", return_value=(100, 1000)),
+            patch.object(communication, "PyHcclCommunicator") as create,
+            patch.object(communication, "RetainedGroup") as group,
+        ):
+            create.return_value.available = True
+            assert owner.activate(2, inactive_callback=reclaim) is group.return_value
+        reclaim.assert_not_called()
+        assert owner.root is None
+
+    def test_failed_inactive_reclaim_cannot_reach_readiness_barrier(self):
+        owner = self.owner()
+        reclaim = MagicMock(side_effect=RuntimeError("reclaim failed"))
+        with (
+            patch.object(communication.torch.npu, "synchronize"),
+            patch.object(communication.torch.npu, "mem_get_info", return_value=(100, 1000)),
+            pytest.raises(RuntimeError, match="reclaim failed"),
+        ):
+            owner.activate(2, inactive_callback=reclaim)
+        assert owner.root is None and owner.active_group is None
+        owner.barrier.assert_called_once()
+
     def test_migration_communicator_is_restored_only_when_needed(self):
         owner = self.owner()
         owner.root = None

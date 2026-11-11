@@ -9,7 +9,7 @@ buffers. Worker processes and CPU rendezvous groups remain available. Returning
 ranks recover the same virtual addresses, refill dense weights from a live peer,
 and receive individual experts according to the new placement.
 
-The runtime accepts Model Runner V1 or V2, BF16 weights, TP=PP=PCP=DCP=1,
+Current Ascend main uses Model Runner V2. FastEEP requires BF16 weights, TP=PP=PCP=DCP=1,
 one Python API process, internal DP routing, and AllGather or AllToAll MoE
 communication. Nodes use a mutually reachable CPU rendezvous network and HCCL
 network. Every rank has equal expert-slot capacity; the active ranks together
@@ -27,8 +27,8 @@ qualification results described below.
 ## Launch
 
 Build the native extension with CANN headers providing `HcclCreateSubCommConfig`.
-The C++ shim uses the installed `HcclCommConfig` ABI. Select V1 or V2 with
-the existing `VLLM_USE_V2_MODEL_RUNNER` setting.
+The C++ shim uses the installed `HcclCommConfig` ABI. Use Model Runner V2 on
+current main; the V1 commands in the matched pilot apply to its pinned compatibility runtime.
 
 For Qwen3-30B-A3B-Base on four NPUs, create a placement JSON with 48 entries
 in `layer_list`. Each entry has a `device_list` of four objects whose
@@ -38,7 +38,7 @@ active prefixes of two, three, or four ranks. The full example is in
 `tests/e2e/pull_request/four_card/test_fasteep_serving.py`.
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve Qwen/Qwen3-30B-A3B-Base \
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-30B-A3B-Base \
   --data-parallel-size 4 --data-parallel-size-local 4 \
   --enable-expert-parallel --api-server-count 1 --dtype bfloat16 \
   --enforce-eager --enable-sleep-mode --no-enable-prefix-caching \
@@ -88,7 +88,9 @@ Layers whose expert slots already match the target placement skip migration
 collectives. The migration communicator is initialized only for peer transfers
 or joining-worker weight refill. Equal layer placements reuse routing-table
 construction within each resize while retaining independent layer metadata.
-Every startup rank still participates in the final topology commit barrier.
+After migration channels close, inactive workers reclaim their pools while
+surviving workers initialize the serving communicator. Every startup rank
+participates in the final topology commit barrier.
 Native migration communicators exist only during transitions. Active serving
 communicators are rebuilt for the new group, and replaced startup device
 communicators are destroyed. This releases their communication buffers while

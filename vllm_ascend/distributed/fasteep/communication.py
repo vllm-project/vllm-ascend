@@ -65,7 +65,7 @@ class ReclaimableCommunicators(RetainedCommunicators):
         self.cpu_groups[size] = cpu
         return cpu
 
-    def activate(self, size):
+    def activate(self, size, *, inactive_callback=None):
         torch.npu.synchronize()
         free_before = torch.npu.mem_get_info()[0]
         # Every startup rank participates, including ranks becoming inactive.
@@ -73,6 +73,11 @@ class ReclaimableCommunicators(RetainedCommunicators):
             self.active_native.close()
             self.active_native = None
             self.active_group = None
+        # Transfers have synchronized and serving groups do not reference this
+        # migration root. Release it before any rank unmaps its idle pools.
+        if self.root is not None:
+            self.root.close()
+            self.root = None
         self.barrier()
         cpu = self._cpu_group(size)
         if self.rank < size:
@@ -81,13 +86,13 @@ class ReclaimableCommunicators(RetainedCommunicators):
                 raise RuntimeError("Failed to restore the serving communicator.")
             self.active_native = native
             self.active_group = RetainedGroup(self, native.comm, cpu, size)
-        self.barrier()
-        # No child native communicator references this migration root.
-        if self.root is not None:
-            self.root.close()
-            self.root = None
-        self.barrier()
+        # Keep communication accounting separate from weight/KV/graph reclaim.
         self.last_memory_delta = torch.npu.mem_get_info()[0] - free_before
+        if self.rank >= size and inactive_callback is not None:
+            # Overlap inactive memory reclamation with active communicator
+            # initialization; every rank waits before publishing the topology.
+            inactive_callback()
+        self.barrier()
         return self.active_group
 
     def close(self):
