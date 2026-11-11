@@ -1689,7 +1689,7 @@ class MooncakeConnectorScheduler:
 
         num_prompt_blocks = math.ceil(request.num_prompt_tokens / self.block_size)
 
-        return delay_free_blocks, dict(
+        txfer_params = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -1703,6 +1703,12 @@ class MooncakeConnectorScheduler:
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
         )
+
+        params = request.kv_transfer_params or {}
+        cached_tokens = params.get("_remote_num_cached_tokens", 0)
+        txfer_params["remote_num_cached_tokens"] = int(cached_tokens)
+
+        return delay_free_blocks, txfer_params
 
     def _port_offset_from_handshake_metadata(self, rank_metadata: KVConnectorHandshakeMetadata, metadata_key) -> int:
         handshake_port = getattr(rank_metadata, "handshake_port", 0)

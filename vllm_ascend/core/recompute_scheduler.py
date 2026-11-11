@@ -606,6 +606,11 @@ class RecomputeScheduler(Scheduler):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
+                        params = request.kv_transfer_params or {}
+                        if params.get("do_remote_prefill"):
+                            request.prefill_stats.num_cached_tokens = (
+                                params.get("remote_num_cached_tokens", 0)
+                            )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
