@@ -28,6 +28,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
@@ -119,6 +120,8 @@ def make_worker(
     layer_offset=0,
     pp_partition=None,
     cache_block_size=16,
+    use_recoverssm=False,
+    mamba_copy_funcs=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -173,6 +176,15 @@ def make_worker(
     config.cache_config.block_size = cache_block_size
     config.cache_config.prefix_match_unit = prefix_match_unit
     config.cache_config.prefix_cache_retention_interval = None
+    config.cache_config.use_kda_recoverssm = use_recoverssm
+    if use_recoverssm:
+        model_cls = start_patch(test, f"{module}.get_model_cls").return_value
+        if mamba_copy_funcs is None:
+            model_cls.get_mamba_state_copy_funcs.side_effect = lambda mamba_types: {
+                backend: MambaStateCopyFuncCalculator.kda_state_copy_func() for backend in mamba_types
+            }
+        else:
+            model_cls.get_mamba_state_copy_funcs.return_value = mamba_copy_funcs
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
@@ -181,6 +193,79 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
+        for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
+            with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
+                worker = make_worker(
+                    self,
+                    use_layerwise=True,
+                    use_mla=True,
+                    extra_config={"backend": "memcache"},
+                    tp_size=4,
+                    tp_rank=tp_rank,
+                    pcp_size=2,
+                    pcp_rank=1,
+                    dcp_size=dcp_size,
+                )
+                worker.dcp_rank = dcp_size - 1
+                self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_non_align_sharded_mamba_save_ownership_respects_write_role(self):
+        spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")
+        plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.attn"], spec)])
+        for tp_size, tp_rank, pcp_size, pcp_rank in ((2, 1, 1, 0), (1, 0, 2, 1)):
+            worker = make_worker(
+                self,
+                kv_cache_config=plan,
+                num_layers=1,
+                use_layerwise=True,
+                use_mla=True,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
+            )
+            self.assertFalse(worker.group_uses_align_state[0])
+            for kv_role, consumer_is_to_put, expected in (
+                ("kv_producer", False, True),
+                ("kv_both", False, True),
+                ("kv_consumer", False, False),
+                ("kv_consumer", True, True),
+            ):
+                with self.subTest(tp_rank=tp_rank, pcp_rank=pcp_rank, role=kv_role, put=consumer_is_to_put):
+                    worker.kv_role = kv_role
+                    worker.consumer_is_to_put = consumer_is_to_put
+                    self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_single_mamba_group_uses_pcp_state_shards(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.attn"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((8,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ]
+        )
+        for use_layerwise in (False, True):
+            with self.subTest(use_layerwise=use_layerwise):
+                worker = make_worker(
+                    self,
+                    kv_cache_config=plan,
+                    num_layers=1,
+                    use_layerwise=use_layerwise,
+                    pcp_size=2,
+                    pcp_rank=1,
+                )
+                self.assertFalse(worker.use_hybrid)
+                self.assertEqual(worker.sharded_mamba_group_ids, {0})
+                self.assertEqual(worker.metadata[0].head_or_tp_rank, 0 if use_layerwise else 1)
+                self.assertEqual(worker.get_group_tp_size(0), 2)
+
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
         draft_names = [f"draft.layers.{index}.attn" for index in range(4, 6)]
