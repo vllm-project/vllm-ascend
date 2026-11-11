@@ -117,11 +117,12 @@ runtime pass records. Do not change them solely to match an unintended default.
 
 ## Compatibility and limits
 
-The renderer does not export a shared installation resolver yet. The adapter
-guards the relevant JSX installation-selection blocks with fingerprints.
-Unrelated renderer commits are accepted; a change to those blocks fails with
-an adapter-review diagnostic. Review the UI behavior and tests before updating
-fingerprints. Other command/assembly APIs are exercised by integration tests.
+Installation checks reuse the renderer's exported `resolveInstall`,
+`hardwareInstall`, `hwPipOverride`, `isPipInstallAvailable` and
+`computeDockerMeta` helpers. This follows variant and hardware installation
+precedence without depending on JSX text fingerprints. Missing shared APIs
+fail with an actionable compatibility diagnostic; integration tests cover
+the effective installation and command/assembly behavior against renderer main.
 
 Coverage is Huawei overlays, baseline preset, features disabled, Python
 frontend requested, default PD connector/router, and minimum multi-node topology.
