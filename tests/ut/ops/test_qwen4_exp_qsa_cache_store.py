@@ -22,26 +22,28 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import qsa_store_cache_rows
 
 blocks = 5
 page_size = 8
+num_heads = 2
 width = 128
 block_gap = 37
-block_stride = page_size * width + block_gap
-storage_size = (blocks - 1) * block_stride + page_size * width
+token_stride = num_heads * width
+block_stride = page_size * token_stride + block_gap
+storage_size = (blocks - 1) * block_stride + page_size * token_stride
 
 backing = torch.full(
     (storage_size,), -7, dtype=torch.bfloat16, device="npu"
 )
 cache = torch.as_strided(
     backing,
-    size=(blocks, page_size, 1, width),
-    stride=(block_stride, width, width, 1),
+    size=(blocks, page_size, num_heads, width),
+    stride=(block_stride, token_stride, width, 1),
 )
 capacity = blocks * page_size
 slot_values = [0, page_size - 1, page_size, capacity - 1, -1, capacity, 2**35]
 slots = torch.tensor(slot_values, dtype=torch.int64, device="npu")
 rows = (
-    torch.arange(len(slot_values) * width, dtype=torch.int32)
+    torch.arange(len(slot_values) * num_heads * width, dtype=torch.int32)
     .remainder(97)
-    .reshape(len(slot_values), 1, width)
+    .reshape(len(slot_values), num_heads, width)
     .to(dtype=torch.bfloat16, device="npu")
 )
 
@@ -55,17 +57,18 @@ expected = before.clone()
 for row, slot in enumerate(slot_values):
     if 0 <= slot < capacity:
         block, token = divmod(slot, page_size)
-        start = block * block_stride + token * width
-        expected[start : start + width] = rows_cpu[row, 0]
+        for head in range(num_heads):
+            start = block * block_stride + token * token_stride + head * width
+            expected[start : start + width] = rows_cpu[row, head]
 
-assert cache.stride() == (block_stride, width, width, 1)
+assert cache.stride() == (block_stride, token_stride, width, 1)
 assert torch.equal(actual, expected)
 print("CHILD-OK")
 """
 
 
-def test_qsa_store_invalid_slots_stay_in_bounds_for_strided_cache():
-    """Masked invalid slots must still use an in-bounds physical address."""
+def test_qsa_store_invalid_slots_stay_in_bounds_for_strided_multihead_cache():
+    """Store all KV heads while masked slots stay in physical bounds."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
