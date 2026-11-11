@@ -12,14 +12,14 @@ from vllm.logger import logger
 @cache
 def get_selective_lim_library():
     path = os.environ.get("VLLM_ASCEND_SELECTIVE_LIM_LIBRARY")
-    return ctypes.CDLL(path) if path else None
+    if not path:
+        raise RuntimeError("Selective KV offload requires VLLM_ASCEND_SELECTIVE_LIM_LIBRARY for LIM and SDMA")
+    return ctypes.CDLL(path)
 
 
 @cache
 def get_selective_lim_launcher():
     library = get_selective_lim_library()
-    if library is None:
-        return None
     launch = library.aclrtlaunch_selective_lim_topk
     launch.argtypes = (
         [ctypes.c_uint32, ctypes.c_void_p] + [ctypes.c_void_p] * 11 + [ctypes.c_int] * 9 + [ctypes.c_uint64] * 4

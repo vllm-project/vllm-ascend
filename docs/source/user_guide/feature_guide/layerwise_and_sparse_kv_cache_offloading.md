@@ -200,6 +200,8 @@ export VLLM_ASCEND_SELECTIVE_LIM_LIBRARY="$PWD/build/selective-lim/lib/libselect
 ```
 
 Export the library path in every Decode worker's environment before startup.
+Selective offload requires this library; it does not fall back to tensor planning
+or AIV Host transfers when the library is missing.
 The current kernel supports `TopK <= hot capacity <= 2048`. It assigns each
 captured request row to an independent vector-core owner. The owner retains cached
 GM reads for TopK and cache state, and publishes indices, cache updates and

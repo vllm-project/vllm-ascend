@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,6 +9,20 @@ from unittest.mock import patch
 import torch
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import selective_sdma
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_lim import get_selective_lim_library
+
+
+class TestSelectiveLIMLibrary(unittest.TestCase):
+    def test_missing_library_fails_instead_of_using_tensor_fallback(self):
+        get_selective_lim_library.cache_clear()
+        try:
+            with (
+                patch.dict(os.environ, {"VLLM_ASCEND_SELECTIVE_LIM_LIBRARY": ""}),
+                self.assertRaisesRegex(RuntimeError, "VLLM_ASCEND_SELECTIVE_LIM_LIBRARY"),
+            ):
+                get_selective_lim_library()
+        finally:
+            get_selective_lim_library.cache_clear()
 
 
 class TestSharedSDMAPrefetch(unittest.TestCase):

@@ -106,28 +106,6 @@ def _sparse_kv_ops():
     return _SPARSE_KV_OFFLOAD_OPS
 
 
-def plan_selective_hot_slots(keys, previous_request, request, source_slots, valid, lookup, slot_ids):
-    """Keep selected resident rows and assign misses to unselected slots."""
-    capacity = keys.shape[-1] - 1  # Last entry in each row absorbs invalid selections.
-    if capacity < source_slots.shape[-1]:
-        raise ValueError("Selective hot capacity must cover every TopK entry")
-    resident = torch.where(previous_request == request, keys[..., :capacity], -1)
-    sentinel = lookup.shape[-1] - 1
-    lookup.scatter_(-1, torch.where(resident >= 0, resident, sentinel), slot_ids.expand_as(resident))
-    hit_slots = lookup.gather(-1, torch.where(valid, source_slots, sentinel)).to(torch.int64)
-    # Entries left by an earlier layer or request are hits only if the current slot agrees.
-    hits = valid & (resident.gather(-1, hit_slots) == source_slots)
-    used = torch.zeros_like(keys)
-    used.scatter_(-1, torch.where(hits, hit_slots, capacity), 1)
-    free = torch.argsort((used[..., :capacity] * 2 + (resident >= 0).to(torch.int64)).float())
-    misses = valid & ~hits
-    miss_positions = (misses.to(torch.int64).cumsum(-1) - 1).clamp_min(0)
-    slots = torch.where(hits, hit_slots, free.gather(-1, miss_positions))
-    updated = torch.cat((resident, keys[..., -1:]), dim=-1)
-    updated.scatter_(-1, torch.where(valid, slots, capacity), torch.where(valid, source_slots, -1))
-    return slots, misses, updated
-
-
 def allocate_kv_offload_topk_buffer_pair(
     vllm_config: VllmConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
@@ -203,7 +181,7 @@ def get_selective_sdma_device_memory_bytes(
     vllm_config: VllmConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
 ) -> int:
-    if not sparse_kv_offload_config.selective_offload or get_selective_lim_library() is None:
+    if not sparse_kv_offload_config.selective_offload:
         return 0
     decode_width = 1
     if vllm_config.speculative_config is not None:
@@ -879,7 +857,6 @@ class SparseKVOffloadManager:
             self.selective_physical = torch.empty(
                 (self.num_layers, rows, 1, self.topk), dtype=torch.int32, device=device
             )
-            self.selective_current_slots = torch.empty((self.num_layers, rows, 1), dtype=torch.int64, device=device)
             self.selective_prefetch_topk = torch.empty((rows, self.topk), dtype=torch.int64, device=device)
             self.selective_prefetch_stream = torch_npu.npu.Stream(device=device)
             self.selective_prefetch_ready = [torch_npu.npu.Event() for _ in self.offload_layer_names]
@@ -901,20 +878,11 @@ class SparseKVOffloadManager:
                 .view(rows, row_blocks)[:, :hot_blocks]
                 .contiguous()
             )
-            self.selective_hot_offsets = (
-                torch.arange(rows, dtype=torch.int64, device=device).view(-1, 1) * self.selective_row_stride
-            )
-            self.selective_hot_len = torch.full((rows,), self.topk_buffer_size, dtype=torch.int32, device=device)
-            self.selective_tail_len = torch.full_like(self.selective_hot_len, self.selective_row_stride)
+            self.selective_tail_len = torch.full((rows,), self.selective_row_stride, dtype=torch.int32, device=device)
             self.selective_hot_keys = [
                 torch.full((rows, self.topk_buffer_size + 1), -1, dtype=torch.int64, device=device)
                 for _ in self.offload_layer_names
             ]
-            # The main and prefetch streams can plan different layers concurrently.
-            lookup_shape = (rows, self.kv_cache_config.num_blocks * self.block_size + 1)
-            self.selective_hot_lookup = torch.zeros(lookup_shape, dtype=torch.int32, device=device)
-            self.selective_prefetch_lookup = torch.zeros_like(self.selective_hot_lookup)
-            self.selective_slot_ids = torch.arange(self.topk_buffer_size, dtype=torch.int32, device=device)
             self.selective_hot_requests = [
                 torch.full((rows, 1), -1, dtype=torch.int64, device=device) for _ in self.offload_layer_names
             ]
@@ -1006,8 +974,8 @@ class SparseKVOffloadManager:
         self.selective_sdma_prefetch = None
         self.selective_sdma_tail = None
         self.selective_sdma_prefill = None
-        library = get_selective_lim_library() if selective else None
-        if library is not None:
+        if selective:
+            library = get_selective_lim_library()
             rows = self.topk_buffers_k[0].shape[0]
             self.selective_host_gather = HostGatherCoordinator(
                 self.tp_group,
@@ -1298,10 +1266,7 @@ class SparseKVOffloadManager:
 
     def prefetch_selective_kv(self, rows, sources, destinations, lengths) -> None:
         count = self.selective_copy_counts[rows - 1]
-        if self.selective_sdma_prefetch is None:
-            self.copy_sfa_kv(sources, destinations, lengths, count)
-        else:
-            self.selective_sdma_prefetch.transfer(self, sources, destinations, lengths, count, to_device=True)
+        self.selective_sdma_prefetch.transfer(self, sources, destinations, lengths, count, to_device=True)
 
     def copy_sfa_kv(self, sources, destinations, lengths, count) -> None:
         """Enqueue bounded descriptor copies on the current compute stream."""

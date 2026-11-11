@@ -455,42 +455,6 @@ if __name__ == "__main__":
 
 
 class TestHostKVRegistration(unittest.TestCase):
-    def test_selective_hot_slots_reuse_and_request_isolation(self):
-        torch = manager_module.torch
-        keys = torch.full((5,), -1, dtype=torch.int64)
-        previous = torch.tensor([-1])
-        request = torch.tensor([10])
-        cache = torch.full((4,), -1, dtype=torch.int64)
-        lookup = torch.zeros(11, dtype=torch.int32)
-        slot_ids = torch.arange(4, dtype=torch.int32)
-        for selection, expected_misses in (([2, 4, 6], 3), ([6, 2, 8], 1), ([8, 8, -1], 0), ([4, 0, -1], 1)):
-            sources = torch.tensor(selection)
-            valid = sources >= 0
-            slots, misses, updated = manager_module.plan_selective_hot_slots(
-                keys,
-                previous,
-                request,
-                sources,
-                valid,
-                lookup,
-                slot_ids,
-            )
-            self.assertEqual(int(misses.sum()), expected_misses)
-            cache[slots[misses]] = sources[misses]
-            torch.testing.assert_close(cache[slots[valid]], sources[valid])
-            keys.copy_(updated)
-            previous.copy_(request)
-        _, misses, _ = manager_module.plan_selective_hot_slots(
-            keys,
-            previous,
-            torch.tensor([11]),
-            torch.tensor([8, 2, 6]),
-            torch.ones(3, dtype=torch.bool),
-            lookup,
-            slot_ids,
-        )
-        self.assertEqual(int(misses.sum()), 3)
-
     def test_selective_registration_keeps_only_shared_main_kv(self):
         names = [f"model.layers.{i}.self_attn" for i in range(7)]
         shared = set(names[3:6])
