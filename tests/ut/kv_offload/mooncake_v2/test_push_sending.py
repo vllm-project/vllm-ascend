@@ -44,6 +44,7 @@ def descriptor():
         engine_id="p",
         te_rpc_port=1,
         block_size=4,
+        cp_kv_cache_interleave_size=4,
         num_blocks=100,
         layer_names=["model.layers.0.attn"],
         layer_block_sizes=[4],
@@ -53,6 +54,7 @@ def descriptor():
         block_lens=[[32]],
         block_shapes=[[(2, 4, 2)]],
         block_size_scales=[[1]],
+        indexer_replication_sizes=[0],
     )
 
 
@@ -69,6 +71,7 @@ def remote_metadata(pcp_size=1, tp_size=1, heads=2):
         metadata_by_pp_rank={
             0: MooncakePPTransferMetadata(
                 block_size=4,
+                cp_kv_cache_interleave_size=4,
                 num_blocks=100,
                 layer_names=["model.layers.0.attn"],
                 layer_block_sizes=[4],
@@ -77,6 +80,7 @@ def remote_metadata(pcp_size=1, tp_size=1, heads=2):
                 block_lens=[[heads * 16]],
                 block_shapes=[[(heads, 4, 2)]],
                 block_size_scales=[[1]],
+                indexer_replication_sizes=[0],
                 metadata_by_pcp_rank={
                     pcp: MooncakePCPTransferMetadata(
                         {tp: MooncakeTPTransferMetadata(2, [0], [[10000]], "127.0.0.1", 9001) for tp in range(tp_size)}
@@ -177,6 +181,7 @@ def worker(monkeypatch, request):
                 block_lens=[[32], [32], [32]],
                 block_shapes=[[(2, 4, 2)]] * 3,
                 block_size_scales=[[1], [1], [1]],
+                indexer_replication_sizes=[0, 0, 0],
             )
         self.kv_cache_specs = [spec]
         self.layer_name_to_spec_index = {name: 0 for name in self.transfer_metadata.layer_names}
@@ -632,6 +637,7 @@ def multi_cache_remote(worker):
         block_lens=[[32], [32], [32]],
         block_shapes=[[(2, 4, 2)]] * 3,
         block_size_scales=[[1], [1], [1]],
+        indexer_replication_sizes=[0, 0, 0],
         metadata_by_pcp_rank={
             0: MooncakePCPTransferMetadata(
                 {0: MooncakeTPTransferMetadata(2, [0, 1, 2], [[10000], [20000], [30000]], "127.0.0.1", 9001)}

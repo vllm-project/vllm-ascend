@@ -37,6 +37,7 @@ def workers():
             engine_id="d",
             te_rpc_port=9000 + pcp * 2 + tp,
             block_size=16,
+            cp_kv_cache_interleave_size=16,
             num_blocks=8,
             layer_names=[f"layer.{pp}"],
             layer_block_sizes=[16],
@@ -46,6 +47,7 @@ def workers():
             block_lens=[[128]],
             block_shapes=[[(16, 8)]],
             block_size_scales=[[1]],
+            indexer_replication_sizes=[0],
             local_ip=f"10.0.0.{pp + 1}",
             handshake_port=8000 + pcp * 2 + tp,
         )
