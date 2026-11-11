@@ -1,4 +1,4 @@
-pr: 20946
+pr: 21545
 entries:
   - category: feature
     text: Added Step-5 model support with compact CSA summary and request-private tail ring caches on Ascend.
