@@ -40,7 +40,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kpool_indexer
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -260,7 +260,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if not self._align_mode:
             return
         pcp_manager = getattr(self, "pcp_manager", None)
-        if pcp_manager is not None and model_uses_kpool_indexer(self.vllm_config.model_config):
+        if pcp_manager is not None and (
+            model_uses_kpool_indexer(self.vllm_config.model_config)
+            or model_uses_kimi_kda(self.vllm_config.model_config)
+        ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
             input_batch = pcp_context.global_batch
             block_tables = pcp_context.global_block_tables
@@ -345,47 +348,52 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         pcp_context = None
         if (
             pcp_manager is not None
-            and model_uses_kpool_indexer(self.vllm_config.model_config)
+            and (
+                model_uses_kpool_indexer(self.vllm_config.model_config)
+                or model_uses_kimi_kda(self.vllm_config.model_config)
+            )
             and pcp_manager.is_target_attn_groups(attn_groups)
         ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
-        if pcp_context is not None and not input_batch.is_dummy:
-            # PCP turns one prefill request into two rank-local segments. The
-            # recurrent state must advance once in original request order.
-            local_groups = [
-                [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
-            mamba_groups = [
-                [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
-            local_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-                self,
-                input_batch,
-                cudagraph_mode,
-                block_tables,
-                slot_mappings,
-                local_groups,
-                kv_cache_config,
-                for_capture,
-                use_pcp_padding=True,
-                pcp_context=pcp_context,
-            )
-            global_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-                self,
-                pcp_context.global_batch,
-                cudagraph_mode,
-                pcp_context.global_block_tables,
-                pcp_context.global_slot_mappings,
-                mamba_groups,
-                kv_cache_config,
-                for_capture,
-                use_pcp_padding=False,
-                pcp_context=pcp_context,
-            )
-            local_metadata.update(global_metadata)
-            self.attn_metadata = local_metadata
-        else:
-            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+
+        def build_metadata(**kwargs):
+            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+                # Recurrent state uses global request order; SFA keeps local queries.
+                local_groups = [
+                    [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
+                mamba_groups = [
+                    [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
+                ]
+                metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                    self,
+                    input_batch,
+                    cudagraph_mode,
+                    block_tables,
+                    slot_mappings,
+                    local_groups,
+                    kv_cache_config,
+                    for_capture,
+                    use_pcp_padding=True,
+                    pcp_context=pcp_context,
+                )
+                metadata.update(
+                    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                        self,
+                        pcp_context.global_batch,
+                        cudagraph_mode,
+                        pcp_context.global_block_tables,
+                        pcp_context.global_slot_mappings,
+                        mamba_groups,
+                        kv_cache_config,
+                        for_capture,
+                        use_pcp_padding=False,
+                        pcp_context=pcp_context,
+                    )
+                )
+                return metadata
+            return AscendMambaHybridModelState._build_attn_metadata_for_batch(
                 self,
                 input_batch,
                 cudagraph_mode,
@@ -397,6 +405,18 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                 use_pcp_padding=pcp_context is not None,
                 pcp_context=pcp_context,
             )
+
+        device_metadata = getattr(self, "device_metadata", None)
+        if device_metadata is not None:
+            # Real, capture and idle batches share one producer lifecycle.
+            self.attn_metadata = device_metadata.run_build(
+                build_metadata,
+                attn_groups=attn_groups,
+                full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+                for_cudagraph_capture=for_capture,
+            )
+        else:
+            self.attn_metadata = build_metadata()
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata
@@ -508,5 +528,6 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
             pcp_context=pcp_context,
+            full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )

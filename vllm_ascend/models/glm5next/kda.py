@@ -35,7 +35,6 @@ from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
-from vllm_ascend.utils import vllm_version_is
 
 
 class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
@@ -217,8 +216,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_recoverssm:
-            if vllm_version_is("0.32.0"):
-                return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, self.model_config.dtype)
             # vLLM main moved KDA RecoverSSM records out of the KV cache and
             # removed the calculator helper, but Ascend still packs the
             # float32 correction and activation key/gate records into the page.
@@ -240,10 +237,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
         if self.use_recoverssm:
-            if vllm_version_is("0.32.0"):
-                return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                    shapes, self.num_heads, self.head_dim, self.tp_size, self.num_spec + 1
-                )
             # One checkpoint per request plus compact update records, matching
             # the layout the Ascend commit context allocates from.
             local_num_heads = divide(self.num_heads, self.tp_size)

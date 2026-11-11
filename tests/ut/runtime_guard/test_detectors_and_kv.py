@@ -125,24 +125,18 @@ def test_token_repeat_detector_hit_and_miss(tmp_path: Path):
 
     det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
     det.refresh_from_config()
-    io = RequestIoSnapshotManager.get()
 
     miss: list = []
     for tid in range(10, 20):
-        # Simulate a new engine wave so same-wave append dedupe does not
-        # swallow consecutive single-token steps.
-        io.clear_wave_cache()
         miss = det.check_all([[tid]], req_ids=["uniq"])
     assert miss == []
 
     RequestGuardStore.reset_for_tests()
     RequestIoSnapshotManager.reset_for_tests()
     det.clear_finished("uniq")
-    io = RequestIoSnapshotManager.get()
     # Same token repeatedly → high repeat_sum after warmup.
     hit: list = []
     for _ in range(12):
-        io.clear_wave_cache()
         alerts = det.check_all([[7]], req_ids=["rep"])
         if alerts:
             hit = alerts
@@ -153,24 +147,21 @@ def test_token_repeat_detector_hit_and_miss(tmp_path: Path):
     assert hit[0].is_ill is True
 
     # Already alerted: further repeats do not re-emit.
-    io.clear_wave_cache()
     assert det.check_all([[7]], req_ids=["rep"]) == []
 
     RequestGuardStore.reset_for_tests()
     RequestIoSnapshotManager.reset_for_tests()
     tr["enabled"] = False
     det.refresh_from_config()
-    io = RequestIoSnapshotManager.get()
     for _ in range(20):
-        io.clear_wave_cache()
         assert det.check_all([[7]], req_ids=["off"]) == []
 
 
-def test_w1_1_r04_same_wave_double_fold_keeps_seen_eq_oc(tmp_path: Path):
-    """W1-1/R-04: same-wave duplicate after-sample must not inflate content_tokens_seen.
+def test_w1_1_r04_second_append_is_kept_and_seen_follows_store(tmp_path: Path):
+    """A second append of the same row is another token.
 
-    Store append dedupes identical chunks; folding must follow Store only so
-    ``content_tokens_seen`` stays aligned with ``output_token_count``.
+    MR v2 writes each step once. Folding follows Store, so
+    ``content_tokens_seen`` stays equal to ``output_token_count``.
     """
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
@@ -211,7 +202,7 @@ def test_w1_1_r04_same_wave_double_fold_keeps_seen_eq_oc(tmp_path: Path):
     oc = len(st.output_token_ids)
     seen = det._states[rid].content_tokens_seen
     snap = io.snapshot(None, rid, None, include_token_ids=False, use_cache=False)
-    assert oc == 10
+    assert oc == 15
     assert seen == oc
     assert snap.output_token_count == oc
 
@@ -245,14 +236,14 @@ def test_w1_1_run_after_sample_cpu_folds_store_only(tmp_path: Path):
         skip_req_ids=None,
     )
     mgr.run_after_sample_cpu(snap)
-    # Same-wave duplicate: Store skips append; CPU job must not double-fold.
+    # A second append is kept. The CPU path folds Store only, so seen matches.
     io.append_batch([rid], [[7]])
     mgr.run_after_sample_cpu(snap)
 
     st = RequestGuardStore.get().get_state(rid)
     assert st is not None
-    assert len(st.output_token_ids) == 1
-    assert mgr.get("token_repeat")._states[rid].content_tokens_seen == 1  # type: ignore[attr-defined]
+    assert len(st.output_token_ids) == 2
+    assert mgr.get("token_repeat")._states[rid].content_tokens_seen == 2  # type: ignore[attr-defined]
 
 
 def test_slice_blocks_selects_requested_and_empty():

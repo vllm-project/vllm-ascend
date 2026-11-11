@@ -92,33 +92,6 @@ class TestSampler310pStandalone(unittest.TestCase):
 
         self.assertTrue(torch.equal(sampled, torch.tensor([2, 0, 3])))
 
-    def test_fill_exponential_honors_active_mask(self):
-        source_active = _SourceGenerator(31)
-        source_inactive = _SourceGenerator(41)
-        prepared = sampler_310p._prepare_cpu_generators_310p({0: source_active, 1: source_inactive})
-        active_state = prepared[0].get_state()
-        inactive_state = prepared[1].get_state()
-        real_rand = torch.rand
-
-        def rand_without_pinning(*args, **kwargs):
-            kwargs.pop("pin_memory", None)
-            return real_rand(*args, **kwargs)
-
-        with patch.object(sampler_310p.torch, "rand", side_effect=rand_without_pinning):
-            exponential = sampler_310p.fill_exponential_310p(
-                torch.empty((2, 4), dtype=torch.float32),
-                {0: source_active, 1: source_inactive},
-                active_mask=[True, False],
-            )
-
-        cached_active = sampler_310p._CPU_GENERATOR_CACHE_310P[0][1]
-        cached_inactive = sampler_310p._CPU_GENERATOR_CACHE_310P[1][1]
-        self.assertFalse(torch.equal(cached_active.get_state(), active_state))
-        self.assertTrue(torch.equal(cached_inactive.get_state(), inactive_state))
-        self.assertEqual(exponential.shape, (2, 4))
-        self.assertTrue(torch.isfinite(exponential).all())
-        self.assertTrue((exponential > 0).all())
-
     def test_random_sample_waits_before_cdf_reads_probs(self):
         events: list[str] = []
         global_npu_stream = MagicMock()

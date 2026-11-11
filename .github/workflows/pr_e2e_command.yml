@@ -45,8 +45,9 @@ jobs:
       has_tests: ${{ steps.groups.outputs.has_tests }}
       csrc_cache_target_ids: ${{ steps.groups.outputs.csrc_cache_target_ids }}
       notify_comment_id: ${{ steps.notify.outputs.comment-id }}
-      main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
+      # JSON array of the vLLM refs to test, resolved from the PR base branch:
+      # both refs on main/dev, the release tag alone on releases/v*.
+      vllm_versions: ${{ steps.vllm.outputs.vllm_versions }}
     steps:
       - name: Install system dependencies
         run: |
@@ -117,21 +118,34 @@ jobs:
 
       - name: Read verified vLLM refs
         id: vllm
+        env:
+          # This workflow runs from the default branch, so the target branch of
+          # the PR being tested must come from the dispatch payload.
+          BASE_REF: ${{ github.event.client_payload.pull_request.base.ref }}
         run: |
-          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
-          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
-            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
-            exit 1
-          }
           [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
             echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
             exit 1
           }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${BASE_REF}" == releases/* ]]; then
+            # Release branches are frozen: only the matched vLLM release tag is
+            # supported. vllm-main-verified.commit is not read on purpose.
+            vllm_versions="[\"${release_tag}\"]"
+          else
+            main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+            [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+              echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+              exit 1
+            }
+            echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
+            vllm_versions="[\"${main_commit}\",\"${release_tag}\"]"
+          fi
+
+          echo "vllm_versions=${vllm_versions}" >> "$GITHUB_OUTPUT"
+          echo "vLLM refs (base_ref=${BASE_REF:-main}): ${vllm_versions}"
 
       - name: Resolve PR info and test names
         id: resolve
@@ -200,9 +214,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version:
-          - ${{ needs.e2e-test.outputs.main_commit }}
-          - ${{ needs.e2e-test.outputs.release_tag }}
+        vllm_version: ${{ fromJSON(needs.e2e-test.outputs.vllm_versions) }}
     needs: [e2e-test, ensure-csrc-cache]
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml

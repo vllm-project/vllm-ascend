@@ -27,7 +27,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -42,7 +41,9 @@ def _make_runner(need_timing: bool = True):
         kvpp_config=SimpleNamespace(size=1),
     )
     runner.vllm_config = SimpleNamespace(
-        kv_transfer_config=None, parallel_config=SimpleNamespace(prefill_context_parallel_size=1)
+        kv_transfer_config=None,
+        use_v2_model_runner=False,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
     )
     runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(
@@ -55,6 +56,7 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
     runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
+    runner.dcp_size = 1
     runner.use_pp = False
     runner.is_last_pp_rank = False
     runner.is_pooling_model = False
@@ -91,8 +93,14 @@ def _make_runner(need_timing: bool = True):
         (False, True, True),
     ],
 )
-def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, profile, fail):
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("base_can_skip", [False, True])
+def test_metadata_and_dp_skip_scopes_coexist_and_retire(
+    monkeypatch, dummy, profile, fail, lmhead_tp, dcp_size, base_can_skip
+):
     runner = _make_runner(need_timing=False)
+    runner.dcp_size = dcp_size
     scheduler_output = SimpleNamespace(total_num_scheduled_tokens=0, num_scheduled_tokens={})
     active = set()
     events: list[str | tuple[str, bool]] = []
@@ -107,7 +115,9 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
 
     module = "vllm_ascend.worker.v2.model_runner."
     monkeypatch.setattr(module + "has_kv_transfer_group", lambda: False)
-    monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: True)
+    monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: base_can_skip)
+    monkeypatch.setattr(module + "lmhead_tp_enable", lambda: lmhead_tp)
+    monkeypatch.setattr(module + "requires_lmhead_dp_sync", lambda _config: lmhead_tp and dcp_size == 1)
     monkeypatch.setattr(module + "skip_dp_coordination", lambda: scope("dp_skip"))
     runner.model_state.finish_execution.side_effect = lambda *, failed: events.append(("finish", failed))
 
@@ -119,7 +129,8 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
     monkeypatch.setattr(runner, "_maybe_send_draft_kv", draft_sender)
 
     def forward(_self, _output, **kwargs):
-        assert active == {"dp_skip"}
+        expected_skip = base_can_skip and (not lmhead_tp or dcp_size > 1)
+        assert active == ({"dp_skip"} if expected_skip else set())
         assert kwargs["dummy_run"] is dummy
         assert kwargs["is_profile"] is profile
         events.append("forward")
@@ -488,7 +499,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the whole descriptor through the retained
-    # PCPManager API (vLLM #57980), also retained in v0.32.0.
+    # PCPManager API (vLLM #57980), also retained in v0.33.0.
     assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
@@ -960,7 +971,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
     # execute_model stages dummy inputs before preparing attention metadata.
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_for_capture_or_profile"
     staged = getattr(manager, stage_name)(dummy)
     block_tables, slots = runner.prepare_dummy_attn(staged)
 
@@ -2279,3 +2290,60 @@ def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
     assert args[5] == [6.0, 7.0, 9.0]
     np.testing.assert_allclose(args[6], [0.9, 2.12])
     np.testing.assert_allclose(args[7], [0.7, 0.8])
+
+
+@pytest.mark.parametrize("release_lane", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("tokens,expected", [(None, 16), ([4, 8], 8), ([32, 64], 16)])
+def test_lmhead_padding_reads_versioned_dp_sync_state(release_lane, dcp_size, tokens, expected):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.max_num_reqs = 16
+    runner.decode_query_len = 1
+    runner.dcp_size = dcp_size
+    dp_sync = None if tokens is None else SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens))
+    field = "dp_sync" if release_lane else "dp_sync_state"
+    state = SimpleNamespace(**{field: dp_sync})
+    with patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=release_lane):
+        assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
+        assert runner._get_lmhead_pad_size(None) == 16
+
+
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+@pytest.mark.parametrize("first_call_fails", [False, True])
+def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp, first_call_fails):
+    runner = _make_runner(need_timing=False)
+    runner.pcp_manager = None
+    runner.max_num_reqs = 16
+    runner.decode_query_len = 1
+    runner.dcp_size = 1
+    runner._lmhead_pad_size = 123  # Must never leak into this step's sampling.
+    observed = []
+
+    def parent_sample_tokens(self, grammar_output):
+        # Upstream consumes the state before invoking sample(). The cached
+        # padding must survive that consumption and refresh on the next step.
+        self.execute_model_state = None
+        observed.append(self._lmhead_pad_size)
+        if first_call_fails and len(observed) == 1:
+            raise RuntimeError("sampling failed")
+        return "sampled"
+
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(module + "lmhead_tp_enable", lambda: lmhead_tp)
+    monkeypatch.setattr(module + "vllm_version_is", lambda _version: True)
+    monkeypatch.setattr(GPUModelRunner, "sample_tokens", parent_sample_tokens)
+
+    for step, tokens in enumerate(([2, 4], [8, 6], None)):
+        runner.execute_model_state = (
+            SimpleNamespace(dp_sync=SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens)))
+            if tokens is not None
+            else None
+        )
+        if first_call_fails and step == 0:
+            with pytest.raises(RuntimeError, match="sampling failed"):
+                runner.sample_tokens(None)
+        else:
+            assert runner.sample_tokens(None) == "sampled"
+            assert runner._lmhead_pad_size is None
+
+    assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
