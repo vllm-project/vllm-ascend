@@ -1,0 +1,182 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Doc Quality Review - evaluate documentation changes on PRs touching
+# docs/source markdown files, then report findings as a sticky summary
+# comment plus inline review comments anchored on diff lines.
+#
+# Evaluation rules come from the doc-quality skill repository (cloned at
+# runtime, always latest); orchestration scripts live in-repo under
+# .github/workflows/scripts/doc_quality/ (same layout as po_translate.py).
+#
+# Enable: set repository variable DOC_QUALITY_ENABLED=true (same pattern
+# as RECIPES_PREVIEW_ENABLED in recipes-preview-comment.yml).
+#
+# Triggers:
+#   - same-repo PR touching docs/source/**/*.md: automatic
+#   - fork PR: maintainers add the `doc-eval` label (pull_request_target
+#     gated; evaluation code comes from the skill repo and the base
+#     branch, no code from the PR is ever executed)
+#   - comment `/doc-eval` on a PR (OWNER/MEMBER/COLLABORATOR): re-run
+#   - workflow_dispatch with pr_number input: manual re-run
+#
+# LLM credentials: reuses DEEPSEEK_API_KEY already configured for
+# schedule_doc_translate.yaml; DOC_EVAL_* secrets may point to any
+# OpenAI-compatible endpoint instead.
+name: Doc Quality Review
+
+on:
+  pull_request:
+    paths:
+      - 'docs/source/**/*.md'
+  pull_request_target:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request number to evaluate'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: doc-quality-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  doc_quality:
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 35
+    if: >-
+      vars.DOC_QUALITY_ENABLED == 'true' &&
+      ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'pull_request_target' && github.event.label.name == 'doc-eval') ||
+       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, '/doc-eval') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+       (github.event_name == 'workflow_dispatch'))
+
+    env:
+      # Prefer DEEPSEEK_API_KEY already in the repo (shared with
+      # schedule_doc_translate.yaml); DOC_EVAL_* secrets override.
+      DOC_EVAL_BASE_URL: ${{ secrets.DOC_EVAL_BASE_URL || 'https://api.deepseek.com/v1' }}
+      DOC_EVAL_API_KEY: ${{ secrets.DOC_EVAL_API_KEY || secrets.DEEPSEEK_API_KEY }}
+      DOC_EVAL_MODEL: ${{ vars.DOC_EVAL_MODEL || 'deepseek-chat' }}
+      # Language of issue descriptions in bot comments: 'en' (default for
+      # this repo) or 'zh'; set vars.DOC_EVAL_LANG to override.
+      DOC_EVAL_LANG: ${{ vars.DOC_EVAL_LANG || 'en' }}
+      DOC_EVAL_MAX_FILES: ${{ vars.DOC_EVAL_MAX_FILES || '8' }}
+      # Bot identity: prefer the repo's PAT_TOKEN (vllm-ascend-ci account,
+      # same as Auto Doc Translate); fall back to github.token.
+      GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+
+    steps:
+      - name: Resolve PR number
+        id: pr
+        run: |
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request|pull_request_target) n=${{ github.event.pull_request.number }} ;;
+            issue_comment)                    n=${{ github.event.issue.number }} ;;
+            workflow_dispatch)                n=${{ inputs.pr_number }} ;;
+          esac
+          echo "pr=${n}" >> "$GITHUB_OUTPUT"
+
+      # Check out the PR head so issue line numbers match the permanent
+      # blob links in the report. Read-only use: no PR code is executed.
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.pr }}/head
+          fetch-depth: 0
+
+      - name: Clone doc-quality skill repo
+        # skills/ rules always come from upstream (fresh on every run,
+        # zero maintenance); DOC_QUALITY_REPO_URL/DOC_QUALITY_REPO_TOKEN
+        # may point the clone at a mirror or private fork of the rules.
+        env:
+          SKILL_URL_BASE: ${{ secrets.DOC_QUALITY_REPO_URL }}
+          SKILL_TOKEN: ${{ secrets.DOC_QUALITY_REPO_TOKEN }}
+        run: |
+          retry() {  # transient-failure guard: retry a command up to 3 times
+            for i in 1 2 3; do
+              if "$@"; then return 0; fi
+              [ "$i" -lt 3 ] && sleep $((i * 5))
+            done
+            return 1
+          }
+          auth_url() {  # inject oauth2 token for private repos
+            local url="$1" token="$2"
+            if [ -z "$token" ]; then echo "$url"; return; fi
+            local host path
+            host=$(echo "$url" | sed -E 's#https://([^/]+)/.*#\1#')
+            path=$(echo "$url" | sed -E "s#https://[^/]+/##; s#\.git\$##")
+            echo "https://oauth2:${token}@${host}/${path}.git"
+          }
+          URL=$(auth_url "${SKILL_URL_BASE:-https://gitcode.com/opencxd/doc-quality.git}" "$SKILL_TOKEN")
+          retry git clone --depth 1 "$URL" "$RUNNER_TEMP/skill"
+          echo "skill HEAD: $(git -C "$RUNNER_TEMP/skill" rev-parse --short HEAD)"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Install eval deps
+        run: |
+          python -m pip install --disable-pip-version-check --quiet openpyxl
+          LINK_SCRIPTS="$RUNNER_TEMP/skill/skills/01.评估标准/00.正确性/链接与导航/scripts"
+          npm ci --prefix "$LINK_SCRIPTS" \
+            || echo "DOC_EVAL_SKIP_LINK=1" >> "$GITHUB_ENV"
+
+      - name: Run doc evaluation
+        id: eval
+        run: |
+          gh pr diff --repo "$GITHUB_REPOSITORY" "${{ steps.pr.outputs.pr }}" \
+            --name-only > changed.txt
+          python "$GITHUB_WORKSPACE/.github/workflows/scripts/doc_quality/run_eval.py" \
+            --skill-root "$RUNNER_TEMP/skill" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --changed-file changed.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --head-sha "$(git rev-parse HEAD)" \
+            --pr "${{ steps.pr.outputs.pr }}" \
+            --out-dir "$RUNNER_TEMP/eval-out"
+
+      - name: Post PR comment
+        if: always() && steps.eval.outcome == 'success'
+        env:
+          DOC_EVAL_MAX_INLINE: ${{ vars.DOC_EVAL_MAX_INLINE || '10' }}
+        run: |
+          python "$GITHUB_WORKSPACE/.github/workflows/scripts/doc_quality/post_comment.py" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "${{ steps.pr.outputs.pr }}" \
+            --head-sha "$(git rev-parse HEAD)" \
+            --comment-file "$RUNNER_TEMP/eval-out/comment.md" \
+            --inline "$RUNNER_TEMP/eval-out/inline.json"
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doc-quality-report-pr-${{ steps.pr.outputs.pr }}
+          path: ${{ runner.temp }}/eval-out
+          retention-days: 30
+          if-no-files-found: ignore
