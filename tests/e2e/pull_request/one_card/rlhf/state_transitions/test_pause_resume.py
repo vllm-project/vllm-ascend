@@ -28,7 +28,7 @@ rlhf/api_router   : POST /pause  POST /resume   GET /is_paused
 import threading
 import time
 
-from tests.e2e.pull_request.one_card.rlhf.conftest import (
+from tests.e2e.common.rlhf.common import (
     gen,
     ok,
     pause,

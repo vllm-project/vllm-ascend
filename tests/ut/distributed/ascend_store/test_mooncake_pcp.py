@@ -15,7 +15,7 @@ from tests.ut.distributed.ascend_store import test_mooncake_hybrid as hybrid_tes
 from tests.ut.distributed.ascend_store import test_mooncake_pipeline as pipeline_tests
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 
 
 class TestMooncakePCP(unittest.TestCase):
@@ -97,8 +97,11 @@ class TestMooncakePCP(unittest.TestCase):
                         workers.append((worker, arrays, saved))
                 first = workers[0][0]
                 with (
-                    patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=None),
-                    patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
+                    patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
+                    patch(
+                        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                        "MooncakeBackend.create_scheduler_client"
+                    ),
                 ):
                     scheduler = create_kv_pool_scheduler(
                         first.vllm_config, use_layerwise=True, kv_cache_config=first.kv_cache_config

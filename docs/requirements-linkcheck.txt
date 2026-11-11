@@ -1,0 +1,5 @@
+# Standalone checker dependencies; no MkDocs theme, vLLM, or NPU runtime.
+httpx>=0.27,<1
+Markdown>=3.6,<4
+pymdown-extensions>=10,<11
+regex>=2024.5.15

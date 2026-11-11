@@ -39,7 +39,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -64,6 +63,8 @@ class AscendPCPAttentionContext:
     local_to_global_req_indices: tuple[int, ...] | None = None
     # Actual local tokens in the unpartitioned batch, excluding padding.
     local_token_indices: torch.Tensor | None = None
+    # Padded tensor width consumed by each rank's model forward.
+    local_num_tokens: int | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -117,7 +118,7 @@ class AscendPCPManager(PCPManager):
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
-            **({} if vllm_version_is("0.32.0") else {"moe_gathers_tokens": moe_gathers_tokens}),
+            moe_gathers_tokens=moe_gathers_tokens,
         )
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
@@ -370,45 +371,24 @@ class AscendPCPManager(PCPManager):
     # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
     # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
     # ``is_padding`` to the rows the MoE routes.
-    if vllm_version_is("0.32.0"):
 
-        def prepare_inputs_to_capture(
-            self,
-            input_batch: AscendInputBatch,
-        ) -> AscendInputBatch:
-            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-            if not getattr(input_batch, "is_cpp_profile", False):
-                staged = super().prepare_inputs_to_capture(input_batch)
-                assert isinstance(staged, AscendInputBatch)
-                return staged
+    def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
+        self,
+        input_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+        if not getattr(input_batch, "is_cpp_profile", False):
+            staged = super().prepare_inputs_for_capture_or_profile(input_batch)
+            assert isinstance(staged, AscendInputBatch)
+            return staged
 
-            # The parent implementation only copies a dummy into PCP-local buffers.
-            # CPP instead supplies a global prompt, so use the real prefill splitter
-            # before those buffers are overwritten with the rank-local layout.
-            return self.partition_batch(
-                input_batch,
-                BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-            )
-
-    else:
-
-        def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
-            self,
-            input_batch: AscendInputBatch,
-        ) -> AscendInputBatch:
-            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-            if not getattr(input_batch, "is_cpp_profile", False):
-                staged = super().prepare_inputs_for_capture_or_profile(input_batch)
-                assert isinstance(staged, AscendInputBatch)
-                return staged
-
-            # The parent implementation only copies a dummy into PCP-local buffers.
-            # CPP instead supplies a global prompt, so use the real prefill splitter
-            # before those buffers are overwritten with the rank-local layout.
-            return self.partition_batch(
-                input_batch,
-                BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-            )
+        # The parent implementation only copies a dummy into PCP-local buffers.
+        # CPP instead supplies a global prompt, so use the real prefill splitter
+        # before those buffers are overwritten with the rank-local layout.
+        return self.partition_batch(
+            input_batch,
+            BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
+        )
 
     def _pad_hidden_restore_idx(self, global_batch: AscendInputBatch) -> None:
         """Extend restore indices to the global padded extent.
@@ -541,7 +521,8 @@ class AscendPCPManager(PCPManager):
         if not self.is_last_pp_rank:
             return hidden_states
 
-        restored_hidden_states = super().restore_hidden_states(hidden_states)
+        # PP and draft states can be strided views; HCCL requires dense inputs.
+        restored_hidden_states = super().restore_hidden_states(hidden_states.contiguous())
         if self._global_batch is None:
             return restored_hidden_states
 
@@ -608,8 +589,8 @@ class AscendPCPManager(PCPManager):
         return hidden_states, aux_hidden_states, global_batch
 
     def get_draft_input_buffers(
-        self, input_buffers: InputBuffers, num_tokens: int | None = None
-    ) -> InputBatch | InputBuffers | tuple[InputBatch | InputBuffers, torch.Tensor]:
+        self, input_buffers: InputBuffers, num_tokens: int
+    ) -> tuple[InputBatch | InputBuffers, torch.Tensor]:
         """Stage rank-local draft prefill inputs at the draft's own addresses.
 
         Draft graphs are captured against the speculator's input buffers,
@@ -620,9 +601,7 @@ class AscendPCPManager(PCPManager):
         """
         local_batch = self.draft_prefill_batch
         if local_batch is None:
-            if vllm_version_is("0.32.0"):
-                return input_buffers
-            return super().get_draft_input_buffers(input_buffers, num_tokens)  # type: ignore[call-arg]
+            return super().get_draft_input_buffers(input_buffers, num_tokens)
         num_staged_tokens = local_batch.num_tokens_after_padding
         self._draft_input_ids_stash[:num_staged_tokens].copy_(input_buffers.input_ids[:num_staged_tokens])
         self._draft_positions_stash[:num_staged_tokens].copy_(input_buffers.positions[:num_staged_tokens])
@@ -631,8 +610,6 @@ class AscendPCPManager(PCPManager):
         input_buffers.input_ids[:num_staged_tokens].copy_(local_batch.input_ids[:num_staged_tokens])
         input_buffers.positions[:num_staged_tokens].copy_(local_batch.positions[:num_staged_tokens])
         input_buffers.is_padding[:num_staged_tokens].copy_(local_batch.is_padding[:num_staged_tokens])
-        if vllm_version_is("0.32.0"):
-            return input_buffers
         return input_buffers, local_batch.is_padding
 
     def restore_draft_prefill(
@@ -740,6 +717,7 @@ class AscendPCPManager(PCPManager):
         update_cos_sin(input_batch.positions)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
             hidden_restore_idx=torch.arange(num_tokens, device=self.device),
@@ -764,6 +742,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_num_tokens=num_tokens,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
                 global_slot_mappings=slot_mappings.view(slot_mappings.shape[0], self.pcp_world_size, num_tokens)[
@@ -795,6 +774,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_num_tokens=local_batch.num_tokens_after_padding,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(

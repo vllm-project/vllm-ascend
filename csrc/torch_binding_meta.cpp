@@ -4,6 +4,7 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
+#include "acl/acl_base_rt.h"
 #include "utils.h"
 
 /*
@@ -437,32 +438,6 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_meta(
     auto lse = at::empty_symint(lse_shape,
                                 q.options().dtype(at::kFloat).device(c10::kMeta));
     return {output, lse};
-}
-
-at::Tensor npu_sparse_attention_score_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &select_idx, const at::Tensor &block_table,
-    const c10::optional<at::Tensor> &select_num_idx,
-    const c10::optional<at::Tensor> &q_dequant_scale,
-    const c10::optional<at::Tensor> &k_dequant_scale,
-    const c10::optional<at::Tensor> &v_dequant_scale,
-    const c10::optional<at::Tensor> &actual_seq_lengths,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
-    c10::string_view q_input_layout, c10::string_view kv_input_layout,
-    int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise,
-    const c10::optional<at::ScalarType> &attention_out_dtype)
-{
-    TORCH_CHECK(std::string(q_input_layout) == "TND",
-                "npu_sparse_attention_score only supports query TND layout");
-    at::ScalarType out_dtype = query.scalar_type();
-    if (query.scalar_type() == at::kFloat8_e4m3fn) {
-        out_dtype = attention_out_dtype.value_or(at::kBFloat16);
-        TORCH_CHECK(out_dtype == at::kHalf || out_dtype == at::kBFloat16,
-                    "attention_out_dtype must be float16 or bfloat16 for float8_e4m3fn input.");
-    }
-    return at::empty_symint(query.sym_sizes(),
-                            query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_vllm_meta(
@@ -917,7 +892,13 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_t
     at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
     at::Tensor sparse_values_out;
     if (return_value) {
-        sparse_values_out = at::empty_symint(output_size, query.options().dtype(at::kBFloat16));
+        // Match PR48's runtime adapter: arch22 scores are FP32, while
+        // Ascend950 retains BF16. Empty placeholders below remain BF16.
+        const char *soc_name = aclrtGetSocName();
+        const bool fp32_score =
+            (soc_name == nullptr) || (std::string(soc_name).find("Ascend950") == std::string::npos);
+        sparse_values_out = at::empty_symint(
+            output_size, query.options().dtype(fp32_score ? at::kFloat : at::kBFloat16));
     } else {
         sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kBFloat16));
     }
@@ -938,7 +919,9 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_meta(
     const c10::optional<at::Tensor> &output_idx_offset,
     const c10::optional<at::Tensor> &metadata,
     int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
-    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value,
+    bool enable_dcp, int64_t cp_world, int64_t cp_rank, int64_t cp_kv_cache_interleave_size,
+    const c10::optional<at::Tensor> &causal_seqlens_kv_global)
 {
     std::string query_layout_str = std::string(layout_q);
     std::string key_layout_str = std::string(layout_k);
@@ -1046,9 +1029,10 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
     const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
     const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
-    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
-    const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
-    const c10::string_view device)
+    const c10::optional<at::Tensor> &cmp_residual_k, const c10::optional<at::Tensor> &causal_seqlens_kv_global,
+    int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k, const c10::string_view layout_q,
+    c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio, int64_t enable_dcp, int64_t cp_world,
+    int64_t cp_rank, int64_t cp_kv_cache_interleave_size, const c10::string_view device)
 {
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Tensor output;
@@ -1068,6 +1052,14 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
         output = at::empty_symint(
             c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
             torch::dtype(torch::kInt32).device(seqused_q.value().device()));
+    } else if (cmp_residual_k.has_value()) {
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cmp_residual_k.value().device()));
+    } else if (causal_seqlens_kv_global.has_value()) {
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(causal_seqlens_kv_global.value().device()));
     } else {
         auto deviceOri = at::Device(std::string(device));
         std::string device_str = "meta";
@@ -1842,7 +1834,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_generic_block_sparse_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
     ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
-    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);

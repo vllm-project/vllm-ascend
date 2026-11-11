@@ -860,6 +860,7 @@ class SFAPDRD2HProducerWorker:
         self.kv_send_layer_thread = MembPullSendingThread(
             ready_event=ready_event,
             state=send_state,
+            device_id=torch.npu.current_device(),
         )
         self.kv_send_layer_thread.start()
         if not ready_event.wait(timeout=CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS):

@@ -17,8 +17,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
-from vllm_ascend.models import kimi_k3_dspark
-from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -32,6 +32,7 @@ def make_speculator():
     spec.pcp_manager = None
     spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
+    spec.use_flashmla = False
     spec.use_dcp = False
     spec.requires_non_causal = True
     spec.vllm_config = SimpleNamespace(
@@ -62,7 +63,7 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
     # Without PCP, both models use the same request layout.
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         target_sync = DPSyncState(  # type: ignore[call-arg]
             num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
         )
@@ -127,7 +128,17 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
     assert spec.attn_backends == {"draft": draft_backend}
 
 
-def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
+@pytest.mark.parametrize(
+    "choices,expected", [((True,), True), ((False,), False), ((True, True), True), ((True, False), False), ((), False)]
+)
+def test_dspark_flashmla_selection_requires_all_mla_groups(monkeypatch, choices, expected):
+    monkeypatch.setattr(shared, "_get_graph_update_backend", lambda _: AscendMLABackend)
+    spec = initialize_attention(monkeypatch, AscendMLABackend, flashmla_choices=choices)
+    assert spec.attn_architecture == "MLA"
+    assert spec.use_flashmla is expected
+
+
+def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend, flashmla_choices=(False,)):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
     monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
     monkeypatch.setattr(shared, "build_dspark_draft_config", lambda config: config)
@@ -145,7 +156,18 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
-    draft_groups = [[], [SimpleNamespace(backend=draft_backend)]]
+    draft_groups = [
+        [],
+        [
+            SimpleNamespace(
+                backend=draft_backend,
+                get_metadata_builder=lambda _, enabled=enabled: SimpleNamespace(
+                    flashmla_state=object() if enabled else None
+                ),
+            )
+            for enabled in flashmla_choices
+        ],
+    ]
 
     def set_attn(self, model_state, kv_cache_config, block_tables, input_buffers, target_attn_groups):
         assert target_attn_groups is target_groups

@@ -4,6 +4,7 @@
 
 import json
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -20,12 +21,15 @@ from vllm.config import (
     VllmConfig,
     replace,
 )
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.platform import _validate_eplb_config
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.eagle import (
     speculator as eagle_speculator_module,
@@ -149,18 +153,36 @@ def eplb_worker_config(tmp_path):
         )
 
 
+@pytest.fixture
+def validate_eplb_on_cpu(monkeypatch):
+    # The real platform hook skips Ascend validation for this fixture's CPU
+    # device. Run the actual EPLB validator during reconstruction.
+    platform = current_platform
+    original_check = platform.check_and_update_config
+
+    def check_and_update_config(config):
+        original_check(config)
+        _validate_eplb_config(config)
+
+    monkeypatch.setattr(platform, "check_and_update_config", check_and_update_config)
+
+
 @pytest.mark.parametrize(
-    ("tp_size", "pcp_size", "dp_size", "enabled", "redundant", "expected"),
+    ("tp_size", "pcp_size", "dp_size", "enabled", "redundant", "expected", "phase"),
     [
-        (1, 8, 1, True, 0, False),
-        (1, 8, 1, True, 8, False),
-        (2, 8, 1, True, 0, True),
-        (1, 8, 2, True, 0, True),
-        (2, 1, 1, True, 0, True),
-        (1, 8, 1, False, 0, False),
+        (1, 8, 1, True, 0, False, "prefill"),
+        (1, 8, 1, True, 0, False, "decode"),
+        (1, 8, 1, True, 8, False, "prefill"),
+        (2, 8, 1, True, 0, True, "prefill"),
+        (2, 8, 1, True, 0, True, "decode"),
+        (1, 8, 2, True, 0, True, "decode"),
+        (2, 1, 1, True, 0, True, "prefill"),
+        (1, 8, 1, False, 0, False, "all"),
     ],
 )
-def test_dspark_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size, dp_size, enabled, redundant, expected):
+def test_dspark_draft_eplb_policy(
+    eplb_worker_config, validate_eplb_on_cpu, tp_size, pcp_size, dp_size, enabled, redundant, expected, phase
+):
     config = replace(
         eplb_worker_config,
         parallel_config=replace(
@@ -173,14 +195,17 @@ def test_dspark_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size, dp_size
                 eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=redundant
             ),
         ),
+        additional_config={"eplb_config": {"load_collection_phase": phase, "stair_config": {"load_window_bins": 32}}},
     )
+    original_additional_config = deepcopy(config.additional_config)
     draft = build_dspark_draft_config(config)
-    # Upstream DFlashSpeculator.__init__ forces PCP=1 on the copied config.
+    # Upstream DFlash derives PCP=1 later; the Ascend builder keeps topology.
     assert draft.parallel_config.prefill_context_parallel_size == pcp_size
     assert (draft is config) == (pcp_size == 1)
     assert draft.parallel_config.enable_expert_parallel
     assert draft.parallel_config.enable_eplb == expected
     assert draft.parallel_config.eplb_config.num_redundant_experts == (redundant if expected else 0)
+    assert draft.additional_config == config.additional_config == original_additional_config
     assert config.parallel_config.prefill_context_parallel_size == pcp_size
     assert config.parallel_config.enable_eplb == enabled
     assert config.parallel_config.eplb_config.num_redundant_experts == redundant
@@ -219,6 +244,47 @@ def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):
     assert draft_config.parallel_config.decode_context_parallel_size == 1
     assert draft_config.parallel_config.pipeline_parallel_size == 1
     assert draft_config.parallel_config.enable_eplb
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_eplb_on_cpu, phase):
+    eplb_worker_config = replace(
+        eplb_worker_config, additional_config={"eplb_config": {"load_collection_phase": phase}}
+    )
+    spec_config = eplb_worker_config.speculative_config
+    # Exercise every loader override that reconstructs the config.
+    spec_config.moe_backend = "auto"
+    spec_config.kv_cache_dtype = "bfloat16"
+    spec_config.attention_backend = AttentionBackendEnum.CUSTOM
+    eplb_worker_config.load_config = replace(eplb_worker_config.load_config, load_format="fastsafetensors")
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.vllm_config = eplb_worker_config
+    speculator.draft_model_config = spec_config.draft_model_config
+    speculator.speculative_config = spec_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
+
+    def get_draft_model(*, vllm_config, model_config):
+        assert vllm_config.additional_config["eplb_config"]["load_collection_phase"] == phase
+        raise RuntimeError("reached model construction")
+
+    with (
+        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
+        patch.object(eagle_utils, "get_model", side_effect=get_draft_model) as get_model,
+        pytest.raises(RuntimeError, match="reached model construction"),
+    ):
+        speculator.load_draft_model(torch.nn.Module(), set())
+    loading_config = get_model.call_args.kwargs["vllm_config"]
+    assert loading_config.parallel_config.enable_eplb
+    assert loading_config.parallel_config.enable_expert_parallel
+    assert loading_config.parallel_config.prefill_context_parallel_size == 8
+    assert loading_config.kernel_config.moe_backend == "auto"
+    assert loading_config.cache_config.cache_dtype == "bfloat16"
+    assert loading_config.attention_config.backend == AttentionBackendEnum.CUSTOM
+    assert loading_config.load_config.load_format == "auto"
+    assert speculator.draft_vllm_config.parallel_config.enable_eplb
+    assert eplb_worker_config.parallel_config.enable_eplb
+    assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
+    assert eplb_worker_config.parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"]
 
 
 def _mla_pcp_decode_metadata(num_tokens, query_ends):
@@ -287,10 +353,11 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.dp_size = 2
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
     attn_metadata = {"mtp": _mla_pcp_decode_metadata(4, [4, 8])}
-    sync_kwargs = {} if vllm_version_is("0.32.0") else {"max_query_len": None}
+    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     dp_sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16, **sync_kwargs
     )

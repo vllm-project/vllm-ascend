@@ -547,11 +547,9 @@ sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] 
 # with ImportError under the stub. (Submodules such as
 # backend.memcache_backend resolve through the stub package's __path__ and
 # need no special casing.)
-# The scheduler/worker resolve the backend class dynamically via
-# ``importlib.import_module(path)``; tests that exercise those paths patch
-# ``<module>.importlib`` locally (see test_pool_scheduler.py /
-# test_pool_worker.py) so the backend resolves to a MagicMock. Do NOT
-# register the backends in sys.modules or globally wrap import_module here:
+# Scheduler tests mock create_scheduler_client on real backend classes;
+# worker tests patch pool_worker.importlib locally. Do NOT install fake
+# backend modules in sys.modules or globally wrap import_module here:
 # test_backend.py imports the real backend classes and also relies on
 # ``mock.patch`` (which itself calls importlib.import_module) resolving
 # those real modules.
