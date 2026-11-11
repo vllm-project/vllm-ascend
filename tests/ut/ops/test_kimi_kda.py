@@ -525,7 +525,9 @@ def test_kda_conv_weight_is_repacked_by_post_load_hook():
 
     assert is_deferred_attention_layer(attention)
 
-    attention.process_weights_after_loading()
+    # vLLM v0.33.0 and the vLLM main commit tested by this repo call the hook
+    # with the model dtype; newer vLLM main calls it without arguments.
+    attention.process_weights_after_loading(torch.bfloat16)
     packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
     torch.testing.assert_close(packed, source[:, 0, :].transpose(0, 1).to(torch.bfloat16))
     assert packed.data_ptr() == original_ptr
