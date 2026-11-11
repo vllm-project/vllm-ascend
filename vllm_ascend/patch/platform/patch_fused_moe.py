@@ -73,6 +73,9 @@ def _adapt_routed_experts_cls(routed_experts_cls: Any | None) -> Any | None:
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    # Preserve BaseRouter's selection flow when TopK already returned physical IDs.
+    if getattr(self, "_use_gating_top_k_with_map", False):
+        return topk_ids
     eplb_state = self.eplb_state
     if eplb_state is None:
         return topk_ids

@@ -188,6 +188,10 @@
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
+#       The existing Ascend EPLB mapping hook reads the router's fixed fusion
+#       choice to avoid remapping physical IDs, preserving upstream
+#       BaseRouter._select_experts. Remove this check when upstream exposes
+#       a routing-result contract for IDs already mapped by the backend.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:

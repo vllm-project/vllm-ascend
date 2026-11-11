@@ -23,6 +23,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
@@ -118,6 +119,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
+        # Model routing configuration (including capture) must be finalized before the first call.
+        self._use_gating_top_k_with_map: bool | None = None
 
     def is_fused_supported(
         self,
@@ -137,6 +140,31 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             return False
         return True
 
+    def _can_fuse_gating_map(self, hidden_states: torch.Tensor) -> bool:
+        profile = get_current_hardware_profile()
+        return (
+            self.eplb_state is not None
+            and self.capture_fn is None
+            and self.scoring_func == "sqrtsoftplus"
+            and self.num_expert_group in (None, 1)
+            and self.topk_group in (None, 1)
+            and profile.supports(HardwareCapability.MOE_GATING_TOP_K_WITH_MAP)
+            and (self.bias_vl is None or profile.supports(HardwareCapability.MOE_GATING_TOP_K_HASH_VISION))
+            and self.is_fused_supported(hidden_states)
+        )
+
+    def _get_gating_map_table(self) -> torch.Tensor | None:
+        if not self._use_gating_top_k_with_map:
+            return None
+        table = (
+            self.eplb_state.allgather_expert_replica_routing_table
+            if use_allgather_eplb()
+            else self.eplb_state.expert_replica_routing_table
+        )
+        if table is None:
+            raise RuntimeError("Fused EPLB mapping requires an initialized expert replica routing table.")
+        return table
+
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
@@ -145,6 +173,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._use_gating_top_k_with_map is None:
+            self._use_gating_top_k_with_map = self._can_fuse_gating_map(hidden_states)
         if self.bias_vl is None and not self.is_fused_supported(hidden_states):
             return super()._compute_routing(
                 hidden_states=hidden_states,
@@ -201,6 +231,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             text_bias = self.e_score_correction_bias
             if text_bias is not None and text_bias.dtype != router_logits.dtype:
                 text_bias = text_bias.to(router_logits.dtype)
+            expert_replica_routing_table = self._get_gating_map_table()
             topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
                 x=router_logits,
                 k=self.top_k,
@@ -219,6 +250,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 bias_vl=bias_vl,
                 image_sentinel_lo=self.image_sentinel_lo,
                 image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
+                expert_replica_routing_table=expert_replica_routing_table,
             )
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1

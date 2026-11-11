@@ -153,6 +153,8 @@ class HardwareCapability(Enum):
     # Route DeepSeek-V4 vision and hash rows through the fused
     # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
     MOE_GATING_TOP_K_HASH_VISION = auto()
+    # Ungrouped sqrtsoftplus gating with an optional periodic EPLB routing table.
+    MOE_GATING_TOP_K_WITH_MAP = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
@@ -308,6 +310,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
+    HardwareCapability.MOE_GATING_TOP_K_WITH_MAP,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -419,6 +422,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
                     HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
+                    HardwareCapability.MOE_GATING_TOP_K_WITH_MAP,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
                     HardwareCapability.STANDARD_MAMBA_PATCH,

@@ -15,6 +15,7 @@
 #ifndef MOE_GATING_TOP_K_E_K_WITHOUT_GROUP_H
 #define MOE_GATING_TOP_K_E_K_WITHOUT_GROUP_H
 #include "kernel_operator.h"
+#include "eplb_map.h"
 #include "common.h"
 #include "kernel_utils.h"
 namespace MoeGatingTopKHash {
@@ -24,7 +25,7 @@ template <typename T, typename U1, typename U2>
 class MoeGatingTopKHashWithoutGroup {
 public:
     __aicore__ inline MoeGatingTopKHashWithoutGroup(){};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR routingTable, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                 const MoeGatingTopKHashTilingData *tilingData, TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -41,6 +42,7 @@ private:
 
 private:
     TPipe *pipe_;
+    MoeGatingTopKHash::EplbMap eplbMap_;
     TQue<QuePosition::VECIN, 1> xInQueue_;
     TQue<QuePosition::VECOUT, 1> yOutQueue_;
     TQue<QuePosition::VECOUT, 1> expertIdxOutQueue_;
@@ -317,6 +319,7 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::CopyOut(int64_t
     DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(k_ * sizeof(T)), 0, 0, 0};
     DataCopyPad(yGm_[row * k_], yOutTensor, dataCopyParams);
     dataCopyParams.blockLen = k_ * sizeof(int32_t);
+    eplbMap_.Apply(expertIdxOut, row + tilingData_->perCoreRowCount * blockIdx_);
     DataCopyPad(expertIdxGm_[row * k_], expertIdxOut, dataCopyParams);
     yOutQueue_.FreeTensor(yOutTensor);
     expertIdxOutQueue_.FreeTensor(expertIdxOut);
@@ -346,12 +349,14 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::SelectExpertIdx
 }
 
 template <typename T, typename U1, typename U2>
-__aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl,
+__aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR routingTable,
                                                           GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                                           const MoeGatingTopKHashTilingData *tilingData, TPipe *tPipe)
 {
     tilingData_ = tilingData;
     pipe_ = tPipe;
+    eplbMap_.Init(routingTable, tilingData_->routingTableRows,
+                  tilingData_->expertCount, tilingData_->k, pipe_);
     blockIdx_ = GetBlockIdx();
     perCoreRowCount_ = tilingData_->perCoreRowCount;
     if (blockIdx_ == GetBlockNum() - 1) {

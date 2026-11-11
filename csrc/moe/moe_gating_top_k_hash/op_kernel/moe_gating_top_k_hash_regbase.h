@@ -18,6 +18,7 @@
 #include <cmath>
 #include "common_regbase.h"
 #include "kernel_operator.h"
+#include "eplb_map.h"
 #include "kernel_utils.h"
 
 namespace MoeGatingTopKHashRegbaseNS
@@ -37,7 +38,7 @@ namespace MoeGatingTopKHashRegbaseNS
     {
     public:
         __aicore__ inline MoeGatingTopKHashRegbase(){};
-        __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
+        __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR routingTable, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                     const MoeGatingTopKHashRegbaseTilingData *tilingData, TPipe *tPipe);
         __aicore__ inline void Process();
 
@@ -83,6 +84,7 @@ namespace MoeGatingTopKHashRegbaseNS
 
     private:
         TPipe *pipe_;
+        MoeGatingTopKHash::EplbMap eplbMap_;
         TQue<QuePosition::VECIN, 1> xInQueue_;
         TQue<QuePosition::VECOUT, 1> yOutQueue_;
         TQue<QuePosition::VECOUT, 1> expertIdxOutQueue_;
@@ -1485,6 +1487,7 @@ namespace MoeGatingTopKHashRegbaseNS
         DataCopyPad(yGm_[row * k_], yOutTensor, dataCopyParams);
 
         dataCopyParams.blockLen = k_ * sizeof(int32_t);
+        eplbMap_.Apply(expertIdxTensor, row + tilingData_->perCoreRowCount * blockIdx_);
         DataCopyPad(expertIdxGm_[row * k_], expertIdxTensor, dataCopyParams);
 
         expertIdxOutQueue_.FreeTensor(expertIdxTensor);
@@ -1492,12 +1495,14 @@ namespace MoeGatingTopKHashRegbaseNS
     }
 
     template <typename T, typename  U1, typename U2>
-    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out,
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR routingTable, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out,
                                                          GM_ADDR workspace,
                                                          const MoeGatingTopKHashRegbaseTilingData *tilingData, TPipe *tPipe)
     {
         tilingData_ = tilingData;
         pipe_ = tPipe;
+        eplbMap_.Init(routingTable, tilingData_->routingTableRows,
+                      tilingData_->expertCount, tilingData_->k, pipe_);
         blockIdx_ = GetBlockIdx();
         if (blockIdx_ == GetBlockNum() - 1)
         {

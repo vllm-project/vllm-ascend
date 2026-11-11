@@ -738,7 +738,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     bool out_flag,
     const c10::optional<at::Tensor>& bias_vl_opt,
     int64_t image_sentinel_lo,
-    int64_t image_sentinel_count)
+    int64_t image_sentinel_count,
+    const c10::optional<at::Tensor>& expert_replica_routing_table_opt)
 {
     TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
     TORCH_CHECK(
@@ -755,6 +756,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
                 "renorm can only be 0 currently, but got ", renorm);
     TORCH_CHECK(norm_type == 0 || norm_type == 1 || norm_type ==2,
                 "norm_type must be 0 (softmax) or 1 (sigmoid) or 2 (softplus), but got ", norm_type);
+
+    if (expert_replica_routing_table_opt.has_value() && expert_replica_routing_table_opt->defined()) {
+        const auto& table = *expert_replica_routing_table_opt;
+        TORCH_CHECK(group_count == 1 && norm_type == 2,
+                    "Fused EPLB mapping requires ungrouped sqrtsoftplus routing");
+        TORCH_CHECK(table.dim() == 2 && table.sym_size(0) > 0 && table.sym_size(1) == x.sym_size(1),
+                    "EPLB table must have shape [period, logical_experts]");
+        TORCH_CHECK(table.scalar_type() == at::kInt && table.is_contiguous(),
+                    "EPLB table must be contiguous int32");
+        TORCH_CHECK(table.device() == x.device(), "EPLB table must be on the logits device");
+    }
 
     TORCH_CHECK(eps > 0.0, "eps must be > 0, but got ", eps);
     TORCH_CHECK(routed_scaling_factor > 0.0,
