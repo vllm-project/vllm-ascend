@@ -951,7 +951,7 @@ Expected output: MetaService starts successfully with no errors.
 
     **Automatic layerwise strategy selection:** resolve the backend first.
     Mooncake with `use_layerwise=true` retains its block-key path. Memcache
-    with `use_layerwise=true` selects `cross_layer_kv` for shared KV sources,
+    with `use_layerwise=true` selects `cross_layer` for shared KV sources,
     such as DeepSeek-V4.1, and retains ordinary GVA for independent-layer
     models such as DeepSeek-V4. Both use `LayerwiseKVPoolScheduler` and the
     existing backend key builder; no additional public switch is required.
@@ -1016,7 +1016,7 @@ Expected output: MetaService starts successfully with no errors.
     A load failure after computation begins fails the step; automatic state
     rollback/retry is not supported. NPU correctness and performance evidence
     are required before production use. See the
-    [cross-layer KV design and SDK contract](../../developer_guide/Design_Documents/cross_layer_kv_pool.md).
+    [cross-layer KV design and SDK contract](../../developer_guide/Design_Documents/cross_layer_pool.md).
 
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 

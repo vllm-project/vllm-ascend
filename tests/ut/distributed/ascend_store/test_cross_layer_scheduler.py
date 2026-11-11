@@ -12,7 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     create_kv_pool_scheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import CrossLayerKVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer import CrossLayerKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
@@ -85,7 +85,7 @@ class TestCrossLayerScheduler(unittest.TestCase):
     def test_layerwise_scheduler_reuses_gva_lookup_and_synchronous_admission(self):
         scheduler = self._scheduler()
         self.assertIsInstance(scheduler, LayerwiseKVPoolScheduler)
-        self.assertIs(scheduler.transfer_mode, KVPoolTransferMode.CROSS_LAYER_KV)
+        self.assertIs(scheduler.transfer_mode, KVPoolTransferMode.CROSS_LAYER)
         self.assertTrue(scheduler.use_layerwise)
         self.assertFalse(scheduler.load_async)
         self.assertFalse(scheduler.layerwise_offload)
@@ -130,19 +130,19 @@ class TestCrossLayerScheduler(unittest.TestCase):
         ):
             connector = AscendStoreConnector(_config(), KVConnectorRole.WORKER)
         self.assertTrue(connector.use_layerwise)
-        self.assertTrue(connector.use_cross_layer_kv)
+        self.assertTrue(connector.use_cross_layer)
         self.assertFalse(connector.use_classic_layerwise)
         lookup.assert_not_called()
         metadata = AscendConnectorMetadata(set())
         connector.bind_connector_metadata(metadata)
-        worker.prepare_cross_layer_kv_step.assert_called_once_with(metadata)
+        worker.prepare_cross_layer_step.assert_called_once_with(metadata)
         worker._extract_physical_layer_index.return_value = 1
         connector.wait_for_layer_load("model.layers.1.self_attn")
         connector.save_kv_layer("model.layers.1.self_attn", MagicMock(), None)
-        worker.wait_for_cross_layer_kv_load.assert_called_once_with(1)
-        worker.on_cross_layer_kv_save_trigger.assert_called_once_with(1)
+        worker.wait_for_cross_layer_load.assert_called_once_with(1)
+        worker.on_cross_layer_save_trigger.assert_called_once_with(1)
         worker.save_kv_layer.assert_not_called()
         connector.wait_for_save()
         worker.wait_for_save.assert_called_once_with(metadata)
         connector.finish_forward()
-        worker.finish_cross_layer_kv_loads.assert_called_once_with()
+        worker.finish_cross_layer_loads.assert_called_once_with()

@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv_hooks import (
-    supports_cross_layer_kv_hooks,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_hooks import (
+    supports_cross_layer_hooks,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
     KVPoolTransferMode,
@@ -53,7 +53,7 @@ class TestResolveKVPoolTransferMode(unittest.TestCase):
                 architectures=(architecture,),
                 text_config=SimpleNamespace(num_hidden_layers=16, kv_source_layer_ids=[1, 5, 9]),
             )
-            self.assertIs(resolve_kv_pool_transfer_mode(config), KVPoolTransferMode.CROSS_LAYER_KV)
+            self.assertIs(resolve_kv_pool_transfer_mode(config), KVPoolTransferMode.CROSS_LAYER)
 
     def test_all_layers_own_kv_keeps_physical_layerwise(self):
         config = _vllm_config(
@@ -68,7 +68,7 @@ class TestResolveKVPoolTransferMode(unittest.TestCase):
                 hf_config={"text_config": {"num_hidden_layers": 16, "kv_source_layer_ids": [1, 9]}}
             ),
         )
-        self.assertIs(resolve_kv_pool_transfer_mode(config, True), KVPoolTransferMode.CROSS_LAYER_KV)
+        self.assertIs(resolve_kv_pool_transfer_mode(config, True), KVPoolTransferMode.CROSS_LAYER)
         config.model_config.hf_text_config = {"num_hidden_layers": 16, "kv_source_layer_ids": []}
         self.assertIs(resolve_kv_pool_transfer_mode(config, True), KVPoolTransferMode.PHYSICAL_LAYER)
 
@@ -85,15 +85,15 @@ class TestResolveKVPoolTransferMode(unittest.TestCase):
 
     def test_every_backbone_consumer_requires_hooks(self):
         context = {
-            str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_kv_transfer_hooks=True)
+            str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_transfer_hooks=True)
             for layer in range(16)
         }
-        self.assertTrue(supports_cross_layer_kv_hooks(context, 16))
-        context["8"].supports_cross_layer_kv_transfer_hooks = False
-        self.assertFalse(supports_cross_layer_kv_hooks(context, 16))
-        context["8"].supports_cross_layer_kv_transfer_hooks = True
+        self.assertTrue(supports_cross_layer_hooks(context, 16))
+        context["8"].supports_cross_layer_transfer_hooks = False
+        self.assertFalse(supports_cross_layer_hooks(context, 16))
+        context["8"].supports_cross_layer_transfer_hooks = True
         del context["9"]
-        self.assertFalse(supports_cross_layer_kv_hooks(context, 16))
+        self.assertFalse(supports_cross_layer_hooks(context, 16))
 
     def test_mooncake_block_key_never_selects_cross_layer(self):
         for enabled in (False, True):

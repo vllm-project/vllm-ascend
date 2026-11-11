@@ -153,7 +153,7 @@ def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = No
             if (
                 vllm_config is not None
                 and resolve_kv_pool_transfer_mode(vllm_config, extra_config=extra_config)
-                is KVPoolTransferMode.CROSS_LAYER_KV
+                is KVPoolTransferMode.CROSS_LAYER
             ):
                 continue
             return extra_config

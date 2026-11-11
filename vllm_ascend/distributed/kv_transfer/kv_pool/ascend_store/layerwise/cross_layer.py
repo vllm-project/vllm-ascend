@@ -9,8 +9,8 @@ import numpy as np
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv_hooks import (
-    supports_cross_layer_kv_hooks,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_hooks import (
+    supports_cross_layer_hooks,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerLoadTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
@@ -21,7 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
-CROSS_LAYER_KV_GATE_POLL_INTERVAL_S = 0.1
+CROSS_LAYER_GATE_POLL_INTERVAL_S = 0.1
 
 
 class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
@@ -35,14 +35,14 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
 
     def __init__(self, vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None):
         if not vllm_config.use_v2_model_runner:
-            raise ValueError("cross_layer_kv requires Model Runner V2")
+            raise ValueError("cross_layer requires Model Runner V2")
         mode = vllm_config.compilation_config.cudagraph_mode
         mode_name = getattr(mode, "name", str(mode))
         if "PIECEWISE" in mode_name:
-            raise ValueError("cross_layer_kv does not support PIECEWISE yet; use --enforce-eager")
+            raise ValueError("cross_layer does not support PIECEWISE yet; use --enforce-eager")
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         if self.pp_size != 1 or self.pcp_size != 1 or self.dcp_size != 1 or self.use_kvpp:
-            raise ValueError("cross_layer_kv currently supports Memcache TP deployments without PP/PCP/DCP/KVPP")
+            raise ValueError("cross_layer currently supports Memcache TP deployments without PP/PCP/DCP/KVPP")
         self.load_async = False
         self._load_started = False
         self._pending_layers: set[int] = set()
@@ -76,7 +76,7 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
         if self._transfer_threads_started:
             return
         super()._start_kv_transfer_threads()
-        self._pipeline_enabled = self._pipeline_enabled and supports_cross_layer_kv_hooks(
+        self._pipeline_enabled = self._pipeline_enabled and supports_cross_layer_hooks(
             self.vllm_config.compilation_config.static_forward_context,
             config_value(self.hf_config, "num_hidden_layers", 0),
         )
@@ -98,10 +98,10 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
                 groups.add(group_id)
         return groups
 
-    def prepare_cross_layer_kv_step(self, metadata: AscendConnectorMetadata) -> None:
+    def prepare_cross_layer_step(self, metadata: AscendConnectorMetadata) -> None:
         # Save-only steps also bind before forward. Drain old H2D writes
         # before replacing block snapshots or completion events.
-        self.finish_cross_layer_kv_loads()
+        self.finish_cross_layer_loads()
         self._load_started = False
         self._pending_layers.clear()
         for event in self.layer_load_finished_events:
@@ -131,7 +131,7 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
             self._pipeline_groups = self._pipeline_group_ids()
         except Exception as exc:
             self._step_error = exc
-            self.finish_cross_layer_kv_loads()
+            self.finish_cross_layer_loads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata) -> None:
         if self._load_started:
@@ -153,14 +153,14 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
                     self.kv_recv_thread.add_request(LayerLoadTask(None, tasks, layer_id))
         except Exception as exc:
             self._step_error = exc
-            self.finish_cross_layer_kv_loads()
+            self.finish_cross_layer_loads()
 
-    def wait_for_cross_layer_kv_load(self, layer_idx: int) -> None:
+    def wait_for_cross_layer_load(self, layer_idx: int) -> None:
         layer_id = self._global_to_local_layer.get(layer_idx)
         if layer_id not in self._pending_layers:
             return
         try:
-            while not self.layer_load_finished_events[layer_id].wait(CROSS_LAYER_KV_GATE_POLL_INTERVAL_S):
+            while not self.layer_load_finished_events[layer_id].wait(CROSS_LAYER_GATE_POLL_INTERVAL_S):
                 self.kv_recv_thread.raise_if_failed()
                 if not self.kv_recv_thread.is_alive():
                     raise RuntimeError("GVA receiver stopped before completing a cross-layer load")
@@ -169,9 +169,9 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
                 raise RuntimeError("Cross-layer GVA copy failed")
         except Exception as exc:
             self._step_error = exc
-            self.finish_cross_layer_kv_loads()
+            self.finish_cross_layer_loads()
 
-    def finish_cross_layer_kv_loads(self) -> None:
+    def finish_cross_layer_loads(self) -> None:
         receiver = self.kv_recv_thread
         try:
             if receiver is not None:
@@ -200,10 +200,10 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
             raise RuntimeError("Cross-layer GVA load failed; this step's state cannot be reused") from self._step_error
 
     def reset_store(self) -> None:
-        self.finish_cross_layer_kv_loads()
+        self.finish_cross_layer_loads()
         super().reset_store()
 
-    def on_cross_layer_kv_save_trigger(self, trigger_layer: int) -> None:
+    def on_cross_layer_save_trigger(self, trigger_layer: int) -> None:
         # DSpark verification/draft preparation can still change cache pages.
         # The final step boundary is their publication boundary.
         if self.vllm_config.speculative_config is not None or not self.can_put:
@@ -231,6 +231,6 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
 
     def shutdown(self) -> None:
         try:
-            self.finish_cross_layer_kv_loads()
+            self.finish_cross_layer_loads()
         finally:
             super().shutdown()

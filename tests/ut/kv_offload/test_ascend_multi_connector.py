@@ -21,9 +21,9 @@ from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa
 @pytest.mark.parametrize("prefill_layerwise", [False, True])
 def test_shared_kv_boundary_in_pd_multi_connector(monkeypatch, nested, prefill_layerwise):
     pd, store = MagicMock(), MagicMock()
-    pd.use_cross_layer_kv = False
+    pd.use_cross_layer = False
     pd.sub_connectors = ()
-    store.use_cross_layer_kv = prefill_layerwise
+    store.use_cross_layer = prefill_layerwise
     store.sub_connectors = ()
 
     def multi(children):
@@ -42,7 +42,7 @@ def test_shared_kv_boundary_in_pd_multi_connector(monkeypatch, nested, prefill_l
     layer = "model.layers.5.self_attn.v41_attn"
     context = SimpleNamespace(
         attn_metadata=object(),
-        no_compile_layers={layer: SimpleNamespace(supports_cross_layer_kv_transfer_hooks=True)},
+        no_compile_layers={layer: SimpleNamespace(supports_cross_layer_transfer_hooks=True)},
     )
     monkeypatch.setattr(attention_utils, "get_forward_context", lambda: context)
     monkeypatch.setattr(attention_utils, "get_kv_transfer_group", lambda: root)

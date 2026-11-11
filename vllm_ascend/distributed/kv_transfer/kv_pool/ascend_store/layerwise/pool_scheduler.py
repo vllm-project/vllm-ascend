@@ -40,7 +40,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.transfer_mode = resolve_kv_pool_transfer_mode(vllm_config, use_layerwise)
-        self.use_cross_layer_kv = self.transfer_mode is KVPoolTransferMode.CROSS_LAYER_KV
+        self.use_cross_layer = self.transfer_mode is KVPoolTransferMode.CROSS_LAYER
         backend_name, self.layerwise_backend = resolve_backend(extra_config)
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
@@ -56,7 +56,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.load_async = False
-        if self.use_layerwise_transfer and not self.use_cross_layer_kv:
+        if self.use_layerwise_transfer and not self.use_cross_layer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
@@ -83,7 +83,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
-        return not getattr(self, "use_cross_layer_kv", False) and store_skip_tokens > 0
+        return not getattr(self, "use_cross_layer", False) and store_skip_tokens > 0
 
     def _async_load_enabled(self) -> bool:
         return False

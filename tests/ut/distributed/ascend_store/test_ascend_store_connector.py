@@ -67,18 +67,18 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
                                 if factory is not selected:
                                     factory.assert_not_called()
 
-    def test_cross_layer_kv_plan_is_bound_before_start_load_kv(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import (
+    def test_cross_layer_plan_is_bound_before_start_load_kv(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer import (
             CrossLayerKVPoolWorker,
         )
 
         connector = object.__new__(AscendStoreConnector)
-        connector.use_cross_layer_kv = True
+        connector.use_cross_layer = True
         connector.use_layerwise = False
         connector.connector_worker = MagicMock(spec=CrossLayerKVPoolWorker)
         metadata = AscendConnectorMetadata(set())
         connector.bind_connector_metadata(metadata)
-        connector.connector_worker.prepare_cross_layer_kv_step.assert_called_once_with(metadata)
+        connector.connector_worker.prepare_cross_layer_step.assert_called_once_with(metadata)
         connector.connector_worker.start_load_kv.assert_not_called()
 
     def test_factory_passes_only_current_constructor_arguments(self):

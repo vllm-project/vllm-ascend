@@ -21,7 +21,7 @@ ATTENTION = "vllm_ascend/attention/dsa_v41.py"
 
 def connector(*, shared=False, bound=True, children=()):
     return SimpleNamespace(
-        use_cross_layer_kv=shared,
+        use_cross_layer=shared,
         sub_connectors=children,
         has_connector_metadata=Mock(return_value=bound),
         wait_for_layer_load=Mock(),
@@ -30,7 +30,7 @@ def connector(*, shared=False, bound=True, children=()):
 
 
 def hook_scope(root, *, composite=True):
-    attn = SimpleNamespace(supports_cross_layer_kv_transfer_hooks=composite)
+    attn = SimpleNamespace(supports_cross_layer_transfer_hooks=composite)
     context = SimpleNamespace(attn_metadata=object(), no_compile_layers={"layer": attn})
     scope = {
         "get_forward_context": lambda: context,
@@ -147,7 +147,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
             with self.subTest(method=method):
                 worker, store, caches = make_cross_worker(self, bounded=True, method=method)
                 pool = object.__new__(AscendStoreConnector)
-                pool.use_layerwise = pool.use_cross_layer_kv = pool.can_put = True
+                pool.use_layerwise = pool.use_cross_layer = pool.can_put = True
                 pool.connector_worker = worker
                 pool.has_connector_metadata = lambda pool=pool: getattr(pool, "_connector_metadata", None) is not None
                 root = connector(children=[connector(), connector(children=[pool])])

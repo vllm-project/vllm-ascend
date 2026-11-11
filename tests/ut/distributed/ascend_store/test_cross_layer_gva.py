@@ -17,7 +17,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 from tests.ut.distributed.ascend_store import test_pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv import CrossLayerKVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer import CrossLayerKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
@@ -149,7 +149,7 @@ def make_cross_worker(
         config.model_config.enforce_eager = False
         config.compilation_config.cudagraph_mode = SimpleNamespace(name=mode)
         config.compilation_config.static_forward_context = {
-            str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_kv_transfer_hooks=True)
+            str(layer): SimpleNamespace(layer_idx=layer, supports_cross_layer_transfer_hooks=True)
             for layer in range(num_layers)
         }
         config.parallel_config.use_ubatching = config.parallel_config.use_sequence_parallel_moe = False
@@ -220,9 +220,9 @@ def metadata(worker, *, load=False, save=True):
 
 def save_prefix(worker):
     meta = metadata(worker)
-    worker.prepare_cross_layer_kv_step(meta)
+    worker.prepare_cross_layer_step(meta)
     for layer in range(worker.vllm_config.model_config.hf_text_config.num_hidden_layers):
-        worker.on_cross_layer_kv_save_trigger(layer)
+        worker.on_cross_layer_save_trigger(layer)
     worker.wait_for_save(meta)
 
 
@@ -243,7 +243,7 @@ class TestCrossLayerGVA(unittest.TestCase):
         )
         for cache in caches.values():
             cache[2].fill_(47)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         worker.wait_for_save(meta)
         for cache in caches.values():
             cache.zero_()
@@ -251,13 +251,13 @@ class TestCrossLayerGVA(unittest.TestCase):
             request.can_save = False
             request.load_spec = LoadSpec(0, 16, True)
         store.block_address = caches["model.layers.8.attn.long_kv_cache"][1].data_ptr()
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         worker.start_load_kv(meta)
         self.assertTrue(store.blocked.wait(timeout=2))
-        worker.wait_for_cross_layer_kv_load(2)
+        worker.wait_for_cross_layer_load(2)
         self.assertEqual(int(caches["model.layers.2.attn.long_kv_cache"][2].sum()), 47 * 16)
         store.resume.set()
-        worker.finish_cross_layer_kv_loads()
+        worker.finish_cross_layer_loads()
         self.assertFalse(store.leases)
 
     def test_changed_sources_and_segmented_descriptors_roundtrip(self):
@@ -267,11 +267,11 @@ class TestCrossLayerGVA(unittest.TestCase):
         for cache in caches.values():
             cache.zero_()
         meta = metadata(worker, load=True, save=False)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         worker.start_load_kv(meta)
         for layer in range(16):
-            worker.wait_for_cross_layer_kv_load(layer)
-        worker.finish_cross_layer_kv_loads()
+            worker.wait_for_cross_layer_load(layer)
+        worker.finish_cross_layer_loads()
         for name, cache in caches.items():
             self.assertTrue(torch.equal(cache.flatten()[16:32], expected[name]), name)
         self.assertFalse(store.leases)
@@ -291,11 +291,11 @@ class TestCrossLayerGVA(unittest.TestCase):
         for value in caches.values():
             value.zero_()
         meta = metadata(worker, load=True, save=False)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         worker.start_load_kv(meta)
         for layer in range(12):
-            worker.wait_for_cross_layer_kv_load(layer)
-        worker.finish_cross_layer_kv_loads()
+            worker.wait_for_cross_layer_load(layer)
+        worker.finish_cross_layer_loads()
         self.assertFalse(store.leases)
         for name, value in caches.items():
             self.assertTrue(torch.equal(value[1], expected[name]), name)
@@ -306,23 +306,23 @@ class TestCrossLayerGVA(unittest.TestCase):
         save_prefix(worker)
         store.block_address = caches["model.layers.8.attn.long_kv_cache"][1].data_ptr()
         meta = metadata(worker, load=True, save=False)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         worker.start_load_kv(meta)
         self.assertTrue(store.blocked.wait(timeout=2))
-        worker.wait_for_cross_layer_kv_load(2)
+        worker.wait_for_cross_layer_load(2)
         self.assertFalse(worker.layer_load_finished_events[worker._global_to_local_layer[8]].is_set())
         store.resume.set()
-        worker.finish_cross_layer_kv_loads()
+        worker.finish_cross_layer_loads()
 
     def test_replay_cut_and_publication_wait_for_step_end(self):
         worker, store, _ = make_cross_worker(self, bounded=True)
         meta = metadata(worker)
-        worker.prepare_cross_layer_kv_step(meta)
-        worker.on_cross_layer_kv_save_trigger(2)
+        worker.prepare_cross_layer_step(meta)
+        worker.on_cross_layer_save_trigger(2)
         worker.kv_send_thread.request_queue.join()
         self.assertTrue(store.copies)
         self.assertFalse(store.published)
-        worker.on_cross_layer_kv_save_trigger(8)
+        worker.on_cross_layer_save_trigger(8)
         self.assertFalse(store.published)
         worker.wait_for_save(meta)
         self.assertTrue(store.published)
@@ -332,14 +332,14 @@ class TestCrossLayerGVA(unittest.TestCase):
         worker, store, _ = make_cross_worker(self, bounded=True)
         save_prefix(worker)
         meta = metadata(worker, load=True, save=False)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         store.fail_copy = True
         worker.start_load_kv(meta)
         with self.assertRaisesRegex(RuntimeError, "state cannot be reused"):
-            worker.wait_for_cross_layer_kv_load(2)
+            worker.wait_for_cross_layer_load(2)
         worker.get_failed_requests()
         with self.assertRaisesRegex(RuntimeError, "state cannot be reused"):
-            worker.prepare_cross_layer_kv_step(metadata(worker))
+            worker.prepare_cross_layer_step(metadata(worker))
         self.assertFalse(store.leases)
 
     def test_missing_or_wrong_sized_objects_release_read_leases(self):
@@ -354,13 +354,13 @@ class TestCrossLayerGVA(unittest.TestCase):
                     address, size = store.objects[key]
                     store.objects[key] = (address, size + 1)
                 with self.assertRaisesRegex(RuntimeError, "state cannot be reused"):
-                    worker.prepare_cross_layer_kv_step(metadata(worker, load=True, save=False))
+                    worker.prepare_cross_layer_step(metadata(worker, load=True, save=False))
                 self.assertFalse(store.leases)
 
     def test_failed_save_does_not_publish_or_delete_shared_keys(self):
         worker, store, _ = make_cross_worker(self, bounded=True)
         meta = metadata(worker)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         store.fail_copy = True
         worker.wait_for_save(meta)
         self.assertFalse(store.published)
@@ -376,7 +376,7 @@ class TestCrossLayerGVA(unittest.TestCase):
 
         store.batch_write_finish = lost_reply
         meta = metadata(worker)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         with self.assertRaises(RuntimeError):
             worker.wait_for_save(meta)
         self.assertTrue(store.published)

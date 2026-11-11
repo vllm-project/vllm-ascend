@@ -595,10 +595,10 @@ def _kv_layer_transfer_connectors(connector: Any, layer: Any) -> Iterator[Any]:
     Ordinary cache owners retain the root connector's standard forwarding.
     Composite owners notify only shared-KV children, including nested MultiConnector.
     """
-    if getattr(layer, "supports_cross_layer_kv_transfer_hooks", False) is not True:
+    if getattr(layer, "supports_cross_layer_transfer_hooks", False) is not True:
         yield connector
         return
-    if getattr(connector, "use_cross_layer_kv", False) is True:
+    if getattr(connector, "use_cross_layer", False) is True:
         if connector.has_connector_metadata():
             yield connector
         return

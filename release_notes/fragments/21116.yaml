@@ -2,8 +2,8 @@ pr: 21116
 entries:
   - category: feature
     text: >-
-      The existing use_layerwise option now automatically selects experimental
-      cross-layer KV prefetch for compatible shared-source models such as
+      The existing use_layerwise option now automatically selects the experimental
+      cross_layer strategy for compatible shared-source models such as
       DeepSeek-V4.1 on Model Runner V2, while DS4 retains the physical-layer path.
       Explicit V1 and PIECEWISE configurations are rejected for cross-layer KV;
       use --enforce-eager.

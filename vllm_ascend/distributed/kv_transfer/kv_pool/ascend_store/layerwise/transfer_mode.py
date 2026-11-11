@@ -10,7 +10,7 @@ from typing import Any
 class KVPoolTransferMode(Enum):
     BULK = "bulk"
     PHYSICAL_LAYER = "physical_layer"
-    CROSS_LAYER_KV = "cross_layer_kv"
+    CROSS_LAYER = "cross_layer"
 
 
 def config_value(config: Any, name: str, default: Any = None) -> Any:
@@ -58,5 +58,5 @@ def resolve_kv_pool_transfer_mode(
     if declared_sources is not None and not sources:
         raise ValueError("Invalid cross-layer KV topology: check num_hidden_layers and kv_source_layer_ids")
     if sources and len(sources) < config_value(config, "num_hidden_layers"):
-        return KVPoolTransferMode.CROSS_LAYER_KV
+        return KVPoolTransferMode.CROSS_LAYER
     return KVPoolTransferMode.PHYSICAL_LAYER

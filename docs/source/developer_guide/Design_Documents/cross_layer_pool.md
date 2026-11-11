@@ -1,6 +1,6 @@
 # Cross-layer shared KV pool transfers
 
-`cross_layer_kv` extends the existing Memcache GVA layerwise path for models
+`cross_layer` extends the existing Memcache GVA layerwise path for models
 whose consumer layers share KV sources. The public switch remains
 `kv_connector_extra_config.use_layerwise`.
 
@@ -74,7 +74,7 @@ reachability/alignment policy, allocates target blocks and builds `ReqMeta`.
 Both strategies use synchronous admission (`load_async=false`). Copies can
 still overlap computation within the admitted forward.
 
-`bind_connector_metadata` calls `prepare_cross_layer_kv_step` before model
+`bind_connector_metadata` calls `prepare_cross_layer_step` before model
 hooks, including save-only steps. This wraps the inherited
 `prepare_layerwise_step` and `process_layer_data`: request snapshots use the
 adopted hit length, and existing GVA code builds masks, leases, arrays and
@@ -86,7 +86,7 @@ consumer order. Requests with the same first consumer share a batch. The
 background thread is the existing `KVCacheStoreLayerRecvingThread`.
 
 Before attention or a cache-only write, `wait_for_layer_load` dispatches to
-the worker's `wait_for_cross_layer_kv_load`, which waits
+the worker's `wait_for_cross_layer_load`, which waits
 for the physical owner's completion event. A completed SDK copy opens the
 gate; queue submission never reports early `finished_recving`. Hooks visit
 public `MultiConnector.sub_connectors` so composition cannot bypass a gate.

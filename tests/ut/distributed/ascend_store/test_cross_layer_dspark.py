@@ -42,10 +42,10 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
                 self.assertFalse(worker._pipeline_enabled)
                 save_prefix(worker)
                 meta = metadata(worker, load=True, save=False)
-                worker.prepare_cross_layer_kv_step(meta)
+                worker.prepare_cross_layer_step(meta)
                 worker.start_load_kv(meta)
                 self.assertFalse(worker._pending_layers)
-                worker.finish_cross_layer_kv_loads()
+                worker.finish_cross_layer_loads()
                 self.assertFalse(store.leases)
 
     def test_other_drafters_do_not_enable_pipeline(self):
@@ -64,20 +64,20 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
             cache.zero_()
         store.block_address = caches["model.layers.8.attn.long_kv_cache"][1].data_ptr()
         meta = metadata(worker, load=True, save=False)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         worker.start_load_kv(meta)
         self.assertTrue(store.blocked.wait(timeout=2))
         self.assertGreater(int(caches["model.mtp.layers.0.attn.kv_cache"][1].sum()), 0)
-        worker.wait_for_cross_layer_kv_load(2)
+        worker.wait_for_cross_layer_load(2)
         store.resume.set()
-        worker.finish_cross_layer_kv_loads()
+        worker.finish_cross_layer_loads()
 
     def test_speculative_saves_use_final_cache_contents(self):
         worker, store, caches = make_cross_worker(self, bounded=True, draft=True, method="dspark")
         meta = metadata(worker)
-        worker.prepare_cross_layer_kv_step(meta)
+        worker.prepare_cross_layer_step(meta)
         for layer in range(12):
-            worker.on_cross_layer_kv_save_trigger(layer)
+            worker.on_cross_layer_save_trigger(layer)
         self.assertFalse(store.copies)
         for cache in caches.values():
             cache[1].fill_(37)
