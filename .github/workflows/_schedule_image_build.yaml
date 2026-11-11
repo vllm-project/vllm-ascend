@@ -322,7 +322,7 @@ jobs:
           #    Triggered by cron, always produces a fixed tag:
           #    - (any schedule run) --> vllm-ascend:nightly-main[-suffix]
           #
-          # 3. Manual (on: workflow_dispatch) or presmoke PR (on: pull_request_target)
+          # 3. Manual (on: workflow_dispatch) or PR-targeted (on: pull_request_target)
           #    → type=raw,value=<pattern>
           #    Tag comes from schedule_tag_pattern, or the selected branch on dispatch:
           #    - inputs.docker_ref=main              --> vllm-ascend:nightly-main[-suffix]
