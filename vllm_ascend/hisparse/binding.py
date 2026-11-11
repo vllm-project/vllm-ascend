@@ -89,15 +89,18 @@ def _validate_indexer_spec(spec: AscendSFAIndexerCacheSpec) -> None:
 
 def _quantized_indexer_views(cache: torch.Tensor, spec: AscendSFAIndexerCacheSpec):
     """Alias the current Core allocation; retain no additional storage owner."""
-    pages, heads, block, width = cache.shape
+    pages, heads, block, row_bytes = cache.shape
     stride = cache.stride(0)
+    width = spec.head_size
     key_bytes = block * heads * width
     scale_bytes = block * heads * torch.float32.itemsize
     offset = cache.storage_offset()
+    # Core's view covers all bytes reserved for each token. The Indexer
+    # kernels use a page with contiguous K followed by contiguous scales.
     if (
         cache.dtype != torch.float8_e4m3fn
-        or (heads, block, width) != (1, spec.block_size, spec.head_size)
-        or cache.stride()[1:] != (block * width, width, 1)
+        or (heads, block, row_bytes) != (1, spec.block_size, spec.state_content_size_bytes)
+        or cache.stride()[2:] != (row_bytes, 1)
         or pages <= 0
         or stride < key_bytes + scale_bytes
         or stride % width

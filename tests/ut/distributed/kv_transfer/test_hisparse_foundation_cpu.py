@@ -8,7 +8,15 @@ from types import SimpleNamespace as NS
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import (
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
+    KVCacheTensor,
+    MLAAttentionSpec,
+    SparseCacheRole,
+    create_kv_cache_views,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
 from vllm_ascend.attention.sfa_hisparse import (
@@ -462,9 +470,11 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
     key_bytes = 128 * 128
     stride = spec.page_size_bytes + padding
     raw = torch.full((offset + pages * stride + 256,), 165, dtype=torch.uint8)
-    cache = raw.view(torch.float8_e4m3fn).as_strided(
-        (pages, 1, 128, 128), (stride, key_bytes, 128, 1), storage_offset=offset
+    tensor_config = KVCacheTensor(
+        size=raw.numel(), layers=["indexer"], layer_stride=spec.page_size_bytes, block_stride=stride, offset=offset
     )
+    (cache,) = create_kv_cache_views(raw.view(torch.int8), spec, pages, KVCacheLayout.BLHNC, tensor_config)
+    assert cache.shape == (pages, 1, 128, 132)
     layer = NS()
     caches = {"indexer": cache}
     _bind_indexer_views(caches, {"indexer": spec}, {"indexer": layer})
