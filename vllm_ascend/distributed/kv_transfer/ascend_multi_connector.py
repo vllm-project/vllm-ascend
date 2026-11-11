@@ -1,12 +1,15 @@
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorRole,
     SupportsHMA,
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import MooncakeAgentMetadata, MooncakeConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 
 if TYPE_CHECKING:
@@ -53,6 +56,19 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self.requires_mamba_state_copy_after_load = any(
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
+    ) -> None:
+        if metadata and any(isinstance(value, MooncakeAgentMetadata) for value in metadata.values()):
+            # Other children may use a different, strongly typed handshake.
+            mooncake_children = [child for child in self._connectors if isinstance(child, MooncakeConnector)]
+            if not mooncake_children:
+                raise ValueError("Mooncake handshake metadata requires a MooncakeConnector child.")
+            for child in mooncake_children:
+                child.set_xfer_handshake_metadata_pp_aware(metadata)
+            return
+        super().set_xfer_handshake_metadata_pp_aware(metadata)
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""
