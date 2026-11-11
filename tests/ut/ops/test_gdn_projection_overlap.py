@@ -61,6 +61,7 @@ class GDNProjectionTest(unittest.TestCase):
         modules = {}
         for name, attrs in {
             "torch": vars(self.torch),
+            "torch_npu": {},
             "vllm.config": {
                 "CompilationMode": self.compilation_mode,
                 "CUDAGraphMode": self.graph_mode,

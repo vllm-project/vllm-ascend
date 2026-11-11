@@ -46,7 +46,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
-from vllm_ascend.ops.gdn_projection import project_gdn_inputs
+from vllm_ascend.ops.gdn_projection import initialize_gdn_projection_overlap, project_gdn_inputs
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -99,7 +99,12 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
 
 
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
-    """Register the packed weight and repack it after every source load."""
+    """Initialize GDN projections and register the packed convolution weight."""
+    # The upstream constructor has stored the engine config by this point.
+    # Standalone convolution layers used outside GDN need only weight packing.
+    config = getattr(layer, "vllm_config", None)
+    if config is not None:
+        initialize_gdn_projection_overlap(layer, config)
     conv1d = _get_base_conv1d(layer)
     source_weight = conv1d.weight
     if _PACKED_CONV_WEIGHT_NAME not in conv1d._parameters:
@@ -396,9 +401,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             b = b.contiguous()
             a = a.contiguous()
         else:
+            mixed_qkvz, ba = project_gdn_inputs(self, hidden_states)
+            num_tokens = mixed_qkvz.size(0)
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, ba = project_gdn_inputs(self, hidden_states)
-                num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
@@ -408,12 +413,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 b = b.contiguous()
                 a = a.contiguous()
             else:
-                projected_states_qkvz, projected_states_ba = project_gdn_inputs(self, hidden_states)
-                num_tokens = projected_states_qkvz.size(0)
-
                 mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
-                    projected_states_qkvz,
-                    projected_states_ba,
+                    mixed_qkvz,
+                    ba,
                     triton.cdiv(self.num_k_heads, self.tp_size),
                     triton.cdiv(self.num_v_heads, self.tp_size),
                     self.head_k_dim,

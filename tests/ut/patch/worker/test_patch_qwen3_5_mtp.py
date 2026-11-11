@@ -14,14 +14,19 @@ from vllm_ascend.patch.worker import patch_qwen3_5
     not hasattr(patch_qwen3_5, "_gdn_init_with_packed_weight"),
     reason="The 310P branch intentionally does not install packed GDN weights.",
 )
-def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
+@pytest.mark.parametrize("positional", [False, True])
+def test_standard_gdn_constructor_registers_packed_weight_after_base_init(positional):
     hf_config = SimpleNamespace()
     engine_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
 
-    def fake_original_init(layer, config, vllm_config):
+    extra = object()
+
+    def fake_original_init(layer, config, vllm_config, *, future_option):
+        assert future_option is extra
         assert config is hf_config
         assert vllm_config is engine_config
         torch.nn.Module.__init__(layer)
+        layer.vllm_config = vllm_config
         layer.model_config = vllm_config.model_config
         layer.conv1d = torch.nn.Module()
         layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))
@@ -29,10 +34,15 @@ def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
 
     with (
         patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init),
-        patch.object(patch_qwen3_5, "initialize_gdn_projection_overlap") as init_overlap,
+        patch("vllm_ascend.ops.gdn.initialize_gdn_projection_overlap") as init_overlap,
     ):
         layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)
-        patch_qwen3_5._gdn_init_with_packed_weight(layer, config=hf_config, vllm_config=engine_config)
+        if positional:
+            patch_qwen3_5._gdn_init_with_packed_weight(layer, hf_config, engine_config, future_option=extra)
+        else:
+            patch_qwen3_5._gdn_init_with_packed_weight(
+                layer, config=hf_config, vllm_config=engine_config, future_option=extra
+            )
 
     init_overlap.assert_called_once_with(layer, engine_config)
     packed = layer.conv1d.get_parameter("ascend_conv1d_weight")
