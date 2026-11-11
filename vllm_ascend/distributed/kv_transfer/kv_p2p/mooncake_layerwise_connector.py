@@ -25,7 +25,7 @@ import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
-from vllm.distributed import get_pcp_group
+from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -235,6 +235,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
         reuse_completion_callback: Callable[[int, str | None], None] | None = None,
+        last_layer_idx: int | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
@@ -254,6 +255,10 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.num_head_replica = num_head_replica
         self.layer_metadata = layer_metadata
         self.total_layers = total_layers
+        # Global physical layer index whose transfer completes a request. A
+        # pipeline stage that does not own it passes -1 and never signals
+        # completion, because every stage sees only its own layer range.
+        self.last_layer_idx = total_layers - 1 if last_layer_idx is None else last_layer_idx
         self.use_mla = use_mla
         self.use_attn_mamba_hybrid = use_attn_mamba_hybrid
         self.resharding_stream = resharding_stream
@@ -299,7 +304,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                     error,
                 )
             self.failed_reqs.update(send_task.failed_requests)
-            if send_task.layer_idx == (self.total_layers - 1):
+            if send_task.layer_idx == self.last_layer_idx:
                 completion_requests = {
                     **send_task.send_request,
                     **send_task.failed_requests,
@@ -744,6 +749,27 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
         )
 
 
+def _validate_layerwise_pp_role(vllm_config: VllmConfig) -> None:
+    """Accept pipeline parallelism only on the prefill side of a layerwise PUSH transfer.
+
+    The prefill stages stream their own physical layers into the decode KV
+    caches, so a stage-local layer range is enough. The receiving path tracks
+    one layer range per decode engine, therefore a decode-side pipeline is not
+    supported yet and must fail fast instead of transferring a partial cache.
+    """
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+    if pp_size <= 1:
+        return
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_producer:
+        return
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    raise NotImplementedError(
+        "MooncakeLayerwiseConnector supports pipeline parallelism on the prefill (producer) side only, "
+        f"got pipeline_parallel_size={pp_size} with kv_role={kv_role}"
+    )
+
+
 class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     requires_full_blocks_on_update_after_alloc = True
     supports_layerwise_buffer_reuse = True
@@ -751,6 +777,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
+        _validate_layerwise_pp_role(vllm_config)
         self._is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
         self.is_producer = self._is_kv_producer
         self.engine_id = vllm_config.kv_transfer_config.engine_id
@@ -1225,10 +1252,23 @@ class MooncakeLayerwiseConnectorWorker:
         self.pcp_rank: int = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size: int = vllm_config.parallel_config.decode_context_parallel_size
         self.dcp_rank: int = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        self.pp_size: int = vllm_config.parallel_config.pipeline_parallel_size
+        self.pp_rank: int = get_pp_group().rank_in_group if self.pp_size > 1 else 0
+        # Physical layer indices are global across pipeline stages. A stage that
+        # is not the first one must not report its own first layer as layer 0.
+        self.pp_layer_offset: int = (
+            vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)[0]
+            if self.pp_size > 1
+            else 0
+        )
+        self.is_last_pp_stage: bool = self.pp_rank == self.pp_size - 1
+        self.last_layer_idx: int = -1
         self.tp_group = get_tp_group()
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        # Per-layer state is indexed by global layer number, so a stage that does
+        # not start at layer 0 sizes it by its global end index.
+        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config) + self.pp_layer_offset
         self.use_mla = self.vllm_config.model_config.use_mla
         self.request_map = dict[str, str]()
         self.use_attn_mamba_hybrid = False
@@ -1335,7 +1375,13 @@ class MooncakeLayerwiseConnectorWorker:
                 self._storage_send_errors[slot_id] = error
             self.storage_send_done_events[slot_id].set()
 
-    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+    def wait_for_layer_reuse(self, stage_local_layer_idx: int) -> None:
+        """Block until the shared KV buffer of one finished layer may be reused.
+
+        ``stage_local_layer_idx`` is the ordinal inside this pipeline stage,
+        while buffer bookkeeping is keyed by global physical layer index.
+        """
+        layer_idx = stage_local_layer_idx + self.pp_layer_offset
         send_thread = self.kv_send_layer_thread
         if send_thread is None:
             return
@@ -1522,6 +1568,9 @@ class MooncakeLayerwiseConnectorWorker:
             self.index_to_name[max(self.index_to_name.keys()) + 1].append(mtp_layer_name)
         if self.index_to_name:
             self.total_layers = max(self.total_layers, max(self.index_to_name) + 1)
+            # Only the last pipeline stage owns the layer that finishes a
+            # request; the other stages must keep waiting for it.
+            self.last_layer_idx = max(self.index_to_name) if self.is_last_pp_stage else -1
 
         self._init_layerwise_reuse_state()
 
@@ -1539,6 +1588,7 @@ class MooncakeLayerwiseConnectorWorker:
                 kv_cache_specs=self.kv_cache_specs,
                 attn_resharding_group_idx=self.attn_resharding_group_idx,
                 total_layers=self.total_layers,
+                last_layer_idx=self.last_layer_idx,
                 ready_event=ready_event,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
@@ -1789,7 +1839,7 @@ class MooncakeLayerwiseConnectorWorker:
 
     def prepare_layerwise_step(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
         """Prepare layerwise hooks once, when metadata is bound before forward."""
-        self.current_layer = 0
+        self.current_layer = self.pp_layer_offset
         self._cache_write_events = [None] * self.total_layers
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info

@@ -818,6 +818,7 @@ class MockVllmConfig:
         self.parallel_config.data_parallel_rank = 0
         self.parallel_config.prefill_context_parallel_size = 1
         self.parallel_config.decode_context_parallel_size = 1
+        self.parallel_config.pipeline_parallel_size = 1
         self.cache_config.block_size = 16
         self.cache_config.mamba_cache_mode = None
         self.model_config.hf_config.num_key_value_heads = 1
@@ -1256,6 +1257,23 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
         self.assertIsNotNone(connector.connector_scheduler)
         self.assertIsNone(connector.connector_worker)
 
+    def test_pipeline_parallel_rejected_on_decode_side(self):
+        self.config.parallel_config.pipeline_parallel_size = 2
+        self.config.kv_transfer_config.is_kv_producer = False
+        self.config.kv_transfer_config.is_kv_consumer = True
+
+        with self.assertRaisesRegex(NotImplementedError, "prefill"):
+            MooncakeLayerwiseConnector(self.config, KVConnectorRole.SCHEDULER, self.kv_cache_config)
+
+    def test_pipeline_parallel_accepted_on_prefill_side(self):
+        self.config.parallel_config.pipeline_parallel_size = 2
+        self.config.kv_transfer_config.is_kv_producer = True
+        self.config.kv_transfer_config.is_kv_consumer = False
+
+        connector = MooncakeLayerwiseConnector(self.config, KVConnectorRole.SCHEDULER, self.kv_cache_config)
+
+        self.assertIsNotNone(connector.connector_scheduler)
+
     @patch.object(MooncakeLayerwiseConnectorScheduler, "get_num_new_matched_tokens")
     def test_get_num_new_matched_tokens(self, mock_method):
         connector = MooncakeLayerwiseConnector(self.config, KVConnectorRole.SCHEDULER, self.kv_cache_config)
@@ -1299,6 +1317,7 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
 
 def test_layerwise_reuse_state_tracks_shared_physical_slots():
     worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.pp_layer_offset = 0
     worker.index_to_name = {1: ["layer1"], 4: ["layer4"]}
     worker.layer_metadata = {
         "layer1": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
@@ -1320,6 +1339,7 @@ def test_layerwise_reuse_state_tracks_shared_physical_slots():
 
 def test_layerwise_reuse_wait_propagates_mooncake_error():
     worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.pp_layer_offset = 0
     worker.index_to_name = {1: ["layer1"], 4: ["layer4"]}
     worker.layer_metadata = {
         "layer1": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
@@ -1604,6 +1624,9 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_pcp_group",
             ),
             patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_pp_group",
+            ),
+            patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_decode_context_model_parallel_rank",
                 return_value=0,
             ),
@@ -1643,6 +1666,66 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertEqual(len(worker.layer_metadata), 1)
         self.assertIsNotNone(worker.kv_send_layer_thread)
         self.assertIsNone(worker.kv_recv_layer_thread)
+
+    def test_register_kv_caches_producer_reports_last_layer_index(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        self.vllm_config.kv_transfer_config.is_kv_consumer = False
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+
+        worker.register_kv_caches(self.kv_caches)
+
+        thread_factory = sys.modules[MooncakeLayerwiseConnectorWorker.__module__].KVCacheSendingLayerThread
+        self.assertEqual(worker.pp_layer_offset, 0)
+        self.assertTrue(worker.is_last_pp_stage)
+        self.assertEqual(worker.last_layer_idx, 0)
+        self.assertEqual(thread_factory.call_args.kwargs["last_layer_idx"], 0)
+
+    def test_first_pp_stage_defers_completion_to_last_stage(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        self.vllm_config.kv_transfer_config.is_kv_consumer = False
+        self.vllm_config.parallel_config.pipeline_parallel_size = 2
+        self.vllm_config.model_config.get_num_layers = MagicMock(return_value=1)
+        self.vllm_config.model_config.get_layers_start_end_indices = MagicMock(return_value=(0, 1))
+        mooncake_layerwise = sys.modules[MooncakeLayerwiseConnectorWorker.__module__]
+        mooncake_layerwise.get_pp_group.return_value.rank_in_group = 0
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+
+        worker.register_kv_caches(self.kv_caches)
+
+        thread_factory = mooncake_layerwise.KVCacheSendingLayerThread
+        self.assertFalse(worker.is_last_pp_stage)
+        self.assertEqual(worker.last_layer_idx, -1)
+        self.assertEqual(thread_factory.call_args.kwargs["last_layer_idx"], -1)
+
+    def test_second_pp_stage_owns_global_layer_range(self):
+        layer_name = "model.layers.42.self_attn.attn"
+        group = MagicMock()
+        group.kv_cache_spec = MagicMock(block_size=16)
+        group.layer_names = [layer_name]
+        kv_cache_config = MagicMock()
+        kv_cache_config.kv_cache_groups = [group]
+        kv_cache_config.kv_cache_tensors = []
+        kv_cache_config.num_blocks = 10
+        cache = MagicMock()
+        cache.shape = (10, 16, 1, 16)
+        cache.data_ptr.return_value = 0x10000
+        cache.element_size.return_value = 4
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        self.vllm_config.kv_transfer_config.is_kv_consumer = False
+        self.vllm_config.parallel_config.pipeline_parallel_size = 2
+        self.vllm_config.model_config.get_num_layers = MagicMock(return_value=36)
+        self.vllm_config.model_config.get_layers_start_end_indices = MagicMock(return_value=(42, 78))
+        mooncake_layerwise = sys.modules[MooncakeLayerwiseConnectorWorker.__module__]
+        mooncake_layerwise.get_pp_group.return_value.rank_in_group = 1
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, kv_cache_config, self.engine_id)
+
+        worker.register_kv_caches({layer_name: (cache,)})
+
+        self.assertEqual(worker.pp_layer_offset, 42)
+        self.assertTrue(worker.is_last_pp_stage)
+        self.assertEqual(worker.total_layers, 78)
+        self.assertEqual(worker.last_layer_idx, 42)
+        self.assertEqual(mooncake_layerwise.KVCacheSendingLayerThread.call_args.kwargs["last_layer_idx"], 42)
 
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.is_kv_producer = False
@@ -1905,3 +1988,117 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(kv_caches)
 
         worker.create_kv_buffer.assert_called_once_with(main_cache)
+
+
+def _make_pp_stage_worker(pp_rank, pp_size, pp_layer_offset, index_to_name):
+    """Build a worker exposing only the pipeline-parallel layer bookkeeping."""
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.pp_rank = pp_rank
+    worker.pp_size = pp_size
+    worker.is_last_pp_stage = pp_rank == pp_size - 1
+    worker.pp_layer_offset = pp_layer_offset
+    worker.index_to_name = index_to_name
+    worker.total_layers = max(index_to_name) + 1
+    worker.last_layer_idx = max(index_to_name) if worker.is_last_pp_stage else -1
+    return worker
+
+
+class TestMooncakeLayerwisePipelineParallel(unittest.TestCase):
+    """Layer ordinals stay global while each pipeline stage sees one layer range."""
+
+    def _make_reuse_worker(self):
+        # Stage 1 of 2 owns global layers 42 and 43 while AscendStore still
+        # addresses them with the stage-local ordinals 0 and 1.
+        worker = _make_pp_stage_worker(1, 2, 42, {42: ["layer42"], 43: ["layer43"]})
+        worker.layer_metadata = {
+            "layer42": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
+            "layer43": _make_layer_metadata(kv_caches_base_addr=[5000, 6000]),
+        }
+        worker._storage_send_errors = {}
+        worker._pending_reuse_layers = set()
+        worker.kv_send_layer_thread = MagicMock()
+        worker.kv_send_layer_thread.is_alive.return_value = True
+        worker._init_layerwise_reuse_state()
+        return worker
+
+    def test_stage_local_ordinal_releases_matching_global_layer(self):
+        worker = self._make_reuse_worker()
+        worker._mark_layer_reuse_pending(42)
+        worker._mark_layer_reuse_pending(43)
+
+        worker._complete_layer_reuse(42, None)
+
+        worker.wait_for_layer_reuse(0)
+
+    def test_stage_local_ordinal_propagates_global_layer_error(self):
+        worker = self._make_reuse_worker()
+        worker._mark_layer_reuse_pending(42)
+        worker._mark_layer_reuse_pending(43)
+
+        worker._complete_layer_reuse(42, None)
+        worker._complete_layer_reuse(43, "write failed")
+
+        worker.wait_for_layer_reuse(0)
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            worker.wait_for_layer_reuse(1)
+
+    def test_prepare_layerwise_step_starts_at_stage_layer_offset(self):
+        worker = _make_pp_stage_worker(1, 2, 42, {42: ["layer42"], 43: ["layer43"]})
+        worker.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_producer=False))
+
+        worker.prepare_layerwise_step(MooncakeLayerwiseConnectorMetadata())
+
+        self.assertEqual(worker.current_layer, 42)
+        self.assertEqual(len(worker._cache_write_events), worker.total_layers)
+
+    def test_prepare_layerwise_step_keeps_global_start_for_single_stage(self):
+        worker = _make_pp_stage_worker(0, 1, 0, {0: ["layer0"], 1: ["layer1"]})
+        worker.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_producer=False))
+
+        worker.prepare_layerwise_step(MooncakeLayerwiseConnectorMetadata())
+
+        self.assertEqual(worker.current_layer, 0)
+        self.assertEqual(len(worker._cache_write_events), 2)
+
+    def _make_send_thread(self, total_layers, last_layer_idx):
+        thread = KVCacheSendingLayerThread.__new__(KVCacheSendingLayerThread)
+        thread.total_layers = total_layers
+        thread.last_layer_idx = last_layer_idx
+        thread.failed_reqs = set()
+        thread.callback_func = MagicMock()
+        thread.reuse_completion_callback = None
+        thread.send_queue = MagicMock()
+        thread._transfer_kv_cache = MagicMock(return_value=None)
+        return thread
+
+    @staticmethod
+    def _make_send_task(layer_idx, req_meta):
+        send_task = MagicMock()
+        send_task.layer_idx = layer_idx
+        send_task.layer_name = f"layer{layer_idx}"
+        send_task.send_request = {"req": req_meta}
+        send_task.failed_requests = {}
+        return send_task
+
+    def test_non_last_stage_never_signals_request_completion(self):
+        thread = self._make_send_thread(total_layers=78, last_layer_idx=-1)
+        thread.layer_metadata = {}
+        req_meta = MagicMock()
+        req_meta.chunk_finish = True
+
+        # Layer 77 is total_layers - 1, which used to signal completion on every
+        # stage; a non-last stage must never finish the decode request.
+        for layer_idx in (0, 41, 77):
+            thread._handle_request(self._make_send_task(layer_idx, req_meta))
+
+        thread.callback_func.assert_not_called()
+
+    def test_last_stage_signals_completion_on_its_last_layer(self):
+        thread = self._make_send_thread(total_layers=78, last_layer_idx=77)
+        thread.layer_metadata = {"layer77": _make_layer_metadata(tensor_group_idx=[0])}
+        req_meta = MagicMock()
+        req_meta.chunk_finish = True
+
+        thread._handle_request(self._make_send_task(77, req_meta))
+
+        thread.callback_func.assert_called_once_with("req", req_meta, 0, trans_flag=True)
