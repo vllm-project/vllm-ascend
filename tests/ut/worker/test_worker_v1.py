@@ -1125,7 +1125,6 @@ class TestNPUWorker(TestBase):
 
     def test_execute_dummy_batch(self):
         """Test execute_dummy_batch method"""
-        from vllm_ascend.utils import vllm_version_is
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
@@ -1143,12 +1142,11 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            extra_kwargs = {} if vllm_version_is("0.32.0") else {"randomize_inputs": False}
             mock_model_runner._dummy_run.assert_called_once_with(
                 mock_uniform_decode_query_len,
                 uniform_decode=True,
                 skip_gdn_state_update=True,
-                **extra_kwargs,
+                randomize_inputs=False,
             )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")

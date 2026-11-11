@@ -214,24 +214,23 @@ NPU_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
     _i(
         "execute_model",
         Disposition.ALIGN_FIRST,
-        "0.5a",
-        "Misses inference_mode and with_gpu_sync_check, keeps every PP send handle instead of "
-        "handles[1:], and has no annotate_profile context. Align in 0.5a, inherit in Phase 4 once "
-        "SP, KV-connector and msMonitor differences have hooks.",
+        "4",
+        "Phase 0.5 aligns decorators and PP device handles; retain SP, KV-connector and "
+        "msMonitor behavior until Phase 4 supplies the parent hooks.",
     ),
     _i(
         "sample_tokens",
-        Disposition.ALIGN_FIRST,
-        "0.5a",
-        "Keeps @torch.inference_mode but not the @with_gpu_sync_check layer, and attaches profiling-chunk "
-        "statistics. Align decorators in 0.5a, inherit once the statistics have an extension point.",
+        Disposition.ASCEND_SPECIFIC,
+        "4",
+        "Phase 0.5 aligns inference and sync-check decorators; keep profiling-chunk statistics "
+        "until the parent provides an extension point.",
     ),
     _i(
         "load_model",
-        Disposition.ALIGN_FIRST,
-        "0.5c",
-        "Signature lacks the keyword-only load_dummy_weights argument, and the body uses the CaMem "
-        "weights pool. Widen the signature in 0.5c, converge in Phase 5.",
+        Disposition.ASCEND_SPECIFIC,
+        "5",
+        "Phase 0.5 accepts load_dummy_weights and rejects elastic-EP dummy loading before "
+        "allocation; keep the CaMem weights pool until Phase 5 convergence.",
     ),
     _i(
         "compile_or_warm_up_model",
@@ -304,7 +303,7 @@ NPU_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
     _i(
         "profile",
         Disposition.ASCEND_SPECIFIC,
-        "0.5c",
+        "5",
         "NPU profiler wrapper (TorchNPUProfilerWrapper); the signature already accepts upstream "
         "delay_iterations/max_iterations and profiler_kwargs after the main-branch alignment.",
     ),
@@ -352,10 +351,10 @@ NPU_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
     ),
     _i(
         "execute_dummy_batch",
-        Disposition.ALIGN_FIRST,
-        "0.5c",
-        "Passes skip_gdn_state_update and has no randomize_inputs contract; align the signature and "
-        "the _dummy_run contract in 0.5c.",
+        Disposition.ASCEND_SPECIFIC,
+        "4",
+        "Phase 0.5 forwards randomized DP dummy inputs on verified main and v0.33.0; keep "
+        "the idle runtime guard, current-config context and GDN-state suppression.",
     ),
     _i(
         "_init_worker_distributed_environment",
@@ -384,16 +383,17 @@ NPU_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
     ),
     _i(
         "update_config",
-        Disposition.ALIGN_FIRST,
-        "0.5b",
-        "Forwards to the model runner only; the parent replaces the config object on vllm_config, "
-        "the worker and the model runner.",
+        Disposition.PENDING_REMOVAL,
+        "2",
+        "Phase 0.5 replaces each config once and shares it between VllmConfig, Worker and "
+        "ModelRunner, matching the parent; inherit in Phase 2.",
     ),
     _i(
         "reload_weights",
-        Disposition.ALIGN_FIRST,
-        "0.5a",
-        "Calls the model runner without set_current_vllm_config; align in 0.5a, inherit in Phase 2.",
+        Disposition.PENDING_REMOVAL,
+        "2",
+        "Phase 0.5 restores set_current_vllm_config around reload; equivalent to the parent "
+        "and scheduled for removal in Phase 2.",
     ),
     _i(
         "check_health",
@@ -467,13 +467,12 @@ XLITE_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
 )
 
 #: Overrides whose local signature does not yet accept every call the parent
-#: accepts. Phase 0.5c removes them one by one.
-KNOWN_SIGNATURE_GAPS = frozenset({"load_model"})
+#: accepts. Unified Phase 0.5 closes the remaining load_model gap.
+KNOWN_SIGNATURE_GAPS = frozenset()
 
-#: Overrides that lost (or never adopted) a parent decorator. Phase 0.5a fixes
-#: them. ``sample_tokens`` is added at test time only where
-#: ``with_gpu_sync_check`` actually wraps, since it is a no-op off CUDA.
-KNOWN_DECORATOR_GAPS = frozenset({"execute_model"})
+#: Unified Phase 0.5 aligns both execute_model and sample_tokens decorators.
+#: The semantic guard compares the actual wrappers on the current platform.
+KNOWN_DECORATOR_GAPS = frozenset()
 
 #: Decorated methods the guard inspects. Extending this set is how later phases
 #: pull more decorators under CI.

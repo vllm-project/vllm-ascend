@@ -2,3 +2,7 @@ pr: 20850
 entries:
   - category: bugfix
     text: Fixed current-config visibility during weight reload and unnecessary pipeline-parallel metadata synchronization.
+  - category: bugfix
+    text: Fixed stale Worker and ModelRunner config references after runtime model or loader configuration updates.
+  - category: bugfix
+    text: Aligned dummy weight loading errors and randomized DP dummy inputs with verified vLLM main and v0.33.0.

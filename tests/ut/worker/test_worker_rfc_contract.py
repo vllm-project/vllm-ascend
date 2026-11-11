@@ -8,7 +8,7 @@ integration tests remain in test_worker_v1.py and test_worker_v2.py.
 import ast
 import copy
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import NoneType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -118,21 +118,32 @@ class WorkerAlignmentContract(unittest.TestCase):
                             pp.irecv_tensor_dict.assert_not_called()
 
     def test_config_identity_and_rejection(self):
-        for runner_version in ("v1", "v2"):
-            with self.subTest(runner=runner_version):
+        for overrides in ({}, {"model_config": {"value": 2}, "load_config": {"value": 3}}):
+            with self.subTest(overrides=overrides):
                 old = SimpleNamespace(value=1)
                 config = SimpleNamespace(model_config=old, load_config=old)
-                worker = SimpleNamespace(vllm_config=config, model_runner=SimpleNamespace())
+                worker = SimpleNamespace(
+                    vllm_config=config,
+                    model_config=old,
+                    load_config=old,
+                    model_runner=SimpleNamespace(model_config=old, load_config=old),
+                )
 
                 def replace_config(config, overrides):
                     return SimpleNamespace(**(vars(config) | overrides))
 
-                update = worker_method("update_config", update_config=replace_config)
-                update(worker, {"model_config": {"value": 2}, "load_config": {"value": 3}})
+                replace = MagicMock(side_effect=replace_config)
+                update = worker_method("update_config", update_config=replace)
+                update(worker, overrides)
+                self.assertEqual(replace.call_count, len(overrides))
                 for name in ("model_config", "load_config"):
                     self.assertIs(getattr(worker, name), getattr(config, name))
                     self.assertIs(getattr(worker.model_runner, name), getattr(config, name))
-                    self.assertIsNot(getattr(config, name), old)
+                    if name in overrides:
+                        self.assertIsNot(getattr(config, name), old)
+                        self.assertEqual(getattr(config, name).value, overrides[name]["value"])
+                    else:
+                        self.assertIs(getattr(config, name), old)
                 with self.assertRaisesRegex(ValueError, "cache_config"):
                     update(worker, {"cache_config": {}})
 
@@ -141,31 +152,41 @@ class WorkerAlignmentContract(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "elastic-EP"):
             load(SimpleNamespace(), load_dummy_weights=True)
 
-    def test_dummy_contract_and_release_compatibility(self):
-        for release in (False, True):
-            for dp_size in (1, 2):
-                runner = SimpleNamespace(uniform_decode_query_len=4, _dummy_run=MagicMock())
+    def test_dummy_contract_rechecks_randomization_and_dp_size(self):
+        for uniform_len in (None, 4):
+            with self.subTest(uniform_len=uniform_len):
+                runner = SimpleNamespace(_dummy_run=MagicMock())
+                if uniform_len is not None:
+                    runner.uniform_decode_query_len = uniform_len
                 worker = SimpleNamespace(
                     log_memory_stats=MagicMock(),
                     model_runner=runner,
                     vllm_config=object(),
-                    parallel_config=SimpleNamespace(data_parallel_size=dp_size),
+                    parallel_config=SimpleNamespace(data_parallel_size=1),
                 )
-                execute = worker_method(
-                    "execute_dummy_batch",
-                    set_current_vllm_config=lambda _: contextmanager(lambda: iter([None]))(),
-                    vllm_version_is=lambda _, release=release: release,
-                    envs=SimpleNamespace(VLLM_RANDOMIZE_DP_DUMMY_INPUTS=True),
-                )
-                execute(worker)
-                expected = {"uniform_decode": True, "skip_gdn_state_update": True}
-                if not release:
-                    expected["randomize_inputs"] = dp_size > 1
-                runner._dummy_run.assert_called_once_with(4, **expected)
+                flags = SimpleNamespace(VLLM_RANDOMIZE_DP_DUMMY_INPUTS=False)
+                config_context = MagicMock(side_effect=lambda _: nullcontext())
+                execute = worker_method("execute_dummy_batch", set_current_vllm_config=config_context, envs=flags)
+                for enabled, dp_size in ((False, 1), (False, 2), (True, 1), (True, 2), (True, 1)):
+                    flags.VLLM_RANDOMIZE_DP_DUMMY_INPUTS = enabled
+                    worker.parallel_config.data_parallel_size = dp_size
+                    runner._dummy_run.reset_mock()
+                    config_context.reset_mock()
+                    execute(worker)
+                    config_context.assert_called_once_with(worker.vllm_config)
+                    runner._dummy_run.assert_called_once_with(
+                        uniform_len or 1,
+                        uniform_decode=True,
+                        skip_gdn_state_update=True,
+                        randomize_inputs=enabled and dp_size > 1,
+                    )
+                self.assertEqual(worker.log_memory_stats.call_count, 5)
 
     def test_execution_decorators(self):
         cls = next(
-            n for n in ast.parse(WORKER.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"
+            n
+            for n in ast.parse(WORKER.read_text(encoding="utf-8")).body
+            if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"
         )
         for name in ("execute_model", "sample_tokens"):
             node = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)

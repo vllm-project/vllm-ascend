@@ -1415,17 +1415,17 @@ class NPUWorker(WorkerBase):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         # Ascend retains the idle runtime guard and GDN-state suppression.
-        # Both current runners accept randomize_inputs; release V2 does not.
+        # Both verified main and v0.33.0 accept randomized DP dummy inputs.
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
-            dummy_kwargs = {"uniform_decode": True, "skip_gdn_state_update": True}
-            if not vllm_version_is("0.32.0"):
-                dummy_kwargs["randomize_inputs"] = (
-                    envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
-                )
-            self.model_runner._dummy_run(num_tokens, **dummy_kwargs)
+            self.model_runner._dummy_run(
+                num_tokens,
+                uniform_decode=True,
+                skip_gdn_state_update=True,
+                randomize_inputs=(envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1),
+            )
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -1461,8 +1461,8 @@ class NPUWorker(WorkerBase):
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         # Replace each config once, sharing the replacement across all owners.
-        # Both NPU runners inherit GPUModelRunner.update_config; calling it after
-        # replacement would construct a second, different object.
+        # Calling model_runner.update_config after replacement would construct
+        # a second, different object instead of sharing the worker's config.
         allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():
             if config_name not in allowed_config_names:

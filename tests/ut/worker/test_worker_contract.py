@@ -202,21 +202,6 @@ def _decorator_effects(fn):
     return inference_mode, tuple(sync_regions)
 
 
-def _sync_check_is_enforced() -> bool:
-    """Whether ``with_gpu_sync_check`` wraps at all on this platform.
-
-    Off CUDA-like platforms it returns the function unchanged, so the parent's
-    decorator stack is one layer shallower than on a GPU runner.
-    """
-
-    from vllm.utils.gpu_sync_debug import with_gpu_sync_check
-
-    def probe() -> None:
-        return None
-
-    return with_gpu_sync_check(probe) is not probe
-
-
 def test_every_override_is_registered(guard):
     """A new override must be classified before it can land."""
     _skip_if_unavailable(guard)
@@ -339,8 +324,6 @@ def test_quarantined_signatures_accept_the_parent_call_surface(npu_guard):
 def test_guarded_methods_keep_parent_decorators(npu_guard):
     """Compare inference-mode and sync-region effects, not wrapper counts."""
     expected = set(KNOWN_DECORATOR_GAPS)
-    if _sync_check_is_enforced():
-        expected.add("sample_tokens")
     observed = set()
     for name in DECORATOR_GUARDED_METHODS:
         local = _decorator_effects(getattr(npu_guard.cls, name))
