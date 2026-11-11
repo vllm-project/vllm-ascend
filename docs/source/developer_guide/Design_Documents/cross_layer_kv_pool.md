@@ -27,6 +27,21 @@ objects are not queried by this strategy. Physical buffer reuse and offload
 snapshots remain disabled for shared-source models: source sharing does not
 imply that its physical HBM buffers can be reused by other layers.
 
+Attention uses the existing `attention/utils.py` helpers and the upstream
+`wait_for_layer_load(layer_name)` / `save_kv_layer(...)` connector interfaces.
+`AscendStoreConnector` selects its cross-layer worker inside these methods;
+there is no separate public group-save or cross-layer-load connector API.
+The worker maps a physical consumer boundary to its registered group tasks,
+so the save argument does not redefine the shared cache layout.
+
+PD separation can compose the same `AscendStoreConnector` with a PD connector
+under `MultiConnector`, including nested groups. A composite shared-attention
+boundary notifies only bound cross-layer store children; ordinary cache-owner
+hooks retain root-level forwarding. Metadata binding, `start_load_kv`,
+`finish_forward` and `wait_for_save` still run through the root connector for
+all children. Configure Memcache and `use_layerwise=true` on the P-side store
+child; the D-side store retains `use_layerwise=false`.
+
 ## Topology and SWA
 
 `kv_source_layer_ids` and `num_hidden_layers` determine source ownership and
@@ -70,7 +85,8 @@ the GVA receiver's copy routine, then queues target source/SWA tasks in first
 consumer order. Requests with the same first consumer share a batch. The
 background thread is the existing `KVCacheStoreLayerRecvingThread`.
 
-Before attention or a cache-only write, `wait_for_cross_layer_kv_load` waits
+Before attention or a cache-only write, `wait_for_layer_load` dispatches to
+the worker's `wait_for_cross_layer_kv_load`, which waits
 for the physical owner's completion event. A completed SDK copy opens the
 gate; queue submission never reports early `finished_recving`. Hooks visit
 public `MultiConnector.sub_connectors` so composition cannot bypass a gate.

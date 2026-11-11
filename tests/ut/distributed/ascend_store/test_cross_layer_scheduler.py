@@ -136,10 +136,12 @@ class TestCrossLayerScheduler(unittest.TestCase):
         metadata = AscendConnectorMetadata(set())
         connector.bind_connector_metadata(metadata)
         worker.prepare_cross_layer_kv_step.assert_called_once_with(metadata)
+        worker._extract_physical_layer_index.return_value = 1
         connector.wait_for_layer_load("model.layers.1.self_attn")
         connector.save_kv_layer("model.layers.1.self_attn", MagicMock(), None)
-        connector.wait_for_cross_layer_kv_load(1)
         worker.wait_for_cross_layer_kv_load.assert_called_once_with(1)
+        worker.on_cross_layer_kv_save_trigger.assert_called_once_with(1)
+        worker.save_kv_layer.assert_not_called()
         connector.wait_for_save()
         worker.wait_for_save.assert_called_once_with(metadata)
         connector.finish_forward()

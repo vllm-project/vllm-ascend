@@ -415,6 +415,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load_ready(layer_name)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
+        if getattr(self, "use_cross_layer_kv", False):
+            worker = self.connector_worker
+            assert isinstance(worker, CrossLayerKVPoolWorker)
+            worker.wait_for_cross_layer_kv_load(worker._extract_physical_layer_index(layer_name))
+            return
         if not self.use_classic_layerwise:
             return
         assert self.connector_worker is not None
@@ -466,38 +471,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
     ) -> None:
-        if not self.use_classic_layerwise:
+        if not self.use_layerwise:
             return
 
         if not self.can_put:
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
+        if getattr(self, "use_cross_layer_kv", False):
+            worker = cast(CrossLayerKVPoolWorker, self.connector_worker)
+            worker.on_cross_layer_kv_save_trigger(worker._extract_physical_layer_index(layer_name))
+            return
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
-
-    def save_kv_group(self, trigger_layer: int) -> None:
-        """Dispatch a CrossLayerKV per-slice save trigger raised at a V4.1 layer boundary.
-
-        The public ``use_layerwise`` switch selects this strategy for shared
-        KV topologies. Physical-layer mode ignores source-slice triggers.
-        """
-        if not self.use_cross_layer_kv or not self.can_put:
-            return
-        worker = self.connector_worker
-        if isinstance(worker, CrossLayerKVPoolWorker):
-            worker.on_cross_layer_kv_save_trigger(trigger_layer)
-
-    def wait_for_cross_layer_kv_load(self, layer_idx: int) -> None:
-        """Gate a V4.1 consumer layer on its pipelined load unit.
-
-        CrossLayerKV keeps synchronous scheduler admission and waits only for each
-        consumer's dependencies, without an early finished-receiving signal.
-        """
-        if not self.use_cross_layer_kv:
-            return
-        worker = self.connector_worker
-        if isinstance(worker, CrossLayerKVPoolWorker):
-            worker.wait_for_cross_layer_kv_load(layer_idx)
 
     def finish_forward(self) -> None:
         if getattr(self, "use_cross_layer_kv", False) and isinstance(self.connector_worker, CrossLayerKVPoolWorker):

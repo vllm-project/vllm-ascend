@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Forward CrossLayerKV attention hooks through composite KV connectors."""
+"""Validate shared-KV attention boundary coverage."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -18,13 +18,3 @@ def supports_cross_layer_kv_hooks(forward_context: Mapping[str, Any], num_layers
         and 0 <= layer.layer_idx < num_layers
     }
     return layers == set(range(num_layers))
-
-
-def dispatch_cross_layer_kv_hook(connector: Any, method_name: str, layer_idx: int) -> None:
-    """Invoke a connector hook, or visit the public MultiConnector children."""
-    hook = getattr(connector, method_name, None)
-    if callable(hook):
-        hook(layer_idx)
-        return
-    for child in getattr(connector, "sub_connectors", ()):
-        dispatch_cross_layer_kv_hook(child, method_name, layer_idx)

@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer_kv_hooks import (
-    dispatch_cross_layer_kv_hook,
     supports_cross_layer_kv_hooks,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
@@ -18,30 +16,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer
 )
 
 V41_SOURCES = (2, 8, 14, 20)
-
-
-class TestCrossLayerKVHookDispatch(unittest.TestCase):
-    def test_nested_multi_connector_reaches_all_children(self):
-        wait = MagicMock()
-        other_wait = MagicMock()
-        connector = SimpleNamespace(
-            sub_connectors=[
-                SimpleNamespace(),
-                SimpleNamespace(sub_connectors=[SimpleNamespace(wait_for_cross_layer_kv_load=wait)]),
-                SimpleNamespace(wait_for_cross_layer_kv_load=other_wait),
-            ]
-        )
-        dispatch_cross_layer_kv_hook(connector, "wait_for_cross_layer_kv_load", 8)
-        wait.assert_called_once_with(8)
-        other_wait.assert_called_once_with(8)
-
-    def test_direct_hook_owns_forwarding(self):
-        save = MagicMock()
-        child_save = MagicMock()
-        connector = SimpleNamespace(save_kv_group=save, sub_connectors=[SimpleNamespace(save_kv_group=child_save)])
-        dispatch_cross_layer_kv_hook(connector, "save_kv_group", 14)
-        save.assert_called_once_with(14)
-        child_save.assert_not_called()
 
 
 def _vllm_config(extra, architectures=("DeepseekV41ForCausalLM",), text_config=None):

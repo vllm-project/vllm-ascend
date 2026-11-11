@@ -23,5 +23,7 @@ entries:
     text: >-
       Shared-source scheduling reuses Memcache GVA keys, hit queries,
       descriptor builders and layerwise transfer threads, including ranged
-      saves with final-step publication. Mooncake retains its block-key path.
-      Source layers derive from model parameters; no new public switch is added.
+      saves with final-step publication and standard connector interfaces for
+      mixed or nested MultiConnector deployments.
+      Source layers derive from model parameters without a new public switch;
+      Mooncake retains its block-key path.

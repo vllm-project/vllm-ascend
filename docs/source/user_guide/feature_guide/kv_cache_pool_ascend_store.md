@@ -981,6 +981,15 @@ Expected output: MetaService starts successfully with no errors.
     and bounded replay callbacks stay outside graph segments; eager remains
     supported. In PD separation, enable layerwise on P only; D keeps it disabled.
 
+    PD separation also supports `MultiConnector` with the existing
+    `AscendStoreConnector` store child alongside the PD transport child.
+    Set `backend=memcache` and `use_layerwise=true` in that P-side store
+    child's `kv_connector_extra_config`, rather than on the MultiConnector root.
+    Cross-layer uses the standard connector load/save interfaces. Composite
+    attention boundaries reach bound cross-layer store children, including
+    nested groups; the PD child's normal step lifecycle remains active.
+    D-side store children keep `use_layerwise=false`.
+
     With `swa_bounded_replay=true`, target SWA is reconstructed by replay and
     is excluded from pool storage. Otherwise SWA saves follow the existing
     window/block retention masks at reusable prefix boundaries, rather than

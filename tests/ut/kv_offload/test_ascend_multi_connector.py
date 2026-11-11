@@ -8,10 +8,65 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata  # noqa: E402
+
+from vllm_ascend.attention import utils as attention_utils  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
     AscendMultiConnector,
     MultiConnector,
 )
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("prefill_layerwise", [False, True])
+def test_shared_kv_boundary_in_pd_multi_connector(monkeypatch, nested, prefill_layerwise):
+    pd, store = MagicMock(), MagicMock()
+    pd.use_cross_layer_kv = False
+    pd.sub_connectors = ()
+    store.use_cross_layer_kv = prefill_layerwise
+    store.sub_connectors = ()
+
+    def multi(children):
+        result = AscendMultiConnector.__new__(AscendMultiConnector)
+        result._connectors = children
+        result._extra_async_saves = {}
+        result._layerwise_slot_release_providers = []
+        result._non_slot_release_connectors = children
+        return result
+
+    child = multi([store]) if nested else store
+    root = multi([pd, child])
+    store_metadata = MultiKVConnectorMetadata((object(),)) if nested else object()
+    step_metadata = MultiKVConnectorMetadata((object(), store_metadata))
+    root.bind_connector_metadata(step_metadata)
+    layer = "model.layers.5.self_attn.v41_attn"
+    context = SimpleNamespace(
+        attn_metadata=object(),
+        no_compile_layers={layer: SimpleNamespace(supports_cross_layer_kv_transfer_hooks=True)},
+    )
+    monkeypatch.setattr(attention_utils, "get_forward_context", lambda: context)
+    monkeypatch.setattr(attention_utils, "get_kv_transfer_group", lambda: root)
+    monkeypatch.setattr(attention_utils, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(attention_utils, "is_v1_kv_transfer_group", lambda: True)
+    cache = [object()]
+    root.start_load_kv(context)
+    attention_utils.wait_for_kv_layer_from_connector(layer)
+    attention_utils.maybe_save_kv_layer_to_connector(layer, cache)
+    root.finish_forward()
+    root.wait_for_save()
+    if prefill_layerwise:
+        store.wait_for_layer_load.assert_called_once_with(layer)
+        store.save_kv_layer.assert_called_once_with(layer, cache, context.attn_metadata)
+    else:
+        store.wait_for_layer_load.assert_not_called()
+        store.save_kv_layer.assert_not_called()
+    pd.wait_for_layer_load.assert_not_called()
+    pd.save_kv_layer.assert_not_called()
+    for connector in (pd, store):
+        connector.bind_connector_metadata.assert_called_once()
+        connector.start_load_kv.assert_called_once_with(context)
+        connector.finish_forward.assert_called_once_with()
+        connector.wait_for_save.assert_called_once_with()
 
 
 def test_load_ready_observer_does_not_advance_child_attention_hooks():
