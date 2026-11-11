@@ -178,11 +178,11 @@ supports draft updates, call `start_draft_weight_update()` instead of
 selects the draft model and its model configuration for that session and
 restores the transfer engine's target model afterward.
 
-Draft weight updates are validated with Model Runner V2. The worker reuses
-upstream helpers to temporarily select source LM heads and restore or refresh
-online-quantized copies afterward. Select the validated runner with
-`VLLM_USE_V2_MODEL_RUNNER=1`. A draft that shares the target LM head also updates
-that shared source when its LM-head weights are transferred.
+Draft weight updates require Model Runner V2, the only runner in this tree.
+The worker reuses upstream helpers to temporarily select source LM heads
+and restore or refresh online-quantized copies afterward. A draft that shares
+the target LM head also updates that shared source when its LM-head weights
+are transferred.
 
 Generation must remain paused throughout the update. Overlapping target and
 draft update sessions are rejected. A failed update restores routing and head
