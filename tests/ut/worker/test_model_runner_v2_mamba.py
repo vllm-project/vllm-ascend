@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 import vllm.v1.worker.gpu.cp_utils as _cp_utils
+from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
@@ -49,7 +50,7 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
 def _mock_vllm_config():
     # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.
     config = MagicMock()
-    config.attention_config.indexer_kv_dtype = "int8"
+    config.attention_config = AttentionConfig(indexer_kv_dtype="int8")
     config.cache_config.cache_dtype = "auto"
     return config
 
@@ -1181,7 +1182,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     original_specs = {"target.full": full, "draft.sliding": sliding, "draft.full": draft_full, "target.gdn": mamba}
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=AttentionConfig(indexer_kv_dtype="int8"),
         cache_config=SimpleNamespace(cache_dtype="auto"),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace()),
         kv_transfer_config=None,
