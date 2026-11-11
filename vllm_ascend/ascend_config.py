@@ -346,10 +346,7 @@ class EplbConfig:
         if not isinstance(self.num_redundant_experts, int):
             raise TypeError("num_redundant_experts must be an integer")
         if self.num_redundant_experts < 0:
-            raise ValueError(
-                f"num_redundant_experts must be non-negative; "
-                f"got {self.num_redundant_experts} instead"
-            )
+            raise ValueError(f"num_redundant_experts must be non-negative; got {self.num_redundant_experts} instead")
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
         if self.dynamic_eplb:
