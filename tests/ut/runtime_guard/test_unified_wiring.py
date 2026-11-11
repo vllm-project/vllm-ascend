@@ -4,8 +4,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import torch
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
 from vllm_ascend.observability.runtime_guard.hooks import (
     check_before_sample_from_batch,
+    stash_pre_sample_logits,
+    take_pre_sample_logits,
     wrap_compute_logits_for_pre_sample,
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
@@ -14,12 +19,23 @@ from ._helpers import bare_processor
 
 
 class _FakeDfx:
-    def __init__(self, runner=None):
+    def __init__(self, runner=None, *, logits_finite: bool = True, rare_chars: bool = False):
         self.runner = runner
         self.calls = []
+        # Match production: wrap only invokes check_before_sample when a
+        # pre-sample detector is enabled.
+        self.runtime_config = SimpleNamespace(
+            detector_get=lambda sec, key, default=None: {
+                ("logits_finite", "enabled"): logits_finite,
+                ("rare_chars", "enabled"): rare_chars,
+            }.get((sec, key), default)
+        )
 
     def check_before_sample(self, **kwargs):
         self.calls.append(kwargs)
+
+    def consume_rare_pairs(self, output, pending=None):
+        return None
 
 
 class _FakeModel:
@@ -47,6 +63,48 @@ def test_wrap_fires_once_for_two_compute_logits_calls():
     assert len(dfx.calls) == 1  # once-fire: v2 samples + prompt logprobs both call it
     assert dfx.calls[0]["logits"] == "logits-tensor"
     assert "scheduler_output" not in dfx.calls[0]
+
+
+def test_stash_clones_tensor_before_grammar_rewrite():
+    runner = SimpleNamespace()
+    logits = torch.tensor([[1.0, 2.0, 3.0]])
+    stash_pre_sample_logits(runner, logits)
+    logits.fill_(0.0)
+    stashed = take_pre_sample_logits(runner)
+    assert stashed is not None
+    assert not torch.equal(stashed, logits)
+    assert stashed.tolist() == [[1.0, 2.0, 3.0]]
+
+
+def test_wrap_fires_once_on_batch_sharded_all_to_all_path():
+    """batch-sharded sample uses compute_logits_local + all_to_all, not compute_logits."""
+    sample_globals = getattr(GPUModelRunner.sample, "__globals__", None)
+    if not isinstance(sample_globals, dict) or "all_to_all_logits" not in sample_globals:
+        import pytest
+
+        pytest.skip("installed vLLM GPUModelRunner.sample has no batch-sharded all_to_all_logits")
+
+    dfx = _FakeDfx()
+    runner = SimpleNamespace(model=_FakeModel("unused"), runtime_guard=dfx, vocab_size=2, input_batch="batch")
+    orig = sample_globals["all_to_all_logits"]
+
+    def fake_all_to_all(logits_shard, metadata):
+        # Wider than vocab_size — sample trims after all-to-all.
+        return torch.tensor([[1.0, 2.0, 9.0], [3.0, 4.0, 9.0]])
+
+    sample_globals["all_to_all_logits"] = fake_all_to_all
+    try:
+        with wrap_compute_logits_for_pre_sample(runner, "batch"):
+            out = sample_globals["all_to_all_logits"](torch.zeros(1, 1), None)
+            out2 = sample_globals["all_to_all_logits"](torch.zeros(1, 1), None)
+    finally:
+        sample_globals["all_to_all_logits"] = orig
+
+    assert out.shape[-1] == 3
+    assert out2.shape[-1] == 3
+    assert len(dfx.calls) == 1
+    assert dfx.calls[0]["logits"].shape == (2, 2)  # trimmed to vocab_size
+    assert dfx.calls[0]["logits"].tolist() == [[1.0, 2.0], [3.0, 4.0]]
 
 
 def test_wrap_restores_compute_logits():
@@ -210,6 +268,12 @@ def test_d11_ascend_async_output_appends_trimmed_once():
         def check_after_sample(self, sampled_token_ids, req_ids=None):
             RequestIoSnapshotManager.get().append_batch(req_ids, sampled_token_ids)
             appended.append((list(sampled_token_ids), list(req_ids or [])))
+
+        def consume_rare_pairs(self, output, pending=None):
+            return None
+
+        def take_step_rare_pair(self):
+            return None
 
     runner = SimpleNamespace(runtime_guard=_Guard())
     assert AscendAsyncOutput(inner, runner).get_output() is out
