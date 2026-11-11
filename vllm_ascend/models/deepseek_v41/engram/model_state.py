@@ -287,10 +287,6 @@ class EngramModelState(AscendModelState):
             # FULL replay runs its own producers. No Python-side hash/lookup
             # and no ExternalEvent records may precede it on this route.
             return model_inputs
-        # TODO: Support breakable PIECEWISE by refreshing lookups under the
-        # forward context before replay, which bypasses the model pre-hook.
-        # Align capture bindings with that path so replay does not retain
-        # dummy graph-producer coordinates.
         # DP lookup needs the forward context, which is not established yet.
         self._engram_inputs = {
             "input_ids": batch.input_ids[: batch.num_tokens],
@@ -326,8 +322,28 @@ class EngramModelState(AscendModelState):
     def _prepare_engram_before_forward(self, model, args, kwargs) -> None:
         kwargs.update(self.prepare_engram())
 
+    def prepare_engram_piecewise_inputs(self, model_inputs: dict[str, Any]) -> dict[str, Any]:
+        """Refresh the same fixed lookup buffers before PIECEWISE replay.
+
+        Graph replay bypasses the model pre-hook. Capture and runtime must
+        both bind these buffers, rather than FULL graph's captured producer
+        coordinates or events. The existing preparation runs synchronously
+        under the caller's current forward context for PIECEWISE mode.
+        """
+        inputs = dict(model_inputs)
+        for name in self._engram_graph_inputs or ():
+            inputs.pop(name, None)
+        for name in ("engram_pending", "engram_mask_ready_event", "engram_graph_events"):
+            inputs.pop(name, None)
+        prepared = self.prepare_engram()
+        if not prepared:
+            # Dummy capture has no request-dependent pending lookup.
+            prepared = self.model.prepare_engram_graph_inputs(inputs["positions"].shape[0])
+        inputs.update(prepared)
+        return inputs
+
     def prepare_engram(self) -> dict[str, Any]:
-        """Refresh buffers once inside eager forward or before FULL replay."""
+        """Refresh buffers once inside eager forward or before graph replay."""
         if self._engram_inputs is None:
             return {}
         model_inputs = self.model.prepare_engram_inputs(**self._engram_inputs)

@@ -147,6 +147,93 @@ def test_eager_hook_forwards_lookup_events(state):
     state.model.prepare_engram_inputs.assert_called_once()
 
 
+def test_piecewise_capture_uses_stable_lookup_buffers_without_full_graph_producers(state):
+    state._engram_graph_inputs = {
+        "engram_query_start_loc": torch.zeros(5, dtype=torch.int32),
+        "engram_valid_token_count": torch.zeros(1, dtype=torch.int32),
+    }
+    capture_inputs = {
+        "input_ids": torch.zeros(8, dtype=torch.int32),
+        "positions": torch.arange(8),
+        "engram_pending": {0: object()},
+        "engram_mask_ready_event": object(),
+        "engram_graph_events": True,
+        **state._engram_graph_inputs,
+    }
+    prepared = state.prepare_engram_piecewise_inputs(capture_inputs)
+    assert prepared["engram_lookups"] is state.model.buffers_for_graph["engram_lookups"]
+    assert prepared["engram_mask"] is state.model.buffers_for_graph["engram_mask"]
+    assert "engram_query_start_loc" not in prepared
+    assert "engram_valid_token_count" not in prepared
+    assert "engram_pending" not in prepared
+    assert "engram_mask_ready_event" not in prepared
+    assert "engram_graph_events" not in prepared
+    assert "engram_query_start_loc" in capture_inputs
+    state.model.prepare_engram_inputs.assert_not_called()
+
+
+def test_piecewise_replays_refresh_current_request_before_reading_stable_buffers(state):
+    buffers = state.model.buffers_for_graph
+    model_inputs = {"input_ids": torch.zeros(8, dtype=torch.int32), "positions": torch.arange(8)}
+    readback = []
+
+    def prepare(input_ids, **kwargs):
+        assert kwargs["cg_mode"] == CUDAGraphMode.PIECEWISE
+        buffers["engram_lookups"][0].fill_(int(input_ids[0]))
+        return buffers
+
+    state.model.prepare_engram_inputs.side_effect = prepare
+    for token in [17, 29]:
+        state._engram_inputs = {"input_ids": torch.tensor([token]), "cg_mode": CUDAGraphMode.PIECEWISE}
+        prepared = state.prepare_engram_piecewise_inputs(model_inputs)
+        assert prepared["engram_lookups"][0] is buffers["engram_lookups"][0]
+        assert state._engram_inputs is None
+        readback.append(prepared["engram_lookups"][0][0, 0].item())
+        state.prepare_engram()
+    assert readback == [17, 29]
+    assert state.model.prepare_engram_inputs.call_count == 2
+
+
+@pytest.mark.parametrize("failure", [None, "lookup", "replay"])
+def test_piecewise_manager_reuses_graph_runner_after_model_preparation(monkeypatch, failure):
+    from vllm_ascend.worker.v2 import aclgraph_utils as graph_mod
+
+    calls = []
+    model = object()
+    original_inputs = {"input_ids": object()}
+    prepared_inputs = {**original_inputs, "engram_mask": object()}
+    output = object()
+
+    def prepare(inputs):
+        assert inputs is original_inputs
+        calls.append("lookup")
+        if failure == "lookup":
+            raise RuntimeError("lookup")
+        return prepared_inputs
+
+    def replay(self, replay_model, inputs):
+        assert replay_model is model
+        assert inputs is prepared_inputs
+        calls.append("replay")
+        if failure == "replay":
+            raise RuntimeError("replay")
+        return output
+
+    monkeypatch.setattr(graph_mod.ModelCudaGraphManager, "run_pw_graph", replay)
+    metadata = Mock()
+    manager = graph_mod.ModelAclGraphManager.__new__(graph_mod.ModelAclGraphManager)
+    manager.model_runner = SimpleNamespace(
+        model_state=SimpleNamespace(prepare_engram_piecewise_inputs=prepare, device_metadata=metadata)
+    )
+    if failure is None:
+        assert manager.run_pw_graph(model, original_inputs) is output
+    else:
+        with pytest.raises(RuntimeError, match=failure):
+            manager.run_pw_graph(model, original_inputs)
+    assert calls == (["lookup"] if failure == "lookup" else ["lookup", "replay"])
+    metadata.finish.assert_called_once_with()
+
+
 @pytest.mark.parametrize("state", [1, 2, 4], indirect=True)
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_replay_metadata_follows_local_segments_and_preserves_global_history(state, mode, monkeypatch):

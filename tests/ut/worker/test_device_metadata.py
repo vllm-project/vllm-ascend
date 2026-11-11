@@ -498,3 +498,58 @@ def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
     prepare(state, Builder(), full=True)
     state.finish()
     assert state.executor.calls == []
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_piecewise_dispatch_retires_host_metadata(state, monkeypatch, fail):
+    from vllm_ascend.worker.v2 import aclgraph_utils
+
+    prepare(state, Builder())
+    manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
+    manager.model_runner = SimpleNamespace(model_state=SimpleNamespace(device_metadata=state))
+
+    def forward(*args):
+        state.executor.wait(DeviceMetadataStage.ATTENTION, 1)
+        if fail:
+            raise ValueError("model failure")
+        return 23
+
+    monkeypatch.setattr(aclgraph_utils.ModelCudaGraphManager, "run_pw_graph", forward)
+    if fail:
+        with pytest.raises(ValueError, match="model failure"):
+            manager.run_pw_graph(None, {})
+    else:
+        assert manager.run_pw_graph(None, {}) == 23
+    assert not state.executor.submission_in_flight
+    assert state.executor.calls == ["submit", "wait", "wait", "release"]
+    prepare(state, Builder())
+    state.finish()
+
+
+def test_compiled_piecewise_capture_reuses_warmup_metadata_only(state, monkeypatch):
+    import torch
+    from vllm.config import CUDAGraphMode
+
+    from vllm_ascend.worker.v2 import aclgraph_utils
+
+    context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE, attn_metadata={})
+    monkeypatch.setattr(aclgraph_utils, "_EXTRA_CTX", SimpleNamespace())
+    monkeypatch.setattr(aclgraph_utils, "get_forward_context", lambda: context)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+
+    class Model(torch.nn.Module):
+        def forward(self):
+            assert state.executor.submission_in_flight
+            state.executor.wait(DeviceMetadataStage.ATTENTION, 1)
+
+    wrapped = aclgraph_utils.ModelWithContext(Model(), device_metadata=state)
+    prepare(state, Builder(), full=True)
+    wrapped()  # NONE warmup consumes the prepared tasks.
+    context.cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+    wrapped()  # Compiled PW capture reuses this same attention metadata.
+    assert state.executor.calls == ["submit", "wait", "wait", "release"] * 2
+    # A new metadata object with no tasks must not inherit the old submission.
+    context.attn_metadata = {}
+    wrapped.original_model = torch.nn.Identity()
+    wrapped(torch.tensor(0))
+    assert state.executor.calls == ["submit", "wait", "wait", "release"] * 2
