@@ -5404,8 +5404,8 @@ def test_worker_handshake_mapping_preserves_previous_entries_and_updates_atomica
 
 def test_handshake_listener_allocates_distinct_ports_and_releases_them():
     host = "127.0.0.1"
-    occupied = zmq.Context()
-    fixed = occupied.socket(zmq.ROUTER)
+    occupied = zmq.Context()  # type: ignore[attr-defined]
+    fixed = occupied.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     occupied_port = fixed.bind_to_random_port(f"tcp://{host}")
     try:
         with (
@@ -5414,15 +5414,15 @@ def test_handshake_listener_allocates_distinct_ports_and_releases_them():
         ):
             assert first is not second
             assert len({occupied_port, first_port, second_port}) == 3
-            probe = zmq.Context()
-            conflicting = probe.socket(zmq.ROUTER)
-            with pytest.raises(zmq.ZMQError):
+            probe = zmq.Context()  # type: ignore[attr-defined]
+            conflicting = probe.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+            with pytest.raises(zmq.ZMQError):  # type: ignore[attr-defined]
                 conflicting.bind(f"tcp://{host}:{first_port}")
             conflicting.close(linger=0)
             probe.destroy(linger=0)
         # The listener owns the port through its context and frees it on exit.
-        rebound_ctx = zmq.Context()
-        rebound = rebound_ctx.socket(zmq.ROUTER)
+        rebound_ctx = zmq.Context()  # type: ignore[attr-defined]
+        rebound = rebound_ctx.socket(zmq.ROUTER)  # type: ignore[attr-defined]
         rebound.bind(f"tcp://{host}:{first_port}")
         rebound.close(linger=0)
         rebound_ctx.destroy(linger=0)
@@ -5452,8 +5452,8 @@ def test_sender_close_releases_port_and_is_idempotent():
     sender.close()
     sender.close()
     assert not sender.is_alive()
-    context = zmq.Context()
-    socket = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore[attr-defined]
+    socket = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     try:
         socket.bind(f"tcp://127.0.0.1:{port}")
     finally:
