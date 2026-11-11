@@ -6,13 +6,22 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
-# Set to true temporarily to run all selected targets before reporting failure.
+# Coverage keeps going after a failed file so later tests are still measured.
+# The process still exits non-zero at the end when any target failed.
 continue_on_error=false
+if [ "${enable_coverage}" = "true" ]; then
+  continue_on_error=true
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enable-coverage)
       enable_coverage=true
+      continue_on_error=true
+      shift
+      ;;
+    --continue-on-error)
+      continue_on_error=true
       shift
       ;;
     *)
@@ -22,7 +31,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
+  echo "Usage: $0 [--enable-coverage] [--continue-on-error] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
   exit 1
 fi
 

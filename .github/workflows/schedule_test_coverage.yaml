@@ -48,8 +48,6 @@ defaults:
 # select_tests.py --singlecard-ops yet.
 env:
   COVERAGE_BRANCH: none
-  # Trial: launch _bad_words_kernel so Triton body lines can be recorded.
-  SINGLECARD_OPS_ONLY: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_bad_words.py
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
@@ -137,11 +135,7 @@ jobs:
               env = os.environ.copy()
               env["GITHUB_OUTPUT"] = output_path
               script = os.path.join(root, ".github/workflows/scripts/select_tests.py")
-              command = [sys.executable, script, "--singlecard-ops"]
-              only = os.environ.get("SINGLECARD_OPS_ONLY", "").strip()
-              if only:
-                  command.extend(["--singlecard-ops-only", only])
-              subprocess.run(command, cwd=root, env=env, check=True)
+              subprocess.run([sys.executable, script, "--singlecard-ops"], cwd=root, env=env, check=True)
               parsed = {}
               for line in open(output_path, encoding="utf-8"):
                   if "=" not in line:
