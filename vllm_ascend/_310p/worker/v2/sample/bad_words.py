@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # mypy: ignore-errors
-"""Triton-free bad_words; reuses ``vllm.v1.sample.ops.bad_words.apply_bad_words``."""
+"""Triton-free bad_words filtering for 310p MRV2."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from vllm.v1.sample.ops.bad_words import apply_bad_words as apply_bad_words_vllm
 
 
 def apply_bad_words(
@@ -29,12 +28,9 @@ def apply_bad_words(
     all_token_ids_cpu = req_states.all_token_ids.cpu
     total_lens = req_states.total_len.np
 
-    bad_by_row: dict[int, list[list[int]]] = {}
-    past_tokens: list[list[int]] = []
     for row_idx, req_idx in enumerate(expanded_np.tolist()):
         req_idx = int(req_idx)
         if req_idx < 0 or not bool(use_bad_words[req_idx]):
-            past_tokens.append([])
             continue
         total_len = int(total_lens[req_idx])
         past = all_token_ids_cpu[req_idx, :total_len].tolist()
@@ -44,6 +40,8 @@ def apply_bad_words(
                 start_idx = row_idx - pos
                 for prev_pos in range(pos):
                     past.append(int(input_ids_cpu[start_idx + prev_pos + 1].item()))
-        past_tokens.append(past)
-        bad_by_row[row_idx] = bad_words_token_ids[req_idx]
-    apply_bad_words_vllm(logits, bad_by_row, past_tokens)
+        for bad_word in bad_words_token_ids[req_idx]:
+            prefix = bad_word[:-1]
+            if not prefix or past[-len(prefix) :] == prefix:
+                last_token_id = bad_word[-1]
+                logits[row_idx, last_token_id : last_token_id + 1] = float("-inf")

@@ -1,6 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
+from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -75,6 +75,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -89,11 +90,6 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
     weak_ref_tensors,
 )
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
@@ -458,53 +454,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
-
-    def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
-        # We now want to reorder the batch so that the "decode" requests are at
-        # the front and the "prefill" requests are at the using the least amount
-        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-        # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound, TODO(lucas): figure out a
-        # better naming here)
-        decodes = []
-        prefills = []
-
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens <= self.decode_threshold:
-                decodes.append(i)
-            else:
-                prefills.append(i)
-
-        # We hope that this is fairly minimal since decodes
-        # should be around for a number of iterations so hopefully they are
-        # relatively stationary (and new request are generally appended to the
-        # persistent batch so already should be at the back)
-        # To achieve this we loop over the decodes in descending order and
-        # the prefills in ascending order. We swap decodes from the  "back"
-        # i.e. past where the last decode should be in the reodorered with
-        # prefills from the front of the batch.
-        # `decodes` and `prefills` are already in ascending order just based on
-        # the above loop
-        num_decodes = len(decodes)
-        num_prefills = len(prefills)
-        first_prefill = 0
-        modified_batch = False
-
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            if decodes[num_decodes - i] >= num_decodes:
-                input_batch.swap_states(prefills[first_prefill], decodes[num_decodes - i])
-                first_prefill += 1
-                modified_batch = True
-            else:
-                break
-
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
-        return modified_batch
 
     def pad_actual_seq_len_q_mtp_enable_pad(
         self, num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
@@ -1023,6 +972,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         fused_output_sizes = getattr(self.fused_qkv_a_proj, "output_sizes", None)
         self.qkv_a_gate_fused = fused_output_sizes is not None and len(fused_output_sizes) == 3
         self.use_output_gate = self.g_proj is not None or self.qkv_a_gate_fused
+        if self.g_proj is not None:
+            register_flash_attention_gate_warmup(self.vllm_config.model_config.dtype, self.num_heads * self.v_head_dim)
+        if self.qkv_a_gate_fused:
+            register_flash_attention_gate_warmup(
+                self.vllm_config.model_config.dtype,
+                self.num_heads * self.v_head_dim,
+                gate_prefix=self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+            )
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -1040,6 +997,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
+        # Replicated MLA layers use ordinary, non-interleaved KV.
+        if not self.use_pcp and not self.use_dcp:
+            self.supports_mtp_with_cp_non_trivial_interleave_size = True
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
@@ -1070,6 +1030,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
+        # Remove this restriction once the K3.1 draft model supports FlashMLA.
+        if config.model_config.hf_config.model_type == "kimi_k31":
+            return False
         if not getattr(config, "use_v2_model_runner", False):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
@@ -3503,7 +3466,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         if gate is not None:
-            o_proj_input.mul_(torch.sigmoid(gate))
+            flash_attention_gate(o_proj_input, gate)
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
