@@ -171,7 +171,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MultiConnector","kv_role": "kv_consumer","kv_connector_extra_config": {"connectors": [ {"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}, { "kv_connector": "AscendStoreConnector","kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "mooncake","lookup_rpc_port": 1}}]}}'
+      - '{"kv_connector": "MultiConnector","kv_role": "kv_consumer","kv_connector_extra_config": {"connectors": [ {"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}, { "kv_connector": "AscendStoreConnector","kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "mooncake","lookup_rpc_port": 0}}]}}'
       - --additional-config
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
