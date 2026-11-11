@@ -25,11 +25,12 @@ run_eval.py - CI 编排器：复刻 doc-evaluator SKILL.md 的调度流程
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import time
+
+import regex as re
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):

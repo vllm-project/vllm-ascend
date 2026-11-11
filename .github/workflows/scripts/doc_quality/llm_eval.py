@@ -25,12 +25,13 @@ llm_eval.py - CI 版 LLM 语义检测层
 import contextlib
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import regex as re
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):

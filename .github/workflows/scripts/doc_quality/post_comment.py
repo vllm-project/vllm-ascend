@@ -21,10 +21,11 @@ post_comment.py - 评测结果发布到 PR：
 import contextlib
 import json
 import os
-import re
 import sys
 import urllib.error
 import urllib.request
+
+import regex as re
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):

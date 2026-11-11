@@ -8,8 +8,9 @@ gen_comment.py - 由 summary.json 生成 PR 评论 markdown
 
 import json
 import os
-import re
 import sys
+
+import regex as re
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):

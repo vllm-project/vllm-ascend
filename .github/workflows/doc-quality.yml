@@ -141,7 +141,7 @@ jobs:
 
       - name: Install eval deps
         run: |
-          python -m pip install --disable-pip-version-check --quiet openpyxl
+          python -m pip install --disable-pip-version-check --quiet openpyxl regex
           LINK_SCRIPTS="$RUNNER_TEMP/skill/skills/01.评估标准/00.正确性/链接与导航/scripts"
           npm ci --prefix "$LINK_SCRIPTS" \
             || echo "DOC_EVAL_SKIP_LINK=1" >> "$GITHUB_ENV"
