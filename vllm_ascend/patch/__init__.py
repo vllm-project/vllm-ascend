@@ -295,7 +295,7 @@
 #       planning functions.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
-#   3. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
+#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
 #    Why:
 #       Ascend dense GQA attention requires contiguous K/V pools. Replicated

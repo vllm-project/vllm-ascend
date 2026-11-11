@@ -87,6 +87,8 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
         block_lens=[[128], [128]],
         block_shapes=[[(1, 16, 4)], [(1, 16, 4)]],
         block_size_scales=[[1], [1]],
+        cp_kv_cache_interleave_size=16,
+        indexer_replication_sizes=[0, 0],
         dcp_sharded=[False, True],
     )
     merged = scheduler._merge_metadata_by_pp_rank({0: first, 1: first})[0]
@@ -119,6 +121,7 @@ def worker():
     worker.pcp_rank = 0
     worker.dcp_size = 2
     worker.dcp_rank = 0
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     return worker
 
 
@@ -164,14 +167,15 @@ def test_routing_and_block_mapping_follow_layout(
         [10, 11],
         [10, 11],
         [20, 21, 22, 23],
-        65,
-        64,
+        65 if local_sharded else 33,
+        64 if local_sharded else 32,
         0,
         1,
         1,
         spec,
         0,
-        local_size,
+        remote_interleave_size=16,
+        local_dcp_size=local_size,
     )
     if local_sharded and not remote_sharded:
         assert result == [(0, [10, 11], [20, 22]), (1, [10, 11], [20, 22])]
@@ -207,5 +211,23 @@ def test_handshake_rejects_missing_layer_flags():
             block_lens=[[128]],
             block_shapes=[[(1, 16, 4)]],
             block_size_scales=[[1]],
+            cp_kv_cache_interleave_size=16,
+            indexer_replication_sizes=[0],
             dcp_sharded=[],
         )
+
+
+@pytest.mark.parametrize("local_replicas", [1, 2])
+@pytest.mark.parametrize("remote_replicas", [1, 2])
+@pytest.mark.parametrize("remote_scale", [1, 4])
+def test_indexer_replication_uses_explicit_metadata(worker, local_replicas, remote_replicas, remote_scale):
+    spec = AscendSFAIndexerCacheSpec(dcp_sharded=True, sfa_dcp_replicated_indexer_size=local_replicas)
+    remote = SimpleNamespace(
+        dcp_sharded=[True],
+        indexer_replication_sizes=[remote_replicas],
+        block_size_scales=[[remote_scale]],
+    )
+    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4) == (
+        1 if local_replicas > 1 else 2,
+        1 if remote_replicas > 1 else 4,
+    )

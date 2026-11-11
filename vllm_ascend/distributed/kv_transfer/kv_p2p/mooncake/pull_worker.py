@@ -383,7 +383,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             # Packed indexer pages already contain all DCP sequence pieces.
             if spec.sfa_dcp_replicated_indexer_size > 1:
                 local_size = 1
-            if any(scale > 1 for scale in remote_metadata.block_size_scales[remote_layer_index]):
+            if remote_metadata.indexer_replication_sizes[remote_layer_index] > 1:
                 remote_size = 1
         return local_size, remote_size
 

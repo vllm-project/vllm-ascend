@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 from collections import defaultdict
+from dataclasses import replace
 from typing import Any
 
 # Both supported versions use the KV-cache planner and builder API from #61183/#42309.
@@ -10,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,

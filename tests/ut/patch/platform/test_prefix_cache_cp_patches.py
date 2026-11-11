@@ -572,10 +572,10 @@ def test_dcp1_hybrid_hash_unit_divides_every_group(prefix_match_unit, expected_h
             ),
         ],
     )
-    assert _ascend_resolve_kv_cache_block_sizes(cache, config) == (3072, expected_hash)
+    assert resolve_kv_cache_block_sizes(cache, config) == (3072, expected_hash)
     config.cache_config.prefix_match_unit = 96
     with pytest.raises(ValueError, match="Invalid prefix_match_unit"):
-        _ascend_resolve_kv_cache_block_sizes(cache, config)
+        resolve_kv_cache_block_sizes(cache, config)
 
 
 def test_ascend_mla_page_size_includes_scale_storage() -> None:
@@ -1692,7 +1692,7 @@ def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     assert any(not g.kv_cache_spec.dcp_sharded and isinstance(g.kv_cache_spec, FullAttentionSpec) for g in groups)
     config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp, block_size=384)
     cache = KVCacheConfig(num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups)
-    scheduler, hashed = _ascend_resolve_kv_cache_block_sizes(cache, config)
+    scheduler, hashed = resolve_kv_cache_block_sizes(cache, config)
     assert scheduler == 384 * dcp
     assert hashed == 384
     coordinator = object.__new__(AscendHybridKVCacheCoordinator)
