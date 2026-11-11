@@ -70,8 +70,9 @@ ACCEPTANCE_RATE_TOLERANCE = 0.03
 # 16,384-token prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
-# Chunked prefill cap equals the reusable whole lcm block count (H3 precondition).
-POOL_BATCHED_TOKENS = POOL_LCM_BLOCK_SIZE
+# 16K 预算在 TP2xPCP2 + 0.9 下放不下（8.72 GiB 需求 vs 4.53 GiB 可用）。
+# 4096 = 32 x 128 block 的 chunked prefill，实测 H3 仍逐 token 一致。
+POOL_BATCHED_TOKENS = 4096
 # max_model_len needs headroom for output tokens
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
