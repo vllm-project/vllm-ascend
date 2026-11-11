@@ -13,7 +13,7 @@ variants:
       - ascend_910c
     tp: 4
     min_vllm_version: 0.16.0
-    description: BF16 checkpoint on one Atlas 800 A3 node (16x 64G Ascend 910C NPUs), TP4 with full-decode ACLGraph — the single-node configuration of the v0.23.0 tutorial. That tutorial is discontinued since vLLM-Ascend v0.30.0, so keep the v0.23.0 image tag.
+    description: BF16 checkpoint on one Atlas 800 A3 node (16x 64G Ascend 910C NPUs), TP4 with full-decode ACLGraph — the single-node configuration of the v0.23.0.post1 tutorial. That tutorial is discontinued since vLLM-Ascend v0.30.0, so keep the v0.23.0.post1 image tag.
     extra_args:
       - '--max-model-len'
       - '32768'
@@ -27,4 +27,4 @@ variants:
       VLLM_USE_MODELSCOPE: 'True'
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
