@@ -3,7 +3,7 @@
 meta:
   hardware:
     ascend_910c: verified
-    ascend_950dt: verified
+    ascend_950dt: supported
 features:
   spec_decoding:
     modes:
@@ -18,6 +18,22 @@ features:
               - '--speculative-config'
               - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
 variants:
+  # The base recipe's BF16 `default` variant carries no Ascend image; without
+  # this block the renderer falls back to the NVIDIA default image and emits
+  # an unrunnable `vllm serve` for ascend_910c / ascend_950dt.
+  default:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: "vllm serve"
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+
   ascend_w8a8_a3:
     model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8
     precision: int8
@@ -30,14 +46,8 @@ variants:
     default_modes:
       spec_decoding: mtp
     extra_args:
-      - '--data-parallel-size'
-      - '1'
-      - '--tensor-parallel-size'
-      - '2'
       - '--quantization'
       - ascend
-      - '--served-model-name'
-      - qwen3.6
       - '--max-num-seqs'
       - '128'
       - '--max-model-len'
@@ -57,6 +67,7 @@ variants:
       - '--additional-config'
       - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
     extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
       VLLM_USE_V2_MODEL_RUNNER: '1'
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
       HCCL_BUFFSIZE: '1024'
@@ -74,7 +85,7 @@ variants:
   ascend_w8a8_mxfp8_a5:
     model_id: Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8
     precision: mxfp8
-    label: W8A8 MXFP8 (Ascend 950DT)
+    label: W8A8 MXFP8
     vram_minimum_gb: 80
     supported_hardware:
       - ascend_950dt
@@ -83,14 +94,8 @@ variants:
     default_modes:
       spec_decoding: mtp
     extra_args:
-      - '--data-parallel-size'
-      - '1'
-      - '--tensor-parallel-size'
-      - '1'
       - '--quantization'
       - ascend
-      - '--served-model-name'
-      - qwen3.6
       - '--max-model-len'
       - '135168'
       - '--max-num-seqs'
@@ -108,6 +113,7 @@ variants:
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
       - '--enable-prefix-caching'
     extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
       VLLM_USE_V2_MODEL_RUNNER: '1'
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
