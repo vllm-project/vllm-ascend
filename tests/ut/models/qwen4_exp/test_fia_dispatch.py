@@ -208,7 +208,27 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
         out.fill_(7)
         return out
 
-    implementation.update(prepare_qsa_fia_paged_kv=prepare, qsa_fia_attention=fia, qsa_gbsa_attention=gbsa)
+    def union(q, k, v, idx, table, requests, positions, lengths, out, *, request_index):
+        assert torch.all(requests == request_index)
+        calls.append(("union", q.flatten().tolist()))
+        out.fill_(7)
+        return out
+
+    def union_batch(q, k, v, idx, table, requests, positions, lengths, out, *, query_starts, request_indices):
+        assert query_starts[0] == 0 and query_starts[-1] == q.shape[0]
+        for start, end, request in zip(query_starts, query_starts[1:], request_indices):
+            assert torch.all(requests[start:end] == request)
+        calls.append(("union_batch", q.flatten().tolist()))
+        out.fill_(7)
+        return out
+
+    implementation.update(
+        prepare_qsa_fia_paged_kv=prepare,
+        qsa_fia_attention=fia,
+        qsa_gbsa_attention=gbsa,
+        qsa_union_gbsa_attention=union,
+        qsa_union_gbsa_attention_batch=union_batch,
+    )
     plan = implementation["build_qsa_request_plan"](
         torch.tensor(starts), torch.tensor(kv_lengths), total, torch.tensor(phases)
     )
@@ -241,12 +261,39 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
 
 def test_pure_prefill_routes_by_logical_kv_length(implementation):
     calls = run_stub_batch(implementation, [True, True, True], [2, 4, 1], [4096, 24578, 24577])
-    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4, 5]), ("gbsa", [6])]
+    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4, 5]), ("union", [6])]
 
 
 def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):
     calls = run_stub_batch(implementation, [False, False, False], [1, 4, 8], [1, 8192, 32768])
     assert calls == [("gbsa", list(range(13)))]
+
+
+def test_eight_prefill_requests_share_one_union_launch(implementation):
+    query_lengths = [1, 7, 8, 9, 15, 16, 17, 19]
+    calls = run_stub_batch(implementation, [True] * 8, query_lengths, [32768] * 8)
+    assert calls == [("union_batch", list(range(sum(query_lengths))))]
+
+
+def test_empty_requests_preserve_original_page_table_indices(implementation):
+    calls = run_stub_batch(implementation, [True, True, True], [5, 0, 7], [32768, 0, 65536])
+    assert calls == [("union_batch", list(range(12)))]
+
+
+def test_union_batches_do_not_include_decode_or_fia_rows(implementation):
+    calls = run_stub_batch(
+        implementation,
+        [True, True, False, True, True, True],
+        [5, 7, 1, 9, 4, 8],
+        [32768, 65536, 131072, 32768, 4096, 65536],
+    )
+    assert calls == [
+        ("fia", list(range(22, 26))),
+        ("union_batch", list(range(12))),
+        ("union", list(range(13, 22))),
+        ("union", list(range(26, 34))),
+        ("gbsa", [12]),
+    ]
 
 
 def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementation):
@@ -259,8 +306,9 @@ def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementat
     assert calls == [
         ("fia", [1, 2]),
         ("fia", [9]),
+        ("union", [3]),
         ("gbsa", [0]),
-        ("gbsa", [3, 4, 5, 6, 7, 8]),
+        ("gbsa", [4, 5, 6, 7, 8]),
         ("gbsa", [10]),
     ]
 
