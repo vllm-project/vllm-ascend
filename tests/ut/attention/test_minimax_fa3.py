@@ -558,7 +558,7 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
         if isinstance(n, ast.ClassDef) and n.name == "GraphFusionPassManager"
     )
     configure = next(n for n in cls.body if getattr(n, "name", None) == "configure")
-    flags = NS(fuse_norm_quant=False, fuse_qknorm_rope=enabled, fuse_muls_add=False)
+    flags = NS(fuse_norm_quant=False, fuse_qknorm_rope=enabled, fuse_muls_add=False, fuse_swiglu=False)
     monkeypatch.setitem(
         sys.modules, "vllm_ascend.ascend_config", NS(get_ascend_config=lambda: NS(ascend_compilation_config=flags))
     )
