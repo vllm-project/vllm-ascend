@@ -174,11 +174,11 @@ class LayerTransferTask:
 
 @dataclass
 class LayerLoadTask:
+    # Non-consuming waits; the step fence clears save completion after all readers.
     wait_for_save_layers: tuple[int, ...]
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
-    release_save_layers: tuple[int, ...] | None = None
 
 
 @dataclass(init=False)

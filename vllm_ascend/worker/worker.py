@@ -57,10 +57,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-from vllm.v1.core.kv_cache_planning import (
-    get_kv_cache_config_from_groups,
-    unify_hybrid_kv_cache_specs,
-)
+from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -98,10 +95,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
-    get_layerwise_reuse_config,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import get_layerwise_reuse_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
@@ -119,8 +113,6 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
 )
-
-KV_CACHE_ALIGNMENT = 2 * 1024 * 1024
 
 
 def get_kv_cache_groups(
@@ -640,25 +632,6 @@ class NPUWorker(WorkerBase):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
-    def _get_layerwise_physical_plan(self, specs: dict[str, KVCacheSpec]) -> KVCacheConfig:
-        # Use the same group/config builders as engine admission. The probe
-        # allocates no device storage and also honors model-declared packing.
-        groups = get_kv_cache_groups(self.vllm_config, specs)
-        plan = get_kv_cache_config_from_groups(
-            self.vllm_config, groups, sum(spec.page_size_bytes for spec in specs.values())
-        )
-        apply_layerwise_kv_cache_plan(plan, self.vllm_config)
-        return plan
-
-    def _reserve_kv_cache_alignment(self, available_bytes: int) -> int:
-        if get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is None:
-            return available_bytes
-        specs = self.get_kv_cache_spec()
-        plan = self._get_layerwise_physical_plan(specs)
-        reserve = len(plan.kv_cache_tensors) * KV_CACHE_ALIGNMENT
-        logger.info("Reserve %d bytes for KV cache backing alignment.", reserve)
-        return max(available_bytes - reserve, 0)
-
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -696,9 +669,7 @@ class NPUWorker(WorkerBase):
             # before the offload and KVPP budget conversions.
             kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(kv_cache_memory_bytes)
             return self._apply_kvpp_memory_budget(
-                self._reserve_kv_cache_alignment(
-                    self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
-                )
+                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
             )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -751,7 +722,7 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
-        return self._apply_kvpp_memory_budget(self._reserve_kv_cache_alignment(self.available_kv_cache_memory_bytes))
+        return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.

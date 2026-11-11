@@ -8,7 +8,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
-from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
@@ -28,10 +27,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
+        if self.layerwise_offload and request_tuple is not None:
+            # Verifier rows have no corresponding input KV/state to snapshot.
+            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
         if self.layerwise_offload and request_tracker.layerwise_request_id is None:
             request_tracker.layerwise_request_id = uuid4().hex
         meta = super()._build_req_meta(request_tracker, *args, **kwargs)
-        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
         if meta is not None and self.layerwise_offload and request_tuple is not None:
             request = request_tuple[0]
             meta.needs_private_snapshot = not (
@@ -59,7 +61,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
-        self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
@@ -330,8 +331,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         head_or_tp_ranks = (
             self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
         )
-        if getattr(self, "use_layerwise_transfer", False) and getattr(self, "use_kvpp", False):
-            head_or_tp_ranks *= getattr(self, "pcp_size", 1)
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))

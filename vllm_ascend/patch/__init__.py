@@ -305,10 +305,16 @@
 #       accounting.
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       NPUPlatform. Its inherited materialization calls the patched planning
+#       function, which applies offload after native placement. The builder
+#       probes that placement for device cost. Offload admission uses Core's
+#       group-lifetime calculation with that cost; ordinary layouts retain
+#       their native admission paths.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#    Future Plan:
+#       Remove the remaining native placement/admission patches when upstream
+#       supports those Ascend layouts.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -21,6 +21,13 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    apply_layerwise_kv_cache_plan,
+    get_layerwise_reuse_config,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LayerwiseCacheConfig,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -481,7 +488,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     if is_deepseek_v41_cache(kv_cache_groups):
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_pool_bytes_per_block(kv_cache_groups, vllm_config)
+        return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
     if qwen_bytes is not None:
         return qwen_bytes
@@ -498,6 +505,11 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
+    extra_config = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra_config is not None:
+        num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        if LayerwiseCacheConfig.has_layer_reuse_for_stage(num_layers, extra_config):
+            return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
@@ -555,6 +567,16 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
+    extra_config = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra_config is not None:
+        if available_memory < 0:
+            raise ValueError("available_memory must be non-negative")
+        if vllm_config.cache_config.num_gpu_blocks_override is not None:
+            num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+            if LayerwiseCacheConfig.has_layer_reuse_for_stage(num_layers, extra_config):
+                raise ValueError(
+                    "Layerwise offload does not support num_gpu_blocks_override; use automatic block sizing."
+                )
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
@@ -595,6 +617,8 @@ def _ascend_get_kv_cache_config_from_groups(
         # Remove these snapshots once upstream preserves per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+    if extra_config is not None:
+        apply_layerwise_kv_cache_plan(kv_cache_config, vllm_config)
     return kv_cache_config
 
 

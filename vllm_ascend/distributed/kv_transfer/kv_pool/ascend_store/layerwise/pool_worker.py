@@ -5,13 +5,13 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
+from itertools import chain
 from typing import Any, cast
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_pcp_group,
     get_tp_group,
 )
 from vllm.logger import logger
@@ -54,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseCacheConfig,
+    LayerwiseReuseLayout,
     get_layerwise_kv_cache_specs,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
@@ -65,7 +66,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     get_partial_block_index,
     masked_block_runs,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.reuse_policy import LayerwiseReuseLayout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
@@ -196,7 +196,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
-        base_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
+        stage_num_layers = self.num_layers
+        base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -306,7 +307,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     self.num_layers,
                     self._extra_config,
                 )
-                if LayerwiseCacheConfig.parse(base_layers, self._extra_config).has_layer_reuse:
+                if LayerwiseCacheConfig.parse(stage_num_layers, self._extra_config).has_layer_reuse:
                     raise ValueError("Layerwise offload requires a compiled model reuse plan.")
                 self.independent_layers = cache_layout.independent_layers
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
@@ -349,10 +350,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
-        self._last_reuse_consumer = {}
-        for layer in sorted(self.prefetch_layer_map):
-            for source in self.prefetch_layer_map[layer]:
-                self._last_reuse_consumer[source] = layer
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
@@ -699,9 +696,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # Use configuration, never local requests/tasks, to gate the collective.
         if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
             get_tp_group().barrier()
-        if self.use_layerwise_transfer and self.layerwise_offload and self.pcp_size > 1:
-            # Replica readers must wait for PCP 0 to publish the previous step.
-            get_pcp_group().barrier()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
@@ -737,9 +731,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self.tp_rank == min(peers)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
-        if self.use_layerwise_transfer and not getattr(self, "use_kvpp", False):
-            if getattr(self, "pcp_rank", 0) != 0:
-                return False
         # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
         return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and (
             self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
@@ -2170,9 +2161,30 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Share load metadata, preserving layer-specific selections for reuse."""
         if not isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
             return
+        if not self.layerwise_offload:
+            # Ordinary layerwise storage has the same load range per group.
+            # Preserve its single-build path without selection snapshots.
+            for group_id in range(self.num_kv_cache_groups):
+                first_task = None
+                for layer_id in range(self.num_layers):
+                    for task in self.layer_load_tasks[layer_id]:
+                        if task.group_id == group_id:
+                            first_task = task
+                            break
+                    if first_task:
+                        break
+                if first_task is None:
+                    continue
+                shared = self.kv_recv_thread.build_shared_data(first_task)
+                if shared is not None:
+                    for layer_id in range(self.num_layers):
+                        for task in self.layer_load_tasks[layer_id]:
+                            if task.group_id == group_id:
+                                task.shared_block_data = shared
+            return
         for group_id in range(self.num_kv_cache_groups):
             shared_by_ranges: dict[
-                tuple[bool, tuple[tuple[int, int, int, int | None], ...]] | None, SharedBlockData | None
+                tuple[bool, tuple[tuple[int, int, int, int | None], ...]], SharedBlockData | None
             ] = {}
             for layer_id in range(self.num_layers):
                 for task in self.layer_load_tasks[layer_id]:
@@ -2182,28 +2194,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     # layers must restore it, including any partial block.
                     # Request identity also matters: different requests can
                     # select the same logical range but different blocks/GVAs.
-                    key = (
-                        (
-                            task.use_key_major_ranges,
-                            tuple(
-                                (id(r.request), r.start_block, r.end_block, r.partial_block_index)
-                                for r in task.block_ranges
-                            ),
-                        )
-                        if self.layerwise_offload
-                        else None
+                    ranges = tuple(
+                        (id(r.request), r.start_block, r.end_block, r.partial_block_index) for r in task.block_ranges
                     )
+                    key = (task.use_key_major_ranges, ranges)
                     if key not in shared_by_ranges:
                         shared = self.kv_recv_thread.build_shared_data(task)
-                        if shared is not None and self.layerwise_offload:
+                        if shared is not None:
                             # The builder reuses scratch arrays on the next
                             # call; retain each selection's own snapshot.
                             shared.block_ids_arr = shared.block_ids_arr.copy()
                             if shared.block_gvas_arr is not None:
                                 shared.block_gvas_arr = shared.block_gvas_arr.copy()
                         shared_by_ranges[key] = shared
-                    if self.layerwise_offload or shared_by_ranges[key] is not None:
-                        task.shared_block_data = shared_by_ranges[key]
+                    task.shared_block_data = shared_by_ranges[key]
 
     def _compute_reachable_load_masks(
         self,
@@ -2257,7 +2261,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
         else:
             num_local = self.num_layers
-        self._wait_for_final_layer_save(num_local, self.kv_send_thread)
+        self._wait_for_final_layer_save(num_local)
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         self._masked_runs_cache.clear()
@@ -2371,13 +2375,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         transfer stops overlapping compute. Letting the send thread run a bounded
         number of layers behind the compute stream keeps the ranged puts off the
         critical path, and ordering is preserved because that thread still
-        consumes the queue in submission order. ``save_kv_layer`` waits for the
-        final layer's save at the end of every step, which implies every earlier
-        layer committed, so publication is still complete before the step ends.
+        consumes the queue in submission order. The step fence drains all saves,
+        including earlier PUTs when the final layer has no save task.
 
         ``full`` drains the selected queues to zero, defaulting to both queues
-        for teardown. Step completion passes ``drain_recv=False`` to wait only
-        for outstanding PUTs.
+        for teardown. Step completion drains writers first, then reuse readers
+        before resetting save completion events.
         """
         assert self.layerwise_backend is not None
         if full and drain_recv is None:
@@ -2415,9 +2418,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layers=reuse_sources,
-                    release_save_layers=tuple(
-                        source for source in reuse_sources if self._last_reuse_consumer[source] == layer_id
-                    ),
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
                     attention_start_gate=attention_start_gate,
@@ -2542,12 +2542,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.current_layer == num_local - 1:
             # Recurrent state may be cleared or copied before the next load
             # hook. Finish reading shared state before returning from forward.
-            if _LW_DEFER_LAST_SAVE and not (
-                self._recurrent_layers
-                & (
-                    self.prefetch_layer_map.keys()
-                    | {source for sources in self.prefetch_layer_map.values() for source in sources}
-                )
+            if (
+                _LW_DEFER_LAST_SAVE
+                and self._recurrent_layers.isdisjoint(self.prefetch_layer_map)
+                and self._recurrent_layers.isdisjoint(chain.from_iterable(self.prefetch_layer_map.values()))
             ):
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
@@ -2555,48 +2553,24 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # thread's tail latency into the inter-step scheduling gap.
                 self._pending_last_save_drain = True
             else:
-                self._wait_for_final_layer_save(num_local, send_thread)
+                self._wait_for_final_layer_save(num_local)
         self.current_layer += 1
 
-    def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
-        """Keep layerwise source buffers alive until the step's last PUT commits."""
+    def _wait_for_final_layer_save(self, num_local: int) -> None:
+        """Drain step transfers before rearming save completion for the next step."""
         assert self.layer_save_finished_events is not None
         save_finished_events = self.layer_save_finished_events
-        # The final layer may have no save task while earlier layers still copy.
-        # Drain pending saves before clearing or reusing completion events.
-        queue = send_thread.request_queue
-        with queue.all_tasks_done:
-            waited_s = 0
-            while queue.unfinished_tasks:
-                send_thread.raise_if_failed()
-                queue.all_tasks_done.wait(timeout=1)
-                waited_s += 1
-                if waited_s % 60 == 0:
-                    logger.info("Layerwise save drain still waiting on %d queued PUT(s)", queue.unfinished_tasks)
-        while not save_finished_events[num_local - 1].wait(timeout=10):
-            send_thread.raise_if_failed()
-            logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
-        send_thread.raise_if_failed()
+        # Keep save completion latched for every reader in this step. Drain
+        # writers first so their failures cannot strand receivers waiting on them.
+        self._drain_attention_transfers(drain_recv=False, full=True)
         if getattr(self, "layerwise_offload", False):
             self._check_layerwise_transfer_errors()
-        if self.block_key_hybrid:
-            # An empty final layer signals completion without waiting for PUTs
-            # from earlier layers. Drain those before the next step reuses KV.
-            self._drain_attention_transfers(drain_recv=False, full=True)
-        elif self.use_block_key_layerwise:
-            # An empty final layer sets its event on the compute thread, ahead
-            # of earlier queued PUTs. Drain at the step boundary before source
-            # blocks can be reused. Layer-to-layer overlap remains unchanged.
-            for layer_id in range(num_local - 1):
-                while not save_finished_events[layer_id].wait(timeout=10):
-                    send_thread.raise_if_failed()
-            send_thread.raise_if_failed()
-        reuse_source_layers = {source for sources in self.prefetch_layer_map.values() for source in sources}
-        for layer_id in range(num_local):
-            if layer_id in reuse_source_layers:
-                continue
-            if save_finished_events[layer_id].is_set():
-                save_finished_events[layer_id].clear()
+        if self.prefetch_layer_map:
+            # Even a task with no data can still be waiting on a reuse save.
+            # All readers must finish before the next step rearms these events.
+            self._drain_attention_transfers(full=True)
+        for event in save_finished_events[:num_local]:
+            event.clear()
 
     def retrieve_layer(
         self,

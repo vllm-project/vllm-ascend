@@ -1,24 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Shared cache types, configuration values, byte views and allocation."""
+
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
+from math import lcm
 from typing import Any
 
 import regex as re
 import torch
-from vllm.config import VllmConfig
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
+    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    get_backend_class,
-)
-from vllm_ascend.models.cache_reuse import get_cache_reuse_planner
+
+SpecReuseRules = Mapping[type[KVCacheSpec], bool | Callable[[KVCacheSpec], bool]]
+
+
+@dataclass(frozen=True)
+class LayerwiseReuseLayout:
+    layers: tuple[int, ...]
+    cache_layer_indices: dict[str, int]
+    kv_cache_tensors: tuple[KVCacheTensor, ...]
+    # Preserve each native physical window, including padding and components.
+    cache_view_sizes: dict[str, int]
+    # Target layer -> source layers whose saves must finish before buffer reuse.
+    # A target may reuse several buffers, e.g. {4: (0, 2)} waits for both saves.
+    # Empty saves signal completion independently, so waiting only for the
+    # largest source index does not guarantee that earlier saves have finished.
+    prefetch_layer_map: dict[int, tuple[int, ...]]
+    independent_layers: list[int]
+    num_prefetch_layers: int
+    reused_cache_names: frozenset[str]
+
+    @property
+    def has_layer_reuse(self) -> bool:
+        return bool(self.prefetch_layer_map)
+
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
@@ -61,6 +87,67 @@ def allocate_shared_indexer_cache(
     return views
 
 
+def get_cache_views(config: KVCacheConfig, specs: dict[str, KVCacheSpec]) -> dict[str, tuple[int, int, int]]:
+    """Validate physical byte windows without collecting packs or planning reuse."""
+    if config.num_blocks <= 0:
+        raise ValueError("Cache views require at least one block")
+    layout = getattr(config, "layerwise_reuse_layout", None)
+    view_sizes = layout.cache_view_sizes if getattr(config, "layerwise_kv_cache_reuse", False) else None
+    # Cache name -> (descriptor index, byte start, byte end).
+    views = {}
+    for index, tensor in enumerate(config.kv_cache_tensors):
+        if tensor.host_resident:
+            continue
+        if not tensor.layers or tensor.size <= 0:
+            raise ValueError("Cache descriptors require layers and positive backing capacity")
+        if tensor.layer_stride < 0 or tensor.block_stride <= 0 or tensor.offset < 0:
+            raise ValueError("Cache descriptors require nonnegative offsets and positive block strides")
+        for ordinal, name in enumerate(tensor.layers):
+            start = tensor.offset + ordinal * tensor.layer_stride
+            spec = specs[name]
+            dtypes = getattr(spec, "dtypes", (getattr(spec, "dtype", torch.uint8),))
+            alignment = lcm(*(get_dtype_size(dtype) for dtype in dtypes))
+            if getattr(spec, "scale_dim", 0):
+                alignment = lcm(alignment, get_dtype_size(spec.scale_dtype))
+            if start % alignment or tensor.block_stride % alignment:
+                raise ValueError(f"Cache view for {name} is not aligned to its element sizes")
+            end = (
+                start + view_sizes[name]
+                if view_sizes is not None
+                else min(start + config.num_blocks * tensor.block_stride, tensor.size)
+            )
+            required = (
+                start + (config.num_blocks - 1) * tensor.block_stride + min(spec.page_size_bytes, tensor.block_stride)
+            )
+            if end <= start or end > tensor.size or required > end:
+                raise ValueError(f"Cache view for {name} exceeds its backing")
+            if name in views:
+                raise ValueError("Each cache view must occur in exactly one descriptor")
+            views[name] = (index, start, end)
+    return views
+
+
+def allocate_cache_backing(
+    config: KVCacheConfig, specs: dict[str, KVCacheSpec], allocate: Callable[[int], torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Allocate one backing and preserve identical byte views for aliased layers."""
+    if any(tensor.host_resident for tensor in config.kv_cache_tensors):
+        raise NotImplementedError("Explicit cache backing allocation requires device-resident tensors")
+    views = get_cache_views(config, specs)
+    sizes = {tensor.size for tensor in config.kv_cache_tensors}
+    if len(sizes) != 1:
+        raise ValueError("Layerwise cache descriptors must share one backing capacity")
+    backing = allocate(sizes.pop())
+    regions = {}
+    result = {}
+    for name, (_, start, end) in views.items():
+        region = (start, end)
+        if region not in regions:
+            regions[region] = backing[start:end]
+        result[name] = regions[region]
+    return result
+
+
 def get_physical_layer_index(layer_name: str, base_layers: int) -> int:
     match = re.search(
         r"(?:^|\.)mtp(?:\.layers)?\.(\d+)(?:\.|$)",
@@ -81,6 +168,42 @@ class LayerwiseCacheConfig:
     num_prefetch_layers: int
     independent_layers: list[int]
     has_layer_reuse: bool
+
+    @classmethod
+    def has_layer_reuse_for_stage(cls, num_layers: int, extra_config: dict[str, Any]) -> bool:
+        """Share the stage-level reuse decision across Core planning calls."""
+        shared_buffers = extra_config.get(_NUM_SHARED_BUFFERS)
+        prefetch_layers = extra_config.get(_PREFETCH_LAYERS)
+        independent_layers = extra_config.get(_INDEPENDENT_LAYERS)
+        scalar_types = (type(None), int, float, str)
+        # Cache plain config values. Other inputs retain parse() validation.
+        if type(shared_buffers) not in scalar_types or type(prefetch_layers) not in scalar_types:
+            return cls.parse(num_layers, extra_config).has_layer_reuse
+        if type(independent_layers) is list and all(type(index) in scalar_types for index in independent_layers):
+            independent_layers = tuple(independent_layers)
+        elif type(independent_layers) not in (type(None), str):
+            return cls.parse(num_layers, extra_config).has_layer_reuse
+        return cls._cached_stage_layer_reuse(num_layers, shared_buffers, prefetch_layers, independent_layers)
+
+    @classmethod
+    @lru_cache(maxsize=128)
+    def _cached_stage_layer_reuse(
+        cls,
+        num_layers: int,
+        shared_buffers: Any,
+        prefetch_layers: Any,
+        independent_layers: tuple[Any, ...] | str | None,
+    ) -> bool:
+        return cls.parse(
+            num_layers,
+            {
+                _NUM_SHARED_BUFFERS: shared_buffers,
+                _PREFETCH_LAYERS: prefetch_layers,
+                _INDEPENDENT_LAYERS: (
+                    list(independent_layers) if isinstance(independent_layers, tuple) else independent_layers
+                ),
+            },
+        ).has_layer_reuse
 
     @classmethod
     def parse(cls, num_layers: int, extra_config: dict[str, Any] | None = None) -> LayerwiseCacheConfig:
@@ -132,45 +255,6 @@ class LayerwiseCacheConfig:
         )
 
 
-def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
-    """Return the extra config of the layerwise-reuse connector, if any.
-
-    Layerwise cache reuse requires the GVA backend and an enabled connector.
-    """
-    if kv_transfer_config is None:
-        return None
-
-    connector_name = getattr(kv_transfer_config, "kv_connector", None)
-    root_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
-    if connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
-        connector_configs = [
-            {
-                "kv_connector": connector_name,
-                "kv_connector_extra_config": root_extra_config,
-            }
-        ]
-    elif connector_name == "MultiConnector":
-        connector_configs = root_extra_config.get("connectors", [])
-    else:
-        return None
-
-    for connector_config in connector_configs:
-        if not isinstance(connector_config, dict):
-            continue
-        if connector_config.get("kv_connector") not in (
-            "AscendStoreConnector",
-            "MooncakeConnectorStoreV1",
-        ):
-            continue
-        extra_config = connector_config.get("kv_connector_extra_config") or {}
-        backend_class = get_backend_class(str(extra_config.get("backend", "mooncake")))
-        if backend_class is None or backend_class.layerwise_data_plane != "gva":
-            continue
-        if extra_config.get("use_layerwise", False):
-            return extra_config
-    return None
-
-
 def _parse_int_config(value: Any, name: str) -> int:
     if isinstance(value, bool):
         raise TypeError(f"{name} must be an integer, got bool")
@@ -193,27 +277,3 @@ def get_layerwise_kv_cache_specs(
             else:
                 layer_specs[layer_name] = group_spec
     return layer_specs
-
-
-def apply_layerwise_kv_cache_plan(
-    kv_cache_config: KVCacheConfig,
-    vllm_config: VllmConfig,
-    *,
-    excluded_layer_names: set[str] | None = None,
-) -> None:
-    """Apply the model's plan; exclusions affect reuse, not cache identity."""
-    layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
-    if layout is not None:
-        if excluded_layer_names and layout.reused_cache_names.intersection(excluded_layer_names):
-            raise ValueError("Reuse exclusions must be supplied before the cache layout is planned.")
-        return
-    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
-    if extra_config is None or not kv_cache_config.kv_cache_tensors:
-        return
-    planner = get_cache_reuse_planner(vllm_config)
-    if planner is None:
-        base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-        if LayerwiseCacheConfig.parse(base_layers, extra_config).has_layer_reuse:
-            raise NotImplementedError("Layerwise offload requires a registered model reuse planner.")
-        return
-    planner(kv_cache_config, vllm_config, extra_config, excluded_layer_names).apply()

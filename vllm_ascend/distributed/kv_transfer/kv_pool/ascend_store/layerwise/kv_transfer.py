@@ -737,21 +737,12 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.final_layer_id = num_layers - 1
         self.layer_offset = layer_offset
 
-    def _wait_for_save(self, layer_id: int, *, clear: bool = True) -> bool:
-        if not self._wait_for_event(self.layer_save_finished_events[layer_id]):
-            return False
-        logger.debug("Key-based layer save event cleared: layer %d", layer_id)
-        if clear:
-            self.layer_save_finished_events[layer_id].clear()
-        return True
-
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
         layer_id = data.layer_id
         for source in data.wait_for_save_layers:
-            clear = data.release_save_layers is None or source in data.release_save_layers
-            if not self._wait_for_save(source, clear=clear):
+            if not self._wait_for_event(self.layer_save_finished_events[source]):
                 data.transfer_tasks.clear()
                 break
 
@@ -1254,8 +1245,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.save_failure_checker()
             # CPU completion on a non-writing rank only records the NPU event.
             self.sync_save_events[source].synchronize()
-            if data.release_save_layers is None or source in data.release_save_layers:
-                self.layer_save_finished_events[source].clear()
         return True
 
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
