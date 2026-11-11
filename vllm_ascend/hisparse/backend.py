@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -14,6 +15,45 @@ from vllm.v1.hisparse.backend import HiSparseBackend
 if TYPE_CHECKING:
     from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _install_worker_dma_hooks() -> None:
+    """Bind Ascend staging dtype and grouped invalidation to the Core worker."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
+
+    from vllm_ascend.hisparse.recycled_invalidate import RecycledGroupInvalidator
+
+    original_init = HiSparseConnectorWorker._init_dma
+    if getattr(original_init, "_ascend_row_dma", False):
+        return
+
+    @wraps(original_init)
+    def init(worker):
+        original_init(worker)
+        if isinstance(worker.backend, AscendHiSparseBackend):
+            if worker.is_host_writer and worker.shared_host_region is None:
+                # Core allocates int64 staging; the bound Ascend slot producer uses int32.
+                # Cache binding is complete here and precedes graph capture.
+                staging = worker._slot_mapping_staging
+                slots = worker.cache_handles[0].slot_mapping
+                if staging is not None and not staging.num_tokens and slots.device.type == "npu":
+                    if slots.dtype == torch.int32:
+                        staging.slots = torch.empty(
+                            staging.slots.shape, dtype=slots.dtype, device="cpu", pin_memory=True
+                        )
+            worker._ascend_recycled_invalidator = RecycledGroupInvalidator.bind(worker)
+
+    init._ascend_row_dma = True
+    HiSparseConnectorWorker._init_dma = init
+    original_invalidate = HiSparseConnectorWorker.invalidate_blocks
+
+    @wraps(original_invalidate)
+    def invalidate(worker, block_ids, request_state_indices):
+        owner = getattr(worker, "_ascend_recycled_invalidator", None)
+        if owner is None or not owner.try_call(worker, block_ids, request_state_indices):
+            return original_invalidate(worker, block_ids, request_state_indices)
+
+    HiSparseConnectorWorker.invalidate_blocks = invalidate
 
 
 def _allocate_resolver_workspace(runtime: HiSparseRuntime):
@@ -79,7 +119,6 @@ class AscendHiSparseBackend(HiSparseBackend):
     def check_available(self) -> None:
         from vllm_ascend.hisparse.cache_ops import _load_resolver
         from vllm_ascend.hisparse.host_pool import install
-        from vllm_ascend.hisparse.row_dma import install as install_row_dma
         from vllm_ascend.utils import bootstrap_custom_op_env
 
         install()
@@ -95,7 +134,7 @@ class AscendHiSparseBackend(HiSparseBackend):
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
         _load_resolver()
-        install_row_dma(AscendHiSparseBackend)
+        _install_worker_dma_hooks()
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.hisparse.host_pool import MappedHostTensor
