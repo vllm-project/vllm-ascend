@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# Probe-only marker for a throwaway CI run; no functional change.
 import pytest
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
