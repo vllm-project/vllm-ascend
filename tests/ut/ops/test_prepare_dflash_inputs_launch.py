@@ -59,8 +59,7 @@ class _RecordingKernel:
         return _launch
 
 
-def _run_launcher(scheduled_tokens, vectorcores=48, num_query_per_req=9,
-                  num_speculative_steps=8):
+def _run_launcher(scheduled_tokens, vectorcores=48, num_query_per_req=9, num_speculative_steps=8):
     """Invoke ``prepare_dflash_inputs_triton`` on CPU tensors and return the
     recorded kernel launches."""
     num_reqs = len(scheduled_tokens)
@@ -104,9 +103,11 @@ def _run_launcher(scheduled_tokens, vectorcores=48, num_query_per_req=9,
     block_table = torch.ones((max_num_reqs, 8), dtype=torch.int32)
 
     recording = _RecordingKernel()
-    with patch(f"{MODULE}._prepare_dflash_inputs_kernel", recording), \
-         patch(f"{MODULE}.init_device_properties_triton"), \
-         patch(f"{MODULE}.get_vectorcore_num", return_value=vectorcores):
+    with (
+        patch(f"{MODULE}._prepare_dflash_inputs_kernel", recording),
+        patch(f"{MODULE}.init_device_properties_triton"),
+        patch(f"{MODULE}.get_vectorcore_num", return_value=vectorcores),
+    ):
         prepare_dflash_inputs_triton(
             input_buffers,
             outputs.query_slot_mapping,
@@ -145,12 +146,27 @@ def _widths(recording):
     return {call.kwargs["BLOCK_SIZE"] for call in recording.calls}
 
 
-@pytest.mark.parametrize("scheduled_tokens", [
-    [1], [2], [3], [129], [193], [257], [385], [769], [1025],
-    [1537], [2049], [3073], [6145], [8192],
-    [3, 17, 29, 61],  # ragged mixed batch
-    [8192, 1, 2],  # wide spread across requests
-])
+@pytest.mark.parametrize(
+    "scheduled_tokens",
+    [
+        [1],
+        [2],
+        [3],
+        [129],
+        [193],
+        [257],
+        [385],
+        [769],
+        [1025],
+        [1537],
+        [2049],
+        [3073],
+        [6145],
+        [8192],
+        [3, 17, 29, 61],  # ragged mixed batch
+        [8192, 1, 2],  # wide spread across requests
+    ],
+)
 def test_tile_width_is_a_single_constant_specialization(scheduled_tokens):
     """Every launch must use exactly one width: _MAX_CONTEXT_BLOCK_SIZE."""
     recording = _run_launcher(scheduled_tokens)
@@ -159,25 +175,37 @@ def test_tile_width_is_a_single_constant_specialization(scheduled_tokens):
 
 
 @pytest.mark.parametrize("vectorcores", [4, 8, 16, 48, 64])
-@pytest.mark.parametrize("scheduled_tokens, nqpr, steps", [
-    ([1], 9, 8),
-    ([8192], 9, 8),
-    ([17, 33, 129], 4, 3),
-    ([2049], 18, 17),
-])
-def test_tile_width_independent_of_vectorcores_and_draft_shapes(
-        vectorcores, scheduled_tokens, nqpr, steps):
+@pytest.mark.parametrize(
+    "scheduled_tokens, nqpr, steps",
+    [
+        ([1], 9, 8),
+        ([8192], 9, 8),
+        ([17, 33, 129], 4, 3),
+        ([2049], 18, 17),
+    ],
+)
+def test_tile_width_independent_of_vectorcores_and_draft_shapes(vectorcores, scheduled_tokens, nqpr, steps):
     """The width must not depend on device shape or speculative geometry."""
-    recording = _run_launcher(scheduled_tokens, vectorcores=vectorcores,
-                              num_query_per_req=nqpr,
-                              num_speculative_steps=steps)
+    recording = _run_launcher(
+        scheduled_tokens, vectorcores=vectorcores, num_query_per_req=nqpr, num_speculative_steps=steps
+    )
     assert _widths(recording) == {_MAX_CONTEXT_BLOCK_SIZE}
 
 
-@pytest.mark.parametrize("scheduled_tokens", [
-    [1], [9], [65], [129], [385], [1025], [3073], [8192],
-    [3, 17, 29, 61],
-])
+@pytest.mark.parametrize(
+    "scheduled_tokens",
+    [
+        [1],
+        [9],
+        [65],
+        [129],
+        [385],
+        [1025],
+        [3073],
+        [8192],
+        [3, 17, 29, 61],
+    ],
+)
 @pytest.mark.parametrize("vectorcores", [4, 48, 64])
 def test_context_partition_fits_in_single_tile(scheduled_tokens, vectorcores):
     """workers_per_req * BLOCK_SIZE must cover max_target_query_len so the
@@ -189,4 +217,5 @@ def test_context_partition_fits_in_single_tile(scheduled_tokens, vectorcores):
         assert num_reqs == len(scheduled_tokens)
         assert workers_per_req * call.kwargs["BLOCK_SIZE"] >= max_len, (
             f"partition {max_len} tokens over {workers_per_req} workers "
-            f"with width {call.kwargs['BLOCK_SIZE']} would drop the tail")
+            f"with width {call.kwargs['BLOCK_SIZE']} would drop the tail"
+        )
