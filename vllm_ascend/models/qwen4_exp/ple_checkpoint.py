@@ -3,10 +3,10 @@
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import regex as re
 import torch
 from safetensors import safe_open
 

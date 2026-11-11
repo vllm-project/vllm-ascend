@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Qwen PLE embedding using an independently owned BM table."""
 
-import re
-
+import regex as re
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
