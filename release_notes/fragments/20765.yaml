@@ -1,0 +1,4 @@
+pr: 20765
+entries:
+  - category: bugfix
+    text: Fixed routed-expert capture row alignment for MC2 sequence-parallel batches with padding between TP shards.
