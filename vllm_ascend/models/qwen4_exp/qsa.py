@@ -372,6 +372,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             # Host counts are prepared with this batch's QSA metadata.
             num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
             num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
+            prepared_metadata=getattr(metadata, "qsa_lightning_v2_metadata", None),
         )
 
 
@@ -446,6 +447,7 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(attn_metadata, "qsa_gbsa_metadata", None),
             )
         return dispatch_qsa_attention(
             query[:num_tokens],
@@ -613,9 +615,12 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
         # Preserve valid scheduler positions while mapping padded profiling rows
         # to a safe cache entry, matching the QSA indexer path above.
-        cache = self.rotary_emb.cos_sin_cache
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
+        cos_sin = getattr(self, "_qsa_prepared_cos_sin", None)
+        expected_shape = (*positions.shape, self.rotary_emb.cos_sin_cache.shape[-1])
+        if cos_sin is None or tuple(cos_sin.shape) != expected_shape:
+            cache = self.rotary_emb.cos_sin_cache
+            safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+            cos_sin = cache[safe_positions]
         if cos_sin.device != qkv.device:
             cos_sin = cos_sin.to(qkv.device)
         if cos_sin.dtype != qkv.dtype:
