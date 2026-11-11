@@ -65,6 +65,8 @@ done
 
 ## 查看重叠
 
+如果只想一次采集“非量化、整块 MXFP8、MXFP8 分块流水”的对照时间轴，可使用独立的 [一键采集脚本](profile_mxfp8_pipeline.md)，支持在同一 trace 中比较三个方案，以及一次顺序采集多个 TP。
+
 ```bash
 "$PYTHON" -m torch.distributed.run --standalone --nproc-per-node=2 \
   benchmarks/benchmark_mxfp8_pipeline.py \
