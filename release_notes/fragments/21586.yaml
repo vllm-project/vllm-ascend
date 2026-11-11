@@ -1,0 +1,5 @@
+pr: 21586
+entries:
+  - category: performance
+    text: Improve DCP output and LSE packing for BF16 attention with head dimension 512 on Ascend A3.
+    hardware: [A3]
