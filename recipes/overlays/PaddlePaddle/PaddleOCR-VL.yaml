@@ -139,6 +139,33 @@ guide_sections:
 
     The A2 BF16 graph and 310P FP16 graph/eager variants are single-NPU configurations. The previous pinned 310P RC image passed 32 recognition requests across both modes, both aliases and four tasks, including 16 warmups. Document parsing and full-dataset results have separate environment identities.
 
+    ### Stable-release functional supplement
+
+    On 2026-11-11, the complete official `v0.30.0` A2 image at index
+    `sha256:28351d337b7f9367073344240fa4e28d99794d549d577eaf317689950064150a`
+    ran on one 910B4 with 32 GB HBM and driver 25.5.2. All 16 image layers were
+    SHA256-verified. The original entrypoint ran under PRoot 5.5.0 with explicit
+    host-visible SDK/Python/source paths; no image package, model or driver was
+    changed. Its CANN 9.2.1/Python 3.12.16 runtime has clean tracked sources at
+    vLLM `ced6857afa0ea7b2e3f0846a62e1394e90f15607` and Ascend stable release
+    `c09d3e20b9c45c80b34ae3781440d90904a44023`.
+
+    All 16 recognition requests passed: four tasks under both model aliases,
+    with one warmup and one measured round, checked content and stop reasons.
+    The exact remote-PNG document command below also passed with the unchanged
+    shared parser and the separately pinned Paddle/custom-NPU layout client:
+    31 layout blocks, checked content/bounds/JSON/Markdown. These are functional
+    checks, separate from full-dataset accuracy and performance.
+
+    The frontend exited with code 0 after SIGTERM without a forced kill, but
+    shutdown logged eight ERROR lines containing `EngineDeadError` and a leaked
+    semaphore warning. Client logs passed the error/exception/traceback scan;
+    the strict server-log check failed. These errors are retained and this
+    stable-image result does not meet an error-free-log acceptance criterion.
+    Native Docker launch, stable-image full-dataset evaluation, 910B3 and 310P
+    replacement-image device checks remain unverified. Previous RC/main results
+    below retain their original image and platform identities.
+
     ## Ascend 310P: original PaddleOCR-VL-0.9B
 
     The 310P variants use one logical NPU (TP=1), FP16, a 16384-token context, a 2048-token
@@ -192,8 +219,8 @@ guide_sections:
     not validate the printed Docker command or establish comparable performance.
     Both modes still logged `EngineDeadError` during explicit shutdown after
     completed requests. The functional result does not satisfy a clean-log
-    acceptance requirement or validate future main images. The pinned RC
-    builder configuration and its original 32-request evidence remain separate.
+    acceptance requirement or validate future main images. The previous RC
+    configuration and its original 32-request evidence remain separate.
 
     The exact document command below also passed with the official remote PNG
     URL: 31 blocks, checked content/bounds, JSON/Markdown and normal ACL cleanup.
