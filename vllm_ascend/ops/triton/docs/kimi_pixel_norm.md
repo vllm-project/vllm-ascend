@@ -33,7 +33,7 @@ The launch wrapper is `kimi_pixel_norm_lut(pixels, lut, vector_cores)` in
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `pixels` | Input | Contiguous NPU patches, `[P,588]` or `[P,3,14,14]` | uint8 | ND |
+| `pixels` | Input | Contiguous NPU tensor; Kimi supplies `[P,588]` patches | uint8 | ND |
 | `lut` | Input | Contiguous shared-channel table on the same device, `[256]` | BF16 / FP16 | 1D |
 | `vector_cores` | Attribute | Actual Vector core count read during module initialization | host int | scalar |
 | return value | Output | Newly allocated tensor with the input shape and table dtype | BF16 / FP16 | ND |
@@ -42,9 +42,13 @@ The launch wrapper is `kimi_pixel_norm_lut(pixels, lut, vector_cores)` in
 
 - Model integration is limited to Kimi-K3/K3.1, patch size 14 and RGB mean/std
   `[0.5, 0.5, 0.5]`. These conditions are checked once during construction.
-- RGB channels use one table. Unequal-channel tables and FP32 output are rejected.
-  The module retains only 16-bit recovery data outside checkpoint state; its
+- RGB channels use one table built from the checked processor configuration.
+  The module checks BF16/FP16 support when constructed or moved and retains
+  only 16-bit recovery data outside checkpoint state; its
   temporary FP32 reference is not stored permanently.
+- Table shape and layout are fixed by module construction. The Vector core
+  count is checked when device properties are read. Runtime checks cover pixel
+  dtype, device and contiguity, matching devices, and the element count.
 - Output dtype must match the actual patch projection dtype. Supported dtype and
   device moves restore the corresponding table bits instead of converting a
   previously rounded BF16 table to FP16.

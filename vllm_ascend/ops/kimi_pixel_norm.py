@@ -36,6 +36,8 @@ class KimiPixelNormLut(nn.Module):
         self.lut = reference.to(device=self.lut.device)
         if self.lut.device.type == "npu":
             self._vector_cores = int(torch.npu.get_device_properties(self.lut.device).vector_core_num)
+            if self._vector_cores <= 0:
+                raise ValueError("vector core count must be positive")
 
     def _apply(self, fn, recurse=True):
         moved = fn(self.lut)

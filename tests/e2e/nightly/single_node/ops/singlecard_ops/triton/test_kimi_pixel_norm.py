@@ -61,10 +61,6 @@ def test_pixel_lut_rejects_invalid_layout_and_dtype():
         op(torch.zeros((1, 588), dtype=torch.float32, device=device), table, cores)
     with pytest.raises(ValueError, match="contiguous"):
         op(torch.zeros((1, 3, 14, 14), dtype=torch.uint8, device=device).transpose(2, 3), table, cores)
-    with pytest.raises(ValueError, match="lookup table"):
-        op(torch.zeros((1, 588), dtype=torch.uint8, device=device), table[:255], cores)
-    with pytest.raises(ValueError, match="BF16 or FP16"):
-        op(torch.zeros((1, 588), dtype=torch.uint8, device=device), table.float(), cores)
 
 
 def test_dynamic_shapes_share_one_torch_compile_graph():
