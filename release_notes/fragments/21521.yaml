@@ -11,3 +11,8 @@ entries:
       while retaining CANN-specific cache protocols. Model Runner V2 requires
       removal of legacy DSA-CP options; replay remains subject to its parallel
       layout and graph mode checks.
+  - category: bugfix
+    text: >-
+      Retained CANN P/D validation of the original generation budget before
+      prefill and explicit retryable errors for attributed Mooncake KV load
+      failures, including expired transfer handles.

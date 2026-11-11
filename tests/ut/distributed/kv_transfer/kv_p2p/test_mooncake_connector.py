@@ -74,6 +74,46 @@ MOONCAKE_STORAGE_REGISTRATION_FIX = pytest.mark.skip(
 )
 
 
+@pytest.mark.parametrize(
+    ("request_id", "invalid_blocks", "deadline", "expected"),
+    [
+        ("request", {7}, 50.0, "kv_handle_expired; please retry"),
+        ("request", {7}, 150.0, "kv_load_failed; please retry"),
+        ("request", {8}, 50.0, None),
+        ("other", {7}, 50.0, None),
+    ],
+)
+def test_load_failure_reason_requires_this_requests_blocks(monkeypatch, request_id, invalid_blocks, deadline, expected):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler._reqs_remote_kv_state = {"request": (deadline, ([7],))}
+    module = sys.modules[MooncakeConnectorScheduler.__module__]
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    assert scheduler.get_kv_load_failure_reason(request_id, invalid_blocks) == expected
+
+
+@pytest.mark.parametrize("local_blocks", [([7],), ([],)])
+def test_expired_handle_cannot_read_remote_blocks(monkeypatch, local_blocks):
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    module = sys.modules[KVCacheRecvingThread.__module__]
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    metadata = {
+        "remote_request_id": "request",
+        "local_block_ids": local_blocks,
+        "remote_block_ids": ([17],),
+        "group_pulls": [],
+        "remote_engine_id": "producer",
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 12345,
+        "handle_deadline": 50.0,
+    }
+    if any(local_blocks):
+        with pytest.raises(RuntimeError, match="handle expired"):
+            receiver._transfer_kv_cache_all_groups(metadata)
+    else:
+        # A complete local hit requires no remote read, even after expiry.
+        receiver._transfer_kv_cache_all_groups(metadata)
+
+
 @pytest.fixture(autouse=True)
 def _parallel_groups(monkeypatch):
     """Scope fake distributed topology to each case; never patch at collection."""
@@ -4809,6 +4849,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             num_computed_tokens=0,
             num_external_tokens=16,
             do_virtual=False,
+            handle_deadline=0.0,
         )
         metadata = types.SimpleNamespace(reqs_in_batch=["req"], requests={"req": meta})
 
@@ -4855,6 +4896,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             num_computed_tokens=0,
             num_external_tokens=16,
             do_virtual=False,
+            handle_deadline=0.0,
         )
         metadata = types.SimpleNamespace(reqs_in_batch=["req"], requests={"req": meta})
 
