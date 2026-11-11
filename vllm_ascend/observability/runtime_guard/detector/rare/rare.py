@@ -31,7 +31,7 @@ rc3 (runs/explore/rc3_report.md) adds, computed only when a config's rules use t
   cp, cn        log10 P(that category | token)
   gb            learned token score: gradient-boosted trees over GB_INPUTS (detector/rare_gb.py), computed only at the tokens
                 passing gb_gate (about 1% of tokens); -inf elsewhere
-rc4 (runs/explore/rc4_report.md) adds two config keys, both optional (absent = rc3's behaviour):
+rare_chars adds two config keys, both optional (absent = earlier behaviour):
   "gate": "fs"   the learned score is evaluated only where fs < 0.05 (a letter of a minority class) or bad_utf8
   "ref": "cats"  no reference count tables: only the character categories of each token's first / last character (pcat, ncat),
                  built from the tokenizer at load, so they exist for every corpus (DeepSeek included); needs "gate": "fs", a model
@@ -312,7 +312,7 @@ class _GBScore(Lazy):
 def gb_gate_mask(F):
     """where the learned score is evaluated: fs < 0.05 (a letter of a minority class), bad_utf8, or a context the token rarely
     has on its left / right (cp / cn < -2.5)"""
-    if F.get('_gate') == 'fs':                           # rc4: minority letters and invalid UTF-8 only
+    if F.get('_gate') == 'fs':                           # rare_chars: minority letters and invalid UTF-8 only
         return (F['fs'] < GB_GATE['fs']) | F['bad_utf8']
     tok, prv, nxt, T, ref = F['_ctx']
     t16 = tok * rare_ref.K

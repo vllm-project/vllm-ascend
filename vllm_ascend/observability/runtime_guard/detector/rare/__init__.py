@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Vendored rare_chars (rc4) algorithm for Runtime Guard.
+"""Vendored rare_chars algorithm for Runtime Guard.
 
 Algorithm and tables adapted from RinshannKaihou/self_evolving_inference_detector
 (v35_detector 0.4.0 / research commit 5118334). Guard owns the Ascend collect
@@ -32,7 +32,7 @@ from .result import Result
 
 PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 TABLES_DIR = os.path.join(PKG_DIR, "tables")
-CONFIG_RC4 = os.path.join(PKG_DIR, "rc4.json")
+CONFIG_RARE = os.path.join(PKG_DIR, "rare.json")
 
 from .rare_vocab import (  # noqa: E402
     THINK_END,
@@ -43,7 +43,7 @@ from .rare_vocab import (  # noqa: E402
 )
 
 __all__ = [
-    "CONFIG_RC4",
+    "CONFIG_RARE",
     "PKG_DIR",
     "RareDetector",
     "RareRowBatch",

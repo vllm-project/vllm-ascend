@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Load the GIL-releasing rc4 feed and adapt ``RareDetector`` tables to it.
+"""Load the GIL-releasing rare_chars feed and adapt ``RareDetector`` tables to it.
 
 Feature ids and GB input kinds are the enums in ``rare_feed_native.c``.
 """
@@ -118,7 +118,7 @@ class NativeFeed:
             raise RuntimeError("rare_feed_native.so is not built")
         gbm = detector.gbm
         if gbm is None:
-            raise RuntimeError("native feed requires the rc4 gb model")
+            raise RuntimeError("native feed requires the rare gb model")
         table = detector.T
         ref = detector.ref
         if ref is None or "lcat_s" not in ref:
