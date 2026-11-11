@@ -440,7 +440,7 @@ def test_checkpoint_samples_detect_same_metadata_changed_weights(rdma, tmp_path)
     assert second["tables"]["1"]["row_bytes"] == 288
 
 
-@pytest.mark.parametrize("width", [264, 288])
+@pytest.mark.parametrize("width", [264, 288, 320])
 def test_native_packer_mask_order_and_no_partial_write(width):
     path = os.getenv("ENGRAM_TEST_LIBRARY")
     if not path:
