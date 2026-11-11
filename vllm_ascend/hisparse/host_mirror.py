@@ -179,23 +179,24 @@ class HostMirrorConnector:
         pending_before = len(worker._pending_dma_descriptors)
         try:
             worker._finish_mirror_phase(worker._forward_ready_event)
-        except BaseException:
-            # The runner's failure boundary joins an already-recorded copy.
             if worker._dma_submitted:
                 self._pending_event = worker.host_write_event
-            raise
-        if worker._dma_submitted:
-            self._pending_event = worker.host_write_event
-            worker._dma_submitted = False
-            self._overlap_draft = len(worker._pending_dma_descriptors) == pending_before + 1
-            if self._overlap_draft:
-                # AsyncOutput must not report completion before Host KV is durable.
-                self._output_copy_stream.wait_event(self._pending_event)
+                worker._dma_submitted = False
+                self._overlap_draft = len(worker._pending_dma_descriptors) == pending_before + 1
+                if self._overlap_draft:
+                    # AsyncOutput must not report completion before Host KV is durable.
+                    self._output_copy_stream.wait_event(self._pending_event)
+                else:
+                    self.join_pending()
             else:
-                self.join_pending()
-        else:
-            worker.host_write_event.record(compute_stream)
-        worker._release_completed_dma_descriptors()
+                worker.host_write_event.record(compute_stream)
+            worker._release_completed_dma_descriptors()
+        except BaseException:
+            # The mirror phase may fail after recording a submitted copy.
+            if worker._dma_submitted:
+                self._pending_event = worker.host_write_event
+            self.join_pending()
+            raise
 
     def post_forward(self, finished_req_ids, defer_finalize=False):
         if not defer_finalize or not self._overlap_draft:
