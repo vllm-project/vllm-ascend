@@ -33,7 +33,7 @@ _GROW = 8
 
 
 class RareRowBatch:
-    """Look-ahead rc4 state for many requests, one new token per ``feed_rows``.
+    """Look-ahead rare_chars state for many requests, one new token per ``feed_rows``.
 
     Row ``i`` matches ``RareDetector.feed`` of one token, then ``finish_row``
     matches ``RareDetector.finish``. A strict alert sets the row done; later
@@ -42,7 +42,7 @@ class RareRowBatch:
 
     def __init__(self, detector) -> None:
         if not detector.look:
-            raise ValueError("RareRowBatch requires a look-ahead rc4 config")
+            raise ValueError("RareRowBatch requires a look-ahead rare_chars config")
         self.det = detector
         self._native = bind(detector)
         self._n = 0

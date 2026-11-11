@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runtime Guard wrapper for rare_chars rc4 (visible garbled / foreign-script).
+"""Runtime Guard wrapper for rare_chars (visible garbled / foreign-script).
 
 Collects ``(top1_logprob, chosen_logprob)`` via sampler-side narrow collect on
 Guard-stashed pre-sample logits + sampled ids (v35 Triton). Does **not**
 require ``SamplingParams.logprobs``. Per-tokenizer tables are built at warmup
 from the served tokenizer. Algorithm knobs (``think_end``, ``alert_monitor``)
-live in ``rc4.json``; runtime_config only exposes ``enabled``.
+live in ``rare.json``; runtime_config only exposes ``enabled``.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_config.schema import ConfigField, DetectorSchema
 from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector
 from vllm_ascend.observability.runtime_guard.detector.rare import (
-    CONFIG_RC4,
+    CONFIG_RARE,
     RareDetector,
     RareRowBatch,
     build_from_tokenizer,
@@ -56,8 +56,8 @@ _SERVED_TABLE_KEY = "served"
 
 
 def _algo_knobs() -> tuple[dict[str, Any], str, bool]:
-    """Load rc4.json once for RareDetector + Guard knobs."""
-    with open(CONFIG_RC4, encoding="utf-8") as f:
+    """Load rare.json once for RareDetector + Guard knobs."""
+    with open(CONFIG_RARE, encoding="utf-8") as f:
         cfg = json.load(f)
     think_end = str(cfg.get("think_end", "auto"))
     alert_monitor = bool(cfg.get("alert_monitor", False))
@@ -155,7 +155,7 @@ class RareCharsReqState:
 
 
 class RareCharsDetector(ConfigBackedDetector):
-    """rc4 rare_chars: visible garbled / foreign-script / bad UTF-8.
+    """rare_chars: visible garbled / foreign-script / bad UTF-8.
 
     Shadow-oriented: emits Guard ``Incident`` reports; does not abort the
     request by itself (match upstream V35_RARE=shadow semantics).
@@ -167,12 +167,12 @@ class RareCharsDetector(ConfigBackedDetector):
         section_key="rare_chars",
         stage="after_sample",
         help=(
-            "Visible garbled text (rc4 rare_chars): foreign-script fragments, "
+            "Visible garbled text (rare_chars): foreign-script fragments, "
             "illegal UTF-8, low-confidence rare tokens. Guard uses sampler-side "
             "v35 Triton narrow collect on stashed pre-sample logits "
             "for (top1, chosen) — API SamplingParams.logprobs not required. "
             "Per-tokenizer table is built at warmup; think_end / alert_monitor "
-            "come from detector/rare/rc4.json."
+            "come from detector/rare/rare.json."
         ),
         fields=(ConfigField("enabled", False, "bool", help="Master switch"),),
     )
@@ -201,7 +201,7 @@ class RareCharsDetector(ConfigBackedDetector):
             self.refresh_from_config()
 
     def _apply_detector_values(self, getter) -> None:
-        # Only ``enabled`` is runtime-configurable; algorithm knobs live in rc4.json.
+        # Only ``enabled`` is runtime-configurable; algorithm knobs live in rare.json.
         return
 
     def warmup(self, tokenizer: Any | None = None) -> None:
@@ -258,7 +258,7 @@ class RareCharsDetector(ConfigBackedDetector):
         self._row_batch = RareRowBatch(self._engine)
         self._row_of.clear()
         logger.info(
-            "[runtime_guard: rare_chars] loaded rc4 table=%s think_end=%s alert_monitor=%s",
+            "[runtime_guard: rare_chars] loaded rare table=%s think_end=%s alert_monitor=%s",
             self._corpus_key,
             self._think_end_id,
             self._alert_monitor,
@@ -273,7 +273,7 @@ class RareCharsDetector(ConfigBackedDetector):
         top1_logprobs: Sequence[float],
         chosen_logprobs: Sequence[float],
     ) -> list[Incident]:
-        """Feed rc4 from host pairs. Caller runs this off the sample return path."""
+        """Feed rare_chars from host pairs. Caller runs this off the sample return path."""
         if not self._precheck():
             return []
         n = min(len(req_ids), len(token_ids), len(top1_logprobs), len(chosen_logprobs))
@@ -404,7 +404,7 @@ class RareCharsDetector(ConfigBackedDetector):
                 top1=None if last is None else float(last["top1"]),
                 chosen=None if last is None else float(last["chosen"]),
                 log_leader=log_leader,
-                source="guard_rare_chars_rc4",
+                source="guard_rare_chars",
             )
             if alert is not None:
                 batch._done[row] = True
@@ -434,7 +434,7 @@ class RareCharsDetector(ConfigBackedDetector):
         st.alerted = True
         st.last_reason = str(getattr(res, "reason", "") or "")
         detail = {
-            "violation": "rare_chars_rc4",
+            "violation": "rare_chars",
             "reason": st.last_reason,
             "fired_at": int(getattr(res, "fired_at", -1)),
             "tokens_seen": st.tokens_seen,
@@ -478,7 +478,7 @@ class RareCharsDetector(ConfigBackedDetector):
         )
 
     def finish_request(self, req_id: str) -> Incident | None:
-        """Flush held-back token at request end (rc4 look-ahead)."""
+        """Flush held-back token at request end (look-ahead)."""
         with self._lock:
             st = self._states.get(req_id)
             if st is None or st.alerted:
@@ -503,5 +503,5 @@ class RareCharsDetector(ConfigBackedDetector):
                 top1=None,
                 chosen=None,
                 log_leader=runner_tp_rank(self._runner) == 0,
-                source="guard_rare_chars_rc4_finish",
+                source="guard_rare_chars_finish",
             )

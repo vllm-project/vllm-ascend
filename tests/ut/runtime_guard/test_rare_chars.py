@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # mypy: ignore-errors
-"""UT: rare_chars rc4 Guard wiring + warmup table build."""
+"""UT: rare_chars Guard wiring + warmup table build."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ import torch
 
 from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 from vllm_ascend.observability.runtime_guard.detector.rare import (
-    CONFIG_RC4,
+    CONFIG_RARE,
     RareDetector,
     build_from_token_bytes,
     rare_native,
@@ -126,7 +126,7 @@ def test_rare_chars_feed_precomputed_bad_utf8(tmp_path: Path):
 
 def test_rare_detector_bad_utf8_rule_fires():
     key = _synthetic_table()
-    det = RareDetector(key, CONFIG_RC4, think_end=None)
+    det = RareDetector(key, CONFIG_RARE, think_end=None)
     st = det.start()
     tid = 1
     ids = np.array([tid, tid], np.int64)

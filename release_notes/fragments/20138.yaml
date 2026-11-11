@@ -4,12 +4,12 @@ entries:
     text: >-
       rare_chars collects top-1 and chosen logprobs without a host sync before
       the sampler returns. Each step's device pair is attached to that step's
-      AscendAsyncOutput; collect-wait, pair D2H, and rc4 feed run on a dedicated
+      AscendAsyncOutput; collect-wait, pair D2H, and rare feed run on a dedicated
       wait queue so get_output only submits.
   - category: feature
     text: >-
       rare_chars builds its per-tokenizer table at model warmup from the
-      served tokenizer; think_end/alert_monitor live in packaged rc4.json
+      served tokenizer; think_end/alert_monitor live in packaged rare.json
       (runtime_config only has enabled). rare_feed_native is always a
       setuptools Extension so wheels include it for both
       COMPILE_CUSTOM_KERNELS=0 and =1.

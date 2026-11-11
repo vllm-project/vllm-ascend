@@ -15,7 +15,7 @@
  */
 
 /*
- * One rc4 step for many requests, with the GIL released for the whole step.
+ * One rare_chars step for many requests, with the GIL released for the whole step.
  *
  * The worker thread can launch NPU kernels while this runs on ActionQueue.
  * Pointers passed in are borrowed numpy buffers; no Python calls in feed_impl.
@@ -1244,7 +1244,7 @@ static PyObject *feed_bound(PyObject *self, PyObject *args) {
 }
 
 static PyMethodDef methods[] = {
-    {"make_ctx", make_ctx, METH_VARARGS, "Pack immutable rc4 tables."},
+    {"make_ctx", make_ctx, METH_VARARGS, "Pack immutable rare tables."},
     {"feed", feed, METH_VARARGS, "Score one new token on each row. GIL is released."},
     {"bind_state", bind_state, METH_VARARGS, "Pin row-state buffers for later feed_bound calls."},
     {"feed_bound", feed_bound, METH_VARARGS, "Feed using pinned row state. GIL is released."},
@@ -1256,7 +1256,7 @@ static PyMethodDef methods[] = {
 };
 
 static struct PyModuleDef moduledef = {
-    PyModuleDef_HEAD_INIT, "rare_feed_native", "rc4 request-batch feed, GIL released", -1, methods,
+    PyModuleDef_HEAD_INIT, "rare_feed_native", "rare request-batch feed, GIL released", -1, methods,
 };
 
 PyMODINIT_FUNC PyInit_rare_feed_native(void) { return PyModule_Create(&moduledef); }
